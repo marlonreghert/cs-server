@@ -1,0 +1,23 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cs-server-cluster
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: cs-server
+  template:
+    metadata:
+      labels:
+        app: cs-server
+    spec:
+      containers:
+        - name: cs-server
+          image: johnsummit2024/cs-server:latest  # Replace with your container image
+          ports:
+            - containerPort: 8080
+        - name: redis
+          image: redis:latest  # Replace with your container image
+          ports:
+            - containerPort: 6379
