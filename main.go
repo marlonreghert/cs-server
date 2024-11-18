@@ -22,7 +22,7 @@ func handler(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, "Hello, World!")
 }
 
-func testRedisClient(redisClient *db.RedisClient) *db.RedisClient {
+func testRedisClient(redisClient db.RedisClient) db.RedisClient {
 	// Set a key-value pair
 	if err := redisClient.Set("mykey", "myvalue"); err != nil {
 		log.Fatalf("Failed to set key: %v", err)
@@ -72,7 +72,7 @@ func testMockedBestTimeAPIClient(bestTimeApiClient besttime.BestTimeAPI) {
 	plotBoundingBox(response)
 }
 
-func testRedisGeoLoc(redisClient *db.RedisClient, ctx context.Context) {
+func testRedisGeoLoc(redisClient db.RedisClient, ctx context.Context) {
 	log.Println("[MAIN] Testing redis geo loc")
 	// Example data to store.
 	data := map[string]interface{}{

@@ -13,11 +13,11 @@ const VENUES_GEO_PLACE_MEMBER_FORMAT_V1 = "venues_geo_place_v1:%s"
 
 // RedisVenueDAO handles venue operations using Redis.
 type RedisVenueDAO struct {
-	client *db.RedisClient
+	client db.RedisClient
 }
 
 // NewRedisVenueDAO initializes a RedisVenueDAO with the Redis client.
-func NewRedisVenueDAO(client *db.RedisClient) *RedisVenueDAO {
+func NewRedisVenueDAO(client db.RedisClient) *RedisVenueDAO {
 	return &RedisVenueDAO{
 		client: client,
 	}

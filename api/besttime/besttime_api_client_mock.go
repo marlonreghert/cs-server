@@ -4,11 +4,9 @@ import (
 	"cs-server/models"
 	"cs-server/models/venue"
 	"cs-server/util"
+	"cs-server/config"
 	"fmt"
 )
-
-const SEARCH_VENUES_RESPONSE_PATH = "./resources/search_venues_response.json"
-const VENUES_RESPONSE_PATH = "./resources/venue.json"
 
 // BestTimeApiClientMock embeds mocked logic for the best time api client
 type BestTimeApiClientMock struct {
@@ -22,7 +20,7 @@ func NewBestTimeApiClientMock() *BestTimeApiClientMock {
 // GetVenuesNearby retrieves nearby venues and decodes the response into the Response struct
 func (c *BestTimeApiClientMock) GetVenuesNearby(lat float64, long float64) (*models.SearchVenuesResponse, error) {
 	var response *models.SearchVenuesResponse
-	response, err := util.ReadSearchVenuesResponseFromJSON(SEARCH_VENUES_RESPONSE_PATH)
+	response, err := util.ReadSearchVenuesResponseFromJSON(config.GetResourcePath(config.SEARCH_VENUE_RESPONSE_RESOURCE))
 
 	if err != nil {
 		fmt.Println("Could not read search venues response from json")
@@ -35,7 +33,7 @@ func (c *BestTimeApiClientMock) GetVenuesNearby(lat float64, long float64) (*mod
 // GetVenuesNearby retrieves a venue given a venue id
 func (c *BestTimeApiClientMock) GetVenue(venueId string) (*venue.Venue, error) {
 	var response *venue.Venue
-	response, err := util.ReadVenueFromJSON(VENUES_RESPONSE_PATH)
+	response, err := util.ReadVenueFromJSON(config.GetResourcePath(config.VENUE_STATIC_RESOURCE))
 
 	if err != nil {
 		fmt.Println("Could not read search venues response from json")

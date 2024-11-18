@@ -16,7 +16,7 @@ import (
 
 // Container holds all application dependencies.
 type Container struct {
-	RedisClient            *db.RedisClient
+	RedisClient            db.RedisClient
 	RedisVenueDao          *redis.RedisVenueDAO
 	VenueService           *services.VenueService
 	BestTimeAPI            besttime.BestTimeAPI
@@ -40,7 +40,7 @@ func NewContainer() *Container {
 	// defer redisInternalClient.Close() // Ensure client is closed when the program exits
 
 	// Initialize Redis client
-	redisClient := db.NewRedisClient(ctx, redisInternalClient)
+	redisClient := db.NewGeoRedisClient(ctx, redisInternalClient)
 	if err := redisClient.Ping(); err != nil {
 		panic(fmt.Sprintf("Failed to connect to Redis: %v", err))
 	}

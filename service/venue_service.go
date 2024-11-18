@@ -5,9 +5,8 @@ import (
 	"cs-server/dao/redis"
 	"cs-server/models/venue"
 	"cs-server/util"
+	"cs-server/config"
 )
-
-const VENUES_IDS_PATH = "./resources/static_venues_ids.json"
 
 type VenueService struct {
 	venueDao    *redis.RedisVenueDAO
@@ -30,7 +29,7 @@ func (vs *VenueService) GetVenuesNearby(lat, lon, radius float64) ([]venue.Venue
 }
 
 func (vs *VenueService) GetAllVenuesIds() ([]string, error) {
-	return util.ReadVenuesIds(VENUES_IDS_PATH)
+	return util.ReadVenuesIds(config.GetResourcePath(config.VENUES_IDS_RESOURCE))
 }
 
 func (vs *VenueService) GetVenue(venueId string) (*venue.Venue, error) {
