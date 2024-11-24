@@ -1,6 +1,6 @@
 # CS Server
 
-CS Server is a Go-based backend service that periodically reads live venue busyness data from the BestTime API and provides it through a web API. The application is currently using mocked responses.
+CS Server is a Go-based backend service that periodically reads live venue busyness data from the BestTime API and provides it through a web API. 
 
 ---
 
