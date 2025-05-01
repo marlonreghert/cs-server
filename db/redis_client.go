@@ -10,4 +10,6 @@ type RedisClient interface {
 	GetLocationsWithinRadius(key string, lat, lon, radius float64) ([]string, error)
 	GetContext() context.Context
 	Ping() error
+    Keys(pattern string) ([]string, error)
+	Del(key string) error  
 }

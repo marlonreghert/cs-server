@@ -1,0 +1,4825 @@
+{
+  "_links": {
+    "background_progress_api": "http://besttime.app/api/v1/venues/progress?job_id=2bb79025-ebd3-4961-901d-808fb26db474&ven=False",
+    "background_progress_tool": "http://besttime.app/api/v1/misc/addarea_progress?q=bar+or+event_venue+or+club&job_id=2bb79025-ebd3-4961-901d-808fb26db474&map_lat=5.1073477&map_lng=-10.3470432&lat_min=-33.4261668&lat_max=43.6408623&lng_min=-122.4151995&lng_max=101.7211132&map_zoom=2&radius=16067467&collection_id=col_eba94be073e24fa693f7ce4d813f088e&api_key_private=pri_aff50a71a038456db88864b16d9d6800&lat=-43.3122&lng=-60.535&live=True&live_refresh=False&auto_continue=1",
+    "job_id": "2bb79025-ebd3-4961-901d-808fb26db474",
+    "radar_tool": "http://besttime.app/api/v1/radar/filter?q=bar+or+event_venue+or+club&map_lat=5.1073477&map_lng=-10.3470432&lat_min=-33.4261668&lat_max=43.6408623&lng_min=-122.4151995&lng_max=101.7211132&map_z=2&collection_id=col_eba94be073e24fa693f7ce4d813f088e&api_key_private=pri_aff50a71a038456db88864b16d9d6800&live=True&live_refresh=False&limit=5",
+    "venue_filter_api": "http://besttime.app/api/v1/venues/filter?lat=-43.3122&lng=-60.535&lat_min=-33.4261668&lat_max=43.6408623&lng_min=-122.4151995&lng_max=101.7211132&collection_id=col_eba94be073e24fa693f7ce4d813f088e&api_key_private=pri_aff50a71a038456db88864b16d9d6800&live=True&live_refresh=False"
+  },
+  "bounding_box": {
+    "lat": 5.1073477,
+    "lat_max": 43.6408623,
+    "lat_min": -33.4261668,
+    "lng": -10.3470432,
+    "lng_max": 101.7211132,
+    "lng_min": -122.4151995,
+    "map_zoom": 2,
+    "radius": 16067467
+  },
+  "collection_id": "col_eba94be073e24fa693f7ce4d813f088e",
+  "count_completed": 18,
+  "count_failure": 0,
+  "count_forecast": 13,
+  "count_live": 7,
+  "count_total": 18,
+  "job_finished": true,
+  "job_id": "2bb79025-ebd3-4961-901d-808fb26db474",
+  "message": "Please be aware that this response shows all available foot traffic data. Use the venue filter API link to get the requested filtered results.",
+  "radar_circles": [],
+  "status": "OK",
+  "venues": [
+    {
+      "forecast": false,
+      "live": false,
+      "processed": true,
+      "venue_address": "C8VW+VMH, G.T. Road. opp I R ground, North Loco Colony, Kidwai Nagar, Kanpur, Uttar Pradesh 208004",
+      "venue_id": "ven_384659414f46413967746f526b446e48397a63385a62644a496843",
+      "venue_lat": 26.4446878,
+      "venue_lon": 80.3467401,
+      "venue_name": "Area Club New"
+    },
+    {
+      "forecast": true,
+      "live": false,
+      "processed": true,
+      "venue_address": "19/157 Naughara, Patkapur Kanpur, Uttar Pradesh 208001 India",
+      "venue_foot_traffic_forecast": [
+        {
+          "day_info": {
+            "day_int": 0,
+            "day_max": 91,
+            "day_mean": 44,
+            "day_rank_max": 3,
+            "day_rank_mean": 6,
+            "day_text": "Monday",
+            "note": "Update: venue_open_close_v2 replaces venue_open and venue_closed and supports multiple opening times per day.",
+            "venue_closed": 0,
+            "venue_open": 0,
+            "venue_open_close_v2": {
+              "12h": [
+                "Open 24 hours"
+              ],
+              "24h": [
+                {
+                  "closes": 0,
+                  "opens": 0
+                }
+              ]
+            }
+          },
+          "day_int": 0,
+          "day_raw": [
+            35,
+            50,
+            40,
+            40,
+            25,
+            15,
+            15,
+            50,
+            90,
+            65,
+            60,
+            60,
+            75,
+            75,
+            60,
+            50,
+            60,
+            50,
+            40,
+            35,
+            25,
+            25,
+            15,
+            15
+          ]
+        },
+        {
+          "day_info": {
+            "day_int": 1,
+            "day_max": 75,
+            "day_mean": 51,
+            "day_rank_max": 7,
+            "day_rank_mean": 2,
+            "day_text": "Tuesday",
+            "note": "Update: venue_open_close_v2 replaces venue_open and venue_closed and supports multiple opening times per day.",
+            "venue_closed": 0,
+            "venue_open": 0,
+            "venue_open_close_v2": {
+              "12h": [
+                "Open 24 hours"
+              ],
+              "24h": [
+                {
+                  "closes": 0,
+                  "opens": 0
+                }
+              ]
+            }
+          },
+          "day_int": 1,
+          "day_raw": [
+            25,
+            40,
+            60,
+            75,
+            75,
+            60,
+            65,
+            50,
+            75,
+            75,
+            75,
+            60,
+            50,
+            25,
+            10,
+            15,
+            25,
+            40,
+            65,
+            75,
+            50,
+            35,
+            50,
+            50
+          ]
+        },
+        {
+          "day_info": {
+            "day_int": 2,
+            "day_max": 100,
+            "day_mean": 49,
+            "day_rank_max": 2,
+            "day_rank_mean": 3,
+            "day_text": "Wednesday",
+            "note": "Update: venue_open_close_v2 replaces venue_open and venue_closed and supports multiple opening times per day.",
+            "venue_closed": 0,
+            "venue_open": 0,
+            "venue_open_close_v2": {
+              "12h": [
+                "Open 24 hours"
+              ],
+              "24h": [
+                {
+                  "closes": 0,
+                  "opens": 0
+                }
+              ]
+            }
+          },
+          "day_int": 2,
+          "day_raw": [
+            100,
+            100,
+            90,
+            50,
+            35,
+            10,
+            0,
+            10,
+            15,
+            50,
+            50,
+            65,
+            85,
+            85,
+            40,
+            35,
+            50,
+            65,
+            50,
+            40,
+            35,
+            35,
+            50,
+            40
+          ]
+        },
+        {
+          "day_info": {
+            "day_int": 3,
+            "day_max": 100,
+            "day_mean": 57,
+            "day_rank_max": 2,
+            "day_rank_mean": 1,
+            "day_text": "Thursday",
+            "note": "Update: venue_open_close_v2 replaces venue_open and venue_closed and supports multiple opening times per day.",
+            "venue_closed": 0,
+            "venue_open": 0,
+            "venue_open_close_v2": {
+              "12h": [
+                "Open 24 hours"
+              ],
+              "24h": [
+                {
+                  "closes": 0,
+                  "opens": 0
+                }
+              ]
+            }
+          },
+          "day_int": 3,
+          "day_raw": [
+            40,
+            65,
+            100,
+            85,
+            60,
+            50,
+            25,
+            40,
+            50,
+            60,
+            50,
+            65,
+            65,
+            40,
+            65,
+            75,
+            90,
+            85,
+            75,
+            50,
+            50,
+            50,
+            15,
+            10
+          ]
+        },
+        {
+          "day_info": {
+            "day_int": 4,
+            "day_max": 75,
+            "day_mean": 28,
+            "day_rank_max": 7,
+            "day_rank_mean": 7,
+            "day_text": "Friday",
+            "note": "Update: venue_open_close_v2 replaces venue_open and venue_closed and supports multiple opening times per day.",
+            "venue_closed": 0,
+            "venue_open": 0,
+            "venue_open_close_v2": {
+              "12h": [
+                "Open 24 hours"
+              ],
+              "24h": [
+                {
+                  "closes": 0,
+                  "opens": 0
+                }
+              ]
+            }
+          },
+          "day_int": 4,
+          "day_raw": [
+            10,
+            0,
+            10,
+            15,
+            10,
+            10,
+            15,
+            35,
+            35,
+            40,
+            35,
+            50,
+            75,
+            60,
+            40,
+            15,
+            10,
+            25,
+            35,
+            40,
+            25,
+            25,
+            35,
+            40
+          ]
+        },
+        {
+          "day_info": {
+            "day_int": 5,
+            "day_max": 83,
+            "day_mean": 48,
+            "day_rank_max": 5,
+            "day_rank_mean": 4,
+            "day_text": "Saturday",
+            "note": "Update: venue_open_close_v2 replaces venue_open and venue_closed and supports multiple opening times per day.",
+            "venue_closed": 0,
+            "venue_open": 0,
+            "venue_open_close_v2": {
+              "12h": [
+                "Open 24 hours"
+              ],
+              "24h": [
+                {
+                  "closes": 0,
+                  "opens": 0
+                }
+              ]
+            }
+          },
+          "day_int": 5,
+          "day_raw": [
+            40,
+            65,
+            50,
+            60,
+            25,
+            40,
+            40,
+            50,
+            50,
+            40,
+            40,
+            40,
+            75,
+            40,
+            40,
+            25,
+            25,
+            35,
+            75,
+            85,
+            50,
+            50,
+            50,
+            50
+          ]
+        },
+        {
+          "day_info": {
+            "day_int": 6,
+            "day_max": 83,
+            "day_mean": 46,
+            "day_rank_max": 5,
+            "day_rank_mean": 5,
+            "day_text": "Sunday",
+            "note": "Update: venue_open_close_v2 replaces venue_open and venue_closed and supports multiple opening times per day.",
+            "venue_closed": 0,
+            "venue_open": 0,
+            "venue_open_close_v2": {
+              "12h": [
+                "Open 24 hours"
+              ],
+              "24h": [
+                {
+                  "closes": 0,
+                  "opens": 0
+                }
+              ]
+            }
+          },
+          "day_int": 6,
+          "day_raw": [
+            40,
+            40,
+            35,
+            40,
+            50,
+            65,
+            65,
+            60,
+            35,
+            50,
+            35,
+            40,
+            25,
+            40,
+            60,
+            85,
+            85,
+            60,
+            40,
+            25,
+            25,
+            35,
+            35,
+            50
+          ]
+        }
+      ],
+      "venue_id": "ven_38567269596d5471536f4e526b446e483968574f4437564a496843",
+      "venue_lat": 26.4658018,
+      "venue_lon": 80.3562033,
+      "venue_name": "Potter's Club"
+    },
+    {
+      "forecast": true,
+      "live": false,
+      "processed": true,
+      "venue_address": "2229 S Michigan Ave Chicago, IL 60616",
+      "venue_foot_traffic_forecast": [
+        {
+          "day_info": {
+            "day_int": 0,
+            "day_rank_max": 7,
+            "day_rank_mean": 7,
+            "day_text": "Monday",
+            "venue_closed": "Closed",
+            "venue_open": "Closed",
+            "venue_open_close_v2": {
+              "12h": [
+                "Closed"
+              ],
+              "24h": []
+            }
+          },
+          "day_int": 0,
+          "day_raw": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        {
+          "day_info": {
+            "day_int": 1,
+            "day_rank_max": 7,
+            "day_rank_mean": 7,
+            "day_text": "Tuesday",
+            "venue_closed": "Closed",
+            "venue_open": "Closed",
+            "venue_open_close_v2": {
+              "12h": [
+                "Closed"
+              ],
+              "24h": []
+            }
+          },
+          "day_int": 1,
+          "day_raw": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        {
+          "day_info": {
+            "day_int": 2,
+            "day_max": 4,
+            "day_mean": 3,
+            "day_rank_max": 5,
+            "day_rank_mean": 5,
+            "day_text": "Wednesday",
+            "note": "Update: venue_open_close_v2 replaces venue_open and venue_closed and supports multiple opening times per day.",
+            "venue_closed": 23,
+            "venue_open": 19,
+            "venue_open_close_v2": {
+              "12h": [
+                "7–11PM"
+              ],
+              "24h": [
+                {
+                  "closes": 23,
+                  "opens": 19
+                }
+              ]
+            }
+          },
+          "day_int": 2,
+          "day_raw": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            5,
+            5,
+            5,
+            5,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        {
+          "day_info": {
+            "day_int": 3,
+            "day_max": 14,
+            "day_mean": 10,
+            "day_rank_max": 4,
+            "day_rank_mean": 4,
+            "day_text": "Thursday",
+            "note": "Update: venue_open_close_v2 replaces venue_open and venue_closed and supports multiple opening times per day.",
+            "venue_closed": 23,
+            "venue_open": 19,
+            "venue_open_close_v2": {
+              "12h": [
+                "7–11PM"
+              ],
+              "24h": [
+                {
+                  "closes": 23,
+                  "opens": 19
+                }
+              ]
+            }
+          },
+          "day_int": 3,
+          "day_raw": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            10,
+            10,
+            15,
+            10,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        {
+          "day_info": {
+            "day_int": 4,
+            "day_max": 53,
+            "day_mean": 39,
+            "day_rank_max": 2,
+            "day_rank_mean": 2,
+            "day_text": "Friday",
+            "note": "Update: venue_open_close_v2 replaces venue_open and venue_closed and supports multiple opening times per day.",
+            "venue_closed": 0,
+            "venue_open": 18,
+            "venue_open_close_v2": {
+              "12h": [
+                "6PM–12AM"
+              ],
+              "24h": [
+                {
+                  "closes": 0,
+                  "opens": 18
+                }
+              ]
+            }
+          },
+          "day_int": 4,
+          "day_raw": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            25,
+            45,
+            55,
+            55,
+            40,
+            25,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        {
+          "day_info": {
+            "day_int": 5,
+            "day_max": 100,
+            "day_mean": 69,
+            "day_rank_max": 1,
+            "day_rank_mean": 1,
+            "day_text": "Saturday",
+            "note": "Update: venue_open_close_v2 replaces venue_open and venue_closed and supports multiple opening times per day.",
+            "venue_closed": 0,
+            "venue_open": 17,
+            "venue_open_close_v2": {
+              "12h": [
+                "12–3PM",
+                "5:30PM–12AM"
+              ],
+              "24h": [
+                {
+                  "closes": 15,
+                  "opens": 12
+                },
+                {
+                  "closes": 0,
+                  "opens": 17
+                }
+              ]
+            }
+          },
+          "day_int": 5,
+          "day_raw": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            60,
+            70,
+            65,
+            0,
+            0,
+            35,
+            65,
+            90,
+            100,
+            85,
+            65,
+            45,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        {
+          "day_info": {
+            "day_int": 6,
+            "day_max": 25,
+            "day_mean": 22,
+            "day_rank_max": 3,
+            "day_rank_mean": 3,
+            "day_text": "Sunday",
+            "note": "Update: venue_open_close_v2 replaces venue_open and venue_closed and supports multiple opening times per day.",
+            "venue_closed": 23,
+            "venue_open": 19,
+            "venue_open_close_v2": {
+              "12h": [
+                "11:30AM–4PM",
+                "7–11PM"
+              ],
+              "24h": [
+                {
+                  "closes": 16,
+                  "opens": 11
+                },
+                {
+                  "closes": 23,
+                  "opens": 19
+                }
+              ]
+            }
+          },
+          "day_int": 6,
+          "day_raw": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            40,
+            65,
+            70,
+            60,
+            35,
+            0,
+            0,
+            0,
+            25,
+            25,
+            20,
+            15,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ]
+        }
+      ],
+      "venue_id": "ven_4164756f7a67545f50387452676f4474457075595357704a496843",
+      "venue_lat": 41.85205,
+      "venue_lon": -87.62334,
+      "venue_name": "Lips Drag Queen Show Palace, Restaurant & Bar"
+    },
+    {
+      "forecast": false,
+      "live": false,
+      "processed": true,
+      "venue_address": "5TH FLOOR, 642, Road No. 36, above Tonique, Aditya Enclave, CBI Colony, Jubilee Hills, Hyderabad, Telangana 500033",
+      "venue_id": "ven_456b7168764f436973666552737a79526d6d66736b57474a496843",
+      "venue_lat": 17.4376433,
+      "venue_lon": 78.4005816,
+      "venue_name": "LoKo Rooftop Bistro and Bar"
+    },
+    {
+      "forecast": true,
+      "live": false,
+      "processed": true,
+      "venue_address": "1102 10th St S Birmingham, AL 35205",
+      "venue_foot_traffic_forecast": [
+        {
+          "day_info": {
+            "day_int": 0,
+            "day_max": 80,
+            "day_mean": 51,
+            "day_rank_max": 2,
+            "day_rank_mean": 2,
+            "day_text": "Monday",
+            "note": "Update: venue_open_close_v2 replaces venue_open and venue_closed and supports multiple opening times per day.",
+            "venue_closed": 0,
+            "venue_open": 14,
+            "venue_open_close_v2": {
+              "12h": [
+                "2PM–12AM"
+              ],
+              "24h": [
+                {
+                  "closes": 0,
+                  "opens": 14
+                }
+              ]
+            }
+          },
+          "day_int": 0,
+          "day_raw": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            25,
+            30,
+            35,
+            35,
+            40,
+            50,
+            65,
+            80,
+            75,
+            75,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        {
+          "day_info": {
+            "day_int": 1,
+            "day_max": 50,
+            "day_mean": 43,
+            "day_rank_max": 6,
+            "day_rank_mean": 5,
+            "day_text": "Tuesday",
+            "note": "Update: venue_open_close_v2 replaces venue_open and venue_closed and supports multiple opening times per day.",
+            "venue_closed": 0,
+            "venue_open": 14,
+            "venue_open_close_v2": {
+              "12h": [
+                "2PM–12AM"
+              ],
+              "24h": [
+                {
+                  "closes": 0,
+                  "opens": 14
+                }
+              ]
+            }
+          },
+          "day_int": 1,
+          "day_raw": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            40,
+            45,
+            50,
+            45,
+            35,
+            45,
+            45,
+            50,
+            45,
+            35,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        {
+          "day_info": {
+            "day_int": 2,
+            "day_max": 66,
+            "day_mean": 44,
+            "day_rank_max": 3,
+            "day_rank_mean": 3,
+            "day_text": "Wednesday",
+            "note": "Update: venue_open_close_v2 replaces venue_open and venue_closed and supports multiple opening times per day.",
+            "venue_closed": 0,
+            "venue_open": 14,
+            "venue_open_close_v2": {
+              "12h": [
+                "2PM–12AM"
+              ],
+              "24h": [
+                {
+                  "closes": 0,
+                  "opens": 14
+                }
+              ]
+            }
+          },
+          "day_int": 2,
+          "day_raw": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            35,
+            45,
+            55,
+            65,
+            65,
+            45,
+            30,
+            35,
+            35,
+            35,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        {
+          "day_info": {
+            "day_int": 3,
+            "day_max": 56,
+            "day_mean": 43,
+            "day_rank_max": 4,
+            "day_rank_mean": 5,
+            "day_text": "Thursday",
+            "note": "Update: venue_open_close_v2 replaces venue_open and venue_closed and supports multiple opening times per day.",
+            "venue_closed": 0,
+            "venue_open": 14,
+            "venue_open_close_v2": {
+              "12h": [
+                "2PM–12AM"
+              ],
+              "24h": [
+                {
+                  "closes": 0,
+                  "opens": 14
+                }
+              ]
+            }
+          },
+          "day_int": 3,
+          "day_raw": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            35,
+            45,
+            55,
+            55,
+            45,
+            45,
+            35,
+            40,
+            45,
+            25,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        {
+          "day_info": {
+            "day_int": 4,
+            "day_max": 53,
+            "day_mean": 41,
+            "day_rank_max": 5,
+            "day_rank_mean": 6,
+            "day_text": "Friday",
+            "note": "Update: venue_open_close_v2 replaces venue_open and venue_closed and supports multiple opening times per day.",
+            "venue_closed": 0,
+            "venue_open": 14,
+            "venue_open_close_v2": {
+              "12h": [
+                "2PM–12AM"
+              ],
+              "24h": [
+                {
+                  "closes": 0,
+                  "opens": 14
+                }
+              ]
+            }
+          },
+          "day_int": 4,
+          "day_raw": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            35,
+            35,
+            45,
+            40,
+            35,
+            45,
+            55,
+            55,
+            35,
+            35,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        {
+          "day_info": {
+            "day_int": 5,
+            "day_max": 100,
+            "day_mean": 63,
+            "day_rank_max": 1,
+            "day_rank_mean": 1,
+            "day_text": "Saturday",
+            "note": "Update: venue_open_close_v2 replaces venue_open and venue_closed and supports multiple opening times per day.",
+            "venue_closed": 0,
+            "venue_open": 14,
+            "venue_open_close_v2": {
+              "12h": [
+                "2PM–12AM"
+              ],
+              "24h": [
+                {
+                  "closes": 0,
+                  "opens": 14
+                }
+              ]
+            }
+          },
+          "day_int": 5,
+          "day_raw": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            40,
+            30,
+            40,
+            40,
+            65,
+            65,
+            75,
+            85,
+            85,
+            100,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        {
+          "day_info": {
+            "day_int": 6,
+            "day_rank_max": 7,
+            "day_rank_mean": 7,
+            "day_text": "Sunday",
+            "venue_closed": "Closed",
+            "venue_open": "Closed",
+            "venue_open_close_v2": {
+              "12h": [
+                "Closed"
+              ],
+              "24h": []
+            }
+          },
+          "day_int": 6,
+          "day_raw": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ]
+        }
+      ],
+      "venue_id": "ven_457435484348734654417652675969627366454f51557a4a496843",
+      "venue_lat": 33.4946635,
+      "venue_lon": -86.8136891,
+      "venue_name": "Club South"
+    },
+    {
+      "forecast": false,
+      "live": false,
+      "processed": true,
+      "venue_address": "11 Polson St First Floor, Toronto, ON M5A 1A4, Canada",
+      "venue_id": "ven_4968366d76566558736832526b49314c37523033792d664a496843",
+      "venue_lat": 43.6408623,
+      "venue_lon": -79.3545641,
+      "venue_name": "Rebel"
+    },
+    {
+      "forecast": true,
+      "live": true,
+      "processed": true,
+      "venue_address": "1 W Las Olas Blvd #700 Fort Lauderdale, FL 33301",
+      "venue_foot_traffic_forecast": [
+        {
+          "day_info": {
+            "day_int": 0,
+            "day_rank_max": 7,
+            "day_rank_mean": 7,
+            "day_text": "Monday",
+            "venue_closed": "Closed",
+            "venue_open": "Closed",
+            "venue_open_close_v2": {
+              "12h": [
+                "Closed"
+              ],
+              "24h": []
+            }
+          },
+          "day_int": 0,
+          "day_raw": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        {
+          "day_info": {
+            "day_int": 1,
+            "day_rank_max": 7,
+            "day_rank_mean": 7,
+            "day_text": "Tuesday",
+            "venue_closed": "Closed",
+            "venue_open": "Closed",
+            "venue_open_close_v2": {
+              "12h": [
+                "Closed"
+              ],
+              "24h": []
+            }
+          },
+          "day_int": 1,
+          "day_raw": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        {
+          "day_info": {
+            "day_int": 2,
+            "day_max": 27,
+            "day_mean": 19,
+            "day_rank_max": 3,
+            "day_rank_mean": 3,
+            "day_text": "Wednesday",
+            "note": "Update: venue_open_close_v2 replaces venue_open and venue_closed and supports multiple opening times per day.",
+            "venue_closed": 1,
+            "venue_open": 16,
+            "venue_open_close_v2": {
+              "12h": [
+                "4PM–1AM"
+              ],
+              "24h": [
+                {
+                  "closes": 1,
+                  "opens": 16
+                }
+              ]
+            }
+          },
+          "day_int": 2,
+          "day_raw": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            10,
+            15,
+            20,
+            25,
+            25,
+            25,
+            25,
+            20,
+            10,
+            0,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        {
+          "day_info": {
+            "day_int": 3,
+            "day_max": 24,
+            "day_mean": 16,
+            "day_rank_max": 4,
+            "day_rank_mean": 4,
+            "day_text": "Thursday",
+            "note": "Update: venue_open_close_v2 replaces venue_open and venue_closed and supports multiple opening times per day.",
+            "venue_closed": 1,
+            "venue_open": 16,
+            "venue_open_close_v2": {
+              "12h": [
+                "4PM–1AM"
+              ],
+              "24h": [
+                {
+                  "closes": 1,
+                  "opens": 16
+                }
+              ]
+            }
+          },
+          "day_int": 3,
+          "day_raw": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            5,
+            10,
+            15,
+            15,
+            20,
+            20,
+            25,
+            25,
+            15,
+            0,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        {
+          "day_info": {
+            "day_int": 4,
+            "day_max": 68,
+            "day_mean": 37,
+            "day_rank_max": 2,
+            "day_rank_mean": 2,
+            "day_text": "Friday",
+            "note": "Update: venue_open_close_v2 replaces venue_open and venue_closed and supports multiple opening times per day.",
+            "venue_closed": 2,
+            "venue_open": 16,
+            "venue_open_close_v2": {
+              "12h": [
+                "4PM–2AM"
+              ],
+              "24h": [
+                {
+                  "closes": 2,
+                  "opens": 16
+                }
+              ]
+            }
+          },
+          "day_int": 4,
+          "day_raw": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            10,
+            15,
+            20,
+            25,
+            35,
+            50,
+            65,
+            70,
+            50,
+            35,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        {
+          "day_info": {
+            "day_int": 5,
+            "day_max": 100,
+            "day_mean": 45,
+            "day_rank_max": 1,
+            "day_rank_mean": 1,
+            "day_text": "Saturday",
+            "note": "Update: venue_open_close_v2 replaces venue_open and venue_closed and supports multiple opening times per day.",
+            "venue_closed": 2,
+            "venue_open": 14,
+            "venue_open_close_v2": {
+              "12h": [
+                "2PM–2AM"
+              ],
+              "24h": [
+                {
+                  "closes": 2,
+                  "opens": 14
+                }
+              ]
+            }
+          },
+          "day_int": 5,
+          "day_raw": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            5,
+            10,
+            15,
+            20,
+            25,
+            35,
+            50,
+            70,
+            90,
+            100,
+            80,
+            50,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        {
+          "day_info": {
+            "day_int": 6,
+            "day_max": 12,
+            "day_mean": 9,
+            "day_rank_max": 5,
+            "day_rank_mean": 5,
+            "day_text": "Sunday",
+            "note": "Update: venue_open_close_v2 replaces venue_open and venue_closed and supports multiple opening times per day.",
+            "venue_closed": 22,
+            "venue_open": 12,
+            "venue_open_close_v2": {
+              "12h": [
+                "12–10PM"
+              ],
+              "24h": [
+                {
+                  "closes": 22,
+                  "opens": 12
+                }
+              ]
+            }
+          },
+          "day_int": 6,
+          "day_raw": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            5,
+            5,
+            10,
+            10,
+            10,
+            10,
+            10,
+            10,
+            10,
+            10,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ]
+        }
+      ],
+      "venue_foot_traffic_live": 13,
+      "venue_id": "ven_4d6b69532d5a4a5343504d5267593241675069654a37374a496843",
+      "venue_lat": 26.1196,
+      "venue_lon": -80.14367,
+      "venue_name": "Rooftop @1WLO"
+    },
+    {
+      "forecast": true,
+      "live": false,
+      "processed": true,
+      "venue_address": "2nd floor, 3rd, Eye Mall Mithakhali, Navrangpura Ahmedabad, Gujarat 380009 India",
+      "venue_foot_traffic_forecast": [
+        {
+          "day_info": {
+            "day_int": 0,
+            "day_max": 49,
+            "day_mean": 24,
+            "day_rank_max": 5,
+            "day_rank_mean": 4,
+            "day_text": "Monday",
+            "note": "Update: venue_open_close_v2 replaces venue_open and venue_closed and supports multiple opening times per day.",
+            "venue_closed": 0,
+            "venue_open": 0,
+            "venue_open_close_v2": {
+              "12h": [
+                "Open 24 hours"
+              ],
+              "24h": [
+                {
+                  "closes": 0,
+                  "opens": 0
+                }
+              ]
+            }
+          },
+          "day_int": 0,
+          "day_raw": [
+            5,
+            5,
+            10,
+            20,
+            20,
+            25,
+            20,
+            30,
+            20,
+            20,
+            15,
+            20,
+            25,
+            20,
+            20,
+            25,
+            35,
+            45,
+            50,
+            40,
+            35,
+            25,
+            20,
+            25
+          ]
+        },
+        {
+          "day_info": {
+            "day_int": 1,
+            "day_max": 47,
+            "day_mean": 24,
+            "day_rank_max": 6,
+            "day_rank_mean": 4,
+            "day_text": "Tuesday",
+            "note": "Update: venue_open_close_v2 replaces venue_open and venue_closed and supports multiple opening times per day.",
+            "venue_closed": 0,
+            "venue_open": 0,
+            "venue_open_close_v2": {
+              "12h": [
+                "Open 24 hours"
+              ],
+              "24h": [
+                {
+                  "closes": 0,
+                  "opens": 0
+                }
+              ]
+            }
+          },
+          "day_int": 1,
+          "day_raw": [
+            25,
+            20,
+            20,
+            20,
+            25,
+            20,
+            15,
+            15,
+            10,
+            15,
+            10,
+            15,
+            20,
+            30,
+            30,
+            30,
+            40,
+            45,
+            45,
+            35,
+            30,
+            30,
+            15,
+            15
+          ]
+        },
+        {
+          "day_info": {
+            "day_int": 2,
+            "day_max": 43,
+            "day_mean": 19,
+            "day_rank_max": 7,
+            "day_rank_mean": 7,
+            "day_text": "Wednesday",
+            "note": "Update: venue_open_close_v2 replaces venue_open and venue_closed and supports multiple opening times per day.",
+            "venue_closed": 0,
+            "venue_open": 0,
+            "venue_open_close_v2": {
+              "12h": [
+                "Open 24 hours"
+              ],
+              "24h": [
+                {
+                  "closes": 0,
+                  "opens": 0
+                }
+              ]
+            }
+          },
+          "day_int": 2,
+          "day_raw": [
+            10,
+            15,
+            10,
+            15,
+            10,
+            15,
+            10,
+            10,
+            10,
+            15,
+            5,
+            10,
+            15,
+            30,
+            25,
+            30,
+            35,
+            45,
+            40,
+            35,
+            25,
+            20,
+            15,
+            5
+          ]
+        },
+        {
+          "day_info": {
+            "day_int": 3,
+            "day_max": 50,
+            "day_mean": 23,
+            "day_rank_max": 3,
+            "day_rank_mean": 5,
+            "day_text": "Thursday",
+            "note": "Update: venue_open_close_v2 replaces venue_open and venue_closed and supports multiple opening times per day.",
+            "venue_closed": 0,
+            "venue_open": 0,
+            "venue_open_close_v2": {
+              "12h": [
+                "Open 24 hours"
+              ],
+              "24h": [
+                {
+                  "closes": 0,
+                  "opens": 0
+                }
+              ]
+            }
+          },
+          "day_int": 3,
+          "day_raw": [
+            5,
+            5,
+            5,
+            10,
+            15,
+            20,
+            20,
+            20,
+            15,
+            20,
+            20,
+            25,
+            20,
+            20,
+            25,
+            35,
+            40,
+            50,
+            45,
+            35,
+            30,
+            20,
+            20,
+            25
+          ]
+        },
+        {
+          "day_info": {
+            "day_int": 4,
+            "day_max": 54,
+            "day_mean": 20,
+            "day_rank_max": 2,
+            "day_rank_mean": 6,
+            "day_text": "Friday",
+            "note": "Update: venue_open_close_v2 replaces venue_open and venue_closed and supports multiple opening times per day.",
+            "venue_closed": 0,
+            "venue_open": 0,
+            "venue_open_close_v2": {
+              "12h": [
+                "Open 24 hours"
+              ],
+              "24h": [
+                {
+                  "closes": 0,
+                  "opens": 0
+                }
+              ]
+            }
+          },
+          "day_int": 4,
+          "day_raw": [
+            20,
+            10,
+            5,
+            5,
+            15,
+            15,
+            15,
+            15,
+            20,
+            20,
+            25,
+            10,
+            10,
+            15,
+            20,
+            25,
+            40,
+            55,
+            40,
+            30,
+            20,
+            20,
+            20,
+            15
+          ]
+        },
+        {
+          "day_info": {
+            "day_int": 5,
+            "day_max": 100,
+            "day_mean": 35,
+            "day_rank_max": 1,
+            "day_rank_mean": 1,
+            "day_text": "Saturday",
+            "note": "Update: venue_open_close_v2 replaces venue_open and venue_closed and supports multiple opening times per day.",
+            "venue_closed": 0,
+            "venue_open": 0,
+            "venue_open_close_v2": {
+              "12h": [
+                "Open 24 hours"
+              ],
+              "24h": [
+                {
+                  "closes": 0,
+                  "opens": 0
+                }
+              ]
+            }
+          },
+          "day_int": 5,
+          "day_raw": [
+            10,
+            15,
+            15,
+            15,
+            20,
+            20,
+            20,
+            15,
+            20,
+            20,
+            25,
+            25,
+            15,
+            20,
+            30,
+            50,
+            75,
+            100,
+            95,
+            85,
+            60,
+            30,
+            30,
+            25
+          ]
+        },
+        {
+          "day_info": {
+            "day_int": 6,
+            "day_max": 49,
+            "day_mean": 26,
+            "day_rank_max": 5,
+            "day_rank_mean": 2,
+            "day_text": "Sunday",
+            "note": "Update: venue_open_close_v2 replaces venue_open and venue_closed and supports multiple opening times per day.",
+            "venue_closed": 0,
+            "venue_open": 0,
+            "venue_open_close_v2": {
+              "12h": [
+                "Open 24 hours"
+              ],
+              "24h": [
+                {
+                  "closes": 0,
+                  "opens": 0
+                }
+              ]
+            }
+          },
+          "day_int": 6,
+          "day_raw": [
+            20,
+            20,
+            15,
+            20,
+            20,
+            15,
+            10,
+            15,
+            20,
+            15,
+            20,
+            30,
+            45,
+            35,
+            35,
+            30,
+            35,
+            45,
+            50,
+            45,
+            35,
+            30,
+            15,
+            10
+          ]
+        }
+      ],
+      "venue_id": "ven_4d796b5130315a646c424b526b6a5846654c5978565f744a496843",
+      "venue_lat": 23.0322707,
+      "venue_lon": 72.5607775,
+      "venue_name": "Rv's cue & cafe bar"
+    },
+    {
+      "forecast": true,
+      "live": false,
+      "processed": true,
+      "venue_address": "Rajiv Gandhi Nagar, HSR Layout Bengaluru, Karnataka 560102 India",
+      "venue_foot_traffic_forecast": [
+        {
+          "day_info": {
+            "day_int": 0,
+            "day_max": 90,
+            "day_mean": 31,
+            "day_rank_max": 2,
+            "day_rank_mean": 7,
+            "day_text": "Monday",
+            "note": "Update: venue_open_close_v2 replaces venue_open and venue_closed and supports multiple opening times per day.",
+            "venue_closed": 0,
+            "venue_open": 0,
+            "venue_open_close_v2": {
+              "12h": [
+                "Open 24 hours"
+              ],
+              "24h": [
+                {
+                  "closes": 0,
+                  "opens": 0
+                }
+              ]
+            }
+          },
+          "day_int": 0,
+          "day_raw": [
+            20,
+            15,
+            15,
+            20,
+            15,
+            30,
+            30,
+            30,
+            25,
+            15,
+            10,
+            10,
+            15,
+            25,
+            50,
+            60,
+            90,
+            70,
+            50,
+            40,
+            40,
+            40,
+            25,
+            20
+          ]
+        },
+        {
+          "day_info": {
+            "day_int": 1,
+            "day_max": 66,
+            "day_mean": 34,
+            "day_rank_max": 6,
+            "day_rank_mean": 6,
+            "day_text": "Tuesday",
+            "note": "Update: venue_open_close_v2 replaces venue_open and venue_closed and supports multiple opening times per day.",
+            "venue_closed": 0,
+            "venue_open": 0,
+            "venue_open_close_v2": {
+              "12h": [
+                "Open 24 hours"
+              ],
+              "24h": [
+                {
+                  "closes": 0,
+                  "opens": 0
+                }
+              ]
+            }
+          },
+          "day_int": 1,
+          "day_raw": [
+            40,
+            40,
+            50,
+            30,
+            35,
+            20,
+            40,
+            40,
+            65,
+            55,
+            50,
+            30,
+            20,
+            25,
+            30,
+            30,
+            30,
+            30,
+            20,
+            25,
+            25,
+            30,
+            30,
+            40
+          ]
+        },
+        {
+          "day_info": {
+            "day_int": 2,
+            "day_max": 76,
+            "day_mean": 37,
+            "day_rank_max": 5,
+            "day_rank_mean": 5,
+            "day_text": "Wednesday",
+            "note": "Update: venue_open_close_v2 replaces venue_open and venue_closed and supports multiple opening times per day.",
+            "venue_closed": 0,
+            "venue_open": 0,
+            "venue_open_close_v2": {
+              "12h": [
+                "Open 24 hours"
+              ],
+              "24h": [
+                {
+                  "closes": 0,
+                  "opens": 0
+                }
+              ]
+            }
+          },
+          "day_int": 2,
+          "day_raw": [
+            25,
+            25,
+            5,
+            15,
+            25,
+            35,
+            30,
+            40,
+            25,
+            25,
+            40,
+            55,
+            75,
+            60,
+            50,
+            40,
+            45,
+            40,
+            55,
+            45,
+            35,
+            35,
+            25,
+            45
+          ]
+        },
+        {
+          "day_info": {
+            "day_int": 3,
+            "day_max": 57,
+            "day_mean": 37,
+            "day_rank_max": 7,
+            "day_rank_mean": 5,
+            "day_text": "Thursday",
+            "note": "Update: venue_open_close_v2 replaces venue_open and venue_closed and supports multiple opening times per day.",
+            "venue_closed": 0,
+            "venue_open": 0,
+            "venue_open_close_v2": {
+              "12h": [
+                "Open 24 hours"
+              ],
+              "24h": [
+                {
+                  "closes": 0,
+                  "opens": 0
+                }
+              ]
+            }
+          },
+          "day_int": 3,
+          "day_raw": [
+            35,
+            40,
+            35,
+            45,
+            40,
+            45,
+            40,
+            30,
+            25,
+            25,
+            40,
+            55,
+            50,
+            40,
+            30,
+            35,
+            40,
+            55,
+            40,
+            30,
+            20,
+            25,
+            45,
+            35
+          ]
+        },
+        {
+          "day_info": {
+            "day_int": 4,
+            "day_max": 85,
+            "day_mean": 52,
+            "day_rank_max": 3,
+            "day_rank_mean": 1,
+            "day_text": "Friday",
+            "note": "Update: venue_open_close_v2 replaces venue_open and venue_closed and supports multiple opening times per day.",
+            "venue_closed": 0,
+            "venue_open": 0,
+            "venue_open_close_v2": {
+              "12h": [
+                "Open 24 hours"
+              ],
+              "24h": [
+                {
+                  "closes": 0,
+                  "opens": 0
+                }
+              ]
+            }
+          },
+          "day_int": 4,
+          "day_raw": [
+            25,
+            20,
+            30,
+            35,
+            25,
+            25,
+            30,
+            50,
+            65,
+            65,
+            75,
+            55,
+            80,
+            75,
+            80,
+            80,
+            75,
+            85,
+            50,
+            50,
+            40,
+            50,
+            35,
+            40
+          ]
+        },
+        {
+          "day_info": {
+            "day_int": 5,
+            "day_max": 100,
+            "day_mean": 41,
+            "day_rank_max": 1,
+            "day_rank_mean": 3,
+            "day_text": "Saturday",
+            "note": "Update: venue_open_close_v2 replaces venue_open and venue_closed and supports multiple opening times per day.",
+            "venue_closed": 0,
+            "venue_open": 0,
+            "venue_open_close_v2": {
+              "12h": [
+                "Open 24 hours"
+              ],
+              "24h": [
+                {
+                  "closes": 0,
+                  "opens": 0
+                }
+              ]
+            }
+          },
+          "day_int": 5,
+          "day_raw": [
+            30,
+            20,
+            10,
+            20,
+            30,
+            40,
+            40,
+            50,
+            40,
+            30,
+            30,
+            30,
+            35,
+            40,
+            80,
+            80,
+            100,
+            75,
+            45,
+            25,
+            20,
+            25,
+            70,
+            40
+          ]
+        },
+        {
+          "day_info": {
+            "day_int": 6,
+            "day_max": 76,
+            "day_mean": 48,
+            "day_rank_max": 5,
+            "day_rank_mean": 2,
+            "day_text": "Sunday",
+            "note": "Update: venue_open_close_v2 replaces venue_open and venue_closed and supports multiple opening times per day.",
+            "venue_closed": 0,
+            "venue_open": 0,
+            "venue_open_close_v2": {
+              "12h": [
+                "Open 24 hours"
+              ],
+              "24h": [
+                {
+                  "closes": 0,
+                  "opens": 0
+                }
+              ]
+            }
+          },
+          "day_int": 6,
+          "day_raw": [
+            40,
+            55,
+            45,
+            55,
+            25,
+            30,
+            25,
+            40,
+            40,
+            40,
+            50,
+            40,
+            55,
+            75,
+            75,
+            60,
+            55,
+            55,
+            55,
+            55,
+            55,
+            65,
+            35,
+            20
+          ]
+        }
+      ],
+      "venue_id": "ven_516741314d503758734a5452736a7256675878307552574a496843",
+      "venue_lat": 12.9070906,
+      "venue_lon": 77.631437,
+      "venue_name": "Ayraan Night Club and Hotel"
+    },
+    {
+      "forecast": true,
+      "live": false,
+      "processed": true,
+      "venue_address": "2265 W 84th Ave Denver, CO 80260",
+      "venue_foot_traffic_forecast": [
+        {
+          "day_info": {
+            "day_int": 0,
+            "day_max": 11,
+            "day_mean": 8,
+            "day_rank_max": 7,
+            "day_rank_mean": 7,
+            "day_text": "Monday",
+            "note": "Update: venue_open_close_v2 replaces venue_open and venue_closed and supports multiple opening times per day.",
+            "venue_closed": 21,
+            "venue_open": 11,
+            "venue_open_close_v2": {
+              "12h": [
+                "11AM–9:30PM"
+              ],
+              "24h": [
+                {
+                  "closes": 21,
+                  "opens": 11
+                }
+              ]
+            }
+          },
+          "day_int": 0,
+          "day_raw": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            5,
+            5,
+            10,
+            10,
+            10,
+            10,
+            10,
+            10,
+            10,
+            5,
+            5,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        {
+          "day_info": {
+            "day_int": 1,
+            "day_max": 17,
+            "day_mean": 11,
+            "day_rank_max": 5,
+            "day_rank_mean": 5,
+            "day_text": "Tuesday",
+            "note": "Update: venue_open_close_v2 replaces venue_open and venue_closed and supports multiple opening times per day.",
+            "venue_closed": 21,
+            "venue_open": 11,
+            "venue_open_close_v2": {
+              "12h": [
+                "11AM–9:30PM"
+              ],
+              "24h": [
+                {
+                  "closes": 21,
+                  "opens": 11
+                }
+              ]
+            }
+          },
+          "day_int": 1,
+          "day_raw": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            5,
+            5,
+            5,
+            10,
+            10,
+            15,
+            15,
+            15,
+            15,
+            10,
+            5,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        {
+          "day_info": {
+            "day_int": 2,
+            "day_max": 13,
+            "day_mean": 9,
+            "day_rank_max": 6,
+            "day_rank_mean": 6,
+            "day_text": "Wednesday",
+            "note": "Update: venue_open_close_v2 replaces venue_open and venue_closed and supports multiple opening times per day.",
+            "venue_closed": 21,
+            "venue_open": 11,
+            "venue_open_close_v2": {
+              "12h": [
+                "11AM–9:30PM"
+              ],
+              "24h": [
+                {
+                  "closes": 21,
+                  "opens": 11
+                }
+              ]
+            }
+          },
+          "day_int": 2,
+          "day_raw": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            5,
+            5,
+            10,
+            5,
+            5,
+            5,
+            10,
+            10,
+            15,
+            10,
+            5,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        {
+          "day_info": {
+            "day_int": 3,
+            "day_max": 18,
+            "day_mean": 13,
+            "day_rank_max": 4,
+            "day_rank_mean": 4,
+            "day_text": "Thursday",
+            "note": "Update: venue_open_close_v2 replaces venue_open and venue_closed and supports multiple opening times per day.",
+            "venue_closed": 21,
+            "venue_open": 11,
+            "venue_open_close_v2": {
+              "12h": [
+                "11AM–9:30PM"
+              ],
+              "24h": [
+                {
+                  "closes": 21,
+                  "opens": 11
+                }
+              ]
+            }
+          },
+          "day_int": 3,
+          "day_raw": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            5,
+            10,
+            10,
+            10,
+            15,
+            15,
+            20,
+            20,
+            15,
+            10,
+            5,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        {
+          "day_info": {
+            "day_int": 4,
+            "day_max": 78,
+            "day_mean": 35,
+            "day_rank_max": 2,
+            "day_rank_mean": 2,
+            "day_text": "Friday",
+            "note": "Update: venue_open_close_v2 replaces venue_open and venue_closed and supports multiple opening times per day.",
+            "venue_closed": 2,
+            "venue_open": 11,
+            "venue_open_close_v2": {
+              "12h": [
+                "11AM–2AM"
+              ],
+              "24h": [
+                {
+                  "closes": 2,
+                  "opens": 11
+                }
+              ]
+            }
+          },
+          "day_int": 4,
+          "day_raw": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            5,
+            10,
+            10,
+            15,
+            15,
+            20,
+            25,
+            25,
+            35,
+            50,
+            70,
+            80,
+            75,
+            55,
+            35,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        {
+          "day_info": {
+            "day_int": 5,
+            "day_max": 100,
+            "day_mean": 41,
+            "day_rank_max": 1,
+            "day_rank_mean": 1,
+            "day_text": "Saturday",
+            "note": "Update: venue_open_close_v2 replaces venue_open and venue_closed and supports multiple opening times per day.",
+            "venue_closed": 2,
+            "venue_open": 11,
+            "venue_open_close_v2": {
+              "12h": [
+                "11AM–2AM"
+              ],
+              "24h": [
+                {
+                  "closes": 2,
+                  "opens": 11
+                }
+              ]
+            }
+          },
+          "day_int": 5,
+          "day_raw": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            10,
+            10,
+            15,
+            15,
+            15,
+            15,
+            20,
+            25,
+            35,
+            60,
+            80,
+            100,
+            95,
+            75,
+            45,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        {
+          "day_info": {
+            "day_int": 6,
+            "day_max": 22,
+            "day_mean": 16,
+            "day_rank_max": 3,
+            "day_rank_mean": 3,
+            "day_text": "Sunday",
+            "note": "Update: venue_open_close_v2 replaces venue_open and venue_closed and supports multiple opening times per day.",
+            "venue_closed": 21,
+            "venue_open": 11,
+            "venue_open_close_v2": {
+              "12h": [
+                "11AM–9:30PM"
+              ],
+              "24h": [
+                {
+                  "closes": 21,
+                  "opens": 11
+                }
+              ]
+            }
+          },
+          "day_int": 6,
+          "day_raw": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            10,
+            15,
+            20,
+            20,
+            20,
+            20,
+            20,
+            15,
+            10,
+            5,
+            5,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ]
+        }
+      ],
+      "venue_id": "ven_516b624446333347387a5852634962336c4d51747131534a496843",
+      "venue_lat": 39.8493351,
+      "venue_lon": -105.0136197,
+      "venue_name": "Babes Night Club"
+    },
+    {
+      "forecast": true,
+      "live": true,
+      "processed": true,
+      "venue_address": "Pérez Valenzuela 1470 7500510 Providencia Región Metropolitana Chile",
+      "venue_foot_traffic_forecast": [
+        {
+          "day_info": {
+            "day_int": 0,
+            "day_max": 35,
+            "day_mean": 22,
+            "day_rank_max": 5,
+            "day_rank_mean": 5,
+            "day_text": "Monday",
+            "note": "Update: venue_open_close_v2 replaces venue_open and venue_closed and supports multiple opening times per day.",
+            "venue_closed": 2,
+            "venue_open": 18,
+            "venue_open_close_v2": {
+              "12h": [
+                "6PM–2AM"
+              ],
+              "24h": [
+                {
+                  "closes": 2,
+                  "opens": 18
+                }
+              ]
+            }
+          },
+          "day_int": 0,
+          "day_raw": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            5,
+            10,
+            20,
+            30,
+            35,
+            35,
+            25,
+            15,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        {
+          "day_info": {
+            "day_int": 1,
+            "day_max": 28,
+            "day_mean": 20,
+            "day_rank_max": 6,
+            "day_rank_mean": 6,
+            "day_text": "Tuesday",
+            "note": "Update: venue_open_close_v2 replaces venue_open and venue_closed and supports multiple opening times per day.",
+            "venue_closed": 2,
+            "venue_open": 18,
+            "venue_open_close_v2": {
+              "12h": [
+                "6PM–2AM"
+              ],
+              "24h": [
+                {
+                  "closes": 2,
+                  "opens": 18
+                }
+              ]
+            }
+          },
+          "day_int": 1,
+          "day_raw": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            10,
+            15,
+            20,
+            30,
+            30,
+            25,
+            20,
+            10,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        {
+          "day_info": {
+            "day_int": 2,
+            "day_max": 57,
+            "day_mean": 38,
+            "day_rank_max": 3,
+            "day_rank_mean": 3,
+            "day_text": "Wednesday",
+            "note": "Update: venue_open_close_v2 replaces venue_open and venue_closed and supports multiple opening times per day.",
+            "venue_closed": 2,
+            "venue_open": 18,
+            "venue_open_close_v2": {
+              "12h": [
+                "6PM–2AM"
+              ],
+              "24h": [
+                {
+                  "closes": 2,
+                  "opens": 18
+                }
+              ]
+            }
+          },
+          "day_int": 2,
+          "day_raw": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            15,
+            20,
+            35,
+            50,
+            55,
+            55,
+            40,
+            25,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        {
+          "day_info": {
+            "day_int": 3,
+            "day_max": 52,
+            "day_mean": 31,
+            "day_rank_max": 4,
+            "day_rank_mean": 4,
+            "day_text": "Thursday",
+            "note": "Update: venue_open_close_v2 replaces venue_open and venue_closed and supports multiple opening times per day.",
+            "venue_closed": 4,
+            "venue_open": 18,
+            "venue_open_close_v2": {
+              "12h": [
+                "6PM–4AM"
+              ],
+              "24h": [
+                {
+                  "closes": 4,
+                  "opens": 18
+                }
+              ]
+            }
+          },
+          "day_int": 3,
+          "day_raw": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            15,
+            25,
+            35,
+            45,
+            50,
+            50,
+            40,
+            25,
+            15,
+            10,
+            0,
+            0
+          ]
+        },
+        {
+          "day_info": {
+            "day_int": 4,
+            "day_max": 100,
+            "day_mean": 55,
+            "day_rank_max": 1,
+            "day_rank_mean": 1,
+            "day_text": "Friday",
+            "note": "Update: venue_open_close_v2 replaces venue_open and venue_closed and supports multiple opening times per day.",
+            "venue_closed": 4,
+            "venue_open": 18,
+            "venue_open_close_v2": {
+              "12h": [
+                "6PM–4AM"
+              ],
+              "24h": [
+                {
+                  "closes": 4,
+                  "opens": 18
+                }
+              ]
+            }
+          },
+          "day_int": 4,
+          "day_raw": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            15,
+            25,
+            50,
+            80,
+            100,
+            100,
+            75,
+            55,
+            30,
+            20,
+            0,
+            0
+          ]
+        },
+        {
+          "day_info": {
+            "day_int": 5,
+            "day_max": 84,
+            "day_mean": 49,
+            "day_rank_max": 2,
+            "day_rank_mean": 2,
+            "day_text": "Saturday",
+            "note": "Update: venue_open_close_v2 replaces venue_open and venue_closed and supports multiple opening times per day.",
+            "venue_closed": 4,
+            "venue_open": 19,
+            "venue_open_close_v2": {
+              "12h": [
+                "7PM–4AM"
+              ],
+              "24h": [
+                {
+                  "closes": 4,
+                  "opens": 19
+                }
+              ]
+            }
+          },
+          "day_int": 5,
+          "day_raw": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            20,
+            40,
+            65,
+            80,
+            85,
+            65,
+            45,
+            25,
+            15,
+            0,
+            0
+          ]
+        },
+        {
+          "day_info": {
+            "day_int": 6,
+            "day_rank_max": 7,
+            "day_rank_mean": 7,
+            "day_text": "Sunday",
+            "venue_closed": "Closed",
+            "venue_open": "Closed",
+            "venue_open_close_v2": {
+              "12h": [
+                "Closed"
+              ],
+              "24h": []
+            }
+          },
+          "day_int": 6,
+          "day_raw": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ]
+        }
+      ],
+      "venue_foot_traffic_live": 25,
+      "venue_id": "ven_55396a6d4676656144567552597059506e4c77644453384a496843",
+      "venue_lat": -33.4261668,
+      "venue_lon": -70.6204876,
+      "venue_name": "Backroom Bar"
+    },
+    {
+      "forecast": true,
+      "live": true,
+      "processed": true,
+      "venue_address": "800 Post St San Francisco, CA 94109",
+      "venue_foot_traffic_forecast": [
+        {
+          "day_info": {
+            "day_int": 0,
+            "day_max": 40,
+            "day_mean": 26,
+            "day_rank_max": 6,
+            "day_rank_mean": 7,
+            "day_text": "Monday",
+            "note": "Update: venue_open_close_v2 replaces venue_open and venue_closed and supports multiple opening times per day.",
+            "venue_closed": 0,
+            "venue_open": 17,
+            "venue_open_close_v2": {
+              "12h": [
+                "5PM–12AM"
+              ],
+              "24h": [
+                {
+                  "closes": 0,
+                  "opens": 17
+                }
+              ]
+            }
+          },
+          "day_int": 0,
+          "day_raw": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            5,
+            15,
+            20,
+            30,
+            35,
+            40,
+            35,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        {
+          "day_info": {
+            "day_int": 1,
+            "day_max": 35,
+            "day_mean": 27,
+            "day_rank_max": 7,
+            "day_rank_mean": 6,
+            "day_text": "Tuesday",
+            "note": "Update: venue_open_close_v2 replaces venue_open and venue_closed and supports multiple opening times per day.",
+            "venue_closed": 0,
+            "venue_open": 17,
+            "venue_open_close_v2": {
+              "12h": [
+                "5PM–12AM"
+              ],
+              "24h": [
+                {
+                  "closes": 0,
+                  "opens": 17
+                }
+              ]
+            }
+          },
+          "day_int": 1,
+          "day_raw": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            20,
+            20,
+            30,
+            35,
+            30,
+            30,
+            20,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        {
+          "day_info": {
+            "day_int": 2,
+            "day_max": 47,
+            "day_mean": 28,
+            "day_rank_max": 4,
+            "day_rank_mean": 5,
+            "day_text": "Wednesday",
+            "note": "Update: venue_open_close_v2 replaces venue_open and venue_closed and supports multiple opening times per day.",
+            "venue_closed": 0,
+            "venue_open": 17,
+            "venue_open_close_v2": {
+              "12h": [
+                "5PM–12AM"
+              ],
+              "24h": [
+                {
+                  "closes": 0,
+                  "opens": 17
+                }
+              ]
+            }
+          },
+          "day_int": 2,
+          "day_raw": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            10,
+            20,
+            20,
+            25,
+            35,
+            45,
+            40,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        {
+          "day_info": {
+            "day_int": 3,
+            "day_max": 64,
+            "day_mean": 41,
+            "day_rank_max": 3,
+            "day_rank_mean": 3,
+            "day_text": "Thursday",
+            "note": "Update: venue_open_close_v2 replaces venue_open and venue_closed and supports multiple opening times per day.",
+            "venue_closed": 2,
+            "venue_open": 17,
+            "venue_open_close_v2": {
+              "12h": [
+                "5PM–2AM"
+              ],
+              "24h": [
+                {
+                  "closes": 2,
+                  "opens": 17
+                }
+              ]
+            }
+          },
+          "day_int": 3,
+          "day_raw": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            25,
+            35,
+            45,
+            50,
+            65,
+            55,
+            50,
+            30,
+            20,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        {
+          "day_info": {
+            "day_int": 4,
+            "day_max": 88,
+            "day_mean": 59,
+            "day_rank_max": 2,
+            "day_rank_mean": 2,
+            "day_text": "Friday",
+            "note": "Update: venue_open_close_v2 replaces venue_open and venue_closed and supports multiple opening times per day.",
+            "venue_closed": 2,
+            "venue_open": 17,
+            "venue_open_close_v2": {
+              "12h": [
+                "5PM–2AM"
+              ],
+              "24h": [
+                {
+                  "closes": 2,
+                  "opens": 17
+                }
+              ]
+            }
+          },
+          "day_int": 4,
+          "day_raw": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            35,
+            40,
+            45,
+            50,
+            70,
+            85,
+            90,
+            65,
+            45,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        {
+          "day_info": {
+            "day_int": 5,
+            "day_max": 100,
+            "day_mean": 60,
+            "day_rank_max": 1,
+            "day_rank_mean": 1,
+            "day_text": "Saturday",
+            "note": "Update: venue_open_close_v2 replaces venue_open and venue_closed and supports multiple opening times per day.",
+            "venue_closed": 2,
+            "venue_open": 17,
+            "venue_open_close_v2": {
+              "12h": [
+                "5PM–2AM"
+              ],
+              "24h": [
+                {
+                  "closes": 2,
+                  "opens": 17
+                }
+              ]
+            }
+          },
+          "day_int": 5,
+          "day_raw": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            15,
+            25,
+            40,
+            60,
+            85,
+            100,
+            100,
+            70,
+            45,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        {
+          "day_info": {
+            "day_int": 6,
+            "day_max": 45,
+            "day_mean": 29,
+            "day_rank_max": 5,
+            "day_rank_mean": 4,
+            "day_text": "Sunday",
+            "note": "Update: venue_open_close_v2 replaces venue_open and venue_closed and supports multiple opening times per day.",
+            "venue_closed": 0,
+            "venue_open": 17,
+            "venue_open_close_v2": {
+              "12h": [
+                "5PM–12AM"
+              ],
+              "24h": [
+                {
+                  "closes": 0,
+                  "opens": 17
+                }
+              ]
+            }
+          },
+          "day_int": 6,
+          "day_raw": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            15,
+            20,
+            20,
+            25,
+            35,
+            40,
+            45,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ]
+        }
+      ],
+      "venue_foot_traffic_live": 54,
+      "venue_id": "ven_59375751426b717647456a52415968414770683531354e4a496843",
+      "venue_lat": 37.7875703,
+      "venue_lon": -122.4151995,
+      "venue_name": "The Royale"
+    },
+    {
+      "forecast": false,
+      "live": false,
+      "processed": true,
+      "venue_address": "1701 NW 112th Ave Unit 101, Miami, FL 33172, United States",
+      "venue_id": "ven_59574e7039365764587449526759325f69584b6a48336f4a496843",
+      "venue_lat": 25.7900371,
+      "venue_lon": -80.3763504,
+      "venue_name": "Santé Cocktail Lounge"
+    },
+    {
+      "forecast": true,
+      "live": true,
+      "processed": true,
+      "venue_address": "3400 Tuckaseegee Rd Charlotte, NC 28208",
+      "venue_foot_traffic_forecast": [
+        {
+          "day_info": {
+            "day_int": 0,
+            "day_max": 13,
+            "day_mean": 10,
+            "day_rank_max": 6,
+            "day_rank_mean": 6,
+            "day_text": "Monday",
+            "note": "Update: venue_open_close_v2 replaces venue_open and venue_closed and supports multiple opening times per day.",
+            "venue_closed": 2,
+            "venue_open": 19,
+            "venue_open_close_v2": {
+              "12h": [
+                "7PM–2AM"
+              ],
+              "24h": [
+                {
+                  "closes": 2,
+                  "opens": 19
+                }
+              ]
+            }
+          },
+          "day_int": 0,
+          "day_raw": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            10,
+            10,
+            10,
+            15,
+            10,
+            10,
+            5,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        {
+          "day_info": {
+            "day_int": 1,
+            "day_max": 12,
+            "day_mean": 9,
+            "day_rank_max": 7,
+            "day_rank_mean": 7,
+            "day_text": "Tuesday",
+            "note": "Update: venue_open_close_v2 replaces venue_open and venue_closed and supports multiple opening times per day.",
+            "venue_closed": 2,
+            "venue_open": 19,
+            "venue_open_close_v2": {
+              "12h": [
+                "7PM–2AM"
+              ],
+              "24h": [
+                {
+                  "closes": 2,
+                  "opens": 19
+                }
+              ]
+            }
+          },
+          "day_int": 1,
+          "day_raw": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            10,
+            10,
+            10,
+            10,
+            10,
+            5,
+            5,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        {
+          "day_info": {
+            "day_int": 2,
+            "day_max": 26,
+            "day_mean": 17,
+            "day_rank_max": 5,
+            "day_rank_mean": 5,
+            "day_text": "Wednesday",
+            "note": "Update: venue_open_close_v2 replaces venue_open and venue_closed and supports multiple opening times per day.",
+            "venue_closed": 2,
+            "venue_open": 19,
+            "venue_open_close_v2": {
+              "12h": [
+                "7PM–2AM"
+              ],
+              "24h": [
+                {
+                  "closes": 2,
+                  "opens": 19
+                }
+              ]
+            }
+          },
+          "day_int": 2,
+          "day_raw": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            15,
+            20,
+            25,
+            25,
+            20,
+            10,
+            5,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        {
+          "day_info": {
+            "day_int": 3,
+            "day_max": 29,
+            "day_mean": 20,
+            "day_rank_max": 3,
+            "day_rank_mean": 4,
+            "day_text": "Thursday",
+            "note": "Update: venue_open_close_v2 replaces venue_open and venue_closed and supports multiple opening times per day.",
+            "venue_closed": 2,
+            "venue_open": 19,
+            "venue_open_close_v2": {
+              "12h": [
+                "7PM–2AM"
+              ],
+              "24h": [
+                {
+                  "closes": 2,
+                  "opens": 19
+                }
+              ]
+            }
+          },
+          "day_int": 3,
+          "day_raw": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            15,
+            20,
+            25,
+            30,
+            25,
+            20,
+            10,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        {
+          "day_info": {
+            "day_int": 4,
+            "day_max": 73,
+            "day_mean": 54,
+            "day_rank_max": 2,
+            "day_rank_mean": 2,
+            "day_text": "Friday",
+            "note": "Update: venue_open_close_v2 replaces venue_open and venue_closed and supports multiple opening times per day.",
+            "venue_closed": 2,
+            "venue_open": 19,
+            "venue_open_close_v2": {
+              "12h": [
+                "7PM–2AM"
+              ],
+              "24h": [
+                {
+                  "closes": 2,
+                  "opens": 19
+                }
+              ]
+            }
+          },
+          "day_int": 4,
+          "day_raw": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            40,
+            55,
+            70,
+            75,
+            65,
+            50,
+            30,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        {
+          "day_info": {
+            "day_int": 5,
+            "day_max": 100,
+            "day_mean": 71,
+            "day_rank_max": 1,
+            "day_rank_mean": 1,
+            "day_text": "Saturday",
+            "note": "Update: venue_open_close_v2 replaces venue_open and venue_closed and supports multiple opening times per day.",
+            "venue_closed": 2,
+            "venue_open": 19,
+            "venue_open_close_v2": {
+              "12h": [
+                "7PM–2AM"
+              ],
+              "24h": [
+                {
+                  "closes": 2,
+                  "opens": 19
+                }
+              ]
+            }
+          },
+          "day_int": 5,
+          "day_raw": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            35,
+            60,
+            80,
+            100,
+            100,
+            75,
+            45,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        {
+          "day_info": {
+            "day_int": 6,
+            "day_max": 28,
+            "day_mean": 20,
+            "day_rank_max": 4,
+            "day_rank_mean": 4,
+            "day_text": "Sunday",
+            "note": "Update: venue_open_close_v2 replaces venue_open and venue_closed and supports multiple opening times per day.",
+            "venue_closed": 2,
+            "venue_open": 19,
+            "venue_open_close_v2": {
+              "12h": [
+                "7PM–2AM"
+              ],
+              "24h": [
+                {
+                  "closes": 2,
+                  "opens": 19
+                }
+              ]
+            }
+          },
+          "day_int": 6,
+          "day_raw": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            15,
+            20,
+            25,
+            30,
+            25,
+            20,
+            10,
+            0,
+            0,
+            0,
+            0
+          ]
+        }
+      ],
+      "venue_foot_traffic_live": 49,
+      "venue_id": "ven_6b6166764937454c61553752676f56684f35504a6856674a496843",
+      "venue_lat": 35.2446656,
+      "venue_lon": -80.8834288,
+      "venue_name": "The Milestone Club"
+    },
+    {
+      "forecast": true,
+      "live": true,
+      "processed": true,
+      "venue_address": "820 W Market St Akron, OH 44303",
+      "venue_foot_traffic_forecast": [
+        {
+          "day_info": {
+            "day_int": 0,
+            "day_rank_max": 7,
+            "day_rank_mean": 7,
+            "day_text": "Monday",
+            "venue_closed": "Closed",
+            "venue_open": "Closed",
+            "venue_open_close_v2": {
+              "12h": [
+                "Closed"
+              ],
+              "24h": []
+            }
+          },
+          "day_int": 0,
+          "day_raw": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        {
+          "day_info": {
+            "day_int": 1,
+            "day_max": 12,
+            "day_mean": 9,
+            "day_rank_max": 5,
+            "day_rank_mean": 5,
+            "day_text": "Tuesday",
+            "note": "Update: venue_open_close_v2 replaces venue_open and venue_closed and supports multiple opening times per day.",
+            "venue_closed": 2,
+            "venue_open": 17,
+            "venue_open_close_v2": {
+              "12h": [
+                "5PM–2:30AM"
+              ],
+              "24h": [
+                {
+                  "closes": 2,
+                  "opens": 17
+                }
+              ]
+            }
+          },
+          "day_int": 1,
+          "day_raw": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            5,
+            5,
+            5,
+            10,
+            10,
+            10,
+            10,
+            10,
+            5,
+            5,
+            0,
+            0,
+            0
+          ]
+        },
+        {
+          "day_info": {
+            "day_int": 2,
+            "day_max": 32,
+            "day_mean": 18,
+            "day_rank_max": 3,
+            "day_rank_mean": 3,
+            "day_text": "Wednesday",
+            "note": "Update: venue_open_close_v2 replaces venue_open and venue_closed and supports multiple opening times per day.",
+            "venue_closed": 2,
+            "venue_open": 17,
+            "venue_open_close_v2": {
+              "12h": [
+                "5PM–2:30AM"
+              ],
+              "24h": [
+                {
+                  "closes": 2,
+                  "opens": 17
+                }
+              ]
+            }
+          },
+          "day_int": 2,
+          "day_raw": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            5,
+            5,
+            10,
+            15,
+            25,
+            30,
+            30,
+            25,
+            15,
+            10,
+            0,
+            0,
+            0
+          ]
+        },
+        {
+          "day_info": {
+            "day_int": 3,
+            "day_max": 19,
+            "day_mean": 13,
+            "day_rank_max": 4,
+            "day_rank_mean": 4,
+            "day_text": "Thursday",
+            "note": "Update: venue_open_close_v2 replaces venue_open and venue_closed and supports multiple opening times per day.",
+            "venue_closed": 2,
+            "venue_open": 17,
+            "venue_open_close_v2": {
+              "12h": [
+                "5PM–2:30AM"
+              ],
+              "24h": [
+                {
+                  "closes": 2,
+                  "opens": 17
+                }
+              ]
+            }
+          },
+          "day_int": 3,
+          "day_raw": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            5,
+            10,
+            10,
+            15,
+            20,
+            20,
+            15,
+            15,
+            10,
+            5,
+            0,
+            0,
+            0
+          ]
+        },
+        {
+          "day_info": {
+            "day_int": 4,
+            "day_max": 62,
+            "day_mean": 40,
+            "day_rank_max": 2,
+            "day_rank_mean": 2,
+            "day_text": "Friday",
+            "note": "Update: venue_open_close_v2 replaces venue_open and venue_closed and supports multiple opening times per day.",
+            "venue_closed": 2,
+            "venue_open": 17,
+            "venue_open_close_v2": {
+              "12h": [
+                "5PM–2:30AM"
+              ],
+              "24h": [
+                {
+                  "closes": 2,
+                  "opens": 17
+                }
+              ]
+            }
+          },
+          "day_int": 4,
+          "day_raw": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            15,
+            20,
+            30,
+            35,
+            50,
+            60,
+            60,
+            55,
+            40,
+            20,
+            0,
+            0,
+            0
+          ]
+        },
+        {
+          "day_info": {
+            "day_int": 5,
+            "day_max": 100,
+            "day_mean": 61,
+            "day_rank_max": 1,
+            "day_rank_mean": 1,
+            "day_text": "Saturday",
+            "note": "Update: venue_open_close_v2 replaces venue_open and venue_closed and supports multiple opening times per day.",
+            "venue_closed": 2,
+            "venue_open": 19,
+            "venue_open_close_v2": {
+              "12h": [
+                "7PM–2:30AM"
+              ],
+              "24h": [
+                {
+                  "closes": 2,
+                  "opens": 19
+                }
+              ]
+            }
+          },
+          "day_int": 5,
+          "day_raw": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            15,
+            30,
+            55,
+            80,
+            100,
+            85,
+            60,
+            35,
+            0,
+            0,
+            0
+          ]
+        },
+        {
+          "day_info": {
+            "day_int": 6,
+            "day_max": 8,
+            "day_mean": 7,
+            "day_rank_max": 6,
+            "day_rank_mean": 6,
+            "day_text": "Sunday",
+            "note": "Update: venue_open_close_v2 replaces venue_open and venue_closed and supports multiple opening times per day.",
+            "venue_closed": 2,
+            "venue_open": 19,
+            "venue_open_close_v2": {
+              "12h": [
+                "7PM–2:30AM"
+              ],
+              "24h": [
+                {
+                  "closes": 2,
+                  "opens": 19
+                }
+              ]
+            }
+          },
+          "day_int": 6,
+          "day_raw": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            5,
+            5,
+            10,
+            5,
+            10,
+            10,
+            5,
+            5,
+            0,
+            0,
+            0
+          ]
+        }
+      ],
+      "venue_foot_traffic_live": 26,
+      "venue_id": "ven_6b6178546d5253486c45375267494d584837544e567a724a496843",
+      "venue_lat": 41.0965624,
+      "venue_lon": -81.5439703,
+      "venue_name": "Square Nightclub"
+    },
+    {
+      "forecast": true,
+      "live": true,
+      "processed": true,
+      "venue_address": "9020 W State Rd 84 Davie, FL 33324",
+      "venue_foot_traffic_forecast": [
+        {
+          "day_info": {
+            "day_int": 0,
+            "day_rank_max": 7,
+            "day_rank_mean": 7,
+            "day_text": "Monday",
+            "venue_closed": "Closed",
+            "venue_open": "Closed",
+            "venue_open_close_v2": {
+              "12h": [
+                "Closed"
+              ],
+              "24h": []
+            }
+          },
+          "day_int": 0,
+          "day_raw": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        {
+          "day_info": {
+            "day_int": 1,
+            "day_rank_max": 7,
+            "day_rank_mean": 7,
+            "day_text": "Tuesday",
+            "venue_closed": "Closed",
+            "venue_open": "Closed",
+            "venue_open_close_v2": {
+              "12h": [
+                "Closed"
+              ],
+              "24h": []
+            }
+          },
+          "day_int": 1,
+          "day_raw": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        {
+          "day_info": {
+            "day_int": 2,
+            "day_max": 43,
+            "day_mean": 26,
+            "day_rank_max": 3,
+            "day_rank_mean": 4,
+            "day_text": "Wednesday",
+            "note": "Update: venue_open_close_v2 replaces venue_open and venue_closed and supports multiple opening times per day.",
+            "venue_closed": 4,
+            "venue_open": 19,
+            "venue_open_close_v2": {
+              "12h": [
+                "7PM–4AM"
+              ],
+              "24h": [
+                {
+                  "closes": 4,
+                  "opens": 19
+                }
+              ]
+            }
+          },
+          "day_int": 2,
+          "day_raw": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            15,
+            25,
+            35,
+            45,
+            45,
+            35,
+            20,
+            10,
+            10,
+            0,
+            0
+          ]
+        },
+        {
+          "day_info": {
+            "day_int": 3,
+            "day_max": 27,
+            "day_mean": 17,
+            "day_rank_max": 5,
+            "day_rank_mean": 5,
+            "day_text": "Thursday",
+            "note": "Update: venue_open_close_v2 replaces venue_open and venue_closed and supports multiple opening times per day.",
+            "venue_closed": 4,
+            "venue_open": 19,
+            "venue_open_close_v2": {
+              "12h": [
+                "7PM–4AM"
+              ],
+              "24h": [
+                {
+                  "closes": 4,
+                  "opens": 19
+                }
+              ]
+            }
+          },
+          "day_int": 3,
+          "day_raw": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            10,
+            20,
+            25,
+            25,
+            25,
+            20,
+            15,
+            5,
+            5,
+            0,
+            0
+          ]
+        },
+        {
+          "day_info": {
+            "day_int": 4,
+            "day_max": 100,
+            "day_mean": 58,
+            "day_rank_max": 1,
+            "day_rank_mean": 1,
+            "day_text": "Friday",
+            "note": "Update: venue_open_close_v2 replaces venue_open and venue_closed and supports multiple opening times per day.",
+            "venue_closed": 4,
+            "venue_open": 19,
+            "venue_open_close_v2": {
+              "12h": [
+                "7PM–4AM"
+              ],
+              "24h": [
+                {
+                  "closes": 4,
+                  "opens": 19
+                }
+              ]
+            }
+          },
+          "day_int": 4,
+          "day_raw": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            25,
+            45,
+            75,
+            95,
+            100,
+            80,
+            55,
+            30,
+            15,
+            0,
+            0
+          ]
+        },
+        {
+          "day_info": {
+            "day_int": 5,
+            "day_max": 97,
+            "day_mean": 56,
+            "day_rank_max": 2,
+            "day_rank_mean": 2,
+            "day_text": "Saturday",
+            "note": "Update: venue_open_close_v2 replaces venue_open and venue_closed and supports multiple opening times per day.",
+            "venue_closed": 4,
+            "venue_open": 19,
+            "venue_open_close_v2": {
+              "12h": [
+                "7PM–4AM"
+              ],
+              "24h": [
+                {
+                  "closes": 4,
+                  "opens": 19
+                }
+              ]
+            }
+          },
+          "day_int": 5,
+          "day_raw": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            30,
+            50,
+            75,
+            95,
+            95,
+            75,
+            45,
+            25,
+            10,
+            0,
+            0
+          ]
+        },
+        {
+          "day_info": {
+            "day_int": 6,
+            "day_max": 34,
+            "day_mean": 28,
+            "day_rank_max": 4,
+            "day_rank_mean": 3,
+            "day_text": "Sunday",
+            "note": "Update: venue_open_close_v2 replaces venue_open and venue_closed and supports multiple opening times per day.",
+            "venue_closed": 0,
+            "venue_open": 19,
+            "venue_open_close_v2": {
+              "12h": [
+                "7PM–12AM"
+              ],
+              "24h": [
+                {
+                  "closes": 0,
+                  "opens": 19
+                }
+              ]
+            }
+          },
+          "day_int": 6,
+          "day_raw": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            25,
+            35,
+            35,
+            25,
+            15,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ]
+        }
+      ],
+      "venue_foot_traffic_live": 37,
+      "venue_id": "ven_6f6a472d6b4f67626c4d4752675932485175746b3777724a496843",
+      "venue_lat": 26.1022623,
+      "venue_lon": -80.2700009,
+      "venue_name": "Round Up Night Club & Restaurant"
+    },
+    {
+      "forecast": true,
+      "live": true,
+      "processed": true,
+      "venue_address": "438, Jln Tun Razak KL City Centre 50400 Kuala Lumpur Federal Territory of Kuala Lumpur, Malaysia",
+      "venue_foot_traffic_forecast": [
+        {
+          "day_info": {
+            "day_int": 0,
+            "day_max": 29,
+            "day_mean": 15,
+            "day_rank_max": 7,
+            "day_rank_mean": 7,
+            "day_text": "Monday",
+            "note": "Update: venue_open_close_v2 replaces venue_open and venue_closed and supports multiple opening times per day.",
+            "venue_closed": 5,
+            "venue_open": 8,
+            "venue_open_close_v2": {
+              "12h": [
+                "8AM–5AM"
+              ],
+              "24h": [
+                {
+                  "closes": 5,
+                  "opens": 8
+                }
+              ]
+            }
+          },
+          "day_int": 0,
+          "day_raw": [
+            0,
+            0,
+            5,
+            5,
+            5,
+            10,
+            10,
+            10,
+            10,
+            10,
+            10,
+            10,
+            15,
+            15,
+            15,
+            20,
+            25,
+            30,
+            25,
+            20,
+            20,
+            20,
+            15,
+            0
+          ]
+        },
+        {
+          "day_info": {
+            "day_int": 1,
+            "day_max": 31,
+            "day_mean": 16,
+            "day_rank_max": 6,
+            "day_rank_mean": 6,
+            "day_text": "Tuesday",
+            "note": "Update: venue_open_close_v2 replaces venue_open and venue_closed and supports multiple opening times per day.",
+            "venue_closed": 5,
+            "venue_open": 8,
+            "venue_open_close_v2": {
+              "12h": [
+                "8AM–5AM"
+              ],
+              "24h": [
+                {
+                  "closes": 5,
+                  "opens": 8
+                }
+              ]
+            }
+          },
+          "day_int": 1,
+          "day_raw": [
+            0,
+            0,
+            5,
+            10,
+            10,
+            10,
+            10,
+            10,
+            10,
+            10,
+            10,
+            15,
+            15,
+            15,
+            20,
+            25,
+            30,
+            30,
+            25,
+            25,
+            20,
+            20,
+            20,
+            0
+          ]
+        },
+        {
+          "day_info": {
+            "day_int": 2,
+            "day_max": 45,
+            "day_mean": 22,
+            "day_rank_max": 4,
+            "day_rank_mean": 4,
+            "day_text": "Wednesday",
+            "note": "Update: venue_open_close_v2 replaces venue_open and venue_closed and supports multiple opening times per day.",
+            "venue_closed": 5,
+            "venue_open": 8,
+            "venue_open_close_v2": {
+              "12h": [
+                "8AM–5AM"
+              ],
+              "24h": [
+                {
+                  "closes": 5,
+                  "opens": 8
+                }
+              ]
+            }
+          },
+          "day_int": 2,
+          "day_raw": [
+            0,
+            0,
+            5,
+            10,
+            10,
+            10,
+            10,
+            10,
+            10,
+            10,
+            15,
+            15,
+            20,
+            20,
+            20,
+            30,
+            35,
+            45,
+            40,
+            40,
+            40,
+            35,
+            30,
+            0
+          ]
+        },
+        {
+          "day_info": {
+            "day_int": 3,
+            "day_max": 54,
+            "day_mean": 24,
+            "day_rank_max": 3,
+            "day_rank_mean": 3,
+            "day_text": "Thursday",
+            "note": "Update: venue_open_close_v2 replaces venue_open and venue_closed and supports multiple opening times per day.",
+            "venue_closed": 5,
+            "venue_open": 8,
+            "venue_open_close_v2": {
+              "12h": [
+                "8AM–5AM"
+              ],
+              "24h": [
+                {
+                  "closes": 5,
+                  "opens": 8
+                }
+              ]
+            }
+          },
+          "day_int": 3,
+          "day_raw": [
+            0,
+            0,
+            5,
+            5,
+            10,
+            10,
+            10,
+            10,
+            10,
+            10,
+            10,
+            15,
+            15,
+            20,
+            25,
+            35,
+            45,
+            55,
+            50,
+            45,
+            40,
+            35,
+            40,
+            0
+          ]
+        },
+        {
+          "day_info": {
+            "day_int": 4,
+            "day_max": 90,
+            "day_mean": 36,
+            "day_rank_max": 2,
+            "day_rank_mean": 2,
+            "day_text": "Friday",
+            "note": "Update: venue_open_close_v2 replaces venue_open and venue_closed and supports multiple opening times per day.",
+            "venue_closed": 5,
+            "venue_open": 8,
+            "venue_open_close_v2": {
+              "12h": [
+                "8AM–5AM"
+              ],
+              "24h": [
+                {
+                  "closes": 5,
+                  "opens": 8
+                }
+              ]
+            }
+          },
+          "day_int": 4,
+          "day_raw": [
+            0,
+            0,
+            5,
+            10,
+            10,
+            10,
+            10,
+            10,
+            10,
+            10,
+            15,
+            15,
+            20,
+            20,
+            30,
+            45,
+            65,
+            90,
+            85,
+            85,
+            75,
+            65,
+            70,
+            0
+          ]
+        },
+        {
+          "day_info": {
+            "day_int": 5,
+            "day_max": 100,
+            "day_mean": 38,
+            "day_rank_max": 1,
+            "day_rank_mean": 1,
+            "day_text": "Saturday",
+            "note": "Update: venue_open_close_v2 replaces venue_open and venue_closed and supports multiple opening times per day.",
+            "venue_closed": 5,
+            "venue_open": 8,
+            "venue_open_close_v2": {
+              "12h": [
+                "8AM–5AM"
+              ],
+              "24h": [
+                {
+                  "closes": 5,
+                  "opens": 8
+                }
+              ]
+            }
+          },
+          "day_int": 5,
+          "day_raw": [
+            0,
+            0,
+            5,
+            5,
+            5,
+            10,
+            10,
+            10,
+            10,
+            10,
+            10,
+            15,
+            15,
+            20,
+            30,
+            50,
+            75,
+            100,
+            95,
+            95,
+            90,
+            85,
+            55,
+            0
+          ]
+        },
+        {
+          "day_info": {
+            "day_int": 6,
+            "day_max": 42,
+            "day_mean": 17,
+            "day_rank_max": 5,
+            "day_rank_mean": 5,
+            "day_text": "Sunday",
+            "note": "Update: venue_open_close_v2 replaces venue_open and venue_closed and supports multiple opening times per day.",
+            "venue_closed": 5,
+            "venue_open": 8,
+            "venue_open_close_v2": {
+              "12h": [
+                "8AM–5AM"
+              ],
+              "24h": [
+                {
+                  "closes": 5,
+                  "opens": 8
+                }
+              ]
+            }
+          },
+          "day_int": 6,
+          "day_raw": [
+            0,
+            0,
+            5,
+            5,
+            5,
+            5,
+            5,
+            5,
+            10,
+            10,
+            10,
+            10,
+            10,
+            15,
+            15,
+            25,
+            30,
+            35,
+            35,
+            30,
+            35,
+            40,
+            15,
+            0
+          ]
+        }
+      ],
+      "venue_foot_traffic_live": 9,
+      "venue_id": "ven_736b365572586c476a6e465245447a326f5459537230364a496843",
+      "venue_lat": 3.1397195,
+      "venue_lon": 101.7211132,
+      "venue_name": "TREC Kuala Lumpur"
+    },
+    {
+      "forecast": false,
+      "live": false,
+      "processed": true,
+      "venue_address": "1500 N Claiborne Ave, New Orleans, LA 70116, United States",
+      "venue_id": "ven_775a4c354165395a6b304c525949496d4f41483450386d4a496843",
+      "venue_lat": 29.9709269,
+      "venue_lon": -90.0667597,
+      "venue_name": "Kermit's Tremé Mother-in-Law Lounge"
+    }
+  ],
+  "venues_n": 18
+}

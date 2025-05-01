@@ -13,11 +13,17 @@ const REDIS_DB = 0
 // Venues Refresher config
 const VENUES_REFRESHER_SERVICE_SCHEDULE_MINUTES = 1
 
+// Best Time API Keys
+const BEST_TIME_PRIVATE_KEY = "pri_aff50a71a038456db88864b16d9d6800"
+const BEST_TIME_PUBLIC_KEY = "pub_4f4f184e1a5f4f50a48e945fde7ab2ea"
+const BEST_TIME_ENDPOINT_BASE_V1 = "https://besttime.app/api/v1"
+const BEST_TIME_SEARCH_POLLING_WAIT_SECONDS = 15
 
 // Resources file paths
 const RESOURCES_PATH_PREFIX = "resources"
 const SEARCH_VENUE_RESPONSE_RESOURCE = "search_venues_response.json"
-const VENUE_STATIC_RESOURCE = "venue.json"
+const VENUE_STATIC_RESOURCE = "venue_static.json"
+const SEARCH_PROGRESS_RESPONSE_RESOURCE = "search_progress_response.json"
 const VENUES_IDS_RESOURCE = "static_venues_ids.json"
 
 // BaseDir returns the absolute path of the project root directory

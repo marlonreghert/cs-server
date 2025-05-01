@@ -103,3 +103,15 @@ func (m *MockRedisClient) Ping() error {
 	log.Println("MockRedisClient: Ping successful")
 	return nil
 }
+
+
+func (m *MockRedisClient) Keys(pattern string) ([]string, error) {
+
+	return []string{}, nil
+}
+
+func (m *MockRedisClient) Del(key string) error   {
+	return nil
+}
+
+

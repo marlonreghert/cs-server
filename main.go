@@ -3,7 +3,7 @@ package main
 import (
 	"context"
 	"cs-server/api/besttime"
-	"cs-server/config"
+	_ "cs-server/config"
 	"cs-server/dao/redis"
 	"cs-server/db"
 	"cs-server/di"
@@ -38,24 +38,6 @@ func testRedisClient(redisClient db.RedisClient) db.RedisClient {
 	return redisClient
 }
 
-// printVenues takes any implementation of BestTimeAPI
-func printVenues(apiClient besttime.BestTimeAPI) {
-	response, err := apiClient.GetVenuesNearby(-50.33, -69.33)
-	if err != nil {
-		log.Println("Error:", err)
-		return
-	}
-
-	fmt.Printf("Job ID: %s\n", response.JobID)
-	fmt.Printf("Status: %s\n", response.Status)
-	fmt.Printf("Number of Venues: %d\n", response.VenuesN)
-
-	if len(response.Venues) > 0 {
-		firstVenue := response.Venues[0]
-		fmt.Printf("First Venue: %s at %s\n", firstVenue.VenueName, firstVenue.VenueAddress)
-	}
-}
-
 func plotBoundingBox(response *models.SearchVenuesResponse) {
 	util.PlotBoundingBox(*response)
 }
@@ -70,6 +52,31 @@ func testMockedBestTimeAPIClient(bestTimeApiClient besttime.BestTimeAPI) {
 	util.PrintSearchVenuesResponsePartially(response)
 
 	plotBoundingBox(response)
+}
+
+func testBestTimeAPIClient(bestTimeApiClient besttime.BestTimeAPI) {
+    log.Println("Running: testBestTimeAPIClient")
+    resp, err := bestTimeApiClient.GetVenuesNearby(-43.3122, -60.535)
+    if err != nil {
+        log.Println("Error starting venue search:", err)
+        return
+    }
+
+    util.PrintSearchVenuesResponsePartially(resp)
+    plotBoundingBox(resp)
+
+    // wait before polling the background job
+    log.Println("Waiting 15 seconds before polling search progress...")
+    time.Sleep(15 * time.Second)
+
+    // now fetch the progress
+    prog, err := bestTimeApiClient.GetVenueSearchProgress(resp.JobID, resp.CollectionID)
+    if err != nil {
+        log.Println("Error fetching search progress:", err)
+        return
+    }
+
+    util.PrintSearchProgressResponsePartially(prog)
 }
 
 func testRedisGeoLoc(redisClient db.RedisClient, ctx context.Context) {
@@ -93,47 +100,50 @@ func testRedisGeoLoc(redisClient db.RedisClient, ctx context.Context) {
 	log.Printf("Retrieved JSON: %s", jsonData)
 }
 
+// testProgressDrivenUpsert reads a SearchProgressResponse JSON and optionally upserts into Redis.
 func testVenueDao(venuesDao *redis.RedisVenueDAO, addVenues bool) {
-	log.Println("Testing venues dao")
+    log.Println("Testing venues dao with SearchProgressResponse")
 
-	venuesResponse, err := util.ReadSearchVenuesResponseFromJSON("./resources/search_venues_response.json")
-	if err != nil {
-		log.Fatalf("Failed to read venues response: %v", err)
-		return
-	}
+    // Load progress response from JSON fixture
+    progressResp, err := util.ReadSearchProgressResponseFromJSON("./resources/search_progress_response.json")
+    if err != nil {
+        log.Fatalf("Failed to read search progress response: %v", err)
+        return
+    }
 
-	v := venuesResponse.Venues[0]
+    // Iterate through all venues in the progress response
+    for _, v := range progressResp.Venues {
+        fmt.Printf("Processed Venue: %s at %s (%.6f, %.6f)\n", v.VenueName, v.VenueAddress, v.VenueLat, v.VenueLon)
+        if addVenues {
+            if err := venuesDao.UpsertVenue(v); err != nil {
+                log.Printf("[MAIN] Failed to upsert venue %s: %v", v.VenueID, err)
+            }
+        }
+    }
 
-	fmt.Printf("Venues response: %s\n", v.ToString())
-	if addVenues {
-		err = venuesDao.UpsertVenue(v)
-		if err != nil {
-			log.Fatalf("[MAIN] Failed to add venues: %v", err)
-			return
-		}
-	}
-
-	venues, err := venuesDao.GetNearbyVenues(lat, lon, 1000)
-	if err != nil {
-		log.Fatalf("[MAIN] Failed to get venues: %v", err)
-		return
-	}
-	log.Println("Found venues:")
-	log.Println(len(venues))
-	for _, v := range venues {
-		fmt.Printf("Venue name: %s\n", v.VenueName)
-	}
+    // Optionally, verify nearby retrieval
+    lat, lon := 0.0, 0.0 // adjust as needed
+    nearby, err := venuesDao.GetNearbyVenues(lat, lon, 1000)
+    if err != nil {
+        log.Fatalf("[MAIN] Failed to get nearby venues: %v", err)
+        return
+    }
+    log.Printf("Found %d venues nearby\n", len(nearby))
+    for _, v := range nearby {
+        fmt.Printf("Nearby Venue: %s at %s\n", v.VenueName, v.VenueAddress)
+    }
 }
 
+
 func main() {
-	container := di.NewContainer()
+	container := di.NewContainer("prod")
 
-	testMockedBestTimeAPIClient(container.BestTimeAPI)
-	testRedisClient(container.RedisClient)
-	testVenueDao(container.RedisVenueDao, false)
+	//testBestTimeAPIClient(container.BestTimeAPI)
+	// testRedisClient(container.RedisClient)
+	// testVenueDao(container.RedisVenueDao, false)
 
-	container.VenuesRefresherService.RefreshVenuesData()
-	container.VenuesRefresherService.StartPeriodicJob(config.VENUES_REFRESHER_SERVICE_SCHEDULE_MINUTES * time.Minute)
-
+	// container.VenuesRefresherService.RefreshVenuesData()
+	// container.VenuesRefresherService.StartPeriodicJob(config.VENUES_REFRESHER_SERVICE_SCHEDULE_MINUTES * time.Minute)
+	_ = time.Minute *  3
 	container.CrowdSenseHttpServer.Start()
 }

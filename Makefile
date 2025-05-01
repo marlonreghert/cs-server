@@ -7,6 +7,9 @@ CS_SERVER_CONTAINER=cs-server-2
 KUBERNETES_DEPLOYMENT=deployment/deployment.yaml
 KUBERNETES_CLUSTER=cs-server-cluster
 
+setup-root:
+	export PROJECT_ROOT=`pwd`
+
 # Phony targets to avoid conflicts with files of the same name
 .PHONY: build image network run-network k8s-deploy k8s-scale-down k8s-port-forward k8s-logs request clean
 
@@ -39,13 +42,17 @@ k8s-deploy:
 k8s-scale-down:
 	kubectl scale deployment $(KUBERNETES_CLUSTER) --replicas=0
 
-# Scale down the Kubernetes deployment to zero replicas
+# Scale the Kubernetes deployment to 1 replicas
 k8s-scale-one:
 	kubectl scale deployment $(KUBERNETES_CLUSTER) --replicas=1
 
 # Port-forward the Kubernetes deployment to access it locally
-k8s-port-forward:
+k8s-pf-web:
 	kubectl port-forward deployment/$(KUBERNETES_CLUSTER) 8080:8080
+
+# Port-forward the Kubernetes deployment to access it locally
+k8s-pf-redis:
+	kubectl port-forward deployment/$(KUBERNETES_CLUSTER) 6379:6379
 
 # Get logs from the Kubernetes deployment
 k8s-logs:
@@ -53,7 +60,7 @@ k8s-logs:
 
 # Send a request to the server
 request:
-	curl -XGET "localhost:8080/v1/venues/nearby?lat=45.5204001&lon=-73.5540803&radius=1"
+	curl -XGET "localhost:8080/v1/venues/nearby?lat=-8.1037988&lon=-34.8734516&radius=10"
 
 # Clean up Docker containers and network
 clean:

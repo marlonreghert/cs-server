@@ -1,0 +1,10 @@
+{
+    "forecast": true,
+    "processed": true,
+    "venue_address": "123 Market St",
+    "venue_lat": 37.7749,
+    "venue_lon": -122.4194,
+    "venue_name": "Test Venue",
+    "venue_id": "ven_123"
+  }
+  

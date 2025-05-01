@@ -8,6 +8,8 @@ import (
 	"cs-server/db"
 	"cs-server/server"
 	"cs-server/server/handlers"
+	"cs-server/api"
+	"log"
 	services "cs-server/service"
 	"fmt"
 	goredis "github.com/go-redis/redis/v8"
@@ -28,7 +30,8 @@ type Container struct {
 }
 
 // NewContainer initializes and wires up all dependencies.
-func NewContainer() *Container {
+func NewContainer(env string) *Container {
+	log.Printf("initializing container - env: %s", env)
 	// Initialize Redis Client internals
 	ctx := context.Background()
 
@@ -49,7 +52,19 @@ func NewContainer() *Container {
 	redisVenueDao := redis.NewRedisVenueDAO(redisClient)
 
 	// Initialize BestTimeApi - using mock for now
-	bestTimeApiClient := besttime.NewBestTimeApiClientMock()
+	var bestTimeApiClient besttime.BestTimeAPI
+	if env != "prod" {
+		bestTimeApiClient = besttime.NewBestTimeApiClientMock()
+		log.Printf("Using mock best time api")
+	} else {
+
+		log.Printf("Using prod best time api")
+		httpClient := api.NewHTTPClient(config.BEST_TIME_ENDPOINT_BASE_V1)
+
+		bestTimeApiClient = besttime.NewBestTimeApiClient(httpClient)
+		bestTimeApiClient.SetCredentials(config.BEST_TIME_PUBLIC_KEY, config.BEST_TIME_PRIVATE_KEY)
+	}
+	
 
 	// Initialize service layer with Redis client dependency
 	venueService := services.NewVenueService(redisVenueDao, bestTimeApiClient)
@@ -66,7 +81,7 @@ func NewContainer() *Container {
 	// initialize crowd sense server
 	crowdSenseHttpServer := server.NewCrowdSenseHttpServer(router, muxRouter)
 
-	venuesRefresherService := services.NewVenuesRefresherService(redisVenueDao, venueService)
+	venuesRefresherService := services.NewVenuesRefresherService(redisVenueDao, bestTimeApiClient)
 
 	return &Container{
 		RedisClient:            redisClient,

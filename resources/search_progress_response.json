@@ -1,0 +1,37 @@
+{
+    "_links": {
+      "venue_search_progress": "https://api.besttime.app/venues/search/progress?job_id=job123&collection_id=col_abc"
+    },
+    "count_total": 2,
+    "count_completed": 2,
+    "count_forecasted": 2,
+    "count_live": 1,
+    "count_failed": 0,
+    "job_finished": true,
+    "collection_id": "col_abc123",
+    "job_id": "job123",
+    "status": "OK",
+    "venues": [
+      {
+        "forecast": true,
+        "processed": true,
+        "venue_address": "123 Market St",
+        "venue_lat": 37.7749,
+        "venue_lon": -122.4194,
+        "venue_name": "Test Venue",
+        "venue_id": "ven_123"
+      }
+    ],
+    "venues_n": 1,
+    "bounding_box": {
+      "lat": 37.7749,
+      "lat_max": 37.8,
+      "lat_min": 37.7,
+      "lng": -122.4194,
+      "lng_max": -122.4,
+      "lng_min": -122.45,
+      "map_zoom": 12,
+      "radius": 10000
+    }
+  }
+  
