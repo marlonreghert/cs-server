@@ -24,5 +24,5 @@ func (r *Router) RegisterRoutes() {
 	// expects ?lat={latitude(float)}&long={longitude(float)}&radius={radius(float)}
 	r.router.HandleFunc("/v1/venues/nearby", r.venueHandler.GetVenuesNearby).Methods("GET")
 
-	r.router.HandleFunc("/ping", r.venueHandler.GetVenuesNearby).Methods("GET")
+	r.router.HandleFunc("/ping", r.venueHandler.Ping).Methods("GET")
 }

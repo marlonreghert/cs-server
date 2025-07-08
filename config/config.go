@@ -6,7 +6,7 @@ import (
 )
 
 // Redis Config
-const REDIS_DB_ADDRESS = "localhost:6379"
+const REDIS_DB_ADDRESS = "redis:6379"
 const REDIS_DB_PASSWORD = ""
 const REDIS_DB = 0
 

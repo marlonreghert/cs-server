@@ -155,3 +155,13 @@ func parseArgFloat64(vals url.Values, name string) (float64, error) {
     s := vals.Get(name)
     return strconv.ParseFloat(s, 64)
 }
+
+
+
+// Ping handles GET /ping
+func (h *VenueHandler) Ping(w http.ResponseWriter, r *http.Request) {
+    log.Println("Pinging server")
+    w.Header().Set("Content-Type", "application/json")
+    w.WriteHeader(http.StatusOK)
+    json.NewEncoder(w).Encode(map[string]string{"status": "pong"})
+}

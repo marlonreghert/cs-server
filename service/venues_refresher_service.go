@@ -57,7 +57,7 @@ func (vr *VenuesRefresherService) startPeriodicJob(interval time.Duration) {
 
     for range ticker.C {
         log.Println("[VenuesRefresherService] Running periodic venues refresher job.")
-        if err := vr.RefreshVenuesData(); err != nil {
+        if err := vr.RefreshVenuesData(true); err != nil {
             log.Printf("[VenuesRefresherService] RefreshVenuesData returned error: %v", err)
         } else {
             log.Println("[VenuesRefresherService] RefreshVenuesData completed successfully.")
@@ -66,7 +66,7 @@ func (vr *VenuesRefresherService) startPeriodicJob(interval time.Duration) {
 }
 
 // RefreshVenuesData orchestrates the four steps: kick-off, wait, process, live-fetch+cache.
-func (vr *VenuesRefresherService) RefreshVenuesData() error {
+func (vr *VenuesRefresherService) RefreshVenuesData(waitBeforePolling bool) error {
     // 1) Kick off searches
     handles := vr.collectJobHandles()
     if len(handles) == 0 {
@@ -74,8 +74,11 @@ func (vr *VenuesRefresherService) RefreshVenuesData() error {
         return nil
     }
 
-    // 2) Wait before polling
-    vr.waitBeforePolling()
+    // 2) Should wait before polling ?
+    if waitBeforePolling {
+        vr.waitBeforePolling()
+    }
+    
 
     // 3) Poll progress, dedupe, upsert → returns unique IDs
     ids := vr.processJobHandles(handles)

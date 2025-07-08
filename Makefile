@@ -30,6 +30,10 @@ run-network:
 	docker run -d --name $(REDIS_CONTAINER) --network $(NETWORK_NAME) -p 6379:6379 redis
 	docker run -d --name $(CS_SERVER_CONTAINER) --network $(NETWORK_NAME) -p 8080:8080 $(IMAGE_NAME)
 
+run-docker-compose:
+	docker-compose down -v
+	docker-compose up -d
+
 # Start a local Kubernetes cluster using minikube
 k8s-start:
 	minikube start

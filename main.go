@@ -3,7 +3,7 @@ package main
 import (
 	"context"
 	"cs-server/api/besttime"
-	_ "cs-server/config"
+	"cs-server/config"
 	"cs-server/dao/redis"
 	"cs-server/db"
 	"cs-server/di"
@@ -138,12 +138,18 @@ func testVenueDao(venuesDao *redis.RedisVenueDAO, addVenues bool) {
 func main() {
 	container := di.NewContainer("prod")
 
-	//testBestTimeAPIClient(container.BestTimeAPI)
+	// testBestTimeAPIClient(container.BestTimeAPI)
 	// testRedisClient(container.RedisClient)
-	// testVenueDao(container.RedisVenueDao, false)
+	testVenueDao(container.RedisVenueDao, false)
 
-	// container.VenuesRefresherService.RefreshVenuesData()
-	// container.VenuesRefresherService.StartPeriodicJob(config.VENUES_REFRESHER_SERVICE_SCHEDULE_MINUTES * time.Minute)
+	fmt.Println("refreshing!")
+	container.VenuesRefresherService.RefreshVenuesData(false)
+	fmt.Println("starting periodic job!")
+	container.VenuesRefresherService.StartPeriodicJob(config.VENUES_REFRESHER_SERVICE_SCHEDULE_MINUTES * time.Minute)
+	fmt.Println("next step!")
 	_ = time.Minute *  3
+	
+	fmt.Println("starting server!")
 	container.CrowdSenseHttpServer.Start()
+	fmt.Println(" server started!")
 }

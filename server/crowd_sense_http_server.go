@@ -23,11 +23,8 @@ func NewCrowdSenseHttpServer(router *Router, muxRouter *mux.Router) *CrowdSenseH
 		muxRouter: muxRouter,
 	}
 }
-
 func (s *CrowdSenseHttpServer) Start() {
 	s.router.RegisterRoutes()
-
-	http.ListenAndServe(":8080", s.muxRouter)
 
 	// Define your HTTP server
 	srv := &http.Server{
