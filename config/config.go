@@ -11,7 +11,7 @@ const REDIS_DB_PASSWORD = ""
 const REDIS_DB = 0
 
 // Venues Refresher config
-const VENUES_REFRESHER_SERVICE_SCHEDULE_MINUTES = 1
+const VENUES_REFRESHER_SERVICE_SCHEDULE_MINUTES = 1*60*24*3 // every 3 days
 
 // Best Time API Keys
 const BEST_TIME_PRIVATE_KEY = "pri_aff50a71a038456db88864b16d9d6800"

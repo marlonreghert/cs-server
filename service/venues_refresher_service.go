@@ -3,6 +3,7 @@ package services
 import (
     "log"
     "time"
+    "cs-server/models"
 	"cs-server/config"
     "cs-server/api/besttime"
     "cs-server/dao/redis"
@@ -26,6 +27,10 @@ var defaultLocations = []Location{
 	Location { 
 		Lat: -8.1037988, 
 		Lng: -34.8734516,
+	},
+	Location { 
+		Lat: -8.0945672,
+		Lng: -34.8864752,
 	},
 }
 
@@ -124,11 +129,31 @@ func (vr *VenuesRefresherService) processJobHandles(handles []jobHandle) []strin
     log.Printf("[VenuesRefresherService] Polling progress for %d jobs", len(handles))
     for _, h := range handles {
         log.Printf("[VenuesRefresherService] Polling job_id=%s collection_id=%s", h.JobID, h.CollectionID)
-        progResp, err := vr.bestTimeAPI.GetVenueSearchProgress(h.JobID, h.CollectionID)
-        if err != nil {
-            log.Printf("[VenuesRefresherService] Failed polling job %s: %v", h.JobID, err)
+
+        var progResp *models.SearchProgressResponse
+        var err error
+
+        const maxRetries = 5
+        for i := 0; i < maxRetries; i++ {
+            progResp, err = vr.bestTimeAPI.GetVenueSearchProgress(h.JobID, h.CollectionID)
+            if err != nil {
+                log.Printf("[VenuesRefresherService] Failed polling job %s (attempt %d): %v", h.JobID, i+1, err)
+                break // unrecoverable error, skip retries
+            }
+
+            if progResp.JobFinished {
+                break
+            }
+
+            log.Printf("[VenuesRefresherService] Job %s not finished yet (attempt %d/%d), waiting to retry...", h.JobID, i+1, maxRetries)
+            vr.waitBeforePolling()
+        }
+
+        if err != nil || progResp == nil || !progResp.JobFinished {
+            log.Printf("[VenuesRefresherService] Job %s did not finish after %d attempts, skipping.", h.JobID, maxRetries)
             continue
         }
+
         log.Printf(
             "[VenuesRefresherService] Progress: job_finished=%v total=%d completed=%d forecasted=%d live=%d failed=%d",
             progResp.JobFinished, progResp.CountTotal, progResp.CountCompleted,
@@ -136,7 +161,6 @@ func (vr *VenuesRefresherService) processJobHandles(handles []jobHandle) []strin
         )
 
         for _, v := range progResp.Venues {
-            // Deduplicate by ID or Name
             if _, dup := seenIDs[v.VenueID]; dup {
                 log.Printf("[VenuesRefresherService] Skipping duplicate venue ID=%s", v.VenueID)
                 continue
@@ -145,12 +169,11 @@ func (vr *VenuesRefresherService) processJobHandles(handles []jobHandle) []strin
                 log.Printf("[VenuesRefresherService] Skipping duplicate venue Name=%q", v.VenueName)
                 continue
             }
-            // Mark seen and collect ID
+
             seenIDs[v.VenueID] = struct{}{}
             seenNames[v.VenueName] = struct{}{}
             uniqueIDs = append(uniqueIDs, v.VenueID)
 
-            // Upsert into Redis geo-index
             log.Printf("[VenuesRefresherService] Upserting venue id=%s name=%q", v.VenueID, v.VenueName)
             if err := vr.venueDao.UpsertVenue(v); err != nil {
                 log.Printf("[VenuesRefresherService] Upsert failed for %s: %v", v.VenueID, err)
@@ -159,6 +182,7 @@ func (vr *VenuesRefresherService) processJobHandles(handles []jobHandle) []strin
             }
         }
     }
+
     return uniqueIDs
 }
 

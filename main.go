@@ -140,10 +140,10 @@ func main() {
 
 	// testBestTimeAPIClient(container.BestTimeAPI)
 	// testRedisClient(container.RedisClient)
-	testVenueDao(container.RedisVenueDao, false)
+	// testVenueDao(container.RedisVenueDao, false)
 
 	fmt.Println("refreshing!")
-	container.VenuesRefresherService.RefreshVenuesData(false)
+	container.VenuesRefresherService.RefreshVenuesData(true)
 	fmt.Println("starting periodic job!")
 	container.VenuesRefresherService.StartPeriodicJob(config.VENUES_REFRESHER_SERVICE_SCHEDULE_MINUTES * time.Minute)
 	fmt.Println("next step!")
