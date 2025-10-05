@@ -33,6 +33,8 @@ type MinifiedVenue struct {
     VenueAddress             string   `json:"venue_address"`
     VenueFootTrafficForecast []string `json:"venue_foot_traffic_forecast"`
     VenueLiveBusyness        int      `json:"venue_live_busyness"`
+	VenueLat                 float64  `json:"venue_lat"`
+	VenueLng                 float64  `json:"venue_lon"`
     VenueName                string   `json:"venue_name"`
 }
 
@@ -145,6 +147,8 @@ func (h *VenueHandler) transform(merged []VenueWithLive, verbose bool) interface
             VenueAddress:             m.Venue.VenueAddress,
             VenueFootTrafficForecast: meta,
             VenueLiveBusyness:        m.Live.Analysis.VenueLiveBusyness,
+            VenueLat:                 m.Venue.VenueLat,
+            VenueLng:                 m.Venue.VenueLon,
             VenueName:                m.Venue.VenueName,
         })
     }
