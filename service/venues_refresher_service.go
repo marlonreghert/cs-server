@@ -25,13 +25,60 @@ type jobHandle struct {
 // Start it empty and populate manually as needed.
 var defaultLocations = []Location{
 	Location { 
-		Lat: -8.1037988, 
-		Lng: -34.8734516,
+        // Pina
+		Lat: -8.098632,  
+		Lng: -34.884890416,
 	},
 	Location { 
-		Lat: -8.0945672,
-		Lng: -34.8864752,
+        // BV
+		Lat: -8.121918,
+		Lng: -34.903602,
 	},
+	Location { 
+        // Centro
+		Lat: -8.059297,
+		Lng: -34.880373,
+	},
+	Location { 
+        // ZN / Cordeiro
+		Lat: -8.060852,
+		Lng: -34.910644,
+	},
+	Location { 
+        // Olinda / Salgadinho
+		Lat: -8.029736,
+		Lng: -34.870261,
+	},
+	Location { 
+        // Olinda / Sé
+		Lat: -8.004132,
+		Lng: -34.854365,
+	}, 
+	Location { 
+        // Varzea
+		Lat: -8.047251,
+		Lng: -34.939524,
+	},
+	Location { 
+        // SP Pinheiros
+		Lat: -23.558037,
+		Lng: -46.700183,
+	},
+	Location { 
+        // SP - Jardim America 
+		Lat: -23.567292, 
+		Lng: -46.677463,
+	},
+	Location { 
+        // SP - Augusta
+		Lat: -23.556218, 
+		Lng: -46.665451,
+	},    
+	Location { 
+        // SP - Santa Cecilia
+		Lat: -23.542361, 
+		Lng: -46.655989,
+	},    
 }
 
 // VenuesRefresherService periodically refreshes venues via BestTime API.
@@ -81,7 +128,7 @@ func (vr *VenuesRefresherService) RefreshVenuesData(waitBeforePolling bool) erro
 
     // 2) Should wait before polling ?
     if waitBeforePolling {
-        vr.waitBeforePolling()
+        vr.waitBeforePolling(1)
     }
     
 
@@ -114,8 +161,8 @@ func (vr *VenuesRefresherService) collectJobHandles() []jobHandle {
 }
 
 // waitBeforePolling sleeps for the configured polling interval.
-func (vr *VenuesRefresherService) waitBeforePolling() {
-    wait := time.Duration(config.BEST_TIME_SEARCH_POLLING_WAIT_SECONDS) * time.Second
+func (vr *VenuesRefresherService) waitBeforePolling(attemptNumber int) {
+    wait := time.Duration(config.BEST_TIME_SEARCH_POLLING_WAIT_SECONDS) * attemptNumber * time.Second
     log.Printf("[VenuesRefresherService] Waiting %v before polling progress...", wait)
     time.Sleep(wait)
 }
@@ -146,7 +193,7 @@ func (vr *VenuesRefresherService) processJobHandles(handles []jobHandle) []strin
             }
 
             log.Printf("[VenuesRefresherService] Job %s not finished yet (attempt %d/%d), waiting to retry...", h.JobID, i+1, maxRetries)
-            vr.waitBeforePolling()
+            vr.waitBeforePolling(i + 1)
         }
 
         if err != nil || progResp == nil || !progResp.JobFinished {

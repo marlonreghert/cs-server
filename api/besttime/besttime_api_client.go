@@ -85,12 +85,12 @@ func (c *BestTimeApiClient) GetVenuesNearby(lat, lng float64) (*models.SearchVen
     // Build query parameters into the endpoint URL
     q := url.Values{}
     q.Set("api_key_private", c.apiKeyPrivate)
-    q.Set("q", "bars and clubs to party and dance in recife")
+    q.Set("q", "most popular bars, nightclubs or pubs to party and dance in recife and are open now")
     q.Set("num", "20")
     q.Set("lat", fmt.Sprintf("%v", lat))
     q.Set("lng", fmt.Sprintf("%v", lng))
     q.Set("opened", "now")
-    q.Set("radius", "10000")
+    q.Set("radius", "2000")
     q.Set("live", "true")
     endpoint := "/venues/search?" + q.Encode()
 

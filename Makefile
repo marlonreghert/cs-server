@@ -15,10 +15,10 @@ setup-root:
 
 # Build the Docker image
 build:
-	docker build --no-cache -t $(IMAGE_NAME):$(IMAGE_TAG) .
+	docker buildx build --platform=linux/amd64 --no-cache -t $(IMAGE_NAME):$(IMAGE_TAG) .
 
 # Push the Docker image to the registry
-image:
+push:
 	docker push $(IMAGE_NAME):$(IMAGE_TAG)
 
 # Create a Docker network
