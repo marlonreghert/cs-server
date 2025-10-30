@@ -162,7 +162,7 @@ func (vr *VenuesRefresherService) collectJobHandles() []jobHandle {
 
 // waitBeforePolling sleeps for the configured polling interval.
 func (vr *VenuesRefresherService) waitBeforePolling(attemptNumber int) {
-    wait := time.Duration(config.BEST_TIME_SEARCH_POLLING_WAIT_SECONDS) * attemptNumber * time.Second
+    wait := time.Duration(config.BEST_TIME_SEARCH_POLLING_WAIT_SECONDS * attemptNumber) * time.Second
     log.Printf("[VenuesRefresherService] Waiting %v before polling progress...", wait)
     time.Sleep(wait)
 }
