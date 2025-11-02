@@ -142,14 +142,18 @@ func main() {
 	// testRedisClient(container.RedisClient)
 	// testVenueDao(container.RedisVenueDao, false)
 
-	fmt.Println("refreshing!")
-	container.VenuesRefresherService.RefreshVenuesData(true)
-	fmt.Println("starting periodic job!")
-	container.VenuesRefresherService.StartPeriodicJob(config.VENUES_REFRESHER_SERVICE_SCHEDULE_MINUTES * time.Minute)
-	fmt.Println("next step!")
-	_ = time.Minute *  3
+	fmt.Println("[Main] Refreshing venues data")
+	container.VenuesRefresherService.RefreshVenuesByFilterForDefaultLocations(true)
+
+	fmt.Println("[Main] Refreshing venues liveforecast")
+	container.VenuesRefresherService.RefreshLiveForecastsForAllVenues()
+
+	fmt.Println("[Main] Starting periodic jobs!")
+	container.VenuesRefresherService.StartVenueFilterMultiLocationJob(config.VENUES_CATALOG_REFRESHER_SCHEDULE_MINUTES * time.Minute, true)
+	container.VenuesRefresherService.StartLiveForecastRefreshJob(config.VENUES_LIVE_FORECAST_REFRESHER_SCHEDULE_MINUTES * time.Minute)
 	
-	fmt.Println("starting server!")
+	
+	fmt.Println("[Main] Starting server!")
 	container.CrowdSenseHttpServer.Start()
-	fmt.Println(" server started!")
+	fmt.Println("[Main] Server started!")
 }

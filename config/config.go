@@ -11,8 +11,9 @@ const REDIS_DB_PASSWORD = ""
 const REDIS_DB = 0
 
 // Venues Refresher config
-// 3 Days: 1*60*24*3
-const VENUES_REFRESHER_SERVICE_SCHEDULE_MINUTES = 1*60*24*3
+// 3 Days: 60*24*32
+const VENUES_CATALOG_REFRESHER_SCHEDULE_MINUTES = 60*2
+const VENUES_LIVE_FORECAST_REFRESHER_SCHEDULE_MINUTES = 30
 
 // Best Time API Keys
 const BEST_TIME_PRIVATE_KEY = "pri_aff50a71a038456db88864b16d9d6800"
@@ -25,6 +26,8 @@ const RESOURCES_PATH_PREFIX = "resources"
 const SEARCH_VENUE_RESPONSE_RESOURCE = "search_venues_response.json"
 const VENUE_STATIC_RESOURCE = "venue_static.json"
 const SEARCH_PROGRESS_RESPONSE_RESOURCE = "search_progress_response.json"
+const LIVE_FORECAST_RESPONSE_RESOURCE  = "live_forecast_response.json" 
+const VENUE_FILTER_RESPONSE_RESOURCE = "venue_filter_response.json"
 const VENUES_IDS_RESOURCE = "static_venues_ids.json"
 
 // BaseDir returns the absolute path of the project root directory

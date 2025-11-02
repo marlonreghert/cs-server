@@ -90,7 +90,7 @@ func (c *BestTimeApiClient) GetVenuesNearby(lat, lng float64) (*models.SearchVen
     q.Set("lat", fmt.Sprintf("%v", lat))
     q.Set("lng", fmt.Sprintf("%v", lng))
     q.Set("opened", "now")
-    q.Set("radius", "2000")
+    q.Set("radius", "10000")
     q.Set("live", "true")
     endpoint := "/venues/search?" + q.Encode()
 
@@ -157,5 +157,24 @@ func (c *BestTimeApiClient) GetLiveForecast(
     if err := c.Request("POST", endpoint, nil, nil, &resp); err != nil {
         return nil, err
     }
+    return &resp, nil
+}
+
+// VenueFilter calls GET /venues/filter with api_key_private and given filters in the query string.
+func (c *BestTimeApiClient) VenueFilter(params models.VenueFilterParams) (*models.VenueFilterResponse, error) {
+    q := params.ToValues()
+    // API requires the private key in the querystring
+    q.Set("api_key_private", c.apiKeyPrivate)
+
+    endpoint := "/venues/filter?" + q.Encode()
+    log.Printf("[BestTimeApiClient] Calling GET %s", endpoint)
+
+    var resp models.VenueFilterResponse
+    if err := c.Request("GET", endpoint, nil, nil, &resp); err != nil {
+        log.Printf("[BestTimeApiClient] Error on GET %s: %v", endpoint, err)
+        return nil, err
+    }
+
+    log.Printf("[BestTimeApiClient] Success GET %s; status=%s venues_n=%d", endpoint, resp.Status, resp.VenuesN)
     return &resp, nil
 }

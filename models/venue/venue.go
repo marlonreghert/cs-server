@@ -8,7 +8,7 @@ type Venue struct {
 	Processed                bool                   `json:"processed"`
 	VenueAddress             string                 `json:"venue_address"`
 	VenueLat                 float64                `json:"venue_lat"`
-	VenueLon                 float64                `json:"venue_lon"`
+	VenueLon                 float64                `json:"venue_lng"`
 	VenueName                string                 `json:"venue_name"`
 	VenueID                  string                 `json:"venue_id"`
 	VenueFootTrafficForecast *[]FootTrafficForecast `json:"venue_foot_traffic_forecast,omitempty"`

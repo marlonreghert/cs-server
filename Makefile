@@ -15,7 +15,7 @@ setup-root:
 
 # Build the Docker image
 build:
-	docker buildx build --platform=linux/amd64 --no-cache -t $(IMAGE_NAME):$(IMAGE_TAG) .
+	docker buildx build --platform=linux/amd64,linux/arm64 --no-cache -t $(IMAGE_NAME):$(IMAGE_TAG) . --push
 
 # Push the Docker image to the registry
 push:
@@ -27,8 +27,8 @@ network:
 
 # Run Redis and the server in the Docker network
 run-network:
-	docker run -d --name $(REDIS_CONTAINER) --network $(NETWORK_NAME) -p 6379:6379 redis
-	docker run -d --name $(CS_SERVER_CONTAINER) --network $(NETWORK_NAME) -p 8080:8080 $(IMAGE_NAME)
+	docker run -d --network $(NETWORK_NAME) -p 6379:6379 redis
+	docker run -d --network $(NETWORK_NAME) -p 8080:8080 $(IMAGE_NAME)
 
 run-docker-compose:
 	docker-compose down -v

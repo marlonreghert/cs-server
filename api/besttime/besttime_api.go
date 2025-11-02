@@ -13,6 +13,7 @@ type BestTimeAPI interface {
 	GetVenueSearchProgress(jobID, collectionID string) (*models.SearchProgressResponse, error) 
 	SetCredentials(apiKeyPublic string, apiKeyPrivate string) 
 	GetLiveForecast(venueID, venueName, venueAddress string) (*live_forecast.LiveForecastResponse, error)
+	VenueFilter(params models.VenueFilterParams) (*models.VenueFilterResponse, error)
 }
 
 

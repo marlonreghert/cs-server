@@ -103,3 +103,18 @@ func (dao *RedisVenueDAO) DeleteLiveForecast(venueID string) error {
     log.Printf("[RedisVenueDAO] Deleted live forecast cache for %s", venueID)
     return nil
 }
+
+// ListAllVenueIDs returns all venue IDs present in the geo index.
+func (dao *RedisVenueDAO) ListAllVenueIDs() ([]string, error) {
+    pattern := fmt.Sprintf(VENUES_GEO_PLACE_MEMBER_FORMAT_V1, "*") // "venues_geo_place_v1:*"
+    keys, err := dao.client.Keys(pattern)
+    if err != nil {
+        return nil, fmt.Errorf("failed to list venue geo keys: %w", err)
+    }
+    ids := make([]string, 0, len(keys))
+    prefix := fmt.Sprintf(VENUES_GEO_PLACE_MEMBER_FORMAT_V1, "")
+    for _, k := range keys {
+        ids = append(ids, strings.TrimPrefix(k, prefix))
+    }
+    return ids, nil
+}

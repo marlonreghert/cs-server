@@ -7,6 +7,7 @@ import (
 
     "cs-server/models"
     "cs-server/models/venue"
+    "cs-server/models/live_forecast"
 )
 
 // ReadSearchVenuesResponseFromJSON loads a SearchVenuesResponse from JSON on disk.
@@ -84,4 +85,29 @@ func PrintSearchProgressResponsePartially(resp *models.SearchProgressResponse) {
         v := resp.Venues[0]
         fmt.Printf("First venue: %s at %s (%.6f, %.6f)\n", v.VenueName, v.VenueAddress, v.VenueLat, v.VenueLon)
     }
+}
+
+func ReadLiveForecastResponseFromJSON(filePath string) (*live_forecast.LiveForecastResponse, error) {
+    data, err := ioutil.ReadFile(filePath)
+    if err != nil {
+        return nil, fmt.Errorf("failed to read file %q: %w", filePath, err)
+    }
+    var resp live_forecast.LiveForecastResponse
+    if err := json.Unmarshal(data, &resp); err != nil {
+        return nil, fmt.Errorf("failed to unmarshal LiveForecastResponse: %w", err)
+    }
+    return &resp, nil
+}
+
+// ReadVenueFilterResponseFromJSON reads a VenueFilterResponse struct from a JSON file.
+func ReadVenueFilterResponseFromJSON(filePath string) (*models.VenueFilterResponse, error) {
+    data, err := ioutil.ReadFile(filePath)
+    if err != nil {
+        return nil, fmt.Errorf("failed to read VenueFilterResponse file %q: %w", filePath, err)
+    }
+    var resp models.VenueFilterResponse
+    if err := json.Unmarshal(data, &resp); err != nil {
+        return nil, fmt.Errorf("failed to unmarshal VenueFilterResponse: %w", err)
+    }
+    return &resp, nil
 }
