@@ -418,11 +418,11 @@ func (vr *VenuesRefresherService) StartVenueFilterMultiLocationJob(interval time
 func (vr *VenuesRefresherService) RefreshVenuesByFilterForDefaultLocations(fetchAndCacheLive bool) {
 	log.Printf("[VenuesRefresherService] Starting VenueFilter refresh for %d default locations", len(defaultLocations))
 
-	// min := 0
-	live := false
-    now := false
+	min := 1
+	live := true
+    // now := false
 	limit := 20   // let client-side limit; API warns busy_* filters apply after limit
-	radius := 2500 // meters
+	radius := 10000 // meters
 
 	totalInserted := 0
 
@@ -440,7 +440,7 @@ func (vr *VenuesRefresherService) RefreshVenuesByFilterForDefaultLocations(fetch
 			Radius:      &radius,
 			FootTraffic: "both",
 			Limit:       &limit,
-            Now:         &now,
+            // Now:         &now,
 			Types:       []string{"BAR", "CLUBS", "EVENT_VENUE", "CONCERT_HALL"},
 		}
 
