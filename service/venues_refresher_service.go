@@ -441,7 +441,7 @@ func (vr *VenuesRefresherService) RefreshVenuesByFilterForDefaultLocations(fetch
 			FootTraffic: "both",
 			Limit:       &limit,
             // Now:         &now,
-			Types:       []string{"BAR", "CLUBS", "EVENT_VENUE", "CONCERT_HALL"},
+			// Types removed to increase response accuracy per BestTime API
 		}
 
 		ids, err := vr.RefreshVenuesDataByVenuesFilter(params, fetchAndCacheLive)
