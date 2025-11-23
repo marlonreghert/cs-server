@@ -40,8 +40,8 @@ var defaultLocations = []Location{
     { Lat: -8.029736,  Lng: -34.870261    }, // Olinda / Salgadinho
 	{ Lat: -8.047251,  Lng: -34.939524    }, // Várzea
     // Examples left commented for convenience:
-	// { Lat: -23.558037, Lng: -46.700183    }, // SP / Pinheiros
-	// { Lat: -23.567292, Lng: -46.677463    }, // SP / Jardim América
+	{ Lat: -23.558037, Lng: -46.700183    }, // SP / Pinheiros
+	{ Lat: -23.567292, Lng: -46.677463    }, // SP / Jardim América
 	// { Lat: -23.556218, Lng: -46.665451    }, // SP / Augusta
 	// { Lat: -23.542361, Lng: -46.655989    }, // SP / Santa Cecília
 }
@@ -421,8 +421,8 @@ func (vr *VenuesRefresherService) RefreshVenuesByFilterForDefaultLocations(fetch
 	min := 1
 	live := true
     // now := false
-	limit := 20   // let client-side limit; API warns busy_* filters apply after limit
-	radius := 10000 // meters
+	limit := 50   // let client-side limit; API warns busy_* filters apply after limit
+	radius := 5000 // meters
 
 	totalInserted := 0
 
@@ -433,7 +433,7 @@ func (vr *VenuesRefresherService) RefreshVenuesByFilterForDefaultLocations(fetch
 		lng := loc.Lng
 
 		params := models.VenueFilterParams{
-			// BusyMin:     &min,
+			BusyMin:     &min,
 			Live:        &live,
 			Lat:         &lat,
 			Lng:         &lng,

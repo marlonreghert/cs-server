@@ -75,10 +75,10 @@ def get_available_venues() -> List[Venue]:
         "lng": LOCATION_LNG,
         "radius": "10000",
         "foot_traffic": "both",
-        "busy_min": "0",
+        "busy_min": "1",
         "busy_max": "100",
         "live": "true",
-        "limit": "100",
+        "limit": "25",
     }
     
     try:
