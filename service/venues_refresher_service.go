@@ -42,8 +42,9 @@ var defaultLocations = []Location{
     // Examples left commented for convenience:
 	{ Lat: -23.558037, Lng: -46.700183    }, // SP / Pinheiros
 	{ Lat: -23.567292, Lng: -46.677463    }, // SP / Jardim América
-	// { Lat: -23.556218, Lng: -46.665451    }, // SP / Augusta
-	// { Lat: -23.542361, Lng: -46.655989    }, // SP / Santa Cecília
+	{ Lat: -23.556218, Lng: -46.665451    }, // SP / Augusta
+	{ Lat: -23.542361, Lng: -46.655989    }, // SP / Santa Cecília
+	{ Lat: -23.547106, Lng: -46.638472    }, // SP / Consolacao
 }
 
 // -----------------------------------------------------------------------------
@@ -421,8 +422,9 @@ func (vr *VenuesRefresherService) RefreshVenuesByFilterForDefaultLocations(fetch
 	min := 1
 	live := true
     // now := false
-	limit := 50   // let client-side limit; API warns busy_* filters apply after limit
-	radius := 5000 // meters
+	limit := 20   // let client-side limit; API warns busy_* filters apply after limit
+	radius := 3000 // meters
+	own_venues_only := false
 
 	totalInserted := 0
 
@@ -440,6 +442,7 @@ func (vr *VenuesRefresherService) RefreshVenuesByFilterForDefaultLocations(fetch
 			Radius:      &radius,
 			FootTraffic: "both",
 			Limit:       &limit,
+			OwnVenuesOnly: &own_venues_only,
             // Now:         &now,
 			// Types removed to increase response accuracy per BestTime API
 		}

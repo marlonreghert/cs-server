@@ -1,6 +1,6 @@
 # Variables
 IMAGE_NAME=johnsummit2024/cs-server
-IMAGE_TAG=2025_11_22_10_19
+IMAGE_TAG=2025_11_24_19_32
 NETWORK_NAME=cs-server-docker-network
 REDIS_CONTAINER=redis-container-2
 CS_SERVER_CONTAINER=cs-server-2
