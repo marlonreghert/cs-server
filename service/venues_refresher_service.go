@@ -33,18 +33,18 @@ var defaultLocations = []Location{
 		Lat: -8.059297,
 		Lng: -34.880373,
 	},
-	{ Lat: -8.098632,  Lng: -34.884890416 }, // Pina
-	{ Lat: -8.121918,  Lng: -34.903602    }, // Boa Viagem
-	{ Lat: -8.060852,  Lng: -34.910644    }, // ZN / Cordeiro
-	{ Lat: -8.004132,  Lng: -34.854365    }, // Olinda / Sé
-    { Lat: -8.029736,  Lng: -34.870261    }, // Olinda / Salgadinho
-	{ Lat: -8.047251,  Lng: -34.939524    }, // Várzea
+	// { Lat: -8.098632,  Lng: -34.884890416 }, // Pina
+	// { Lat: -8.121918,  Lng: -34.903602    }, // Boa Viagem
+	// { Lat: -8.060852,  Lng: -34.910644    }, // ZN / Cordeiro
+	// { Lat: -8.004132,  Lng: -34.854365    }, // Olinda / Sé
+    // { Lat: -8.029736,  Lng: -34.870261    }, // Olinda / Salgadinho
+	// { Lat: -8.047251,  Lng: -34.939524    }, // Várzea
     // Examples left commented for convenience:
-	{ Lat: -23.558037, Lng: -46.700183    }, // SP / Pinheiros
-	{ Lat: -23.567292, Lng: -46.677463    }, // SP / Jardim América
-	{ Lat: -23.556218, Lng: -46.665451    }, // SP / Augusta
-	{ Lat: -23.542361, Lng: -46.655989    }, // SP / Santa Cecília
-	{ Lat: -23.547106, Lng: -46.638472    }, // SP / Consolacao
+	// { Lat: -23.558037, Lng: -46.700183    }, // SP / Pinheiros
+	// { Lat: -23.567292, Lng: -46.677463    }, // SP / Jardim América
+	// { Lat: -23.556218, Lng: -46.665451    }, // SP / Augusta
+	// { Lat: -23.542361, Lng: -46.655989    }, // SP / Santa Cecília
+	// { Lat: -23.547106, Lng: -46.638472    }, // SP / Consolacao
 }
 
 // -----------------------------------------------------------------------------
@@ -420,10 +420,10 @@ func (vr *VenuesRefresherService) RefreshVenuesByFilterForDefaultLocations(fetch
 	log.Printf("[VenuesRefresherService] Starting VenueFilter refresh for %d default locations", len(defaultLocations))
 
 	min := 1
-	live := true
+	live := false
     // now := false
-	limit := 20   // let client-side limit; API warns busy_* filters apply after limit
-	radius := 3000 // meters
+	limit := 300   // let client-side limit; API warns busy_* filters apply after limit
+	radius := 5000 // meters
 	own_venues_only := false
 
 	totalInserted := 0
