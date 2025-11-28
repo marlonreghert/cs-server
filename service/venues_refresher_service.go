@@ -250,7 +250,7 @@ func (vr *VenuesRefresherService) RefreshVenueCatalog(waitBeforePolling bool) ([
 		vr.waitBeforePolling(1)
 	}
 
-	ids := vr.processJobHandles(handles)
+	ids := vr.processJobHandles(handlefrs)
 	return ids, nil
 }
 
@@ -422,8 +422,8 @@ func (vr *VenuesRefresherService) RefreshVenuesByFilterForDefaultLocations(fetch
 	min := 1
 	live := false
     // now := false
-	limit := 300   // let client-side limit; API warns busy_* filters apply after limit
-	radius := 5000 // meters
+	limit := 30   // let client-side limit; API warns busy_* filters apply after limit
+	radius := 1000 // meters
 	own_venues_only := false
 
 	totalInserted := 0
