@@ -1,6 +1,6 @@
 # Variables
 IMAGE_NAME=johnsummit2024/cs-server
-IMAGE_TAG=2025_11_29_15_48
+IMAGE_TAG=2025_11_29_16_38
 NETWORK_NAME=cs-server-docker-network
 REDIS_CONTAINER=redis-container-2
 CS_SERVER_CONTAINER=cs-server-2
@@ -15,7 +15,7 @@ setup-root:
 
 # Build the Docker image
 build:
-	docker buildx build --platform=linux/amd64,linux/arm64 --no-cache -t $(IMAGE_NAME):$(IMAGE_TAG) . 
+	docker buildx build --platform=linux/amd64,linux/arm64 --no-cache -t $(IMAGE_NAME):$(IMAGE_TAG) .  --push
 
 # Push the Docker image to the registry
 push:

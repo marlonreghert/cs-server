@@ -2,7 +2,7 @@ version: '3.8'
 
 services:
   cs-server:
-    image: johnsummit2024/cs-server:2025_11_29_13_42
+    image: johnsummit2024/cs-server:2025_11_29_15_48
     ports:
       - "8080:8080"
     depends_on:
@@ -23,7 +23,7 @@ services:
         # This maps the 'redis_data' Docker volume to the container's default data dir
         - redis_data:/data
         # 2. Mount the custom config file
-        - ./redis.conf:/usr/local/etc/redis/redis.conf
+        - ./config/redis.conf:/usr/local/etc/redis/redis.conf
       command: redis-server /usr/local/etc/redis/redis.conf # Tell Redis to use the custom config
       
 networks:
