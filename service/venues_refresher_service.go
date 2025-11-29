@@ -250,7 +250,7 @@ func (vr *VenuesRefresherService) RefreshVenueCatalog(waitBeforePolling bool) ([
 		vr.waitBeforePolling(1)
 	}
 
-	ids := vr.processJobHandles(handlefrs)
+	ids := vr.processJobHandles(handles)
 	return ids, nil
 }
 
@@ -301,101 +301,126 @@ func (vr *VenuesRefresherService) StartLiveForecastRefreshJob(interval time.Dura
 // -----------------------------------------------------------------------------
 // Venue Filter flow (new endpoint) — single-shot refresh
 // -----------------------------------------------------------------------------
-
 // RefreshVenuesDataByVenuesFilter queries BestTime /venues/filter using the given
-// parameters, de-duplicates venues by ID/Name, upserts them into Redis, and
-// optionally fetches/caches live forecasts for the unique IDs.
+// parameters, de-duplicates venues by ID/Name, maps them into your Venue model,
+// upserts them into Redis, and optionally fetches/caches live forecasts.
 // Returns the unique venue IDs processed in this run.
 func (vr *VenuesRefresherService) RefreshVenuesDataByVenuesFilter(
-	params models.VenueFilterParams,
-	fetchAndCacheLive bool,
+    params models.VenueFilterParams,
+    fetchAndCacheLive bool,
 ) ([]string, error) {
 
-	log.Printf("[VenuesRefresherService] VenueFilter start: params=%+v", params)
-	resp, err := vr.bestTimeAPI.VenueFilter(params)
-	if err != nil {
-		log.Printf("[VenuesRefresherService] VenueFilter error: %v", err)
-		return nil, err
-	}
-	log.Printf("[VenuesRefresherService] VenueFilter status=%s venues_n=%d", resp.Status, resp.VenuesN)
+    log.Printf("[VenuesRefresherService] VenueFilter start: params=%+v", params)
+    resp, err := vr.bestTimeAPI.VenueFilter(params)
+    if err != nil {
+        log.Printf("[VenuesRefresherService] VenueFilter error: %v", err)
+        return nil, err
+    }
+    log.Printf("[VenuesRefresherService] VenueFilter status=%s venues_n=%d", resp.Status, resp.VenuesN)
 
-	// Guard: non-OK stops gracefully
-	if resp.Status != "OK" {
-		log.Printf("[VenuesRefresherService] VenueFilter returned non-OK status=%s; aborting upsert.", resp.Status)
-		return nil, nil
-	}
+    if resp.Status != "OK" {
+        log.Printf("[VenuesRefresherService] VenueFilter returned non-OK status=%s; aborting upsert.", resp.Status)
+        return nil, nil
+    }
 
-	// De-duplication maps
-	seenIDs := make(map[string]struct{})
-	seenNames := make(map[string]struct{})
-	uniqueIDs := make([]string, 0, len(resp.Venues))
+    seenIDs := make(map[string]struct{})
+    seenNames := make(map[string]struct{})
+    uniqueIDs := make([]string, 0, len(resp.Venues))
 
-	// Upsert all venues
-	for _, vf := range resp.Venues { // vf is venue.Venue
-		if vf.VenueID == "" && vf.VenueName == "" {
-			log.Printf("[VenuesRefresherService] Skipping venue with no id and no name: %+v", vf)
-			continue
-		}
+    // resp.Venues is []models.VenueFilterVenue
+    for _, vf := range resp.Venues {
+        if vf.VenueID == "" && vf.VenueName == "" {
+            log.Printf("[VenuesRefresherService] Skipping venue with no id and no name: %+v", vf)
+            continue
+        }
 
-		if vf.VenueID != "" {
-			if _, dup := seenIDs[vf.VenueID]; dup {
-				log.Printf("[VenuesRefresherService] Skipping duplicate venue ID=%s", vf.VenueID)
-				continue
-			}
-		}
-		if vf.VenueName != "" {
-			if _, dup := seenNames[vf.VenueName]; dup {
-				log.Printf("[VenuesRefresherService] Skipping duplicate venue Name=%q", vf.VenueName)
-				continue
-			}
-		}
+        // De-dupe by ID
+        if vf.VenueID != "" {
+            if _, dup := seenIDs[vf.VenueID]; dup {
+                log.Printf("[VenuesRefresherService] Skipping duplicate venue ID=%s", vf.VenueID)
+                continue
+            }
+        }
+        // De-dupe by name
+        if vf.VenueName != "" {
+            if _, dup := seenNames[vf.VenueName]; dup {
+                log.Printf("[VenuesRefresherService] Skipping duplicate venue Name=%q", vf.VenueName)
+                continue
+            }
+        }
 
-		// Convert (currently a pass-through)
-		v := mapVenueFilterVenueToVenue(vf)
+        // Map filter-venue → canonical Venue struct
+        v := mapVenueFilterVenueToVenue(vf)
 
-		log.Printf("[VenuesRefresherService] Upserting venue id=%s name=%q lat=%.6f lng=%.6f",
-			v.VenueID, v.VenueName, v.VenueLat, v.VenueLon)
-		if err := vr.venueDao.UpsertVenue(v); err != nil {
-			log.Printf("[VenuesRefresherService] Upsert failed for %s: %v", v.VenueID, err)
-			continue
-		}
+        log.Printf("[VenuesRefresherService] Upserting venue id=%s name=%q lat=%.6f lng=%.6f",
+            v.VenueID, v.VenueName, v.VenueLat, v.VenueLon)
+        if err := vr.venueDao.UpsertVenue(v); err != nil {
+            log.Printf("[VenuesRefresherService] Upsert failed for %s: %v", v.VenueID, err)
+            continue
+        }
 
-		if v.VenueID != "" {
-			seenIDs[v.VenueID] = struct{}{}
-			uniqueIDs = append(uniqueIDs, v.VenueID)
-		}
-		if v.VenueName != "" {
-			seenNames[v.VenueName] = struct{}{}
-		}
-	}
+        if v.VenueID != "" {
+            seenIDs[v.VenueID] = struct{}{}
+            uniqueIDs = append(uniqueIDs, v.VenueID)
+        }
+        if v.VenueName != "" {
+            seenNames[v.VenueName] = struct{}{}
+        }
+    }
 
-	log.Printf("[VenuesRefresherService] Upserted %d unique venues via VenueFilter", len(uniqueIDs))
+    log.Printf("[VenuesRefresherService] Upserted %d unique venues via VenueFilter", len(uniqueIDs))
 
-	// Optionally fetch and cache live forecasts
-	if fetchAndCacheLive && len(uniqueIDs) > 0 {
-		log.Println("[VenuesRefresherService] Fetching and caching venues live forecasts.")
-		vr.fetchAndCacheLiveForecasts(uniqueIDs)
-	} else {
-		log.Println("[VenuesRefresherService] Skipping live forecast fetch (disabled or no venues).")
-	}
+    if fetchAndCacheLive && len(uniqueIDs) > 0 {
+        log.Println("[VenuesRefresherService] Fetching and caching venues live forecasts.")
+        vr.fetchAndCacheLiveForecasts(uniqueIDs)
+    } else {
+        log.Println("[VenuesRefresherService] Skipping live forecast fetch (flag or empty IDs).")
+    }
 
-	return uniqueIDs, nil
+    return uniqueIDs, nil
 }
 
-// mapVenueFilterVenueToVenue converts a venue.Venue coming from VenueFilter
-// into your persisted venue.Venue struct used by Redis (currently the same shape).
-func mapVenueFilterVenueToVenue(vf venue.Venue) venue.Venue {
-	return venue.Venue{
-		Forecast:                 true,
-		Processed:                true,
-		VenueAddress:             vf.VenueAddress,
-		VenueLat:                 vf.VenueLat,
-		VenueLon:                 vf.VenueLon,
-		VenueName:                vf.VenueName,
-		VenueID:                  vf.VenueID,
-		VenueFootTrafficForecast: nil,
-	}
+
+// mapVenueFilterVenueToVenue converts a VenueFilterVenue into the persisted venue.Venue.
+func mapVenueFilterVenueToVenue(vf models.VenueFilterVenue) venue.Venue {
+    // Build a one-day FootTrafficForecast out of the filter result.
+    // (You can extend this later if BestTime starts returning multiple days.)
+    ft := []venue.FootTrafficForecast{
+        {
+            DayInfo: vf.DayInfo,
+            DayInt:  vf.DayInt,
+            DayRaw:  vf.DayRaw,
+        },
+    }
+
+    v := venue.Venue{
+        Forecast:     true,
+        Processed:    true,
+        VenueAddress: vf.VenueAddress,
+        VenueLat:     vf.VenueLat,
+        VenueLon:     vf.VenueLng,
+        VenueName:    vf.VenueName,
+        VenueID:      vf.VenueID,
+
+        VenueType:         vf.VenueType,
+        VenueDwellTimeMin: vf.VenueDwellTimeMin,
+        VenueDwellTimeMax: vf.VenueDwellTimeMax,
+        Rating:            vf.Rating,
+        Reviews:           vf.Reviews,
+
+        // store the foot traffic info we got from Venue Filter
+        VenueFootTrafficForecast: &ft,
+    }
+
+    // price_level is optional in the API
+    if vf.PriceLevel != nil {
+        v.PriceLevel = *vf.PriceLevel
+    }
+
+    return v
 }
+
+
 
 // -----------------------------------------------------------------------------
 // Multi-location Venue Filter runner
@@ -422,7 +447,7 @@ func (vr *VenuesRefresherService) RefreshVenuesByFilterForDefaultLocations(fetch
 	min := 1
 	live := false
     // now := false
-	limit := 30   // let client-side limit; API warns busy_* filters apply after limit
+	limit := 5   // let client-side limit; API warns busy_* filters apply after limit
 	radius := 1000 // meters
 	own_venues_only := false
 

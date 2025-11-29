@@ -1,14 +1,12 @@
 // models/venue_filter_response.go
 package models
 
-import "cs-server/models/venue"
-
 // VenueFilterResponse matches the BestTime /venues/filter API response.
 type VenueFilterResponse struct {
-    Status  string        `json:"status"`
-    Venues  []venue.Venue `json:"venues"`
-    VenuesN int           `json:"venues_n"`
-    Window  *FilterWindow `json:"window,omitempty"`
+    Status  string            `json:"status"`
+    Venues  []VenueFilterVenue `json:"venues"`
+    VenuesN int               `json:"venues_n"`
+    Window  *FilterWindow     `json:"window,omitempty"`
 }
 
 type FilterWindow struct {

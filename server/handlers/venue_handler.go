@@ -22,21 +22,25 @@ const (
 
 // VenueWithLive pairs a Venue with its cached LiveForecast.
 type VenueWithLive struct {
-    Venue venue.Venue                       `json:"venue"`
+    Venue venue.Venue                        `json:"venue"`
     Live  live_forecast.LiveForecastResponse `json:"live_forecast"`
 }
 
 // MinifiedVenue is the small form returned when verbose=false.
 type MinifiedVenue struct {
-    Forecast                 bool     `json:"forecast"`
-    Processed                bool     `json:"processed"`
-    VenueAddress             string   `json:"venue_address"`
-    VenueFootTrafficForecast []string `json:"venue_foot_traffic_forecast"`
-    VenueLiveBusyness        int      `json:"venue_live_busyness"`
-	VenueLat                 float64  `json:"venue_lat"`
-	VenueLng                 float64  `json:"venue_lon"`
-    VenueName                string   `json:"venue_name"`
+    Forecast                 bool                           `json:"forecast"`
+    Processed                bool                           `json:"processed"`
+    VenueAddress             string                         `json:"venue_address"`
+    VenueFootTrafficForecast *[]venue.FootTrafficForecast   `json:"venue_foot_traffic_forecast,omitempty"`
+    VenueLiveBusyness        int                            `json:"venue_live_busyness"`
+    VenueLat                 float64                        `json:"venue_lat"`
+    VenueLng                 float64                        `json:"venue_lon"`
+    VenueName                string                         `json:"venue_name"`
+    PriceLevel               int                            `json:"price_level,omitempty"`
+    Rating                   float64                        `json:"rating,omitempty"`
+    Reviews                  int                            `json:"reviews,omitempty"`
 }
+
 
 type VenueHandler struct {
     redisVenueDao *redis.RedisVenueDAO
@@ -95,6 +99,7 @@ func (h *VenueHandler) parseArgs(vals url.Values, w http.ResponseWriter) (
         http.Error(w, "Invalid argument "+RADIUS_QUERY_ARG, http.StatusBadRequest)
         return
     }
+
     verbose = false
     if v := vals.Get(VERBOSE_QUERY_ARG); v != "" {
         verbose, _ = strconv.ParseBool(v)
@@ -129,38 +134,32 @@ func (h *VenueHandler) transform(merged []VenueWithLive, verbose bool) interface
     if verbose {
         return merged
     }
-    // minify
+
     min := make([]MinifiedVenue, 0, len(merged))
     for _, m := range merged {
-        // pull metadata strings from the FootTrafficForecast DayInfo.DayText
-        meta := []string{}
-        if m.Venue.VenueFootTrafficForecast != nil {
-            for _, f := range *m.Venue.VenueFootTrafficForecast {
-                if f.DayInfo != nil {
-                    meta = append(meta, f.DayInfo.DayText)
-                }
-            }
-        }
         min = append(min, MinifiedVenue{
             Forecast:                 m.Venue.Forecast,
             Processed:                m.Venue.Processed,
             VenueAddress:             m.Venue.VenueAddress,
-            VenueFootTrafficForecast: meta,
+            VenueFootTrafficForecast: m.Venue.VenueFootTrafficForecast, // full forecast
             VenueLiveBusyness:        m.Live.Analysis.VenueLiveBusyness,
             VenueLat:                 m.Venue.VenueLat,
             VenueLng:                 m.Venue.VenueLon,
             VenueName:                m.Venue.VenueName,
+            PriceLevel:               m.Venue.PriceLevel,
+            Rating:                   m.Venue.Rating,
+            Reviews:                  m.Venue.Reviews,
         })
     }
     return min
 }
 
+
+
 func parseArgFloat64(vals url.Values, name string) (float64, error) {
     s := vals.Get(name)
     return strconv.ParseFloat(s, 64)
 }
-
-
 
 // Ping handles GET /ping
 func (h *VenueHandler) Ping(w http.ResponseWriter, r *http.Request) {
