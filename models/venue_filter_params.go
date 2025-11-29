@@ -72,10 +72,10 @@ func (p VenueFilterParams) ToValues() url.Values {
 		q.Set("live", btoa(*p.Live))
 	}
 	// NOTE: Types parameter is omitted to increase response accuracy per BestTime API recommendations
-	// if len(p.Types) > 0 {
-	//	// API expects comma-separated list
-	//	q.Set("types", join(p.Types, ","))
-	// }
+	if len(p.Types) > 0 {
+		// API expects comma-separated list
+		q.Set("types", join(p.Types, ","))
+	}
 	if p.Lat != nil {
 		q.Set("lat", ftoa(*p.Lat))
 	}

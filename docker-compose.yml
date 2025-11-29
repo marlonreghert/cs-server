@@ -12,14 +12,25 @@ services:
       - cs-network
 
   redis:
-    image: redis:latest
-    ports:
-      - "6379:6379"
-    restart: unless-stopped
-    networks:
-      - cs-network
-
+      image: redis:latest
+      ports:
+        - "6379:6379"
+      restart: unless-stopped
+      networks:
+        - cs-network
+      volumes:
+        # 1. Persist the data directory
+        # This maps the 'redis_data' Docker volume to the container's default data dir
+        - redis_data:/data
+        # 2. Mount the custom config file
+        - ./redis.conf:/usr/local/etc/redis/redis.conf
+      command: redis-server /usr/local/etc/redis/redis.conf # Tell Redis to use the custom config
+      
 networks:
   cs-network:
     name: cs-network
     driver: bridge
+
+volumes:
+  # Define the volume for persistent storage
+  redis_data:

@@ -28,11 +28,15 @@ type jobHandle struct {
 
 var defaultLocations = []Location{
 	// Example enabled:
-	{
-		// Centro (Recife)
-		Lat: -8.059297,
-		Lng: -34.880373,
-	},
+	// {
+	// 	// Centro (Recife)
+	// 	Lat: -8.059297,
+	// 	Lng: -34.880373,
+	// },
+	{ Lat: -7.99081,  Lng: -34.85141 }, // Jaboatao - use Radiuss C1
+	{ Lat: -8.07834,  Lng: -34.90938 }, // ZS/ZN - C1 
+	{ Lat: -8.18160,  Lng: -34.92980 }, // Piedade - C1
+
 	// { Lat: -8.098632,  Lng: -34.884890416 }, // Pina
 	// { Lat: -8.121918,  Lng: -34.903602    }, // Boa Viagem
 	// { Lat: -8.060852,  Lng: -34.910644    }, // ZN / Cordeiro
@@ -45,6 +49,47 @@ var defaultLocations = []Location{
 	// { Lat: -23.556218, Lng: -46.665451    }, // SP / Augusta
 	// { Lat: -23.542361, Lng: -46.655989    }, // SP / Santa Cecília
 	// { Lat: -23.547106, Lng: -46.638472    }, // SP / Consolacao
+}
+
+// -----------------------------------------------------------------------------
+// Venues Search Types
+// -----------------------------------------------------------------------------
+var nightlifeVenueTypes = []string{
+	"BAR",
+	"BREWERY",
+	"CASINO",
+	"CONCERT_HALL",
+	"ADULT",
+	"CLUBS",
+	"EVENT_VENUE",
+	"FOOD_AND_DRINK",
+	// "SHOPPING_CENTER",
+	"RESTAURANT",
+	// "SHOPPING",
+	"PERFORMING_ARTS",
+	"ARTS",
+	// "MOVIES",
+	// "MOVIE_THEATER",
+	"WINERY",
+	// "AMERICAN_RESTAURANT",
+	// "ASIAN_RESTAURANT",
+	// "BBQ_RESTAURANT",
+	// "CHICKEN_RESTAURANT",
+	// "CHINESE_RESTAURANT",
+	// // "DESSERT",
+	// "FRENCH_RESTAURANT",
+	// "INDIAN_RESTAURANT",
+	// "ITALIAN_RESTAURANT",
+	// "JAPANESE_RESTAURANT",
+	// "MEDITERANEAN_RESTAURANT",
+	// "MEXICAN_RESTAURANT",
+	// "PIZZA_RESTAURANT",
+	// "RAMEN_RESTAURANT",
+	// "SEAFOOD_RESTAURANT",
+	// "STEAK_RESTAURANT",
+	// "SUSHI_RESTAURANT",
+	// "THAI_RESTAURANT",
+	// "VEGETERIAN_RESTAURANT",
 }
 
 // -----------------------------------------------------------------------------
@@ -419,9 +464,6 @@ func mapVenueFilterVenueToVenue(vf models.VenueFilterVenue) venue.Venue {
 
     return v
 }
-
-
-
 // -----------------------------------------------------------------------------
 // Multi-location Venue Filter runner
 // -----------------------------------------------------------------------------
@@ -445,10 +487,10 @@ func (vr *VenuesRefresherService) RefreshVenuesByFilterForDefaultLocations(fetch
 	log.Printf("[VenuesRefresherService] Starting VenueFilter refresh for %d default locations", len(defaultLocations))
 
 	min := 1
-	live := false
+	// live := false
     // now := false
-	limit := 5   // let client-side limit; API warns busy_* filters apply after limit
-	radius := 1000 // meters
+	limit := 100   // let client-side limit; API warns busy_* filters apply after limit
+	radius := 6000 // meters
 	own_venues_only := false
 
 	totalInserted := 0
@@ -461,14 +503,16 @@ func (vr *VenuesRefresherService) RefreshVenuesByFilterForDefaultLocations(fetch
 
 		params := models.VenueFilterParams{
 			BusyMin:     &min,
-			Live:        &live,
+			// Live:        &live,
 			Lat:         &lat,
 			Lng:         &lng,
 			Radius:      &radius,
 			FootTraffic: "both",
 			Limit:       &limit,
 			OwnVenuesOnly: &own_venues_only,
+			Types:       nightlifeVenueTypes,
             // Now:         &now,
+			
 			// Types removed to increase response accuracy per BestTime API
 		}
 

@@ -21,26 +21,27 @@ const (
 )
 
 // VenueWithLive pairs a Venue with its cached LiveForecast.
+// Live is now a *pointer* so we can omit it when there is no live data.
 type VenueWithLive struct {
-    Venue venue.Venue                        `json:"venue"`
-    Live  live_forecast.LiveForecastResponse `json:"live_forecast"`
+    Venue venue.Venue                         `json:"venue"`
+    Live  *live_forecast.LiveForecastResponse `json:"live_forecast,omitempty"`
 }
 
 // MinifiedVenue is the small form returned when verbose=false.
 type MinifiedVenue struct {
-    Forecast                 bool                           `json:"forecast"`
-    Processed                bool                           `json:"processed"`
-    VenueAddress             string                         `json:"venue_address"`
-    VenueFootTrafficForecast *[]venue.FootTrafficForecast   `json:"venue_foot_traffic_forecast,omitempty"`
-    VenueLiveBusyness        int                            `json:"venue_live_busyness"`
-    VenueLat                 float64                        `json:"venue_lat"`
-    VenueLng                 float64                        `json:"venue_lon"`
-    VenueName                string                         `json:"venue_name"`
-    PriceLevel               int                            `json:"price_level,omitempty"`
-    Rating                   float64                        `json:"rating,omitempty"`
-    Reviews                  int                            `json:"reviews,omitempty"`
+    Forecast                 bool                          `json:"forecast"`
+    Processed                bool                          `json:"processed"`
+    VenueAddress             string                        `json:"venue_address"`
+    VenueFootTrafficForecast *[]venue.FootTrafficForecast  `json:"venue_foot_traffic_forecast,omitempty"`
+    // Pointer so it's omitted when there is no live data
+    VenueLiveBusyness        *int                          `json:"venue_live_busyness,omitempty"`
+    VenueLat                 float64                       `json:"venue_lat"`
+    VenueLng                 float64                       `json:"venue_lon"`
+    VenueName                string                        `json:"venue_name"`
+    PriceLevel               int                           `json:"price_level,omitempty"`
+    Rating                   float64                       `json:"rating,omitempty"`
+    Reviews                  int                           `json:"reviews,omitempty"`
 }
-
 
 type VenueHandler struct {
     redisVenueDao *redis.RedisVenueDAO
@@ -65,7 +66,7 @@ func (h *VenueHandler) GetVenuesNearby(w http.ResponseWriter, r *http.Request) {
         return
     }
 
-    // 3) Merge with cached live forecasts
+    // 3) Merge with cached live forecasts (no longer skipping venues without live)
     merged := h.mergeLive(venues)
 
     // 4) Transform according to verbose flag
@@ -112,37 +113,74 @@ func (h *VenueHandler) loadNearby(lat, lon, radius float64) ([]venue.Venue, erro
     return h.redisVenueDao.GetNearbyVenues(lat, lon, radius)
 }
 
+// mergeLive now **does not skip** venues without live data.
+// It always appends the venue, and sets Live to nil when not found.
+// Sorting: venues with live data come first (by busyness desc), then venues without live data.
 func (h *VenueHandler) mergeLive(venues []venue.Venue) []VenueWithLive {
-    var out []VenueWithLive
+    out := make([]VenueWithLive, 0, len(venues))
+
     for _, v := range venues {
         lf, err := h.redisVenueDao.GetLiveForecast(v.VenueID)
         if err != nil {
-            log.Printf("No live forecast for venue_id=%s, skipping", v.VenueID)
+            // No live forecast (or other error) – keep the venue, but Live=nil
+            log.Printf("No live forecast for venue_id=%s: %v", v.VenueID, err)
+            out = append(out, VenueWithLive{
+                Venue: v,
+                Live:  nil,
+            })
             continue
         }
-        out = append(out, VenueWithLive{Venue: v, Live: *lf})
+
+        out = append(out, VenueWithLive{
+            Venue: v,
+            Live:  lf,
+        })
     }
-    // sort by live busyness desc
-    sort.Slice(out, func(i, j int) bool {
-        return out[i].Live.Analysis.VenueLiveBusyness >
-            out[j].Live.Analysis.VenueLiveBusyness
+
+    // sort: venues with live first (desc by busyness), then without live
+    sort.SliceStable(out, func(i, j int) bool {
+        li := out[i].Live
+        lj := out[j].Live
+
+        // Only i has live -> i first
+        if li != nil && lj == nil {
+            return true
+        }
+        // Only j has live -> j first
+        if li == nil && lj != nil {
+            return false
+        }
+        // Both have no live: keep original order
+        if li == nil && lj == nil {
+            return false
+        }
+        // Both have live: sort by live busyness desc
+        return li.Analysis.VenueLiveBusyness > lj.Analysis.VenueLiveBusyness
     })
+
     return out
 }
 
 func (h *VenueHandler) transform(merged []VenueWithLive, verbose bool) interface{} {
     if verbose {
+        // In verbose mode, you get the full Venue + optional Live.
         return merged
     }
 
     min := make([]MinifiedVenue, 0, len(merged))
     for _, m := range merged {
+        var busyness *int
+        if m.Live != nil && m.Live.Analysis.VenueLiveBusynessAvailable {
+            v := m.Live.Analysis.VenueLiveBusyness
+            busyness = &v
+        }
+
         min = append(min, MinifiedVenue{
             Forecast:                 m.Venue.Forecast,
             Processed:                m.Venue.Processed,
             VenueAddress:             m.Venue.VenueAddress,
-            VenueFootTrafficForecast: m.Venue.VenueFootTrafficForecast, // full forecast
-            VenueLiveBusyness:        m.Live.Analysis.VenueLiveBusyness,
+            VenueFootTrafficForecast: m.Venue.VenueFootTrafficForecast,
+            VenueLiveBusyness:        busyness, // nil when no live => omitted in JSON
             VenueLat:                 m.Venue.VenueLat,
             VenueLng:                 m.Venue.VenueLon,
             VenueName:                m.Venue.VenueName,
@@ -153,8 +191,6 @@ func (h *VenueHandler) transform(merged []VenueWithLive, verbose bool) interface
     }
     return min
 }
-
-
 
 func parseArgFloat64(vals url.Values, name string) (float64, error) {
     s := vals.Get(name)

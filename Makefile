@@ -1,6 +1,6 @@
 # Variables
 IMAGE_NAME=johnsummit2024/cs-server
-IMAGE_TAG=2025_11_29_13_42
+IMAGE_TAG=2025_11_29_15_48
 NETWORK_NAME=cs-server-docker-network
 REDIS_CONTAINER=redis-container-2
 CS_SERVER_CONTAINER=cs-server-2
@@ -64,7 +64,7 @@ k8s-logs:
 
 # Send a request to the server
 request:
-	curl -XGET "localhost:8080/v1/venues/nearby?lat=-8.1037988&lon=-34.8734516&radius=10"
+	curl -XGET "localhost:8080/v1/venues/nearby?lat=-8.1037988&lon=-34.8734516&radius=10" | grep -v curl | jq .
 
 # Clean up Docker containers and network
 clean:

@@ -161,6 +161,7 @@ func (c *BestTimeApiClient) GetLiveForecast(
 }
 
 // VenueFilter calls GET /venues/filter with api_key_private and given filters in the query string.
+// By default, the Venue Filter API returns up to 5,000 venues per page if you do not specify a limit.
 func (c *BestTimeApiClient) VenueFilter(params models.VenueFilterParams) (*models.VenueFilterResponse, error) {
     q := params.ToValues()
     // API requires the private key in the querystring
