@@ -179,3 +179,26 @@ func (c *BestTimeApiClient) VenueFilter(params models.VenueFilterParams) (*model
     log.Printf("[BestTimeApiClient] Success GET %s; status=%s venues_n=%d", endpoint, resp.Status, resp.VenuesN)
     return &resp, nil
 }
+
+// GetWeekRawForecast retrieves the full weekly raw forecast for a specific venue ID.
+func (c *BestTimeApiClient) GetWeekRawForecast(venueID string) (*models.WeekRawResponse, error) {
+	if venueID == "" {
+		return nil, fmt.Errorf("venueID must be provided")
+	}
+
+	// Build query params
+	q := url.Values{}
+	q.Set("api_key_public", c.apiKeyPublic)
+	q.Set("venue_id", venueID) // The API requires venue_id here
+
+	// CHANGED ENDPOINT
+	endpoint := "/forecasts/week/raw2?" + q.Encode()
+
+	var resp models.WeekRawResponse
+	if err := c.Request("GET", endpoint, nil, nil, &resp); err != nil {
+		return nil, err
+	}
+	
+	// The API response already includes VenueID and VenueName at the top level, which is helpful.
+	return &resp, nil
+}

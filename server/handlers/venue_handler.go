@@ -7,10 +7,12 @@ import (
     "net/url"
     "sort"
     "strconv"
+    "time"
 
     "cs-server/dao/redis"
     "cs-server/models/live_forecast"
     "cs-server/models/venue"
+    "cs-server/models"
 )
 
 const (
@@ -20,20 +22,19 @@ const (
     VERBOSE_QUERY_ARG = "verbose"
 )
 
-// VenueWithLive pairs a Venue with its cached LiveForecast.
-// Live is now a *pointer* so we can omit it when there is no live data.
+// VenueWithLive pairs a Venue with its cached LiveForecast and the Weekly Raw Day Forecast.
 type VenueWithLive struct {
-    Venue venue.Venue                         `json:"venue"`
-    Live  *live_forecast.LiveForecastResponse `json:"live_forecast,omitempty"`
+    Venue          venue.Venue                          `json:"venue"`
+    Live           *live_forecast.LiveForecastResponse  `json:"live_forecast,omitempty"`
+    // CHANGED TYPE: Uses the full raw day forecast structure
+    WeeklyForecast *models.WeekRawDay                  `json:"weekly_forecast,omitempty"` 
 }
-
 // MinifiedVenue is the small form returned when verbose=false.
 type MinifiedVenue struct {
     Forecast                 bool                          `json:"forecast"`
     Processed                bool                          `json:"processed"`
     VenueAddress             string                        `json:"venue_address"`
     VenueFootTrafficForecast *[]venue.FootTrafficForecast  `json:"venue_foot_traffic_forecast,omitempty"`
-    // Pointer so it's omitted when there is no live data
     VenueLiveBusyness        *int                          `json:"venue_live_busyness,omitempty"`
     VenueLat                 float64                       `json:"venue_lat"`
     VenueLng                 float64                       `json:"venue_lon"`
@@ -41,6 +42,9 @@ type MinifiedVenue struct {
     PriceLevel               int                           `json:"price_level,omitempty"`
     Rating                   float64                       `json:"rating,omitempty"`
     Reviews                  int                           `json:"reviews,omitempty"`
+    
+    // The full weekly overview for the current day, also included in the minified response.
+    WeeklyForecast *models.WeekRawDay                  `json:"weekly_forecast,omitempty"`
 }
 
 type VenueHandler struct {
@@ -67,7 +71,7 @@ func (h *VenueHandler) GetVenuesNearby(w http.ResponseWriter, r *http.Request) {
     }
 
     // 3) Merge with cached live forecasts (no longer skipping venues without live)
-    merged := h.mergeLive(venues)
+    merged := h.merge(venues)
 
     // 4) Transform according to verbose flag
     result := h.transform(merged, verbose)
@@ -113,27 +117,45 @@ func (h *VenueHandler) loadNearby(lat, lon, radius float64) ([]venue.Venue, erro
     return h.redisVenueDao.GetNearbyVenues(lat, lon, radius)
 }
 
-// mergeLive now **does not skip** venues without live data.
-// It always appends the venue, and sets Live to nil when not found.
-// Sorting: venues with live data come first (by busyness desc), then venues without live data.
-func (h *VenueHandler) mergeLive(venues []venue.Venue) []VenueWithLive {
+// handlers/venue_handler.go
+
+// mergeLive fetches live data AND weekly overview data.
+// It always appends the venue, and sets Live/WeeklyOverview to nil when not found.
+// Sorting: venues with live data come first (desc by busyness), then venues without live data.
+// handlers/venue_handler.go
+
+// mergeLive fetches live data AND weekly raw forecast data.
+// It always appends the venue, and sets Live/WeeklyForecast to nil when not found.
+// Sorting: venues with live data come first (desc by busyness), then venues without live data.
+func (h *VenueHandler) merge(venues []venue.Venue) []VenueWithLive {
     out := make([]VenueWithLive, 0, len(venues))
+    
+    // Determine the current day of the week using the BestTime API convention: 0=Monday, 6=Sunday.
+    goDay := time.Now().Weekday()
+    // Conversion: (GoDay + 6) % 7 -> Maps Go's 0(Sun) to 6(Sun), 1(Mon) to 0(Mon), etc.
+    bestTimeDayInt := (int(goDay) + 6) % 7 
+
+    log.Printf("Current Go Weekday: %v, Converted BestTime DayInt: %d", goDay, bestTimeDayInt)
 
     for _, v := range venues {
+        // 1. Fetch Live Forecast (lf)
         lf, err := h.redisVenueDao.GetLiveForecast(v.VenueID)
         if err != nil {
-            // No live forecast (or other error) – keep the venue, but Live=nil
             log.Printf("No live forecast for venue_id=%s: %v", v.VenueID, err)
-            out = append(out, VenueWithLive{
-                Venue: v,
-                Live:  nil,
-            })
-            continue
+            // lf remains nil
+        }
+        
+        // 2. Fetch Weekly Raw Forecast for the current day (rawDay)
+        rawDay, err := h.redisVenueDao.GetWeekRawForecast(v.VenueID, bestTimeDayInt) 
+        if err != nil {
+            log.Printf("No weekly raw forecast for venue_id=%s day %d: %v", v.VenueID, bestTimeDayInt, err)
+            // rawDay remains nil
         }
 
         out = append(out, VenueWithLive{
             Venue: v,
             Live:  lf,
+            WeeklyForecast: rawDay, // Full WeekRawDay object
         })
     }
 
@@ -160,19 +182,21 @@ func (h *VenueHandler) mergeLive(venues []venue.Venue) []VenueWithLive {
 
     return out
 }
+// handlers/venue_handler.go
 
 func (h *VenueHandler) transform(merged []VenueWithLive, verbose bool) interface{} {
     if verbose {
-        // In verbose mode, you get the full Venue + optional Live.
+        // In verbose mode, return the full VenueWithLive structure, including Live and WeeklyForecast.
         return merged
     }
 
     min := make([]MinifiedVenue, 0, len(merged))
     for _, m := range merged {
-        var busyness *int
+        // Extract Live Busyness value (pointer is nil if not available)
+        var liveBusyness *int
         if m.Live != nil && m.Live.Analysis.VenueLiveBusynessAvailable {
             v := m.Live.Analysis.VenueLiveBusyness
-            busyness = &v
+            liveBusyness = &v
         }
 
         min = append(min, MinifiedVenue{
@@ -180,17 +204,21 @@ func (h *VenueHandler) transform(merged []VenueWithLive, verbose bool) interface
             Processed:                m.Venue.Processed,
             VenueAddress:             m.Venue.VenueAddress,
             VenueFootTrafficForecast: m.Venue.VenueFootTrafficForecast,
-            VenueLiveBusyness:        busyness, // nil when no live => omitted in JSON
+            VenueLiveBusyness:        liveBusyness, // nil when no live => omitted in JSON
             VenueLat:                 m.Venue.VenueLat,
             VenueLng:                 m.Venue.VenueLon,
             VenueName:                m.Venue.VenueName,
             PriceLevel:               m.Venue.PriceLevel,
             Rating:                   m.Venue.Rating,
             Reviews:                  m.Venue.Reviews,
+            
+            // Pass the entire WeeklyForecast object (WeekRawDay)
+            WeeklyForecast:           m.WeeklyForecast, 
         })
     }
     return min
 }
+
 
 func parseArgFloat64(vals url.Values, name string) (float64, error) {
     s := vals.Get(name)

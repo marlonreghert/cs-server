@@ -4,6 +4,7 @@ import (
     "cs-server/db"
     "cs-server/models/live_forecast"
     "cs-server/models/venue"
+    "cs-server/models"
     "encoding/json"
     "fmt"
     "log"
@@ -12,6 +13,7 @@ import (
 
 const VENUES_GEO_KEY_V1 = "venues_geo_v1"
 const VENUES_GEO_PLACE_MEMBER_FORMAT_V1 = "venues_geo_place_v1:%s"
+const WEEKLY_FORECAST_KEY_FORMAT = "weekly_forecast_v1:%s_%d"
 
 // LIVE_FORECAST_KEY_FORMAT is used to cache live forecasts per venue.
 const LIVE_FORECAST_KEY_FORMAT = "live_forecast_v1:%s"
@@ -117,4 +119,41 @@ func (dao *RedisVenueDAO) ListAllVenueIDs() ([]string, error) {
         ids = append(ids, strings.TrimPrefix(k, prefix))
     }
     return ids, nil
+}
+
+// SetWeekRawForecast caches a single day's raw weekly forecast for a venue.
+func (dao *RedisVenueDAO) SetWeekRawForecast(
+	venueID string,
+	day models.WeekRawDay, // Changed type
+) error {
+	key := fmt.Sprintf(WEEKLY_FORECAST_KEY_FORMAT, venueID, day.DayInt)
+	data, err := json.Marshal(day)
+	if err != nil {
+		return fmt.Errorf("failed to marshal weekly raw forecast for venue %s day %d: %w", venueID, day.DayInt, err)
+	}
+	if err := dao.client.Set(key, string(data)); err != nil {
+		return fmt.Errorf("failed to set weekly raw forecast in redis: %w", err)
+	}
+	return nil
+}
+
+// GetWeekRawForecast retrieves the cached raw weekly forecast for a venue and day.
+func (dao *RedisVenueDAO) GetWeekRawForecast(
+	venueID string,
+	dayInt int,
+) (*models.WeekRawDay, error) { // Changed return type
+	key := fmt.Sprintf(WEEKLY_FORECAST_KEY_FORMAT, venueID, dayInt)
+	str, err := dao.client.Get(key)
+	if err != nil {
+		// Log error if key is missing or Redis error occurred, but return nil for missing key
+		if strings.Contains(err.Error(), "nil") { // Example check for redis.Nil error
+            return nil, nil // Return nil on cache miss
+        }
+		return nil, fmt.Errorf("failed to get weekly raw forecast from redis: %w", err)
+	}
+	var d models.WeekRawDay // Changed struct type
+	if err := json.Unmarshal([]byte(str), &d); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal weekly raw forecast JSON: %w", err)
+	}
+	return &d, nil
 }

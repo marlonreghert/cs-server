@@ -13,6 +13,7 @@ import (
 	"log"
 	"net/http"
 	"time"
+	"github.com/robfig/cron/v3"
 )
 
 const lat = 45.5204001
@@ -149,8 +150,14 @@ func main() {
 	container.VenuesRefresherService.RefreshLiveForecastsForAllVenues()
 
 	fmt.Println("[Main] Starting periodic jobs!")
+	c := cron.New()
 	container.VenuesRefresherService.StartVenueFilterMultiLocationJob(config.VENUES_CATALOG_REFRESHER_SCHEDULE_MINUTES * time.Minute, true)
 	container.VenuesRefresherService.StartLiveForecastRefreshJob(config.VENUES_LIVE_FORECAST_REFRESHER_SCHEDULE_MINUTES * time.Minute)
+	container.VenuesRefresherService.RefreshWeeklyForecastsForAllVenues()
+	container.VenuesRefresherService.StartWeeklyForecastRefreshJob(c)
+
+	
+
 	
 	
 	fmt.Println("[Main] Starting server!")

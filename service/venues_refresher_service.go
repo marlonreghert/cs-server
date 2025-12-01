@@ -9,12 +9,15 @@ import (
 	"cs-server/dao/redis"
 	"cs-server/models"
 	"cs-server/models/venue"
+	"github.com/robfig/cron/v3"
 )
 
 // Location holds latitude and longitude for refresh jobs.
 type Location struct {
 	Lat float64
 	Lng float64
+	Radius int
+	Limit int
 }
 
 // jobHandle ties together a kicked-off search with its job and collection IDs.
@@ -33,9 +36,9 @@ var defaultLocations = []Location{
 	// 	Lat: -8.059297,
 	// 	Lng: -34.880373,
 	// },
-	{ Lat: -7.99081,  Lng: -34.85141 }, // Jaboatao - use Radiuss C1
-	{ Lat: -8.07834,  Lng: -34.90938 }, // ZS/ZN - C1 
-	{ Lat: -8.18160,  Lng: -34.92980 }, // Piedade - C1
+	{ Lat: -8.07834,  Lng: -34.90938, Radius: 6000, Limit: 300 }, // ZS/ZN - C1 
+	{ Lat: -7.99081,  Lng: -34.85141, Radius: 6000, Limit: 100 }, // Olinda
+	{ Lat: -8.18160,  Lng: -34.92980, Radius: 6000, Limit: 100 }, // Jaboatao/Candeias - C1
 
 	// { Lat: -8.098632,  Lng: -34.884890416 }, // Pina
 	// { Lat: -8.121918,  Lng: -34.903602    }, // Boa Viagem
@@ -484,50 +487,118 @@ func (vr *VenuesRefresherService) StartVenueFilterMultiLocationJob(interval time
 // calls RefreshVenuesDataByVenuesFilter() for each one with fixed parameters,
 // and logs results for each region.
 func (vr *VenuesRefresherService) RefreshVenuesByFilterForDefaultLocations(fetchAndCacheLive bool) {
-	log.Printf("[VenuesRefresherService] Starting VenueFilter refresh for %d default locations", len(defaultLocations))
+    log.Printf("[VenuesRefresherService] Starting VenueFilter refresh for %d default locations", len(defaultLocations))
 
-	min := 1
-	// live := false
-    // now := false
-	limit := 100   // let client-side limit; API warns busy_* filters apply after limit
-	radius := 6000 // meters
-	own_venues_only := false
+    min := 1
+    own_venues_only := false
+    totalInserted := 0
 
-	totalInserted := 0
+    for _, loc := range defaultLocations {
+        // Use per-location values
+        limit := loc.Limit
+        radius := loc.Radius
 
-	for _, loc := range defaultLocations {
-		log.Printf("[VenuesRefresherService] VenueFilter refresh at lat=%.6f, lng=%.6f", loc.Lat, loc.Lng)
+        log.Printf("[VenuesRefresherService] VenueFilter refresh at lat=%.6f, lng=%.6f (Radius=%d, Limit=%d)", 
+            loc.Lat, loc.Lng, radius, limit)
 
-		lat := loc.Lat
-		lng := loc.Lng
+        lat := loc.Lat
+        lng := loc.Lng
 
-		params := models.VenueFilterParams{
-			BusyMin:     &min,
-			// Live:        &live,
-			Lat:         &lat,
-			Lng:         &lng,
-			Radius:      &radius,
-			FootTraffic: "both",
-			Limit:       &limit,
-			OwnVenuesOnly: &own_venues_only,
-			Types:       nightlifeVenueTypes,
+        params := models.VenueFilterParams{
+            BusyMin:     &min,
+            // Live:        &live,
+            Lat:         &lat,
+            Lng:         &lng,
+            Radius:      &radius,
+            FootTraffic: "both",
+            Limit:       &limit, 
+            OwnVenuesOnly: &own_venues_only,
+            Types:       nightlifeVenueTypes,
             // Now:         &now,
-			
-			// Types removed to increase response accuracy per BestTime API
-		}
+            
+            // Types removed to increase response accuracy per BestTime API
+        }
 
-		ids, err := vr.RefreshVenuesDataByVenuesFilter(params, fetchAndCacheLive)
+        ids, err := vr.RefreshVenuesDataByVenuesFilter(params, fetchAndCacheLive)
+        if err != nil {
+            log.Printf("[VenuesRefresherService] VenueFilter refresh failed for lat=%.6f, lng=%.6f: %v",
+                loc.Lat, loc.Lng, err)
+            continue
+        }
+
+        log.Printf("[VenuesRefresherService] Successfully upserted %d venues for lat=%.6f, lng=%.6f",
+            len(ids), loc.Lat, loc.Lng)
+        totalInserted += len(ids)
+    }
+
+    log.Printf("[VenuesRefresherService] Finished VenueFilter refresh for all locations; total venues upserted=%d",
+        totalInserted)
+}
+
+// RefreshWeeklyForecastsForAllVenues fetches and caches the weekly raw forecast for all known venue IDs.
+// Note: The function name remains the same as its purpose is unchanged.
+func (vr *VenuesRefresherService) RefreshWeeklyForecastsForAllVenues() error {
+	// 1. Initial declaration of ids and err (Line 539)
+	ids, err := vr.venueDao.ListAllVenueIDs()
+	
+    // The previous implementation snippet omitted this check, but it is necessary
+	if err != nil {
+		log.Printf("[VenuesRefresherService] ListAllVenueIDs failed for weekly refresh: %v", err)
+		return err
+	}
+
+	for _, vid := range ids {
+		log.Printf("[VenuesRefresherService] Fetching weekly raw forecast for venue_id=%s", vid)
+
+		var resp *models.WeekRawResponse
+		// 1. Fetch data from BestTime API - Now using '=' for existing 'err'
+		resp, err = vr.bestTimeAPI.GetWeekRawForecast(vid) 
+        
 		if err != nil {
-			log.Printf("[VenuesRefresherService] VenueFilter refresh failed for lat=%.6f, lng=%.6f: %v",
-				loc.Lat, loc.Lng, err)
+			log.Printf("[VenuesRefresherService] GetWeekRawForecast failed for %s: %v", vid, err)
 			continue
 		}
 
-		log.Printf("[VenuesRefresherService] Successfully upserted %d venues for lat=%.6f, lng=%.6f",
-			len(ids), loc.Lat, loc.Lng)
-		totalInserted += len(ids)
-	}
+		if resp.Status != "OK" {
+			log.Printf("[VenuesRefresherService] Weekly raw forecast status non-OK (%s) for %s. Skipping cache.", resp.Status, vid)
+			continue
+		}
 
-	log.Printf("[VenuesRefresherService] Finished VenueFilter refresh for all locations; total venues upserted=%d",
-		totalInserted)
+		// 2. Cache each day's raw forecast
+		cachedCount := 0
+		for _, day := range resp.Analysis.WeekRaw { // ITERATING OVER WeekRaw ARRAY
+			// CALLING NEW DAO METHOD, reusing 'err' with '='
+			if err = vr.venueDao.SetWeekRawForecast(vid, day); err != nil {
+				log.Printf("[VenuesRefresherService] Failed to cache weekly raw forecast for %s day %d: %v", vid, day.DayInt, err)
+			} else {
+				cachedCount++
+			}
+		}
+		log.Printf("[VenuesRefresherService] Successfully cached %d of %d raw days for %s", cachedCount, len(resp.Analysis.WeekRaw), vid)
+	}
+	log.Println("[VenuesRefresherService] Finished weekly raw forecast refresh.")
+	return nil
+}
+
+
+// StartWeeklyForecastRefreshJob schedules a cron job to refresh weekly forecast data every Sunday at 00:00.
+// The cron runner (c) must be initialized and started in your main application function.
+func (vr *VenuesRefresherService) StartWeeklyForecastRefreshJob(c *cron.Cron) {
+	// Cron Expression: "0 0 * * 0" -> At 00:00 on Sunday.
+	cronSpec := "0 0 * * 0" 
+
+	_, err := c.AddFunc(cronSpec, func() {
+		log.Println("[VenuesRefresherService] Running WeeklyForecastRefresh job (Cron: Sunday 00:00).")
+		if err := vr.RefreshWeeklyForecastsForAllVenues(); err != nil {
+			log.Printf("[VenuesRefresherService] WeeklyForecastRefresh error: %v", err)
+		} else {
+			log.Println("[VenuesRefresherService] WeeklyForecastRefresh finished.")
+		}
+	})
+
+	if err != nil {
+		log.Fatalf("[VenuesRefresherService] Error scheduling WeeklyForecastRefreshJob: %v", err)
+	} else {
+		log.Printf("[VenuesRefresherService] WeeklyForecastRefreshJob scheduled with cron: %s", cronSpec)
+	}
 }

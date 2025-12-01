@@ -93,3 +93,17 @@ func (c *BestTimeApiClientMock) VenueFilter(params models.VenueFilterParams) (*m
         Window:  nil,
     }, nil
 }
+func (c *BestTimeApiClientMock) GetWeekRawForecast(venueID string) (*models.WeekRawResponse, error) {
+	// Simple mock response
+	return &models.WeekRawResponse{
+		Status: "OK",
+        // Initialize Analysis using the NAMED struct
+		Analysis: models.WeekRawAnalysis{
+			WeekRaw: []models.WeekRawDay{
+				// Return a dummy Monday entry for testing
+				{DayInt: 0, DayRaw: []int{10, 20, 30, 40}, DayInfo: nil}, 
+			},
+		},
+		VenueID: venueID,
+	}, nil
+}
