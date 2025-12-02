@@ -1,4 +1,4 @@
-// models/venue/day_info_v2.go (New file or added to venue/day_info.go)
+// models/venue/day_info.go (or similar file in your venue package)
 
 package venue
 
