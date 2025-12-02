@@ -130,10 +130,22 @@ func (h *VenueHandler) loadNearby(lat, lon, radius float64) ([]venue.Venue, erro
 func (h *VenueHandler) merge(venues []venue.Venue) []VenueWithLive {
     out := make([]VenueWithLive, 0, len(venues))
     
-    // Determine the current day of the week using the BestTime API convention: 0=Monday, 6=Sunday.
-    goDay := time.Now().Weekday()
-    // Conversion: (GoDay + 6) % 7 -> Maps Go's 0(Sun) to 6(Sun), 1(Mon) to 0(Mon), etc.
-    bestTimeDayInt := (int(goDay) + 6) % 7 
+    // --- TIMEZONE ADAPTATION START ---
+	// 1. Load the target timezone (Recife)
+	recifeLoc, err := time.LoadLocation("America/Recife")
+	if err != nil {
+		// Fallback to server local time if timezone fails to load, but log a severe warning.
+		log.Printf("ERROR: Failed to load America/Recife timezone: %v. Falling back to server time.", err)
+		recifeLoc = time.Local
+	}
+
+	// 2. Get the current time *in the Recife timezone*
+	recifeTime := time.Now().In(recifeLoc)
+	goDay := recifeTime.Weekday()
+
+	// 3. Conversion: Go Day (0=Sun) -> BestTime DayInt (0=Mon, 6=Sun)
+	// (GoDay + 6) % 7 -> Maps 0(Sun) to 6, 1(Mon) to 0, etc.
+	bestTimeDayInt := (int(goDay) + 6) % 7
 
     log.Printf("Current Go Weekday: %v, Converted BestTime DayInt: %d", goDay, bestTimeDayInt)
 

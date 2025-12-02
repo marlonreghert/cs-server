@@ -144,16 +144,16 @@ func main() {
 	// testVenueDao(container.RedisVenueDao, false)
 
 	fmt.Println("[Main] Refreshing venues data")
-	container.VenuesRefresherService.RefreshVenuesByFilterForDefaultLocations(true)
+	// container.VenuesRefresherService.RefreshVenuesByFilterForDefaultLocations(true)
 
 	fmt.Println("[Main] Refreshing venues liveforecast")
-	container.VenuesRefresherService.RefreshLiveForecastsForAllVenues()
+	// container.VenuesRefresherService.RefreshLiveForecastsForAllVenues()
 
 	fmt.Println("[Main] Starting periodic jobs!")
 	c := cron.New()
 	container.VenuesRefresherService.StartVenueFilterMultiLocationJob(config.VENUES_CATALOG_REFRESHER_SCHEDULE_MINUTES * time.Minute, true)
 	container.VenuesRefresherService.StartLiveForecastRefreshJob(config.VENUES_LIVE_FORECAST_REFRESHER_SCHEDULE_MINUTES * time.Minute)
-	container.VenuesRefresherService.RefreshWeeklyForecastsForAllVenues()
+	// container.VenuesRefresherService.RefreshWeeklyForecastsForAllVenues()
 	container.VenuesRefresherService.StartWeeklyForecastRefreshJob(c)
 
 	
