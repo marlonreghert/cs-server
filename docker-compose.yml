@@ -2,7 +2,7 @@ version: '3.8'
 
 services:
   cs-server:
-    image: johnsummit2024/cs-server:2025_12_02_01_37
+    image: johnsummit2024/cs-server:2025_12_02_16_01
     ports:
       - "8080:8080"
     depends_on:

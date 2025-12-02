@@ -67,7 +67,7 @@ var nightlifeVenueTypes = []string{
 	"EVENT_VENUE",
 	"FOOD_AND_DRINK",
 	// "SHOPPING_CENTER",
-	"RESTAURANT",
+	// "RESTAURANT",
 	// "SHOPPING",
 	"PERFORMING_ARTS",
 	"ARTS",
