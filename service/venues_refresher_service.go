@@ -36,9 +36,9 @@ var defaultLocations = []Location{
 	// 	Lat: -8.059297,
 	// 	Lng: -34.880373,
 	// },
-	{ Lat: -8.07834,  Lng: -34.90938, Radius: 6000, Limit: 300 }, // ZS/ZN - C1 
-	{ Lat: -7.99081,  Lng: -34.85141, Radius: 6000, Limit: 100 }, // Olinda
-	{ Lat: -8.18160,  Lng: -34.92980, Radius: 6000, Limit: 100 }, // Jaboatao/Candeias - C1
+	{ Lat: -8.07834,  Lng: -34.90938, Radius: 6000, Limit: 500 }, // ZS/ZN - C1 
+	{ Lat: -7.99081,  Lng: -34.85141, Radius: 6000, Limit: 200 }, // Olinda
+	{ Lat: -8.18160,  Lng: -34.92980, Radius: 6000, Limit: 200 }, // Jaboatao/Candeias - C1
 
 	// { Lat: -8.098632,  Lng: -34.884890416 }, // Pina
 	// { Lat: -8.121918,  Lng: -34.903602    }, // Boa Viagem
