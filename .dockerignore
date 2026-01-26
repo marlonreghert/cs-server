@@ -1,6 +1,47 @@
-# .dockerignore
-node_modules
-vendor
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+ENV/
+.venv
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
 *.log
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Git
+.git/
+.gitignore
+
+# Docker
+Dockerfile
+.dockerignore
+docker-compose.yml
+
+# Go files (old implementation)
+*.go
+go.mod
+go.sum
+
+# Documentation
 *.md
-.git
+docs/
+
+# Misc
+.DS_Store
+.env.local
+test_startup.py
+playground/
