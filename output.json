@@ -1,1 +1,0 @@
-curl -XGET "localhost:8080/v1/venues/nearby?lat=-8.0636873&lon=-34.8739706&radius=10" | grep -v curl | jq .
