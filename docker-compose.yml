@@ -2,7 +2,9 @@ version: '3.8'
 
 services:
   cs-server:
-    image: johnsummit2024/cs-server:2025_12_02_16_01
+    build:
+      context: .
+      dockerfile: Dockerfile
     ports:
       - "8080:8080"
     depends_on:
@@ -10,6 +12,23 @@ services:
     restart: unless-stopped
     networks:
       - cs-network
+    environment:
+      # Redis Configuration
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=
+      - REDIS_DB=0
+      # BestTime API
+      - BESTTIME_PRIVATE_KEY=pri_aff50a71a038456db88864b16d9d6800
+      - BESTTIME_PUBLIC_KEY=pub_4f4f184e1a5f4f50a48e945fde7ab2ea
+      - BESTTIME_ENDPOINT_BASE_V1=https://besttime.app/api/v1
+      # Scheduler Configuration
+      - VENUES_CATALOG_REFRESH_MINUTES=43200
+      - VENUES_LIVE_REFRESH_MINUTES=5
+      - WEEKLY_FORECAST_CRON=0 0 * * 0
+      # Server Configuration
+      - SERVER_PORT=8080
+      - LOG_LEVEL=INFO
 
   redis:
       image: redis:latest

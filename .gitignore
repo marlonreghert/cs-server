@@ -1,4 +1,9 @@
 cs-server
+__pycache__/
+*.py[cod]
+*$py.class
+__py__cache/
+.pytest_cache/
 .idea/
 bounding_box_map.html
 

@@ -1,23 +1,29 @@
-# Use an official Go base image
-FROM golang:1.23-alpine
+# Use Python 3.13 slim image for smaller size
+FROM python:3.13-slim
 
-# Set the working directory inside the container
+# Set working directory
 WORKDIR /app
 
-# Copy go.mod and go.sum first
-COPY go.mod go.sum ./
+# Install system dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc \
+    && rm -rf /var/lib/apt/lists/*
 
-# Download dependencies (cached if go.mod/go.sum haven't changed)
-RUN go mod download
+# Copy requirements file
+COPY requirements.txt .
 
-# Copy the rest of the application code
+# Install Python dependencies
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy application code
 COPY . .
 
-# Build the application
-RUN go build -o cs-server .
-
-# Expose the necessary port
+# Expose port
 EXPOSE 8080
 
+# Set environment variables
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1
+
 # Run the application
-CMD ["./cs-server"]
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8080"]
