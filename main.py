@@ -19,7 +19,7 @@ from apscheduler.triggers.cron import CronTrigger
 
 from app.config import Settings
 from app.container import Container
-from app.routers import create_venue_router
+from app.routers import venue_router, set_venue_handler
 
 # Configure logging
 logging.basicConfig(
@@ -66,17 +66,11 @@ async def run_weekly_forecast_refresh_job():
 
 
 def start_background_jobs(settings: Settings):
-    """Start all background jobs using APScheduler.
-
-    Implements exact scheduling from Go main.go (lines 154-158):
-    - Venue catalog refresh: every VENUES_CATALOG_REFRESHER_SCHEDULE_MINUTES (30 days = 43200 min)
-    - Live forecast refresh: every VENUES_LIVE_FORECAST_REFRESHER_SCHEDULE_MINUTES (5 min)
-    - Weekly forecast refresh: Cron "0 0 * * 0" (Sundays at 00:00)
-    """
+    """Start all background jobs using APScheduler."""
     global scheduler
     scheduler = AsyncIOScheduler()
 
-    # Job 1: Venue catalog refresh (every 30 days = 43200 minutes)
+    # Job 1: Venue catalog refresh
     scheduler.add_job(
         run_venue_catalog_refresh_job,
         trigger=IntervalTrigger(minutes=settings.venues_catalog_refresh_minutes),
@@ -89,7 +83,7 @@ def start_background_jobs(settings: Settings):
         f"{settings.venues_catalog_refresh_minutes} minutes"
     )
 
-    # Job 2: Live forecast refresh (every 5 minutes)
+    # Job 2: Live forecast refresh
     scheduler.add_job(
         run_live_forecast_refresh_job,
         trigger=IntervalTrigger(minutes=settings.venues_live_refresh_minutes),
@@ -102,7 +96,7 @@ def start_background_jobs(settings: Settings):
         f"{settings.venues_live_refresh_minutes} minutes"
     )
 
-    # Job 3: Weekly forecast refresh (Sundays at 00:00)
+    # Job 3: Weekly forecast refresh
     scheduler.add_job(
         run_weekly_forecast_refresh_job,
         trigger=CronTrigger.from_crontab(settings.weekly_forecast_cron),
@@ -121,12 +115,9 @@ def start_background_jobs(settings: Settings):
 
 
 async def startup_sequence(settings: Settings):
-    """Run initial data loads before starting scheduled jobs.
+    """Run initial data loads before starting jobs.
 
-    Implements exact sequence from Go main.go (lines 146-158):
-    1. Initial venue discovery (with live forecasts)
-    2. Initial live forecast refresh
-    3. Initial weekly forecast refresh
+    Implements exact sequence from Go main.go.
     """
     global container
 
@@ -135,6 +126,11 @@ async def startup_sequence(settings: Settings):
     # Initialize container
     logger.info("[Main] Initializing DI container")
     container = Container(settings)
+
+    # Inject handler into router (routes already registered at app creation)
+    logger.info("[Main] Injecting handler into router")
+    set_venue_handler(container.venue_handler)
+    logger.info("[Main] Handler injected successfully")
 
     # Step 1: Initial venue discovery (with live forecasts)
     logger.info("[Main] Refreshing venues data (initial load)")
@@ -175,13 +171,11 @@ async def shutdown_sequence():
 
     logger.info("[Main] Starting shutdown sequence")
 
-    # Stop scheduler
     if scheduler:
         logger.info("[Main] Stopping scheduler")
         scheduler.shutdown(wait=False)
         logger.info("[Main] Scheduler stopped")
 
-    # Clean up container
     if container:
         logger.info("[Main] Shutting down container")
         await container.shutdown()
@@ -210,22 +204,15 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# Register router at app creation time (before uvicorn starts)
+app.include_router(venue_router)
+
 
 # Health check endpoint
 @app.get("/health")
 def health():
     """Health check endpoint."""
     return {"status": "healthy"}
-
-
-# Include venue router (will be registered after container is initialized)
-@app.on_event("startup")
-def register_routes():
-    """Register routes after container initialization."""
-    if container:
-        venue_router = create_venue_router(container.venue_handler)
-        app.include_router(venue_router)
-        logger.info("[Main] Routes registered")
 
 
 if __name__ == "__main__":

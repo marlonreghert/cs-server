@@ -34,34 +34,6 @@ run-docker-compose:
 	docker-compose down -v
 	docker-compose up -d
 
-# Start a local Kubernetes cluster using minikube
-k8s-start:
-	minikube start
-
-# Deploy the application on Kubernetes
-k8s-deploy:
-	kubectl apply -f $(KUBERNETES_DEPLOYMENT)
-
-# Scale down the Kubernetes deployment to zero replicas
-k8s-scale-down:
-	kubectl scale deployment $(KUBERNETES_CLUSTER) --replicas=0
-
-# Scale the Kubernetes deployment to 1 replicas
-k8s-scale-one:
-	kubectl scale deployment $(KUBERNETES_CLUSTER) --replicas=1
-
-# Port-forward the Kubernetes deployment to access it locally
-k8s-pf-web:
-	kubectl port-forward deployment/$(KUBERNETES_CLUSTER) 8080:8080
-
-# Port-forward the Kubernetes deployment to access it locally
-k8s-pf-redis:
-	kubectl port-forward deployment/$(KUBERNETES_CLUSTER) 6379:6379
-
-# Get logs from the Kubernetes deployment
-k8s-logs:
-	kubectl logs $(KUBERNETES_CLUSTER)-cb5787bfb-qn85v -c cs-server
-
 # Send a request to the server
 request:
 	curl -XGET "localhost:8080/v1/venues/nearby?lat=-8.1037988&lon=-34.8734516&radius=10" | grep -v curl | jq .

@@ -36,6 +36,23 @@ class GeoRedisClient:
             logger.error(f"Could not connect to Redis: {e}")
             raise
 
+    def __init__(self, client):
+        """Initialize Redis client.
+        
+        Args:
+            client: Redis client
+        """
+        logging.info("Passing redis client")
+        self.client = client
+
+        # Test connection
+        try:
+            self.ping()
+            logger.info("Connected to Redis")
+        except redis.ConnectionError as e:
+            logger.error(f"Could not connect to Redis: {e}")
+            raise
+
     def set(self, key: str, value: str) -> None:
         """Set a key-value pair in Redis.
 

@@ -4,36 +4,52 @@ from pydantic import BaseModel, Field, field_validator, ConfigDict
 
 
 class OpenCloseDetail(BaseModel):
-    """Open/close time detail with hour and minute precision."""
+    """Open/close time detail with hour and minute precision.
+
+    Handles both scenarios:
+    - Full data: {"opens": 7, "closes": 21, "opens_minutes": 0, "closes_minutes": 0}
+    - Minimal data: {"opens": 7, "closes": 21}
+    """
     opens: int
     closes: int
-    opens_minutes: int
-    closes_minutes: int
+    opens_minutes: Optional[int] = None  # Present in some responses, absent in others
+    closes_minutes: Optional[int] = None  # Present in some responses, absent in others
 
 
 class DayInfoV2(BaseModel):
-    """Extended opening hours information with multiple time windows."""
-    open_24h: bool = Field(alias="open_24h")
-    crosses_midnight: bool
-    day_text: str
-    special_day: Optional[Any] = None  # Can be null or string/object
-    h24: list[OpenCloseDetail] = Field(alias="24h")  # JSON key is "24h"
-    h12: list[str] = Field(alias="12h")  # JSON key is "12h"
+    """Extended opening hours information with multiple time windows.
+
+    Handles both scenarios:
+    - Full data with all fields present
+    - Minimal data: {"24h": [{"opens": 7, "closes": 21}], "12h": ["7am-9pm"]}
+    """
+    open_24h: Optional[bool] = Field(default=None, alias="open_24h")
+    crosses_midnight: Optional[bool] = None
+    day_text: Optional[str] = None
+    special_day: Optional[Any] = None
+    h24: list[OpenCloseDetail] = Field(default_factory=list, alias="24h")
+    h12: list[str] = Field(default_factory=list, alias="12h")
 
     model_config = ConfigDict(populate_by_name=True)
 
 
 class DayInfo(BaseModel):
-    """Detailed information for a single day's forecast."""
+    """Detailed information for a single day's forecast.
+
+    Handles both scenarios:
+    - Open day: all fields present including day_max, day_mean
+    - Closed day: day_max and day_mean may be absent
+    """
     day_int: int
-    day_max: int
-    day_mean: int
-    day_rank_max: int
-    day_rank_mean: int
-    day_text: str
+    day_max: Optional[int] = None  # Absent for closed days
+    day_mean: Optional[int] = None  # Absent for closed days
+    day_rank_max: Optional[int] = None
+    day_rank_mean: Optional[int] = None
+    day_text: str = ""
     venue_open: str = ""
     venue_closed: str = ""
     venue_open_close_v2: Optional[DayInfoV2] = None
+    note: Optional[str] = None  # API sometimes includes notes
 
     @field_validator("venue_open", "venue_closed", mode="before")
     @classmethod
