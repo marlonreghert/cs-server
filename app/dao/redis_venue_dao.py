@@ -138,6 +138,28 @@ class RedisVenueDAO:
         venue_ids = [key.replace(prefix, "", 1) for key in keys]
         return venue_ids
 
+    def list_all_venues(self) -> list[Venue]:
+        """Return all venues from the geo index.
+
+        Returns:
+            List of Venue objects
+        """
+        pattern = VENUES_GEO_PLACE_MEMBER_FORMAT_V1.format("*")
+        keys = self.client.keys(pattern)
+
+        venues = []
+        for key in keys:
+            try:
+                json_str = self.client.get(key)
+                if json_str:
+                    venue = Venue.model_validate_json(json_str)
+                    venues.append(venue)
+            except Exception as e:
+                logger.error(f"Failed to parse venue from key {key}: {e}")
+                continue
+
+        return venues
+
     def set_week_raw_forecast(self, venue_id: str, day: WeekRawDay) -> None:
         """Cache a single day's raw weekly forecast for a venue.
 

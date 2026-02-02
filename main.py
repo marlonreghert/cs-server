@@ -9,17 +9,25 @@ Implements exact startup sequence from Go main.go (lines 139-165):
 6. Start HTTP server with FastAPI
 """
 import logging
-import asyncio
+import time
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from fastapi.responses import PlainTextResponse
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 from apscheduler.triggers.cron import CronTrigger
+from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
 
 from app.config import Settings
 from app.container import Container
 from app.routers import venue_router, set_venue_handler
+from app.middleware import PrometheusMiddleware
+from app.metrics import (
+    BACKGROUND_JOB_RUNS_TOTAL,
+    BACKGROUND_JOB_DURATION_SECONDS,
+    BACKGROUND_JOB_LAST_RUN_TIMESTAMP,
+)
 
 # Configure logging
 logging.basicConfig(
@@ -35,33 +43,60 @@ scheduler: AsyncIOScheduler = None
 
 async def run_venue_catalog_refresh_job():
     """Background job: Refresh venue catalog for default locations."""
+    job_name = "venue_catalog_refresh"
     logger.info("[Scheduler] Running VenueFilterMultiLocationJob")
+    start_time = time.perf_counter()
     try:
         await container.venues_refresher_service.refresh_venues_by_filter_for_default_locations(
             fetch_and_cache_live=True
         )
+        duration = time.perf_counter() - start_time
+        BACKGROUND_JOB_DURATION_SECONDS.labels(job_name=job_name).observe(duration)
+        BACKGROUND_JOB_RUNS_TOTAL.labels(job_name=job_name, status="success").inc()
+        BACKGROUND_JOB_LAST_RUN_TIMESTAMP.labels(job_name=job_name).set_to_current_time()
         logger.info("[Scheduler] VenueFilterMultiLocationJob completed")
     except Exception as e:
+        duration = time.perf_counter() - start_time
+        BACKGROUND_JOB_DURATION_SECONDS.labels(job_name=job_name).observe(duration)
+        BACKGROUND_JOB_RUNS_TOTAL.labels(job_name=job_name, status="error").inc()
         logger.error(f"[Scheduler] VenueFilterMultiLocationJob failed: {e}")
 
 
 async def run_live_forecast_refresh_job():
     """Background job: Refresh live forecasts for all venues."""
+    job_name = "live_forecast_refresh"
     logger.info("[Scheduler] Running LiveForecastRefreshJob")
+    start_time = time.perf_counter()
     try:
         await container.venues_refresher_service.refresh_live_forecasts_for_all_venues()
+        duration = time.perf_counter() - start_time
+        BACKGROUND_JOB_DURATION_SECONDS.labels(job_name=job_name).observe(duration)
+        BACKGROUND_JOB_RUNS_TOTAL.labels(job_name=job_name, status="success").inc()
+        BACKGROUND_JOB_LAST_RUN_TIMESTAMP.labels(job_name=job_name).set_to_current_time()
         logger.info("[Scheduler] LiveForecastRefreshJob completed")
     except Exception as e:
+        duration = time.perf_counter() - start_time
+        BACKGROUND_JOB_DURATION_SECONDS.labels(job_name=job_name).observe(duration)
+        BACKGROUND_JOB_RUNS_TOTAL.labels(job_name=job_name, status="error").inc()
         logger.error(f"[Scheduler] LiveForecastRefreshJob failed: {e}")
 
 
 async def run_weekly_forecast_refresh_job():
     """Background job: Refresh weekly forecasts for all venues."""
+    job_name = "weekly_forecast_refresh"
     logger.info("[Scheduler] Running WeeklyForecastRefreshJob (Cron: Sunday 00:00)")
+    start_time = time.perf_counter()
     try:
         await container.venues_refresher_service.refresh_weekly_forecasts_for_all_venues()
+        duration = time.perf_counter() - start_time
+        BACKGROUND_JOB_DURATION_SECONDS.labels(job_name=job_name).observe(duration)
+        BACKGROUND_JOB_RUNS_TOTAL.labels(job_name=job_name, status="success").inc()
+        BACKGROUND_JOB_LAST_RUN_TIMESTAMP.labels(job_name=job_name).set_to_current_time()
         logger.info("[Scheduler] WeeklyForecastRefreshJob completed")
     except Exception as e:
+        duration = time.perf_counter() - start_time
+        BACKGROUND_JOB_DURATION_SECONDS.labels(job_name=job_name).observe(duration)
+        BACKGROUND_JOB_RUNS_TOTAL.labels(job_name=job_name, status="error").inc()
         logger.error(f"[Scheduler] WeeklyForecastRefreshJob failed: {e}")
 
 
@@ -204,6 +239,9 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# Add Prometheus metrics middleware
+app.add_middleware(PrometheusMiddleware)
+
 # Register router at app creation time (before uvicorn starts)
 app.include_router(venue_router)
 
@@ -213,6 +251,16 @@ app.include_router(venue_router)
 def health():
     """Health check endpoint."""
     return {"status": "healthy"}
+
+
+# Prometheus metrics endpoint
+@app.get("/metrics", response_class=PlainTextResponse)
+def metrics():
+    """Prometheus metrics endpoint for scraping."""
+    return PlainTextResponse(
+        content=generate_latest(),
+        media_type=CONTENT_TYPE_LATEST,
+    )
 
 
 if __name__ == "__main__":

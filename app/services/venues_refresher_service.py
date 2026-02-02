@@ -2,6 +2,7 @@
 import logging
 from typing import Optional
 from dataclasses import dataclass
+from collections import defaultdict
 
 from app.api import BestTimeAPIClient
 from app.dao import RedisVenueDAO
@@ -10,6 +11,22 @@ from app.models import (
     FootTrafficForecast,
     VenueFilterParams,
     VenueFilterVenue,
+)
+from app.metrics import (
+    VENUES_TOTAL,
+    VENUES_WITH_ATTRIBUTE,
+    VENUES_BY_TYPE,
+    VENUES_WITH_LIVE_FORECAST,
+    VENUES_WITH_WEEKLY_FORECAST,
+    VENUES_LIVE_FORECAST_AVAILABILITY_RATIO,
+    REFRESH_VENUES_DISCOVERED,
+    REFRESH_VENUES_UPSERTED,
+    REFRESH_DUPLICATES_SKIPPED,
+    LIVE_FORECAST_FETCH_RESULTS,
+    WEEKLY_FORECAST_FETCH_RESULTS,
+    VENUES_AVERAGE_RATING,
+    VENUES_AVERAGE_REVIEWS,
+    VENUES_BY_PRICE_LEVEL,
 )
 
 logger = logging.getLogger(__name__)
@@ -61,6 +78,151 @@ class VenuesRefresherService:
         """
         self.venue_dao = venue_dao
         self.besttime_api = besttime_api
+
+    def update_data_quality_metrics(self) -> None:
+        """Compute and update all data quality metrics from cached venues.
+
+        This method reads all venues from the cache and updates Prometheus
+        gauges with counts and statistics about data quality.
+        """
+        try:
+            venues = self.venue_dao.list_all_venues()
+        except Exception as e:
+            logger.error(f"[VenuesRefresherService] Failed to list venues for metrics: {e}")
+            return
+
+        total = len(venues)
+        VENUES_TOTAL.set(total)
+
+        if total == 0:
+            # Reset all gauges to 0 when no venues
+            for attr in ["address", "lat_lng", "rating", "reviews", "price_level", "type", "dwell_time", "forecast"]:
+                VENUES_WITH_ATTRIBUTE.labels(attribute=attr).set(0)
+            VENUES_WITH_LIVE_FORECAST.set(0)
+            VENUES_WITH_WEEKLY_FORECAST.set(0)
+            VENUES_LIVE_FORECAST_AVAILABILITY_RATIO.set(0)
+            VENUES_AVERAGE_RATING.set(0)
+            VENUES_AVERAGE_REVIEWS.set(0)
+            return
+
+        # Count venues with various attributes
+        with_address = 0
+        with_lat_lng = 0
+        with_rating = 0
+        with_reviews = 0
+        with_price_level = 0
+        with_type = 0
+        with_dwell_time = 0
+        with_forecast = 0
+
+        # For aggregations
+        ratings = []
+        reviews_list = []
+        type_counts = defaultdict(int)
+        price_level_counts = defaultdict(int)
+
+        for venue in venues:
+            # Address
+            if venue.venue_address and venue.venue_address.strip():
+                with_address += 1
+
+            # Lat/Lng (always present but check for valid values)
+            if venue.venue_lat != 0 and venue.venue_lng != 0:
+                with_lat_lng += 1
+
+            # Rating
+            if venue.rating is not None and venue.rating > 0:
+                with_rating += 1
+                ratings.append(venue.rating)
+
+            # Reviews
+            if venue.reviews is not None and venue.reviews > 0:
+                with_reviews += 1
+                reviews_list.append(venue.reviews)
+
+            # Price level
+            if venue.price_level is not None:
+                with_price_level += 1
+                price_level_counts[str(venue.price_level)] += 1
+            else:
+                price_level_counts["unknown"] += 1
+
+            # Venue type
+            if venue.venue_type:
+                with_type += 1
+                type_counts[venue.venue_type] += 1
+
+            # Dwell time
+            if venue.venue_dwell_time_min is not None or venue.venue_dwell_time_max is not None:
+                with_dwell_time += 1
+
+            # Forecast data
+            if venue.venue_foot_traffic_forecast:
+                with_forecast += 1
+
+        # Update attribute presence gauges
+        VENUES_WITH_ATTRIBUTE.labels(attribute="address").set(with_address)
+        VENUES_WITH_ATTRIBUTE.labels(attribute="lat_lng").set(with_lat_lng)
+        VENUES_WITH_ATTRIBUTE.labels(attribute="rating").set(with_rating)
+        VENUES_WITH_ATTRIBUTE.labels(attribute="reviews").set(with_reviews)
+        VENUES_WITH_ATTRIBUTE.labels(attribute="price_level").set(with_price_level)
+        VENUES_WITH_ATTRIBUTE.labels(attribute="type").set(with_type)
+        VENUES_WITH_ATTRIBUTE.labels(attribute="dwell_time").set(with_dwell_time)
+        VENUES_WITH_ATTRIBUTE.labels(attribute="forecast").set(with_forecast)
+
+        # Update type breakdown
+        for venue_type, count in type_counts.items():
+            VENUES_BY_TYPE.labels(venue_type=venue_type).set(count)
+
+        # Update price level breakdown
+        for price_level, count in price_level_counts.items():
+            VENUES_BY_PRICE_LEVEL.labels(price_level=price_level).set(count)
+
+        # Update averages
+        if ratings:
+            VENUES_AVERAGE_RATING.set(sum(ratings) / len(ratings))
+        if reviews_list:
+            VENUES_AVERAGE_REVIEWS.set(sum(reviews_list) / len(reviews_list))
+
+        # Count live and weekly forecasts
+        live_count = 0
+        weekly_count = 0
+
+        for venue in venues:
+            venue_id = venue.venue_id
+            if not venue_id:
+                continue
+
+            # Check live forecast
+            try:
+                live = self.venue_dao.get_live_forecast(venue_id)
+                if live is not None:
+                    live_count += 1
+            except Exception:
+                pass
+
+            # Check weekly forecast (check if at least one day exists)
+            try:
+                weekly = self.venue_dao.get_week_raw_forecast(venue_id, 0)  # Check Monday
+                if weekly is not None:
+                    weekly_count += 1
+            except Exception:
+                pass
+
+        VENUES_WITH_LIVE_FORECAST.set(live_count)
+        VENUES_WITH_WEEKLY_FORECAST.set(weekly_count)
+
+        # Calculate availability ratio
+        if total > 0:
+            VENUES_LIVE_FORECAST_AVAILABILITY_RATIO.set(live_count / total)
+        else:
+            VENUES_LIVE_FORECAST_AVAILABILITY_RATIO.set(0)
+
+        logger.info(
+            f"[VenuesRefresherService] Updated data quality metrics: "
+            f"total={total}, with_address={with_address}, with_rating={with_rating}, "
+            f"with_live={live_count}, with_weekly={weekly_count}"
+        )
 
     def _map_venue_filter_venue_to_venue(self, vf: VenueFilterVenue) -> Venue:
         """Convert VenueFilterVenue to Venue model.
@@ -143,6 +305,7 @@ class VenuesRefresherService:
                 logger.debug(
                     f"[VenuesRefresherService] Skipping venue with no id and no name: {vf}"
                 )
+                REFRESH_DUPLICATES_SKIPPED.labels(reason="no_id_or_name").inc()
                 continue
 
             # De-dupe by ID first
@@ -151,6 +314,7 @@ class VenuesRefresherService:
                     logger.debug(
                         f"[VenuesRefresherService] Skipping duplicate venue ID={vf.venue_id}"
                     )
+                    REFRESH_DUPLICATES_SKIPPED.labels(reason="duplicate_id").inc()
                     continue
 
             # De-dupe by name second
@@ -159,6 +323,7 @@ class VenuesRefresherService:
                     logger.debug(
                         f"[VenuesRefresherService] Skipping duplicate venue Name={vf.venue_name!r}"
                     )
+                    REFRESH_DUPLICATES_SKIPPED.labels(reason="duplicate_name").inc()
                     continue
 
             # Map and upsert
@@ -187,6 +352,9 @@ class VenuesRefresherService:
         logger.info(
             f"[VenuesRefresherService] Upserted {len(unique_ids)} unique venues via VenueFilter"
         )
+
+        # Update metrics
+        REFRESH_VENUES_UPSERTED.labels(operation="venue_filter").set(len(unique_ids))
 
         # Optionally fetch and cache live forecasts
         if fetch_and_cache_live and unique_ids:
@@ -225,6 +393,7 @@ class VenuesRefresherService:
                 logger.error(
                     f"[VenuesRefresherService] GetLiveForecast failed for {vid}: {e}"
                 )
+                LIVE_FORECAST_FETCH_RESULTS.labels(result="error").inc()
                 continue
 
             # CRITICAL: Live forecast filtering logic (lines 254-265)
@@ -237,11 +406,13 @@ class VenuesRefresherService:
                         f"[VenuesRefresherService] Error LiveForecast status={lf.status!r} "
                         f"for {vid}, removing cache"
                     )
+                    LIVE_FORECAST_FETCH_RESULTS.labels(result="deleted_not_ok").inc()
                 else:
                     logger.info(
                         f"[VenuesRefresherService] No error but LiveForecast not available, "
                         f"maybe venue is closed, for {vid}, removing cache"
                     )
+                    LIVE_FORECAST_FETCH_RESULTS.labels(result="deleted_not_available").inc()
 
                 try:
                     self.venue_dao.delete_live_forecast(vid)
@@ -258,6 +429,7 @@ class VenuesRefresherService:
             )
             try:
                 self.venue_dao.set_live_forecast(lf)
+                LIVE_FORECAST_FETCH_RESULTS.labels(result="cached").inc()
                 logger.debug(
                     f"[VenuesRefresherService] Live forecast cached for venue_id={vid}"
                 )
@@ -265,6 +437,7 @@ class VenuesRefresherService:
                 logger.error(
                     f"[VenuesRefresherService] SetLiveForecast failed for {vid}: {e}"
                 )
+                LIVE_FORECAST_FETCH_RESULTS.labels(result="error").inc()
 
     async def refresh_venues_by_filter_for_default_locations(
         self, fetch_and_cache_live: bool = False
@@ -303,6 +476,7 @@ class VenuesRefresherService:
                 types=NIGHTLIFE_VENUE_TYPES,
             )
 
+            location_label = f"{loc.lat:.4f},{loc.lng:.4f}"
             try:
                 ids = await self.refresh_venues_data_by_venues_filter(
                     params, fetch_and_cache_live
@@ -311,18 +485,23 @@ class VenuesRefresherService:
                     f"[VenuesRefresherService] Successfully upserted {len(ids)} venues "
                     f"for lat={loc.lat:.6f}, lng={loc.lng:.6f}"
                 )
+                REFRESH_VENUES_DISCOVERED.labels(location=location_label).set(len(ids))
                 total_inserted += len(ids)
             except Exception as e:
                 logger.error(
                     f"[VenuesRefresherService] VenueFilter refresh failed for "
                     f"lat={loc.lat:.6f}, lng={loc.lng:.6f}: {e}"
                 )
+                REFRESH_VENUES_DISCOVERED.labels(location=location_label).set(0)
                 continue
 
         logger.info(
             f"[VenuesRefresherService] Finished VenueFilter refresh for all locations; "
             f"total venues upserted={total_inserted}"
         )
+
+        # Update data quality metrics after catalog refresh
+        self.update_data_quality_metrics()
 
     async def refresh_live_forecasts_for_all_venues(self) -> None:
         """Refresh live forecasts for all known venues.
@@ -341,6 +520,9 @@ class VenuesRefresherService:
         )
         await self._fetch_and_cache_live_forecasts(ids)
 
+        # Update data quality metrics after live refresh
+        self.update_data_quality_metrics()
+
     async def refresh_weekly_forecasts_for_all_venues(self) -> None:
         """Refresh weekly forecasts for all known venues.
 
@@ -358,6 +540,7 @@ class VenuesRefresherService:
             f"[VenuesRefresherService] Found {len(ids)} venues; refreshing weekly forecasts"
         )
 
+        total_cached = 0
         for vid in ids:
             logger.debug(
                 f"[VenuesRefresherService] Fetching weekly raw forecast for venue_id={vid}"
@@ -369,6 +552,7 @@ class VenuesRefresherService:
                 logger.error(
                     f"[VenuesRefresherService] GetWeekRawForecast failed for {vid}: {e}"
                 )
+                WEEKLY_FORECAST_FETCH_RESULTS.labels(result="error").inc()
                 continue
 
             if resp.status != "OK":
@@ -376,6 +560,7 @@ class VenuesRefresherService:
                     f"[VenuesRefresherService] Weekly raw forecast status non-OK "
                     f"({resp.status}) for {vid}. Skipping cache."
                 )
+                WEEKLY_FORECAST_FETCH_RESULTS.labels(result="skipped_not_ok").inc()
                 continue
 
             # Cache each day's raw forecast
@@ -390,9 +575,17 @@ class VenuesRefresherService:
                         f"for {vid} day {day.day_int}: {e}"
                     )
 
+            if cached_count > 0:
+                WEEKLY_FORECAST_FETCH_RESULTS.labels(result="cached").inc()
+                total_cached += 1
+
             logger.info(
                 f"[VenuesRefresherService] Successfully cached {cached_count} of "
                 f"{len(resp.analysis.week_raw)} raw days for {vid}"
             )
 
+        REFRESH_VENUES_UPSERTED.labels(operation="weekly_forecast").set(total_cached)
         logger.info("[VenuesRefresherService] Finished weekly raw forecast refresh.")
+
+        # Update data quality metrics after weekly refresh
+        self.update_data_quality_metrics()

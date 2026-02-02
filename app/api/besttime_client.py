@@ -1,5 +1,6 @@
 """BestTime API client with async HTTP support."""
 import logging
+import time
 from typing import Optional
 import httpx
 
@@ -8,6 +9,11 @@ from app.models import (
     WeekRawResponse,
     VenueFilterParams,
     VenueFilterResponse,
+)
+from app.metrics import (
+    BESTTIME_API_CALLS_TOTAL,
+    BESTTIME_API_CALL_DURATION_SECONDS,
+    BESTTIME_API_ERRORS_TOTAL,
 )
 
 logger = logging.getLogger(__name__)
@@ -72,6 +78,8 @@ class BestTimeAPIClient:
 
         logger.debug(f"[BestTimeAPIClient] {method} {url} params={params} body={json_body}")
 
+        start_time = time.perf_counter()
+
         try:
             response = await self.client.request(
                 method=method,
@@ -88,12 +96,32 @@ class BestTimeAPIClient:
             response_json = response.json()
             logger.debug(f"[BestTimeAPIClient] Success on {method} {endpoint}")
 
+            # Record successful call metrics
+            duration = time.perf_counter() - start_time
+            BESTTIME_API_CALL_DURATION_SECONDS.labels(endpoint=endpoint).observe(duration)
+            BESTTIME_API_CALLS_TOTAL.labels(endpoint=endpoint, status="success").inc()
+
             return response_json
 
         except httpx.HTTPStatusError as e:
+            duration = time.perf_counter() - start_time
+            BESTTIME_API_CALL_DURATION_SECONDS.labels(endpoint=endpoint).observe(duration)
+            BESTTIME_API_CALLS_TOTAL.labels(endpoint=endpoint, status="error").inc()
+            BESTTIME_API_ERRORS_TOTAL.labels(endpoint=endpoint, error_type="http_error").inc()
             logger.error(f"[BestTimeAPIClient] HTTP error on {method} {endpoint}: {e}")
             raise
+        except httpx.TimeoutException as e:
+            duration = time.perf_counter() - start_time
+            BESTTIME_API_CALL_DURATION_SECONDS.labels(endpoint=endpoint).observe(duration)
+            BESTTIME_API_CALLS_TOTAL.labels(endpoint=endpoint, status="error").inc()
+            BESTTIME_API_ERRORS_TOTAL.labels(endpoint=endpoint, error_type="timeout").inc()
+            logger.error(f"[BestTimeAPIClient] Timeout on {method} {endpoint}: {e}")
+            raise
         except httpx.RequestError as e:
+            duration = time.perf_counter() - start_time
+            BESTTIME_API_CALL_DURATION_SECONDS.labels(endpoint=endpoint).observe(duration)
+            BESTTIME_API_CALLS_TOTAL.labels(endpoint=endpoint, status="error").inc()
+            BESTTIME_API_ERRORS_TOTAL.labels(endpoint=endpoint, error_type="connection_error").inc()
             logger.error(f"[BestTimeAPIClient] Request error on {method} {endpoint}: {e}")
             raise
 
