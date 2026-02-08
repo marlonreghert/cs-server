@@ -167,31 +167,35 @@ async def startup_sequence(settings: Settings):
     set_venue_handler(container.venue_handler)
     logger.info("[Main] Handler injected successfully")
 
-    # Step 1: Initial venue discovery (with live forecasts)
-    logger.info("[Main] Refreshing venues data (initial load)")
-    try:
-        await container.venues_refresher_service.refresh_venues_by_filter_for_default_locations(
-            fetch_and_cache_live=True
-        )
-        logger.info("[Main] Initial venue refresh completed")
-    except Exception as e:
-        logger.error(f"[Main] Initial venue refresh failed: {e}")
+    # Check if we should run initial refresh
+    if settings.refresh_on_startup:
+        # Step 1: Initial venue discovery (with live forecasts)
+        logger.info("[Main] Refreshing venues data (initial load)")
+        try:
+            await container.venues_refresher_service.refresh_venues_by_filter_for_default_locations(
+                fetch_and_cache_live=True
+            )
+            logger.info("[Main] Initial venue refresh completed")
+        except Exception as e:
+            logger.error(f"[Main] Initial venue refresh failed: {e}")
 
-    # Step 2: Initial live forecast refresh
-    logger.info("[Main] Refreshing venues live forecast (initial load)")
-    try:
-        await container.venues_refresher_service.refresh_live_forecasts_for_all_venues()
-        logger.info("[Main] Initial live forecast refresh completed")
-    except Exception as e:
-        logger.error(f"[Main] Initial live forecast refresh failed: {e}")
+        # Step 2: Initial live forecast refresh
+        logger.info("[Main] Refreshing venues live forecast (initial load)")
+        try:
+            await container.venues_refresher_service.refresh_live_forecasts_for_all_venues()
+            logger.info("[Main] Initial live forecast refresh completed")
+        except Exception as e:
+            logger.error(f"[Main] Initial live forecast refresh failed: {e}")
 
-    # Step 3: Initial weekly forecast refresh
-    logger.info("[Main] Refreshing weekly forecasts (initial load)")
-    try:
-        await container.venues_refresher_service.refresh_weekly_forecasts_for_all_venues()
-        logger.info("[Main] Initial weekly forecast refresh completed")
-    except Exception as e:
-        logger.error(f"[Main] Initial weekly forecast refresh failed: {e}")
+        # Step 3: Initial weekly forecast refresh
+        logger.info("[Main] Refreshing weekly forecasts (initial load)")
+        try:
+            await container.venues_refresher_service.refresh_weekly_forecasts_for_all_venues()
+            logger.info("[Main] Initial weekly forecast refresh completed")
+        except Exception as e:
+            logger.error(f"[Main] Initial weekly forecast refresh failed: {e}")
+    else:
+        logger.info("[Main] Skipping initial refresh (REFRESH_ON_STARTUP=false)")
 
     # Step 4: Start background jobs
     logger.info("[Main] Starting periodic jobs")

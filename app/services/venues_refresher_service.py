@@ -69,15 +69,22 @@ NIGHTLIFE_VENUE_TYPES = [
 class VenuesRefresherService:
     """Service for refreshing venue data from BestTime API."""
 
-    def __init__(self, venue_dao: RedisVenueDAO, besttime_api: BestTimeAPIClient):
+    def __init__(
+        self,
+        venue_dao: RedisVenueDAO,
+        besttime_api: BestTimeAPIClient,
+        venue_limit_override: int = 0,
+    ):
         """Initialize refresher service.
 
         Args:
             venue_dao: Redis DAO for venue persistence
             besttime_api: BestTime API client
+            venue_limit_override: If > 0, overrides the limit for each location
         """
         self.venue_dao = venue_dao
         self.besttime_api = besttime_api
+        self.venue_limit_override = venue_limit_override
 
     def update_data_quality_metrics(self) -> None:
         """Compute and update all data quality metrics from cached venues.
@@ -459,10 +466,14 @@ class VenuesRefresherService:
         own_venues_only = False
 
         for loc in DEFAULT_LOCATIONS:
+            # Use override limit if set, otherwise use location's default limit
+            effective_limit = (
+                self.venue_limit_override if self.venue_limit_override > 0 else loc.limit
+            )
             logger.info(
                 f"[VenuesRefresherService] VenueFilter refresh at "
                 f"lat={loc.lat:.6f}, lng={loc.lng:.6f} "
-                f"(Radius={loc.radius}, Limit={loc.limit})"
+                f"(Radius={loc.radius}, Limit={effective_limit})"
             )
 
             params = VenueFilterParams(
@@ -471,7 +482,7 @@ class VenuesRefresherService:
                 lng=loc.lng,
                 radius=loc.radius,
                 foot_traffic="both",
-                limit=loc.limit,
+                limit=effective_limit,
                 own_venues_only=own_venues_only,
                 types=NIGHTLIFE_VENUE_TYPES,
             )
