@@ -29,6 +29,12 @@ class Settings(BaseSettings):
     server_port: int = 8080
     log_level: str = "INFO"
 
+    # Startup Configuration
+    # If False, skip initial venue refresh on startup (only schedule jobs)
+    refresh_on_startup: bool = True
+    # If set (> 0), overrides the limit for each location when fetching venues
+    venue_limit_override: int = 0
+
     # Project Paths
     project_root: str = ""
     resources_path_prefix: str = "resources"

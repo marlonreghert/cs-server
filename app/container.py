@@ -66,7 +66,9 @@ class Container:
         # Initialize services
         self.venue_service = VenueService(self.redis_venue_dao, self.besttime_api)
         self.venues_refresher_service = VenuesRefresherService(
-            self.redis_venue_dao, self.besttime_api
+            self.redis_venue_dao,
+            self.besttime_api,
+            venue_limit_override=settings.venue_limit_override,
         )
 
         # Initialize handlers
