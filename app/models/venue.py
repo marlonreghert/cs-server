@@ -131,6 +131,7 @@ class MinifiedVenue(BaseModel):
     venue_lat: float
     venue_lng: float
     venue_name: str
+    venue_type: Optional[str] = None
     price_level: Optional[int] = None
     rating: Optional[float] = None
     reviews: Optional[int] = None

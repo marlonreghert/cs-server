@@ -212,6 +212,7 @@ class VenueHandler:
                     venue_lat=m.venue.venue_lat,
                     venue_lng=m.venue.venue_lng,
                     venue_name=m.venue.venue_name,
+                    venue_type=m.venue.venue_type,
                     price_level=m.venue.price_level,
                     rating=m.venue.rating,
                     reviews=m.venue.reviews,
