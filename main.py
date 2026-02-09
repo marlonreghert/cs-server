@@ -100,6 +100,34 @@ async def run_weekly_forecast_refresh_job():
         logger.error(f"[Scheduler] WeeklyForecastRefreshJob failed: {e}")
 
 
+async def run_vibe_attributes_refresh_job():
+    """Background job: Refresh vibe attributes for all venues from Google Places API."""
+    job_name = "vibe_attributes_refresh"
+    logger.info("[Scheduler] Running VibeAttributesRefreshJob")
+    start_time = time.perf_counter()
+
+    # Check if vibe attributes service is available
+    if container.vibe_attributes_service is None:
+        logger.warning(
+            "[Scheduler] VibeAttributesRefreshJob skipped: "
+            "Google Places API not configured"
+        )
+        return
+
+    try:
+        await container.vibe_attributes_service.refresh_vibe_attributes_for_all_venues()
+        duration = time.perf_counter() - start_time
+        BACKGROUND_JOB_DURATION_SECONDS.labels(job_name=job_name).observe(duration)
+        BACKGROUND_JOB_RUNS_TOTAL.labels(job_name=job_name, status="success").inc()
+        BACKGROUND_JOB_LAST_RUN_TIMESTAMP.labels(job_name=job_name).set_to_current_time()
+        logger.info("[Scheduler] VibeAttributesRefreshJob completed")
+    except Exception as e:
+        duration = time.perf_counter() - start_time
+        BACKGROUND_JOB_DURATION_SECONDS.labels(job_name=job_name).observe(duration)
+        BACKGROUND_JOB_RUNS_TOTAL.labels(job_name=job_name, status="error").inc()
+        logger.error(f"[Scheduler] VibeAttributesRefreshJob failed: {e}")
+
+
 def start_background_jobs(settings: Settings):
     """Start all background jobs using APScheduler."""
     global scheduler
@@ -143,6 +171,25 @@ def start_background_jobs(settings: Settings):
         f"[Scheduler] Scheduled weekly forecast refresh with cron: "
         f"{settings.weekly_forecast_cron}"
     )
+
+    # Job 4: Vibe attributes refresh (only if enabled and configured)
+    if settings.vibe_attributes_refresh_enabled and settings.google_places_api_key:
+        scheduler.add_job(
+            run_vibe_attributes_refresh_job,
+            trigger=CronTrigger.from_crontab(settings.vibe_attributes_refresh_cron),
+            id="vibe_attributes_refresh",
+            name="Vibe Attributes Refresh (Daily 3 AM)",
+            replace_existing=True,
+        )
+        logger.info(
+            f"[Scheduler] Scheduled vibe attributes refresh with cron: "
+            f"{settings.vibe_attributes_refresh_cron}"
+        )
+    else:
+        logger.info(
+            "[Scheduler] Vibe attributes refresh disabled "
+            "(missing API key or disabled in config)"
+        )
 
     # Start scheduler
     scheduler.start()
@@ -197,7 +244,22 @@ async def startup_sequence(settings: Settings):
     else:
         logger.info("[Main] Skipping initial refresh (REFRESH_ON_STARTUP=false)")
 
-    # Step 4: Start background jobs
+    # Step 4: Initial vibe attributes refresh (if enabled)
+    if (
+        settings.vibe_attributes_refresh_on_startup
+        and settings.google_places_api_key
+        and container.vibe_attributes_service is not None
+    ):
+        logger.info("[Main] Refreshing vibe attributes (initial load)")
+        try:
+            await container.vibe_attributes_service.refresh_vibe_attributes_for_all_venues()
+            logger.info("[Main] Initial vibe attributes refresh completed")
+        except Exception as e:
+            logger.error(f"[Main] Initial vibe attributes refresh failed: {e}")
+    else:
+        logger.info("[Main] Skipping initial vibe attributes refresh")
+
+    # Step 5: Start background jobs
     logger.info("[Main] Starting periodic jobs")
     start_background_jobs(settings)
 

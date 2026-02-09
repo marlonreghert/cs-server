@@ -202,6 +202,15 @@ class VenueHandler:
             ):
                 live_busyness = m.live_forecast.analysis.venue_live_busyness
 
+            # Get vibe labels if available
+            vibe_labels: Optional[list[str]] = None
+            try:
+                vibe_attrs = self.venue_dao.get_vibe_attributes(m.venue.venue_id)
+                if vibe_attrs:
+                    vibe_labels = vibe_attrs.get_vibe_labels()
+            except Exception as e:
+                logger.debug(f"[VenueHandler] No vibe attributes for {m.venue.venue_id}: {e}")
+
             minified.append(
                 MinifiedVenue(
                     forecast=m.venue.forecast,
@@ -217,6 +226,7 @@ class VenueHandler:
                     rating=m.venue.rating,
                     reviews=m.venue.reviews,
                     weekly_forecast=m.weekly_forecast,
+                    vibe_labels=vibe_labels,
                 )
             )
 
