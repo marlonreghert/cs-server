@@ -27,7 +27,7 @@ class Settings(BaseSettings):
 
     # Google Places API Configuration (for vibe attributes)
     google_places_api_key: str = ""
-    vibe_attributes_refresh_enabled: bool = True
+    vibe_attributes_refresh_enabled: bool = False  # Disabled by default
     vibe_attributes_refresh_cron: str = "0 3 * * *"  # Daily at 3 AM
     vibe_attributes_refresh_on_startup: bool = False  # If True, refresh vibe attributes on startup
 

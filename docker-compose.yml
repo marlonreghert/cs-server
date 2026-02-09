@@ -31,7 +31,7 @@ services:
       - LOG_LEVEL=INFO
       # Google Places API (for vibe attributes)
       - GOOGLE_PLACES_API_KEY=${GOOGLE_PLACES_API_KEY:-}
-      - VIBE_ATTRIBUTES_REFRESH_ENABLED=true
+      - VIBE_ATTRIBUTES_REFRESH_ENABLED=false
       - VIBE_ATTRIBUTES_REFRESH_CRON=0 3 * * *
 
   redis:
