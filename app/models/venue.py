@@ -139,4 +139,7 @@ class MinifiedVenue(BaseModel):
     venue_live_busyness: Optional[int] = None
     weekly_forecast: Optional[Any] = None
 
+    # Vibe attributes (atmosphere labels)
+    vibe_labels: Optional[list[str]] = None
+
     model_config = ConfigDict(populate_by_name=True)

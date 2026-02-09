@@ -25,6 +25,12 @@ class Settings(BaseSettings):
     besttime_endpoint_base_v1: str = "https://besttime.app/api/v1"
     besttime_search_polling_wait_seconds: int = 15
 
+    # Google Places API Configuration (for vibe attributes)
+    google_places_api_key: str = ""
+    vibe_attributes_refresh_enabled: bool = True
+    vibe_attributes_refresh_cron: str = "0 3 * * *"  # Daily at 3 AM
+    vibe_attributes_refresh_on_startup: bool = False  # If True, refresh vibe attributes on startup
+
     # Server Configuration
     server_port: int = 8080
     log_level: str = "INFO"

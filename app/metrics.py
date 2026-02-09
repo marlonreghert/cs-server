@@ -77,6 +77,45 @@ BESTTIME_API_ERRORS_TOTAL = Counter(
 )
 
 # =============================================================================
+# GOOGLE PLACES API CLIENT METRICS
+# =============================================================================
+
+# API call counter
+GOOGLE_PLACES_API_CALLS_TOTAL = Counter(
+    "google_places_api_calls_total",
+    "Total number of Google Places API calls",
+    ["endpoint", "status"],  # status: success, error
+)
+
+# API call latency
+GOOGLE_PLACES_API_CALL_DURATION_SECONDS = Histogram(
+    "google_places_api_call_duration_seconds",
+    "Google Places API call latency in seconds",
+    ["endpoint"],
+    buckets=(0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0),
+)
+
+# API error counter by error type
+GOOGLE_PLACES_API_ERRORS_TOTAL = Counter(
+    "google_places_api_errors_total",
+    "Total number of Google Places API errors",
+    ["endpoint", "error_type"],  # error_type: http_error, timeout, connection_error
+)
+
+# Vibe attributes fetch results
+VIBE_ATTRIBUTES_FETCH_RESULTS = Counter(
+    "vibe_attributes_fetch_results_total",
+    "Results of vibe attributes fetch operations",
+    ["result"],  # result: cached, skipped_no_place_id, error
+)
+
+# Venues with vibe attributes
+VENUES_WITH_VIBE_ATTRIBUTES = Gauge(
+    "venues_with_vibe_attributes",
+    "Number of venues with cached vibe attributes",
+)
+
+# =============================================================================
 # BACKGROUND JOB METRICS
 # =============================================================================
 

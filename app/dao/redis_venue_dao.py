@@ -6,6 +6,7 @@ import redis
 
 from app.db.geo_redis_client import GeoRedisClient
 from app.models import Venue, LiveForecastResponse, WeekRawDay
+from app.models.vibe_attributes import VibeAttributes
 
 logger = logging.getLogger(__name__)
 
@@ -14,6 +15,7 @@ VENUES_GEO_KEY_V1 = "venues_geo_v1"
 VENUES_GEO_PLACE_MEMBER_FORMAT_V1 = "venues_geo_place_v1:{}"
 LIVE_FORECAST_KEY_FORMAT = "live_forecast_v1:{}"
 WEEKLY_FORECAST_KEY_FORMAT = "weekly_forecast_v1:{}_{}"
+VIBE_ATTRIBUTES_KEY_FORMAT = "vibe_attributes_v1:{}"
 
 
 class RedisVenueDAO:
@@ -41,6 +43,25 @@ class RedisVenueDAO:
             lon=venue.venue_lng,
             data=venue,
         )
+
+    def get_venue(self, venue_id: str) -> Optional[Venue]:
+        """Retrieve a venue by its ID.
+
+        Args:
+            venue_id: Venue identifier
+
+        Returns:
+            Venue object or None if not found
+        """
+        venue_key = VENUES_GEO_PLACE_MEMBER_FORMAT_V1.format(venue_id)
+        try:
+            json_str = self.client.get(venue_key)
+            if json_str is None:
+                return None
+            return Venue.model_validate_json(json_str)
+        except Exception as e:
+            logger.error(f"Failed to get venue {venue_id}: {e}")
+            return None
 
     def get_nearby_venues(self, lat: float, lon: float, radius: float) -> list[Venue]:
         """Retrieve nearby venues within a given radius.
@@ -193,3 +214,71 @@ class RedisVenueDAO:
                 return None
             logger.error(f"Failed to get weekly raw forecast from Redis: {e}")
             return None
+
+    # =========================================================================
+    # VIBE ATTRIBUTES METHODS
+    # =========================================================================
+
+    def set_vibe_attributes(self, vibe_attrs: VibeAttributes) -> None:
+        """Cache vibe attributes for a venue.
+
+        Args:
+            vibe_attrs: VibeAttributes object
+        """
+        key = VIBE_ATTRIBUTES_KEY_FORMAT.format(vibe_attrs.venue_id)
+        json_data = vibe_attrs.model_dump_json(by_alias=True)
+        self.client.set(key, json_data)
+        logger.debug(f"[RedisVenueDAO] Cached vibe attributes for {vibe_attrs.venue_id}")
+
+    def get_vibe_attributes(self, venue_id: str) -> Optional[VibeAttributes]:
+        """Retrieve cached vibe attributes for a venue.
+
+        Args:
+            venue_id: Venue identifier
+
+        Returns:
+            VibeAttributes or None if not found
+        """
+        key = VIBE_ATTRIBUTES_KEY_FORMAT.format(venue_id)
+        try:
+            json_str = self.client.get(key)
+            if json_str is None:
+                return None
+            return VibeAttributes.model_validate_json(json_str)
+        except redis.RedisError as e:
+            logger.error(f"Failed to get vibe attributes from Redis: {e}")
+            return None
+
+    def delete_vibe_attributes(self, venue_id: str) -> None:
+        """Delete cached vibe attributes for a venue.
+
+        Args:
+            venue_id: Venue identifier
+        """
+        key = VIBE_ATTRIBUTES_KEY_FORMAT.format(venue_id)
+        self.client.del_(key)
+        logger.info(f"[RedisVenueDAO] Deleted vibe attributes cache for {venue_id}")
+
+    def list_cached_vibe_attributes_venue_ids(self) -> list[str]:
+        """Return venue IDs for all cached vibe attributes.
+
+        Returns:
+            List of venue IDs
+        """
+        pattern = "vibe_attributes_v1:*"
+        keys = self.client.keys(pattern)
+
+        # Strip prefix to get raw venue IDs
+        prefix = "vibe_attributes_v1:"
+        venue_ids = [key.replace(prefix, "", 1) for key in keys]
+        return venue_ids
+
+    def count_venues_with_vibe_attributes(self) -> int:
+        """Count venues with cached vibe attributes.
+
+        Returns:
+            Number of venues with vibe attributes
+        """
+        pattern = "vibe_attributes_v1:*"
+        keys = self.client.keys(pattern)
+        return len(keys)

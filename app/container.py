@@ -8,7 +8,9 @@ from app.config import Settings
 from app.db import GeoRedisClient
 from app.dao import RedisVenueDAO
 from app.api import BestTimeAPIClient
+from app.api.google_places_client import GooglePlacesAPIClient
 from app.services import VenueService, VenuesRefresherService
+from app.services.vibe_attributes_service import VibeAttributesService
 from app.handlers import VenueHandler
 
 logger = logging.getLogger(__name__)
@@ -63,6 +65,28 @@ class Container:
             base_url=settings.besttime_endpoint_base_v1,
         )
 
+        # Initialize Google Places API client (for vibe attributes)
+        self.google_places_api = None
+        self.vibe_attributes_service = None
+
+        if settings.google_places_api_key:
+            self.google_places_api = GooglePlacesAPIClient(
+                api_key=settings.google_places_api_key,
+            )
+            logger.info("[Container] Google Places API client initialized")
+
+            # Initialize Vibe Attributes service
+            self.vibe_attributes_service = VibeAttributesService(
+                self.google_places_api,
+                self.redis_venue_dao,
+            )
+            logger.info("[Container] Vibe Attributes service initialized")
+        else:
+            logger.warning(
+                "[Container] Google Places API key not configured. "
+                "Vibe attributes feature will be disabled."
+            )
+
         # Initialize services
         self.venue_service = VenueService(self.redis_venue_dao, self.besttime_api)
         self.venues_refresher_service = VenuesRefresherService(
@@ -84,3 +108,10 @@ class Container:
             logger.info("[Container] BestTime API client closed")
         except Exception as e:
             logger.error(f"[Container] Error closing BestTime API client: {e}")
+
+        if self.google_places_api:
+            try:
+                await self.google_places_api.close()
+                logger.info("[Container] Google Places API client closed")
+            except Exception as e:
+                logger.error(f"[Container] Error closing Google Places API client: {e}")
