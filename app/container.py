@@ -10,7 +10,8 @@ from app.dao import RedisVenueDAO
 from app.api import BestTimeAPIClient
 from app.api.google_places_client import GooglePlacesAPIClient
 from app.services import VenueService, VenuesRefresherService
-from app.services.vibe_attributes_service import VibeAttributesService
+from app.services.google_places_enrichment_service import GooglePlacesEnrichmentService
+from app.services.photo_enrichment_service import PhotoEnrichmentService
 from app.handlers import VenueHandler
 
 logger = logging.getLogger(__name__)
@@ -65,9 +66,10 @@ class Container:
             base_url=settings.besttime_endpoint_base_v1,
         )
 
-        # Initialize Google Places API client (for vibe attributes)
+        # Initialize Google Places API client (for enrichment and photos)
         self.google_places_api = None
-        self.vibe_attributes_service = None
+        self.google_places_enrichment_service = None
+        self.photo_enrichment_service = None
 
         if settings.google_places_api_key:
             self.google_places_api = GooglePlacesAPIClient(
@@ -75,16 +77,23 @@ class Container:
             )
             logger.info("[Container] Google Places API client initialized")
 
-            # Initialize Vibe Attributes service
-            self.vibe_attributes_service = VibeAttributesService(
+            # Initialize Google Places Enrichment service
+            self.google_places_enrichment_service = GooglePlacesEnrichmentService(
                 self.google_places_api,
                 self.redis_venue_dao,
             )
-            logger.info("[Container] Vibe Attributes service initialized")
+            logger.info("[Container] Google Places Enrichment service initialized")
+
+            # Initialize Photo Enrichment service
+            self.photo_enrichment_service = PhotoEnrichmentService(
+                self.google_places_api,
+                self.redis_venue_dao,
+            )
+            logger.info("[Container] Photo Enrichment service initialized")
         else:
             logger.warning(
                 "[Container] Google Places API key not configured. "
-                "Vibe attributes feature will be disabled."
+                "Google Places enrichment and photo features will be disabled."
             )
 
         # Initialize services

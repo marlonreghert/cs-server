@@ -211,6 +211,26 @@ class VenueHandler:
             except Exception as e:
                 logger.debug(f"[VenueHandler] No vibe attributes for {m.venue.venue_id}: {e}")
 
+            # Get venue photos if available
+            venue_photos_urls: Optional[list[str]] = None
+            try:
+                venue_photos_urls = self.venue_dao.get_venue_photos(m.venue.venue_id)
+            except Exception as e:
+                logger.debug(f"[VenueHandler] No photos for {m.venue.venue_id}: {e}")
+
+            # Get opening hours if available
+            opening_hours: Optional[list[str]] = None
+            special_days: Optional[list[str]] = None
+            is_open_now: Optional[bool] = None
+            try:
+                hours = self.venue_dao.get_opening_hours(m.venue.venue_id)
+                if hours:
+                    opening_hours = hours.weekday_descriptions if hours.has_hours() else None
+                    special_days = hours.special_days
+                    is_open_now = hours.open_now
+            except Exception as e:
+                logger.debug(f"[VenueHandler] No opening hours for {m.venue.venue_id}: {e}")
+
             minified.append(
                 MinifiedVenue(
                     forecast=m.venue.forecast,
@@ -221,12 +241,17 @@ class VenueHandler:
                     venue_lat=m.venue.venue_lat,
                     venue_lng=m.venue.venue_lng,
                     venue_name=m.venue.venue_name,
+                    venue_id=m.venue.venue_id,
                     venue_type=m.venue.venue_type,
                     price_level=m.venue.price_level,
                     rating=m.venue.rating,
                     reviews=m.venue.reviews,
                     weekly_forecast=m.weekly_forecast,
                     vibe_labels=vibe_labels,
+                    venue_photos_urls=venue_photos_urls,
+                    opening_hours=opening_hours,
+                    special_days=special_days,
+                    is_open_now=is_open_now,
                 )
             )
 

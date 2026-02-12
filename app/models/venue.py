@@ -131,6 +131,7 @@ class MinifiedVenue(BaseModel):
     venue_lat: float
     venue_lng: float
     venue_name: str
+    venue_id: str = ""  # Venue identifier for client-side navigation
     venue_type: Optional[str] = None
     price_level: Optional[int] = None
     rating: Optional[float] = None
@@ -141,5 +142,13 @@ class MinifiedVenue(BaseModel):
 
     # Vibe attributes (atmosphere labels)
     vibe_labels: Optional[list[str]] = None
+
+    # Venue photos (from Google Places API)
+    venue_photos_urls: Optional[list[str]] = None
+
+    # Opening hours (from Google Places API - in Portuguese)
+    opening_hours: Optional[list[str]] = None  # ["Domingo: Fechado", "Segunda-feira: 20:00 – 03:00", ...]
+    special_days: Optional[list[str]] = None   # Holiday hours: ["25 de dezembro: Fechado", ...]
+    is_open_now: Optional[bool] = None         # Current open status
 
     model_config = ConfigDict(populate_by_name=True)

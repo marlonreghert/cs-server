@@ -93,6 +93,10 @@ class GooglePlacesDetailsResponse(BaseModel):
     place_id: str
     display_name: Optional[str] = None
 
+    # Business status from Google Places API
+    # Values: OPERATIONAL, CLOSED_TEMPORARILY, CLOSED_PERMANENTLY
+    business_status: Optional[str] = None
+
     # Boolean attributes from the API
     allows_dogs: Optional[bool] = None
     good_for_children: Optional[bool] = None
@@ -123,3 +127,23 @@ class GooglePlacesDetailsResponse(BaseModel):
 
     # Editorial summary (human-written)
     editorial_summary: Optional[str] = None
+
+    # Opening hours (from Google Places API)
+    # weekday_descriptions: Pre-formatted strings like "Segunda-feira: 20:00 – 03:00"
+    weekday_descriptions: Optional[list[str]] = None
+    # open_now: Current status from currentOpeningHours
+    open_now: Optional[bool] = None
+    # special_days: Secondary opening hours for holidays (pre-formatted)
+    special_days: Optional[list[str]] = None
+
+    def is_permanently_closed(self) -> bool:
+        """Check if the place is permanently closed."""
+        return self.business_status == "CLOSED_PERMANENTLY"
+
+    def is_temporarily_closed(self) -> bool:
+        """Check if the place is temporarily closed."""
+        return self.business_status == "CLOSED_TEMPORARILY"
+
+    def is_operational(self) -> bool:
+        """Check if the place is operational (open)."""
+        return self.business_status == "OPERATIONAL" or self.business_status is None

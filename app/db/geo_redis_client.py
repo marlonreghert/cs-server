@@ -92,6 +92,18 @@ class GeoRedisClient:
         """
         self.client.delete(key)
 
+    def zrem(self, name: str, *values: str) -> int:
+        """Remove members from a sorted set (including geo sets).
+
+        Args:
+            name: Redis sorted set key
+            *values: Members to remove
+
+        Returns:
+            Number of members removed
+        """
+        return self.client.zrem(name, *values)
+
     def add_location_with_json(
         self,
         geo_key: str,

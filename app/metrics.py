@@ -116,6 +116,41 @@ VENUES_WITH_VIBE_ATTRIBUTES = Gauge(
 )
 
 # =============================================================================
+# VENUE BUSINESS STATUS METRICS (from Google Places API)
+# =============================================================================
+
+# Venues by business status
+VENUES_BY_BUSINESS_STATUS = Counter(
+    "venues_by_business_status_total",
+    "Total number of venues checked by business status",
+    ["status"],  # status: operational, closed_temporarily, closed_permanently, unknown
+)
+
+# Permanently closed venues removed
+VENUES_PERMANENTLY_CLOSED_REMOVED = Counter(
+    "venues_permanently_closed_removed_total",
+    "Total number of permanently closed venues removed from database",
+)
+
+# Current count of permanently closed venues detected (snapshot)
+VENUES_PERMANENTLY_CLOSED_DETECTED = Gauge(
+    "venues_permanently_closed_detected",
+    "Number of permanently closed venues detected in last refresh",
+)
+
+# Temporarily closed venues removed
+VENUES_TEMPORARILY_CLOSED_REMOVED = Counter(
+    "venues_temporarily_closed_removed_total",
+    "Total number of temporarily closed venues removed from database",
+)
+
+# Current count of temporarily closed venues detected (snapshot)
+VENUES_TEMPORARILY_CLOSED_DETECTED = Gauge(
+    "venues_temporarily_closed_detected",
+    "Number of temporarily closed venues detected in last refresh",
+)
+
+# =============================================================================
 # BACKGROUND JOB METRICS
 # =============================================================================
 

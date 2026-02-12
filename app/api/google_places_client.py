@@ -1,4 +1,4 @@
-"""Google Places API (New) client for fetching venue vibe attributes."""
+"""Google Places API (New) client for fetching venue vibe attributes and photos."""
 import logging
 import time
 from typing import Optional
@@ -16,11 +16,20 @@ logger = logging.getLogger(__name__)
 # Google Places API (New) base URL
 GOOGLE_PLACES_API_BASE = "https://places.googleapis.com/v1"
 
+# Field mask for fetching photos
+PHOTOS_FIELDS_MASK = "photos"
+
 # Field mask for vibe-related attributes
 # See: https://developers.google.com/maps/documentation/places/web-service/place-details
 VIBE_FIELDS_MASK = ",".join([
     "id",
     "displayName",
+    # Business status (OPERATIONAL, CLOSED_TEMPORARILY, CLOSED_PERMANENTLY)
+    "businessStatus",
+    # Opening hours
+    "regularOpeningHours",           # Standard weekly hours
+    "currentOpeningHours",           # Today's hours (may differ due to holidays)
+    "currentSecondaryOpeningHours",  # Special hours (holidays, events)
     # Boolean attributes
     "allowsDogs",
     "goodForChildren",
@@ -45,6 +54,9 @@ VIBE_FIELDS_MASK = ",".join([
     "generativeSummary",
     "editorialSummary",
 ])
+
+# Language code for Portuguese (Brazil) - used for opening hours descriptions
+LANGUAGE_CODE = "pt-BR"
 
 
 class GooglePlacesAPIClient:
@@ -172,13 +184,17 @@ class GooglePlacesAPIClient:
         Uses the Google Places API (New) which provides structured attribute data.
 
         Args:
-            place_id: Google Place ID
+            place_id: Google Place ID (can be full resource name like 'places/ChIJ...' or just 'ChIJ...')
             fields_mask: Optional custom field mask (uses VIBE_FIELDS_MASK by default)
 
         Returns:
             GooglePlacesDetailsResponse with vibe attributes, or None on error
         """
-        endpoint = f"/places/{place_id}"
+        # Handle both formats: 'places/ChIJ...' or just 'ChIJ...'
+        if place_id.startswith("places/"):
+            endpoint = f"/{place_id}"
+        else:
+            endpoint = f"/places/{place_id}"
         url = f"{GOOGLE_PLACES_API_BASE}{endpoint}"
 
         headers = {
@@ -187,12 +203,15 @@ class GooglePlacesAPIClient:
             "X-Goog-FieldMask": fields_mask or VIBE_FIELDS_MASK,
         }
 
+        # Add language code for Portuguese opening hours descriptions
+        params = {"languageCode": LANGUAGE_CODE}
+
         logger.debug(f"[GooglePlacesAPIClient] GET {endpoint}")
 
         start_time = time.perf_counter()
 
         try:
-            response = await self.client.get(url, headers=headers)
+            response = await self.client.get(url, headers=headers, params=params)
 
             logger.debug(f"[GooglePlacesAPIClient] Response status: {response.status_code}")
 
@@ -269,9 +288,29 @@ class GooglePlacesAPIClient:
         if isinstance(editorial_summary_obj, dict):
             editorial_summary = editorial_summary_obj.get("text")
 
+        # Extract opening hours
+        regular_hours = data.get("regularOpeningHours", {})
+        current_hours = data.get("currentOpeningHours", {})
+        secondary_hours = data.get("currentSecondaryOpeningHours", {})
+
+        # Get weekday descriptions (pre-formatted strings in Portuguese)
+        weekday_descriptions = regular_hours.get("weekdayDescriptions", []) if regular_hours else None
+
+        # Get current open status
+        open_now = current_hours.get("openNow") if current_hours else None
+
+        # Get special days descriptions (holidays)
+        special_days = None
+        if secondary_hours:
+            secondary_descriptions = secondary_hours.get("weekdayDescriptions", [])
+            if secondary_descriptions:
+                special_days = secondary_descriptions
+
         return GooglePlacesDetailsResponse(
             place_id=place_id,
             display_name=display_name,
+            # Business status (OPERATIONAL, CLOSED_TEMPORARILY, CLOSED_PERMANENTLY)
+            business_status=data.get("businessStatus"),
             # Boolean attributes
             allows_dogs=data.get("allowsDogs"),
             good_for_children=data.get("goodForChildren"),
@@ -298,6 +337,10 @@ class GooglePlacesAPIClient:
             # Summaries
             generative_summary=generative_summary,
             editorial_summary=editorial_summary,
+            # Opening hours
+            weekday_descriptions=weekday_descriptions,
+            open_now=open_now,
+            special_days=special_days,
         )
 
     def details_to_vibe_attributes(
@@ -346,6 +389,80 @@ class GooglePlacesAPIClient:
             # AI Summary
             generative_summary=details.generative_summary or details.editorial_summary,
         )
+
+    async def get_place_photos(
+        self,
+        place_id: str,
+        max_photos: int = 5,
+        max_width: int = 800,
+    ) -> list[str]:
+        """Fetch photo URLs for a place.
+
+        Uses the Google Places API (New) to get photo references, then constructs
+        the photo URLs.
+
+        Args:
+            place_id: Google Place ID (can be full resource name like 'places/ChIJ...' or just 'ChIJ...')
+            max_photos: Maximum number of photos to fetch (default 5)
+            max_width: Maximum width in pixels for the photos (default 800)
+
+        Returns:
+            List of photo URLs (may be empty if no photos available)
+        """
+        # Handle both formats: 'places/ChIJ...' or just 'ChIJ...'
+        if place_id.startswith("places/"):
+            endpoint = f"/{place_id}"
+        else:
+            endpoint = f"/places/{place_id}"
+        url = f"{GOOGLE_PLACES_API_BASE}{endpoint}"
+
+        headers = {
+            "Content-Type": "application/json",
+            "X-Goog-Api-Key": self.api_key,
+            "X-Goog-FieldMask": PHOTOS_FIELDS_MASK,
+        }
+
+        logger.debug(f"[GooglePlacesAPIClient] Fetching photos for place: {place_id}")
+
+        start_time = time.perf_counter()
+
+        try:
+            response = await self.client.get(url, headers=headers)
+            response.raise_for_status()
+
+            data = response.json()
+            photos = data.get("photos", [])
+
+            duration = time.perf_counter() - start_time
+            GOOGLE_PLACES_API_CALL_DURATION_SECONDS.labels(endpoint="place_photos").observe(duration)
+            GOOGLE_PLACES_API_CALLS_TOTAL.labels(endpoint="place_photos", status="success").inc()
+
+            # Extract photo URLs (limit to max_photos)
+            photo_urls = []
+            for photo in photos[:max_photos]:
+                photo_name = photo.get("name")
+                if photo_name:
+                    # Construct the photo URL using the Places API photo endpoint
+                    photo_url = f"{GOOGLE_PLACES_API_BASE}/{photo_name}/media?maxWidthPx={max_width}&key={self.api_key}"
+                    photo_urls.append(photo_url)
+
+            logger.debug(f"[GooglePlacesAPIClient] Found {len(photo_urls)} photos for {place_id}")
+            return photo_urls
+
+        except httpx.HTTPStatusError as e:
+            duration = time.perf_counter() - start_time
+            GOOGLE_PLACES_API_CALL_DURATION_SECONDS.labels(endpoint="place_photos").observe(duration)
+            GOOGLE_PLACES_API_CALLS_TOTAL.labels(endpoint="place_photos", status="error").inc()
+            GOOGLE_PLACES_API_ERRORS_TOTAL.labels(endpoint="place_photos", error_type="http_error").inc()
+            logger.error(f"[GooglePlacesAPIClient] Photo fetch error for {place_id}: {e}")
+            return []
+
+        except Exception as e:
+            duration = time.perf_counter() - start_time
+            GOOGLE_PLACES_API_CALL_DURATION_SECONDS.labels(endpoint="place_photos").observe(duration)
+            GOOGLE_PLACES_API_CALLS_TOTAL.labels(endpoint="place_photos", status="error").inc()
+            logger.error(f"[GooglePlacesAPIClient] Photo fetch exception for {place_id}: {e}")
+            return []
 
 
 async def search_for_lgbtq_indicators(summary: Optional[str]) -> bool:

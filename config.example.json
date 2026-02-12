@@ -1,0 +1,55 @@
+{
+  "_comment": "cs-server configuration file. Copy to config.json and customize.",
+
+  "redis": {
+    "_comment": "Redis connection settings",
+    "redis_host": "redis",
+    "redis_port": 6379,
+    "redis_password": "",
+    "redis_db": 0
+  },
+
+  "venues_refresher": {
+    "_comment": "Venue data refresh schedules",
+    "venues_catalog_refresh_minutes": 43200,
+    "venues_live_refresh_minutes": 5,
+    "weekly_forecast_cron": "0 0 * * 0"
+  },
+
+  "besttime_api": {
+    "_comment": "BestTime API credentials for foot traffic data",
+    "besttime_private_key": "",
+    "besttime_public_key": "",
+    "besttime_endpoint_base_v1": "https://besttime.app/api/v1",
+    "besttime_search_polling_wait_seconds": 15
+  },
+
+  "google_places_api": {
+    "_comment": "Google Places API enrichment (vibe attributes, business status, permanently closed detection)",
+    "google_places_api_key": "",
+    "google_places_enrichment_enabled": false,
+    "google_places_enrichment_cron": "0 3 * * *",
+    "google_places_enrichment_on_startup": false,
+    "remove_permanently_closed_venues": true
+  },
+
+  "photo_enrichment": {
+    "_comment": "Photo enrichment using Google Places API",
+    "photo_enrichment_enabled": false,
+    "photo_enrichment_on_startup": false,
+    "photo_enrichment_limit": 20,
+    "photos_per_venue": 5
+  },
+
+  "server": {
+    "_comment": "Server configuration",
+    "server_port": 8080,
+    "log_level": "INFO"
+  },
+
+  "startup": {
+    "_comment": "Startup behavior",
+    "refresh_on_startup": true,
+    "venue_limit_override": 0
+  }
+}

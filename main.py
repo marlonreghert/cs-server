@@ -21,7 +21,7 @@ from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
 
 from app.config import Settings
 from app.container import Container
-from app.routers import venue_router, set_venue_handler
+from app.routers import venue_router, set_venue_handler, debug_router, set_debug_dependencies
 from app.middleware import PrometheusMiddleware
 from app.metrics import (
     BACKGROUND_JOB_RUNS_TOTAL,
@@ -100,32 +100,66 @@ async def run_weekly_forecast_refresh_job():
         logger.error(f"[Scheduler] WeeklyForecastRefreshJob failed: {e}")
 
 
-async def run_vibe_attributes_refresh_job():
-    """Background job: Refresh vibe attributes for all venues from Google Places API."""
-    job_name = "vibe_attributes_refresh"
-    logger.info("[Scheduler] Running VibeAttributesRefreshJob")
+async def run_google_places_enrichment_job():
+    """Background job: Enrich venues with data from Google Places API.
+
+    This includes:
+    - Vibe attributes (pet friendly, outdoor seating, etc.)
+    - Business status checks (operational, temporarily/permanently closed)
+    - Removal of permanently closed venues
+    """
+    job_name = "google_places_enrichment"
+    logger.info("[Scheduler] Running GooglePlacesEnrichmentJob")
     start_time = time.perf_counter()
 
     # Check if vibe attributes service is available
-    if container.vibe_attributes_service is None:
+    if container.google_places_enrichment_service is None:
         logger.warning(
-            "[Scheduler] VibeAttributesRefreshJob skipped: "
+            "[Scheduler] GooglePlacesEnrichmentJob skipped: "
             "Google Places API not configured"
         )
         return
 
     try:
-        await container.vibe_attributes_service.refresh_vibe_attributes_for_all_venues()
+        await container.google_places_enrichment_service.enrich_all_venues()
         duration = time.perf_counter() - start_time
         BACKGROUND_JOB_DURATION_SECONDS.labels(job_name=job_name).observe(duration)
         BACKGROUND_JOB_RUNS_TOTAL.labels(job_name=job_name, status="success").inc()
         BACKGROUND_JOB_LAST_RUN_TIMESTAMP.labels(job_name=job_name).set_to_current_time()
-        logger.info("[Scheduler] VibeAttributesRefreshJob completed")
+        logger.info("[Scheduler] GooglePlacesEnrichmentJob completed")
     except Exception as e:
         duration = time.perf_counter() - start_time
         BACKGROUND_JOB_DURATION_SECONDS.labels(job_name=job_name).observe(duration)
         BACKGROUND_JOB_RUNS_TOTAL.labels(job_name=job_name, status="error").inc()
-        logger.error(f"[Scheduler] VibeAttributesRefreshJob failed: {e}")
+        logger.error(f"[Scheduler] GooglePlacesEnrichmentJob failed: {e}")
+
+
+async def run_photo_enrichment_job():
+    """Background job: Enrich venues with photos from Google Places API."""
+    job_name = "photo_enrichment"
+    logger.info("[Scheduler] Running PhotoEnrichmentJob")
+    start_time = time.perf_counter()
+
+    # Check if photo enrichment service is available
+    if container.photo_enrichment_service is None:
+        logger.warning(
+            "[Scheduler] PhotoEnrichmentJob skipped: "
+            "Google Places API not configured"
+        )
+        return
+
+    try:
+        await container.photo_enrichment_service.refresh_photos_for_venues()
+        duration = time.perf_counter() - start_time
+        BACKGROUND_JOB_DURATION_SECONDS.labels(job_name=job_name).observe(duration)
+        BACKGROUND_JOB_RUNS_TOTAL.labels(job_name=job_name, status="success").inc()
+        BACKGROUND_JOB_LAST_RUN_TIMESTAMP.labels(job_name=job_name).set_to_current_time()
+        logger.info("[Scheduler] PhotoEnrichmentJob completed")
+    except Exception as e:
+        duration = time.perf_counter() - start_time
+        BACKGROUND_JOB_DURATION_SECONDS.labels(job_name=job_name).observe(duration)
+        BACKGROUND_JOB_RUNS_TOTAL.labels(job_name=job_name, status="error").inc()
+        logger.error(f"[Scheduler] PhotoEnrichmentJob failed: {e}")
 
 
 def start_background_jobs(settings: Settings):
@@ -172,23 +206,42 @@ def start_background_jobs(settings: Settings):
         f"{settings.weekly_forecast_cron}"
     )
 
-    # Job 4: Vibe attributes refresh (only if enabled and configured)
-    if settings.vibe_attributes_refresh_enabled and settings.google_places_api_key:
+    # Job 4: Google Places enrichment (only if enabled and configured)
+    if settings.google_places_enrichment_enabled and settings.google_places_api_key:
         scheduler.add_job(
-            run_vibe_attributes_refresh_job,
-            trigger=CronTrigger.from_crontab(settings.vibe_attributes_refresh_cron),
-            id="vibe_attributes_refresh",
-            name="Vibe Attributes Refresh (Daily 3 AM)",
+            run_google_places_enrichment_job,
+            trigger=CronTrigger.from_crontab(settings.google_places_enrichment_cron),
+            id="google_places_enrichment",
+            name="Google Places Enrichment (Daily 3 AM)",
             replace_existing=True,
         )
         logger.info(
-            f"[Scheduler] Scheduled vibe attributes refresh with cron: "
-            f"{settings.vibe_attributes_refresh_cron}"
+            f"[Scheduler] Scheduled Google Places enrichment with cron: "
+            f"{settings.google_places_enrichment_cron}"
         )
     else:
         logger.info(
-            "[Scheduler] Vibe attributes refresh disabled "
+            "[Scheduler] Google Places enrichment disabled "
             "(missing API key or disabled in config)"
+        )
+
+    # Job 5: Photo enrichment (only if enabled and configured)
+    if settings.photo_enrichment_enabled and settings.google_places_api_key:
+        scheduler.add_job(
+            run_photo_enrichment_job,
+            trigger=CronTrigger.from_crontab(settings.google_places_enrichment_cron),  # Same schedule as enrichment
+            id="photo_enrichment",
+            name=f"Photo Enrichment (limit={settings.photo_enrichment_limit})",
+            replace_existing=True,
+        )
+        logger.info(
+            f"[Scheduler] Scheduled photo enrichment with limit={settings.photo_enrichment_limit}, "
+            f"photos_per_venue={settings.photos_per_venue}"
+        )
+    else:
+        logger.info(
+            "[Scheduler] Photo enrichment disabled "
+            "(PHOTO_ENRICHMENT_ENABLED=false or missing API key)"
         )
 
     # Start scheduler
@@ -213,6 +266,9 @@ async def startup_sequence(settings: Settings):
     logger.info("[Main] Injecting handler into router")
     set_venue_handler(container.venue_handler)
     logger.info("[Main] Handler injected successfully")
+
+    # Inject dependencies for debug router
+    set_debug_dependencies(container.redis_venue_dao, container.google_places_api)
 
     # Check if we should run initial refresh
     if settings.refresh_on_startup:
@@ -244,22 +300,48 @@ async def startup_sequence(settings: Settings):
     else:
         logger.info("[Main] Skipping initial refresh (REFRESH_ON_STARTUP=false)")
 
-    # Step 4: Initial vibe attributes refresh (if enabled)
+    # Step 4: Initial Google Places enrichment (if enabled)
     if (
-        settings.vibe_attributes_refresh_on_startup
+        settings.google_places_enrichment_on_startup
         and settings.google_places_api_key
-        and container.vibe_attributes_service is not None
+        and container.google_places_enrichment_service is not None
     ):
-        logger.info("[Main] Refreshing vibe attributes (initial load)")
+        # Force refresh if permanently closed removal is enabled
+        # This ensures we re-check all venues for permanently closed status
+        force_refresh = settings.remove_permanently_closed_venues
+        if force_refresh:
+            logger.info(
+                "[Main] Running Google Places enrichment with force_refresh=True "
+                "(remove_permanently_closed_venues is enabled)"
+            )
+        else:
+            logger.info("[Main] Running Google Places enrichment (initial load)")
         try:
-            await container.vibe_attributes_service.refresh_vibe_attributes_for_all_venues()
-            logger.info("[Main] Initial vibe attributes refresh completed")
+            await container.google_places_enrichment_service.enrich_all_venues(
+                force_refresh=force_refresh
+            )
+            logger.info("[Main] Initial Google Places enrichment completed")
         except Exception as e:
-            logger.error(f"[Main] Initial vibe attributes refresh failed: {e}")
+            logger.error(f"[Main] Initial Google Places enrichment failed: {e}")
     else:
-        logger.info("[Main] Skipping initial vibe attributes refresh")
+        logger.info("[Main] Skipping initial Google Places enrichment")
 
-    # Step 5: Start background jobs
+    # Step 5: Initial photo enrichment (if enabled)
+    if (
+        settings.photo_enrichment_on_startup
+        and settings.google_places_api_key
+        and container.photo_enrichment_service is not None
+    ):
+        logger.info("[Main] Enriching venues with photos (initial load)")
+        try:
+            await container.photo_enrichment_service.refresh_photos_for_venues()
+            logger.info("[Main] Initial photo enrichment completed")
+        except Exception as e:
+            logger.error(f"[Main] Initial photo enrichment failed: {e}")
+    else:
+        logger.info("[Main] Skipping initial photo enrichment")
+
+    # Step 6: Start background jobs
     logger.info("[Main] Starting periodic jobs")
     start_background_jobs(settings)
 
@@ -308,8 +390,9 @@ app = FastAPI(
 # Add Prometheus metrics middleware
 app.add_middleware(PrometheusMiddleware)
 
-# Register router at app creation time (before uvicorn starts)
+# Register routers at app creation time (before uvicorn starts)
 app.include_router(venue_router)
+app.include_router(debug_router)
 
 
 # Health check endpoint
