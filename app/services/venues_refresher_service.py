@@ -74,6 +74,7 @@ class VenuesRefresherService:
         venue_dao: RedisVenueDAO,
         besttime_api: BestTimeAPIClient,
         venue_limit_override: int = 0,
+        venue_total_limit: int = -1,
     ):
         """Initialize refresher service.
 
@@ -81,10 +82,12 @@ class VenuesRefresherService:
             venue_dao: Redis DAO for venue persistence
             besttime_api: BestTime API client
             venue_limit_override: If > 0, overrides the limit for each location
+            venue_total_limit: Global cap on total venues across all locations (-1 = disabled, 0 = fetch none)
         """
         self.venue_dao = venue_dao
         self.besttime_api = besttime_api
         self.venue_limit_override = venue_limit_override
+        self.venue_total_limit = venue_total_limit
 
     def update_data_quality_metrics(self) -> None:
         """Compute and update all data quality metrics from cached venues.
@@ -465,11 +468,31 @@ class VenuesRefresherService:
         min_busy = 1
         own_venues_only = False
 
+        # Global total limit: -1 = disabled, 0 = fetch none
+        if self.venue_total_limit == 0:
+            logger.info(
+                "[VenuesRefresherService] venue_total_limit=0, skipping venue fetch"
+            )
+            return
+
+        remaining_budget = self.venue_total_limit  # -1 means unlimited
+
         for loc in DEFAULT_LOCATIONS:
             # Use override limit if set, otherwise use location's default limit
             effective_limit = (
                 self.venue_limit_override if self.venue_limit_override > 0 else loc.limit
             )
+
+            # Cap per-location limit by remaining global budget
+            if remaining_budget >= 0:
+                effective_limit = min(effective_limit, remaining_budget)
+                if effective_limit <= 0:
+                    logger.info(
+                        f"[VenuesRefresherService] Global venue_total_limit "
+                        f"({self.venue_total_limit}) reached, skipping remaining locations"
+                    )
+                    break
+
             logger.info(
                 f"[VenuesRefresherService] VenueFilter refresh at "
                 f"lat={loc.lat:.6f}, lng={loc.lng:.6f} "
@@ -498,6 +521,8 @@ class VenuesRefresherService:
                 )
                 REFRESH_VENUES_DISCOVERED.labels(location=location_label).set(len(ids))
                 total_inserted += len(ids)
+                if remaining_budget >= 0:
+                    remaining_budget -= len(ids)
             except Exception as e:
                 logger.error(
                     f"[VenuesRefresherService] VenueFilter refresh failed for "

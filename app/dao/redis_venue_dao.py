@@ -8,6 +8,7 @@ from app.db.geo_redis_client import GeoRedisClient
 from app.models import Venue, LiveForecastResponse, WeekRawDay
 from app.models.vibe_attributes import VibeAttributes
 from app.models.opening_hours import OpeningHours
+from app.models.instagram import VenueInstagram
 
 logger = logging.getLogger(__name__)
 
@@ -19,6 +20,7 @@ WEEKLY_FORECAST_KEY_FORMAT = "weekly_forecast_v1:{}_{}"
 VIBE_ATTRIBUTES_KEY_FORMAT = "vibe_attributes_v1:{}"
 VENUE_PHOTOS_KEY_FORMAT = "venue_photos_v1:{}"
 OPENING_HOURS_KEY_FORMAT = "opening_hours_v1:{}"
+VENUE_INSTAGRAM_KEY_FORMAT = "venue_instagram_v1:{}"
 
 
 class RedisVenueDAO:
@@ -112,6 +114,10 @@ class RedisVenueDAO:
 
             # Remove opening hours
             self.delete_opening_hours(venue_id)
+
+            # Remove Instagram cache
+            ig_key = VENUE_INSTAGRAM_KEY_FORMAT.format(venue_id)
+            self.client.del_(ig_key)
 
             logger.info(f"[RedisVenueDAO] Deleted venue {venue_id} and all associated data")
             return True
@@ -442,3 +448,80 @@ class RedisVenueDAO:
         key = OPENING_HOURS_KEY_FORMAT.format(venue_id)
         self.client.del_(key)
         logger.info(f"[RedisVenueDAO] Deleted opening hours cache for {venue_id}")
+
+    # =========================================================================
+    # VENUE INSTAGRAM METHODS
+    # =========================================================================
+
+    def set_venue_instagram(
+        self, instagram: VenueInstagram, cache_ttl_days: int = 30, not_found_ttl_days: int = 7
+    ) -> None:
+        """Cache Instagram discovery result for a venue with TTL.
+
+        Args:
+            instagram: VenueInstagram result to cache
+            cache_ttl_days: TTL in days for found results
+            not_found_ttl_days: TTL in days for not_found results
+        """
+        key = VENUE_INSTAGRAM_KEY_FORMAT.format(instagram.venue_id)
+        json_data = instagram.model_dump_json(by_alias=True)
+
+        if instagram.status == "not_found":
+            ttl_seconds = not_found_ttl_days * 86400
+        else:
+            ttl_seconds = cache_ttl_days * 86400
+
+        self.client.setex(key, ttl_seconds, json_data)
+        logger.debug(
+            f"[RedisVenueDAO] Cached Instagram for {instagram.venue_id}: "
+            f"status={instagram.status}, ttl={ttl_seconds}s"
+        )
+
+    def get_venue_instagram(self, venue_id: str) -> Optional[VenueInstagram]:
+        """Retrieve cached Instagram data for a venue.
+
+        Args:
+            venue_id: Venue identifier
+
+        Returns:
+            VenueInstagram or None if not cached / expired
+        """
+        key = VENUE_INSTAGRAM_KEY_FORMAT.format(venue_id)
+        try:
+            json_str = self.client.get(key)
+            if json_str is None:
+                return None
+            return VenueInstagram.model_validate_json(json_str)
+        except redis.RedisError as e:
+            logger.error(f"Failed to get venue Instagram from Redis: {e}")
+            return None
+
+    def delete_venue_instagram(self, venue_id: str) -> None:
+        """Delete cached Instagram data for a venue.
+
+        Args:
+            venue_id: Venue identifier
+        """
+        key = VENUE_INSTAGRAM_KEY_FORMAT.format(venue_id)
+        self.client.del_(key)
+        logger.info(f"[RedisVenueDAO] Deleted Instagram cache for {venue_id}")
+
+    def count_venues_with_instagram(self) -> int:
+        """Count venues with cached Instagram results (found or low_confidence).
+
+        Returns:
+            Number of venues with Instagram handles
+        """
+        pattern = "venue_instagram_v1:*"
+        keys = self.client.keys(pattern)
+        count = 0
+        for key in keys:
+            try:
+                json_str = self.client.get(key)
+                if json_str:
+                    data = VenueInstagram.model_validate_json(json_str)
+                    if data.has_instagram():
+                        count += 1
+            except Exception:
+                continue
+        return count

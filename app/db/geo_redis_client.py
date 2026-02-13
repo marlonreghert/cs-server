@@ -84,6 +84,16 @@ class GeoRedisClient:
         """
         return self.client.keys(pattern)
 
+    def setex(self, key: str, ttl_seconds: int, value: str) -> None:
+        """Set a key-value pair with expiration.
+
+        Args:
+            key: Redis key
+            ttl_seconds: Time-to-live in seconds
+            value: String value to store
+        """
+        self.client.setex(key, ttl_seconds, value)
+
     def del_(self, key: str) -> None:
         """Delete a key from Redis.
 

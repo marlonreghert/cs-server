@@ -231,6 +231,17 @@ class VenueHandler:
             except Exception as e:
                 logger.debug(f"[VenueHandler] No opening hours for {m.venue.venue_id}: {e}")
 
+            # Get Instagram handle if available
+            instagram_handle: Optional[str] = None
+            instagram_url: Optional[str] = None
+            try:
+                ig_data = self.venue_dao.get_venue_instagram(m.venue.venue_id)
+                if ig_data and ig_data.has_instagram():
+                    instagram_handle = ig_data.instagram_handle
+                    instagram_url = ig_data.instagram_url
+            except Exception as e:
+                logger.debug(f"[VenueHandler] No Instagram for {m.venue.venue_id}: {e}")
+
             minified.append(
                 MinifiedVenue(
                     forecast=m.venue.forecast,
@@ -252,6 +263,8 @@ class VenueHandler:
                     opening_hours=opening_hours,
                     special_days=special_days,
                     is_open_now=is_open_now,
+                    instagram_handle=instagram_handle,
+                    instagram_url=instagram_url,
                 )
             )
 

@@ -128,6 +128,9 @@ class GooglePlacesDetailsResponse(BaseModel):
     # Editorial summary (human-written)
     editorial_summary: Optional[str] = None
 
+    # Website URI (may be an Instagram URL for some venues)
+    website_uri: Optional[str] = None
+
     # Opening hours (from Google Places API)
     # weekday_descriptions: Pre-formatted strings like "Segunda-feira: 20:00 – 03:00"
     weekday_descriptions: Optional[list[str]] = None

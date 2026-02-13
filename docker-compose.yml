@@ -33,6 +33,8 @@ services:
       - GOOGLE_PLACES_API_KEY=${GOOGLE_PLACES_API_KEY:-}
       - VIBE_ATTRIBUTES_REFRESH_ENABLED=false
       - VIBE_ATTRIBUTES_REFRESH_CRON=0 3 * * *
+      # Instagram Discovery (Apify) - token as env var, rest via JSON config
+      - APIFY_API_TOKEN=${APIFY_API_TOKEN:-}
 
   redis:
       image: redis:latest

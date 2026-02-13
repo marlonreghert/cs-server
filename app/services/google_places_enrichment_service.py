@@ -5,9 +5,11 @@ This service handles:
 - Business status checks (operational, temporarily/permanently closed)
 - Removal of permanently closed venues
 - Removal of temporarily closed venues (configurable via remove_temporarily_closed_venues)
+- Instagram handle extraction from venue website URLs
 """
 import asyncio
 import logging
+import re
 from typing import Optional
 
 from app.api.google_places_client import GooglePlacesAPIClient, search_for_lgbtq_indicators
@@ -15,6 +17,7 @@ from app.config import settings
 from app.dao.redis_venue_dao import RedisVenueDAO
 from app.models.vibe_attributes import VibeAttributes
 from app.models.opening_hours import OpeningHours
+from app.models.instagram import VenueInstagram
 from app.metrics import (
     VIBE_ATTRIBUTES_FETCH_RESULTS,
     VENUES_WITH_VIBE_ATTRIBUTES,
@@ -23,6 +26,7 @@ from app.metrics import (
     VENUES_PERMANENTLY_CLOSED_DETECTED,
     VENUES_TEMPORARILY_CLOSED_REMOVED,
     VENUES_TEMPORARILY_CLOSED_DETECTED,
+    INSTAGRAM_ENRICHMENT_RESULTS,
 )
 
 logger = logging.getLogger(__name__)
@@ -168,6 +172,10 @@ class GooglePlacesEnrichmentService:
                     f"[GooglePlacesEnrichment] Stored opening hours for {venue_id}: "
                     f"{len(details.weekday_descriptions)} days"
                 )
+
+            # Extract Instagram handle from website URL if it's an Instagram link
+            # This provides a free, high-confidence source before Apify fallback
+            self._try_extract_instagram_from_website(venue_id, details.website_uri)
 
             logger.info(
                 f"[GooglePlacesEnrichment] Enriched {venue_id}: "
@@ -353,3 +361,69 @@ class GooglePlacesEnrichmentService:
         if attrs:
             return attrs.get_vibe_labels()
         return []
+
+    def _try_extract_instagram_from_website(
+        self, venue_id: str, website_uri: Optional[str]
+    ) -> None:
+        """Extract Instagram handle from a venue's website URL if it's an Instagram link.
+
+        Many small venues set their Instagram page as their website in Google.
+        This gives us the handle for free (no Apify cost, high confidence).
+
+        Args:
+            venue_id: Our internal venue ID
+            website_uri: Website URL from Google Places API
+        """
+        if not website_uri:
+            return
+
+        # Already have Instagram cached for this venue? Skip.
+        existing = self.venue_dao.get_venue_instagram(venue_id)
+        if existing is not None:
+            return
+
+        handle = self._parse_instagram_handle(website_uri)
+        if not handle:
+            return
+
+        ig_data = VenueInstagram(
+            venue_id=venue_id,
+            instagram_handle=handle,
+            instagram_url=f"https://instagram.com/{handle}",
+            confidence_score=1.0,
+            status="found",
+        )
+        self.venue_dao.set_venue_instagram(
+            ig_data,
+            cache_ttl_days=settings.instagram_cache_ttl_days,
+            not_found_ttl_days=settings.instagram_not_found_cache_ttl_days,
+        )
+        INSTAGRAM_ENRICHMENT_RESULTS.labels(result="found_via_google_places").inc()
+        logger.info(
+            f"[GooglePlacesEnrichment] Extracted Instagram @{handle} "
+            f"from website for {venue_id}"
+        )
+
+    @staticmethod
+    def _parse_instagram_handle(url: str) -> Optional[str]:
+        """Extract Instagram username from a URL.
+
+        Handles formats like:
+        - https://www.instagram.com/barconchittas/
+        - https://instagram.com/barconchittas
+        - http://instagram.com/barconchittas?hl=pt
+
+        Returns:
+            Username string or None if not an Instagram URL
+        """
+        match = re.match(
+            r"https?://(?:www\.)?instagram\.com/([A-Za-z0-9_.]+)",
+            url.strip(),
+        )
+        if match:
+            handle = match.group(1)
+            # Ignore non-profile paths
+            if handle.lower() in ("p", "explore", "reel", "stories", "accounts", "about"):
+                return None
+            return handle
+        return None

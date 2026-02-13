@@ -12,6 +12,9 @@ from app.api.google_places_client import GooglePlacesAPIClient
 from app.services import VenueService, VenuesRefresherService
 from app.services.google_places_enrichment_service import GooglePlacesEnrichmentService
 from app.services.photo_enrichment_service import PhotoEnrichmentService
+from app.api.apify_instagram_client import ApifyInstagramClient
+from app.services.instagram_enrichment_service import InstagramEnrichmentService
+from app.services.instagram_validator import InstagramValidator
 from app.handlers import VenueHandler
 
 logger = logging.getLogger(__name__)
@@ -96,12 +99,44 @@ class Container:
                 "Google Places enrichment and photo features will be disabled."
             )
 
+        # Initialize Apify Instagram client and enrichment service
+        self.apify_instagram_client = None
+        self.instagram_enrichment_service = None
+
+        if settings.apify_api_token:
+            self.apify_instagram_client = ApifyInstagramClient(
+                api_token=settings.apify_api_token,
+            )
+            logger.info("[Container] Apify Instagram client initialized")
+
+            validator = InstagramValidator(
+                auto_accept_threshold=settings.instagram_auto_accept_threshold,
+                low_confidence_threshold=settings.instagram_min_confidence,
+            )
+
+            self.instagram_enrichment_service = InstagramEnrichmentService(
+                apify_client=self.apify_instagram_client,
+                venue_dao=self.redis_venue_dao,
+                validator=validator,
+                search_candidates=settings.instagram_search_candidates,
+                enrichment_limit=settings.instagram_enrichment_limit,
+                cache_ttl_days=settings.instagram_cache_ttl_days,
+                not_found_ttl_days=settings.instagram_not_found_cache_ttl_days,
+            )
+            logger.info("[Container] Instagram Enrichment service initialized")
+        else:
+            logger.warning(
+                "[Container] Apify API token not configured. "
+                "Instagram discovery will be disabled."
+            )
+
         # Initialize services
         self.venue_service = VenueService(self.redis_venue_dao, self.besttime_api)
         self.venues_refresher_service = VenuesRefresherService(
             self.redis_venue_dao,
             self.besttime_api,
             venue_limit_override=settings.venue_limit_override,
+            venue_total_limit=settings.venue_total_limit,
         )
 
         # Initialize handlers
@@ -124,3 +159,10 @@ class Container:
                 logger.info("[Container] Google Places API client closed")
             except Exception as e:
                 logger.error(f"[Container] Error closing Google Places API client: {e}")
+
+        if self.apify_instagram_client:
+            try:
+                await self.apify_instagram_client.close()
+                logger.info("[Container] Apify Instagram client closed")
+            except Exception as e:
+                logger.error(f"[Container] Error closing Apify Instagram client: {e}")

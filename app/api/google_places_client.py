@@ -26,6 +26,8 @@ VIBE_FIELDS_MASK = ",".join([
     "displayName",
     # Business status (OPERATIONAL, CLOSED_TEMPORARILY, CLOSED_PERMANENTLY)
     "businessStatus",
+    # Website (used to detect Instagram URLs)
+    "websiteUri",
     # Opening hours
     "regularOpeningHours",           # Standard weekly hours
     "currentOpeningHours",           # Today's hours (may differ due to holidays)
@@ -309,6 +311,7 @@ class GooglePlacesAPIClient:
         return GooglePlacesDetailsResponse(
             place_id=place_id,
             display_name=display_name,
+            website_uri=data.get("websiteUri"),
             # Business status (OPERATIONAL, CLOSED_TEMPORARILY, CLOSED_PERMANENTLY)
             business_status=data.get("businessStatus"),
             # Boolean attributes

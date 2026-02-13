@@ -151,4 +151,8 @@ class MinifiedVenue(BaseModel):
     special_days: Optional[list[str]] = None   # Holiday hours: ["25 de dezembro: Fechado", ...]
     is_open_now: Optional[bool] = None         # Current open status
 
+    # Instagram (from Apify enrichment)
+    instagram_handle: Optional[str] = None
+    instagram_url: Optional[str] = None
+
     model_config = ConfigDict(populate_by_name=True)

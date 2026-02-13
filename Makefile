@@ -15,7 +15,7 @@ setup-root:
 
 # Build the Docker image
 build:
-	docker buildx build --platform=linux/amd64,linux/arm64 --no-cache -t $(IMAGE_NAME):$(IMAGE_TAG) .  --push
+	docker buildx build --platform=linux/amd64,linux/arm64 --no-cache -t $(IMAGE_NAME):$(IMAGE_TAG) . 
 
 # Push the Docker image to the registry
 push:

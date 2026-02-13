@@ -41,6 +41,20 @@
     "photos_per_venue": 5
   },
 
+  "instagram_discovery": {
+    "_comment": "Instagram venue discovery using Apify scraper (weekly enrichment)",
+    "apify_api_token": "",
+    "instagram_enrichment_enabled": false,
+    "instagram_enrichment_cron": "0 4 * * 1",
+    "instagram_enrichment_on_startup": false,
+    "instagram_min_confidence": 0.50,
+    "instagram_auto_accept_threshold": 0.75,
+    "instagram_search_candidates": 3,
+    "instagram_enrichment_limit": 0,
+    "instagram_cache_ttl_days": 30,
+    "instagram_not_found_cache_ttl_days": 7
+  },
+
   "server": {
     "_comment": "Server configuration",
     "server_port": 8080,
@@ -50,6 +64,7 @@
   "startup": {
     "_comment": "Startup behavior",
     "refresh_on_startup": true,
-    "venue_limit_override": 0
+    "venue_limit_override": 0,
+    "venue_total_limit": -1
   }
 }

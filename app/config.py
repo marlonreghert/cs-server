@@ -128,6 +128,18 @@ class Settings(BaseSettings):
     photo_enrichment_limit: int = 20  # Max venues to enrich with photos per refresh cycle (to control API costs)
     photos_per_venue: int = 5  # Number of photos to fetch per venue
 
+    # Instagram Discovery (Apify) Configuration
+    apify_api_token: str = ""
+    instagram_enrichment_enabled: bool = False
+    instagram_enrichment_cron: str = "0 4 * * 1"  # Weekly: Monday at 4 AM
+    instagram_enrichment_on_startup: bool = False
+    instagram_min_confidence: float = 0.50
+    instagram_auto_accept_threshold: float = 0.75
+    instagram_search_candidates: int = 3
+    instagram_enrichment_limit: int = 0  # Max venues per run (0 = unlimited)
+    instagram_cache_ttl_days: int = 30
+    instagram_not_found_cache_ttl_days: int = 7
+
     # Server Configuration
     server_port: int = 8080
     log_level: str = "INFO"
@@ -137,6 +149,8 @@ class Settings(BaseSettings):
     refresh_on_startup: bool = True
     # If set (> 0), overrides the limit for each location when fetching venues
     venue_limit_override: int = 0
+    # Global cap on total venues fetched across all locations (-1 = disabled, 0 = fetch none)
+    venue_total_limit: int = -1
 
     # Project Paths
     project_root: str = ""

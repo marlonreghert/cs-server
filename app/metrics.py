@@ -151,6 +151,58 @@ VENUES_TEMPORARILY_CLOSED_DETECTED = Gauge(
 )
 
 # =============================================================================
+# APIFY INSTAGRAM DISCOVERY METRICS
+# =============================================================================
+
+# API call counter
+APIFY_API_CALLS_TOTAL = Counter(
+    "apify_api_calls_total",
+    "Total number of Apify API calls",
+    ["endpoint", "status"],
+)
+
+# API call latency
+APIFY_API_CALL_DURATION_SECONDS = Histogram(
+    "apify_api_call_duration_seconds",
+    "Apify API call latency in seconds",
+    ["endpoint"],
+    buckets=(1.0, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0),
+)
+
+# API error counter by error type
+APIFY_API_ERRORS_TOTAL = Counter(
+    "apify_api_errors_total",
+    "Total number of Apify API errors",
+    ["endpoint", "error_type"],
+)
+
+# Instagram enrichment results
+INSTAGRAM_ENRICHMENT_RESULTS = Counter(
+    "instagram_enrichment_results_total",
+    "Results of Instagram enrichment operations",
+    ["result"],
+)
+
+# Venues with Instagram handle (snapshot gauge)
+INSTAGRAM_VENUES_WITH_HANDLE = Gauge(
+    "instagram_venues_with_handle",
+    "Number of venues with a discovered Instagram handle",
+)
+
+# Instagram validation confidence score distribution
+INSTAGRAM_VALIDATION_SCORES = Histogram(
+    "instagram_validation_scores",
+    "Distribution of Instagram validation confidence scores",
+    buckets=(0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0),
+)
+
+# Estimated Apify cost (cumulative)
+INSTAGRAM_APIFY_COST_ESTIMATE = Counter(
+    "instagram_apify_cost_estimate_usd",
+    "Estimated cumulative Apify API cost in USD",
+)
+
+# =============================================================================
 # BACKGROUND JOB METRICS
 # =============================================================================
 
