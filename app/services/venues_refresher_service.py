@@ -75,6 +75,10 @@ class VenuesRefresherService:
         besttime_api: BestTimeAPIClient,
         venue_limit_override: int = 0,
         venue_total_limit: int = -1,
+        dev_mode: bool = False,
+        dev_lat: float = 0.0,
+        dev_lng: float = 0.0,
+        dev_radius: int = 6000,
     ):
         """Initialize refresher service.
 
@@ -83,11 +87,19 @@ class VenuesRefresherService:
             besttime_api: BestTime API client
             venue_limit_override: If > 0, overrides the limit for each location
             venue_total_limit: Global cap on total venues across all locations (-1 = disabled, 0 = fetch none)
+            dev_mode: If True, use single dev location instead of DEFAULT_LOCATIONS
+            dev_lat: Dev mode latitude
+            dev_lng: Dev mode longitude
+            dev_radius: Dev mode radius in meters
         """
         self.venue_dao = venue_dao
         self.besttime_api = besttime_api
         self.venue_limit_override = venue_limit_override
         self.venue_total_limit = venue_total_limit
+        self.dev_mode = dev_mode
+        self.dev_lat = dev_lat
+        self.dev_lng = dev_lng
+        self.dev_radius = dev_radius
 
     def update_data_quality_metrics(self) -> None:
         """Compute and update all data quality metrics from cached venues.
@@ -477,7 +489,24 @@ class VenuesRefresherService:
 
         remaining_budget = self.venue_total_limit  # -1 means unlimited
 
-        for loc in DEFAULT_LOCATIONS:
+        # In dev mode, use single dev location instead of all defaults
+        if self.dev_mode:
+            locations = [
+                Location(
+                    lat=self.dev_lat,
+                    lng=self.dev_lng,
+                    radius=self.dev_radius,
+                    limit=self.venue_total_limit if self.venue_total_limit > 0 else 500,
+                )
+            ]
+            logger.info(
+                f"[VenuesRefresherService] DEV MODE: using single location "
+                f"lat={self.dev_lat:.5f}, lng={self.dev_lng:.5f}, radius={self.dev_radius}"
+            )
+        else:
+            locations = DEFAULT_LOCATIONS
+
+        for loc in locations:
             # Use override limit if set, otherwise use location's default limit
             effective_limit = (
                 self.venue_limit_override if self.venue_limit_override > 0 else loc.limit

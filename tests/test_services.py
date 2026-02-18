@@ -22,7 +22,10 @@ from app.models import (
 @pytest.fixture
 def mock_venue_dao():
     """Create mock venue DAO."""
-    return Mock()
+    dao = Mock()
+    # update_data_quality_metrics() calls list_all_venues() and then len() on the result
+    dao.list_all_venues.return_value = []
+    return dao
 
 
 @pytest.fixture

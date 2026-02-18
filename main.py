@@ -189,6 +189,87 @@ async def run_instagram_enrichment_job():
         logger.error(f"[Scheduler] InstagramEnrichmentJob failed: {e}")
 
 
+async def run_menu_photo_enrichment_job():
+    """Background job: Fetch menu photos from Google Maps via Apify and store on S3."""
+    job_name = "menu_photo_enrichment"
+    logger.info("[Scheduler] Running MenuPhotoEnrichmentJob")
+    start_time = time.perf_counter()
+
+    if container.menu_photo_enrichment_service is None:
+        logger.warning(
+            "[Scheduler] MenuPhotoEnrichmentJob skipped: "
+            "Menu photo enrichment not configured"
+        )
+        return
+
+    try:
+        await container.menu_photo_enrichment_service.enrich_all_venues()
+        duration = time.perf_counter() - start_time
+        BACKGROUND_JOB_DURATION_SECONDS.labels(job_name=job_name).observe(duration)
+        BACKGROUND_JOB_RUNS_TOTAL.labels(job_name=job_name, status="success").inc()
+        BACKGROUND_JOB_LAST_RUN_TIMESTAMP.labels(job_name=job_name).set_to_current_time()
+        logger.info("[Scheduler] MenuPhotoEnrichmentJob completed")
+    except Exception as e:
+        duration = time.perf_counter() - start_time
+        BACKGROUND_JOB_DURATION_SECONDS.labels(job_name=job_name).observe(duration)
+        BACKGROUND_JOB_RUNS_TOTAL.labels(job_name=job_name, status="error").inc()
+        logger.error(f"[Scheduler] MenuPhotoEnrichmentJob failed: {e}")
+
+
+async def run_menu_extraction_job():
+    """Background job: Extract structured menu data from photos using OpenAI GPT-4o."""
+    job_name = "menu_extraction"
+    logger.info("[Scheduler] Running MenuExtractionJob")
+    start_time = time.perf_counter()
+
+    if container.menu_extraction_service is None:
+        logger.warning(
+            "[Scheduler] MenuExtractionJob skipped: "
+            "Menu extraction not configured"
+        )
+        return
+
+    try:
+        await container.menu_extraction_service.extract_all_venues()
+        duration = time.perf_counter() - start_time
+        BACKGROUND_JOB_DURATION_SECONDS.labels(job_name=job_name).observe(duration)
+        BACKGROUND_JOB_RUNS_TOTAL.labels(job_name=job_name, status="success").inc()
+        BACKGROUND_JOB_LAST_RUN_TIMESTAMP.labels(job_name=job_name).set_to_current_time()
+        logger.info("[Scheduler] MenuExtractionJob completed")
+    except Exception as e:
+        duration = time.perf_counter() - start_time
+        BACKGROUND_JOB_DURATION_SECONDS.labels(job_name=job_name).observe(duration)
+        BACKGROUND_JOB_RUNS_TOTAL.labels(job_name=job_name, status="error").inc()
+        logger.error(f"[Scheduler] MenuExtractionJob failed: {e}")
+
+
+async def run_vibe_classifier_job():
+    """Background job: Classify venue vibes from photos using OpenAI Vision."""
+    job_name = "vibe_classifier"
+    logger.info("[Scheduler] Running VibeClassifierJob")
+    start_time = time.perf_counter()
+
+    if container.vibe_classifier_service is None:
+        logger.warning(
+            "[Scheduler] VibeClassifierJob skipped: "
+            "Vibe classifier not configured"
+        )
+        return
+
+    try:
+        await container.vibe_classifier_service.classify_all_venues()
+        duration = time.perf_counter() - start_time
+        BACKGROUND_JOB_DURATION_SECONDS.labels(job_name=job_name).observe(duration)
+        BACKGROUND_JOB_RUNS_TOTAL.labels(job_name=job_name, status="success").inc()
+        BACKGROUND_JOB_LAST_RUN_TIMESTAMP.labels(job_name=job_name).set_to_current_time()
+        logger.info("[Scheduler] VibeClassifierJob completed")
+    except Exception as e:
+        duration = time.perf_counter() - start_time
+        BACKGROUND_JOB_DURATION_SECONDS.labels(job_name=job_name).observe(duration)
+        BACKGROUND_JOB_RUNS_TOTAL.labels(job_name=job_name, status="error").inc()
+        logger.error(f"[Scheduler] VibeClassifierJob failed: {e}")
+
+
 def start_background_jobs(settings: Settings):
     """Start all background jobs using APScheduler."""
     global scheduler
@@ -288,6 +369,63 @@ def start_background_jobs(settings: Settings):
         logger.info(
             "[Scheduler] Instagram enrichment disabled "
             "(INSTAGRAM_ENRICHMENT_ENABLED=false or missing Apify API token)"
+        )
+
+    # Job 7: Menu photo enrichment (only if enabled and configured)
+    if settings.menu_enrichment_enabled and container.menu_photo_enrichment_service is not None:
+        scheduler.add_job(
+            run_menu_photo_enrichment_job,
+            trigger=CronTrigger.from_crontab(settings.menu_enrichment_cron),
+            id="menu_photo_enrichment",
+            name=f"Menu Photo Enrichment (limit={settings.menu_enrichment_limit})",
+            replace_existing=True,
+        )
+        logger.info(
+            f"[Scheduler] Scheduled menu photo enrichment with cron: "
+            f"{settings.menu_enrichment_cron}"
+        )
+    else:
+        logger.info(
+            "[Scheduler] Menu photo enrichment disabled "
+            "(MENU_ENRICHMENT_ENABLED=false or missing dependencies)"
+        )
+
+    # Job 8: Menu extraction (only if enabled and configured)
+    if settings.menu_extraction_enabled and container.menu_extraction_service is not None:
+        scheduler.add_job(
+            run_menu_extraction_job,
+            trigger=CronTrigger.from_crontab(settings.menu_extraction_cron),
+            id="menu_extraction",
+            name="Menu Data Extraction (OpenAI GPT-4o)",
+            replace_existing=True,
+        )
+        logger.info(
+            f"[Scheduler] Scheduled menu extraction with cron: "
+            f"{settings.menu_extraction_cron}"
+        )
+    else:
+        logger.info(
+            "[Scheduler] Menu extraction disabled "
+            "(MENU_EXTRACTION_ENABLED=false or missing dependencies)"
+        )
+
+    # Job 9: Vibe classifier (only if enabled and configured)
+    if settings.vibe_classifier_enabled and container.vibe_classifier_service is not None:
+        scheduler.add_job(
+            run_vibe_classifier_job,
+            trigger=CronTrigger.from_crontab(settings.vibe_classifier_cron),
+            id="vibe_classifier",
+            name="Vibe Classifier (AI Photo Analysis)",
+            replace_existing=True,
+        )
+        logger.info(
+            f"[Scheduler] Scheduled vibe classifier with cron: "
+            f"{settings.vibe_classifier_cron}"
+        )
+    else:
+        logger.info(
+            "[Scheduler] Vibe classifier disabled "
+            "(VIBE_CLASSIFIER_ENABLED=false or missing dependencies)"
         )
 
     # Start scheduler
@@ -402,7 +540,49 @@ async def startup_sequence(settings: Settings):
     else:
         logger.info("[Main] Skipping initial Instagram enrichment")
 
-    # Step 7: Start background jobs
+    # Step 7: Initial menu photo enrichment (if enabled)
+    if (
+        settings.menu_enrichment_on_startup
+        and container.menu_photo_enrichment_service is not None
+    ):
+        logger.info("[Main] Running menu photo enrichment (initial load)")
+        try:
+            await container.menu_photo_enrichment_service.enrich_all_venues()
+            logger.info("[Main] Initial menu photo enrichment completed")
+        except Exception as e:
+            logger.error(f"[Main] Initial menu photo enrichment failed: {e}")
+    else:
+        logger.info("[Main] Skipping initial menu photo enrichment")
+
+    # Step 8: Initial menu extraction (if enabled)
+    if (
+        settings.menu_extraction_on_startup
+        and container.menu_extraction_service is not None
+    ):
+        logger.info("[Main] Running menu extraction (initial load)")
+        try:
+            await container.menu_extraction_service.extract_all_venues()
+            logger.info("[Main] Initial menu extraction completed")
+        except Exception as e:
+            logger.error(f"[Main] Initial menu extraction failed: {e}")
+    else:
+        logger.info("[Main] Skipping initial menu extraction")
+
+    # Step 9: Initial vibe classification (if enabled)
+    if (
+        settings.vibe_classifier_on_startup
+        and container.vibe_classifier_service is not None
+    ):
+        logger.info("[Main] Running vibe classification (initial load)")
+        try:
+            await container.vibe_classifier_service.classify_all_venues()
+            logger.info("[Main] Initial vibe classification completed")
+        except Exception as e:
+            logger.error(f"[Main] Initial vibe classification failed: {e}")
+    else:
+        logger.info("[Main] Skipping initial vibe classification")
+
+    # Step 10: Start background jobs
     logger.info("[Main] Starting periodic jobs")
     start_background_jobs(settings)
 

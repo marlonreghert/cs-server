@@ -139,6 +139,9 @@ class GooglePlacesDetailsResponse(BaseModel):
     # special_days: Secondary opening hours for holidays (pre-formatted)
     special_days: Optional[list[str]] = None
 
+    # Reviews (raw dicts from Google Places API)
+    reviews: Optional[list[dict]] = None
+
     def is_permanently_closed(self) -> bool:
         """Check if the place is permanently closed."""
         return self.business_status == "CLOSED_PERMANENTLY"

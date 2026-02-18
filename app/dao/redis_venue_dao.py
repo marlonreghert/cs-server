@@ -9,6 +9,9 @@ from app.models import Venue, LiveForecastResponse, WeekRawDay
 from app.models.vibe_attributes import VibeAttributes
 from app.models.opening_hours import OpeningHours
 from app.models.instagram import VenueInstagram
+from app.models.venue_review import VenueReviews
+from app.models.menu import VenueMenuPhotos, VenueMenuData
+from app.models.vibe_profile import VenueVibeProfile
 
 logger = logging.getLogger(__name__)
 
@@ -21,6 +24,10 @@ VIBE_ATTRIBUTES_KEY_FORMAT = "vibe_attributes_v1:{}"
 VENUE_PHOTOS_KEY_FORMAT = "venue_photos_v1:{}"
 OPENING_HOURS_KEY_FORMAT = "opening_hours_v1:{}"
 VENUE_INSTAGRAM_KEY_FORMAT = "venue_instagram_v1:{}"
+VENUE_REVIEWS_KEY_FORMAT = "venue_reviews_v1:{}"
+VENUE_MENU_PHOTOS_KEY_FORMAT = "venue_menu_photos_v1:{}"
+VENUE_MENU_RAW_DATA_KEY_FORMAT = "venue_menu_raw_data_v1:{}"
+VENUE_VIBE_PROFILE_KEY_FORMAT = "venue_vibe_profile_v1:{}"
 
 
 class RedisVenueDAO:
@@ -118,6 +125,16 @@ class RedisVenueDAO:
             # Remove Instagram cache
             ig_key = VENUE_INSTAGRAM_KEY_FORMAT.format(venue_id)
             self.client.del_(ig_key)
+
+            # Remove reviews
+            self.delete_venue_reviews(venue_id)
+
+            # Remove menu photos and menu data
+            self.delete_venue_menu_photos(venue_id)
+            self.delete_venue_menu_data(venue_id)
+
+            # Remove vibe profile
+            self.delete_venue_vibe_profile(venue_id)
 
             logger.info(f"[RedisVenueDAO] Deleted venue {venue_id} and all associated data")
             return True
@@ -350,33 +367,38 @@ class RedisVenueDAO:
     # VENUE PHOTOS METHODS
     # =========================================================================
 
-    def set_venue_photos(self, venue_id: str, photo_urls: list[str]) -> None:
-        """Cache photo URLs for a venue.
+    def set_venue_photos(self, venue_id: str, photos: list[dict]) -> None:
+        """Cache photo data for a venue.
 
         Args:
             venue_id: Venue identifier
-            photo_urls: List of photo URLs
+            photos: List of photo dicts: [{url: str, author_name: str | None}, ...]
         """
         key = VENUE_PHOTOS_KEY_FORMAT.format(venue_id)
-        json_data = json.dumps(photo_urls)
+        json_data = json.dumps(photos)
         self.client.set(key, json_data)
-        logger.debug(f"[RedisVenueDAO] Cached {len(photo_urls)} photos for {venue_id}")
+        logger.debug(f"[RedisVenueDAO] Cached {len(photos)} photos for {venue_id}")
 
-    def get_venue_photos(self, venue_id: str) -> Optional[list[str]]:
-        """Retrieve cached photo URLs for a venue.
+    def get_venue_photos(self, venue_id: str) -> Optional[list[dict]]:
+        """Retrieve cached photo data for a venue.
 
         Args:
             venue_id: Venue identifier
 
         Returns:
-            List of photo URLs or None if not found
+            List of photo dicts [{url, author_name}], or None if not found.
+            Handles legacy format (list of bare URL strings) gracefully.
         """
         key = VENUE_PHOTOS_KEY_FORMAT.format(venue_id)
         try:
             json_str = self.client.get(key)
             if json_str is None:
                 return None
-            return json.loads(json_str)
+            data = json.loads(json_str)
+            # Handle legacy format: list of bare URL strings
+            if data and isinstance(data[0], str):
+                return [{"url": url, "author_name": None} for url in data]
+            return data
         except redis.RedisError as e:
             logger.error(f"Failed to get venue photos from Redis: {e}")
             return None
@@ -506,6 +528,49 @@ class RedisVenueDAO:
         self.client.del_(key)
         logger.info(f"[RedisVenueDAO] Deleted Instagram cache for {venue_id}")
 
+    # =========================================================================
+    # VENUE REVIEWS METHODS
+    # =========================================================================
+
+    def set_venue_reviews(self, reviews: VenueReviews) -> None:
+        """Cache reviews for a venue (no TTL).
+
+        Args:
+            reviews: VenueReviews object
+        """
+        key = VENUE_REVIEWS_KEY_FORMAT.format(reviews.venue_id)
+        json_data = reviews.model_dump_json(by_alias=True)
+        self.client.set(key, json_data)
+        logger.debug(f"[RedisVenueDAO] Cached {len(reviews.reviews)} reviews for {reviews.venue_id}")
+
+    def get_venue_reviews(self, venue_id: str) -> Optional[VenueReviews]:
+        """Retrieve cached reviews for a venue.
+
+        Args:
+            venue_id: Venue identifier
+
+        Returns:
+            VenueReviews or None if not found
+        """
+        key = VENUE_REVIEWS_KEY_FORMAT.format(venue_id)
+        try:
+            json_str = self.client.get(key)
+            if json_str is None:
+                return None
+            return VenueReviews.model_validate_json(json_str)
+        except redis.RedisError as e:
+            logger.error(f"Failed to get venue reviews from Redis: {e}")
+            return None
+
+    def delete_venue_reviews(self, venue_id: str) -> None:
+        """Delete cached reviews for a venue.
+
+        Args:
+            venue_id: Venue identifier
+        """
+        key = VENUE_REVIEWS_KEY_FORMAT.format(venue_id)
+        self.client.del_(key)
+
     def count_venues_with_instagram(self) -> int:
         """Count venues with cached Instagram results (found or low_confidence).
 
@@ -525,3 +590,181 @@ class RedisVenueDAO:
             except Exception:
                 continue
         return count
+
+    # =========================================================================
+    # VENUE MENU PHOTOS METHODS
+    # =========================================================================
+
+    def set_venue_menu_photos(self, menu_photos: VenueMenuPhotos) -> None:
+        """Cache menu photos for a venue (no TTL).
+
+        Args:
+            menu_photos: VenueMenuPhotos object
+        """
+        key = VENUE_MENU_PHOTOS_KEY_FORMAT.format(menu_photos.venue_id)
+        json_data = menu_photos.model_dump_json(by_alias=True)
+        self.client.set(key, json_data)
+        logger.debug(
+            f"[RedisVenueDAO] Cached {len(menu_photos.photos)} menu photos for {menu_photos.venue_id}"
+        )
+
+    def get_venue_menu_photos(self, venue_id: str) -> Optional[VenueMenuPhotos]:
+        """Retrieve cached menu photos for a venue.
+
+        Args:
+            venue_id: Venue identifier
+
+        Returns:
+            VenueMenuPhotos or None if not found
+        """
+        key = VENUE_MENU_PHOTOS_KEY_FORMAT.format(venue_id)
+        try:
+            json_str = self.client.get(key)
+            if json_str is None:
+                return None
+            return VenueMenuPhotos.model_validate_json(json_str)
+        except redis.RedisError as e:
+            logger.error(f"Failed to get venue menu photos from Redis: {e}")
+            return None
+
+    def delete_venue_menu_photos(self, venue_id: str) -> None:
+        """Delete cached menu photos for a venue.
+
+        Args:
+            venue_id: Venue identifier
+        """
+        key = VENUE_MENU_PHOTOS_KEY_FORMAT.format(venue_id)
+        self.client.del_(key)
+
+    def list_cached_menu_photos_venue_ids(self) -> list[str]:
+        """Return venue IDs for all cached menu photos.
+
+        Returns:
+            List of venue IDs
+        """
+        pattern = "venue_menu_photos_v1:*"
+        keys = self.client.keys(pattern)
+        prefix = "venue_menu_photos_v1:"
+        return [key.replace(prefix, "", 1) for key in keys]
+
+    def count_venues_with_menu_photos(self) -> int:
+        """Count venues with cached menu photos.
+
+        Returns:
+            Number of venues with menu photos
+        """
+        pattern = "venue_menu_photos_v1:*"
+        keys = self.client.keys(pattern)
+        return len(keys)
+
+    # =========================================================================
+    # VENUE MENU DATA (EXTRACTION) METHODS
+    # =========================================================================
+
+    def set_venue_menu_data(self, menu_data: VenueMenuData) -> None:
+        """Cache extracted menu data for a venue (no TTL).
+
+        Args:
+            menu_data: VenueMenuData object
+        """
+        key = VENUE_MENU_RAW_DATA_KEY_FORMAT.format(menu_data.venue_id)
+        json_data = menu_data.model_dump_json(by_alias=True)
+        self.client.set(key, json_data)
+        logger.debug(
+            f"[RedisVenueDAO] Cached menu data ({len(menu_data.sections)} sections) for {menu_data.venue_id}"
+        )
+
+    def get_venue_menu_data(self, venue_id: str) -> Optional[VenueMenuData]:
+        """Retrieve cached extracted menu data for a venue.
+
+        Args:
+            venue_id: Venue identifier
+
+        Returns:
+            VenueMenuData or None if not found
+        """
+        key = VENUE_MENU_RAW_DATA_KEY_FORMAT.format(venue_id)
+        try:
+            json_str = self.client.get(key)
+            if json_str is None:
+                return None
+            return VenueMenuData.model_validate_json(json_str)
+        except redis.RedisError as e:
+            logger.error(f"Failed to get venue menu data from Redis: {e}")
+            return None
+
+    def delete_venue_menu_data(self, venue_id: str) -> None:
+        """Delete cached menu data for a venue.
+
+        Args:
+            venue_id: Venue identifier
+        """
+        key = VENUE_MENU_RAW_DATA_KEY_FORMAT.format(venue_id)
+        self.client.del_(key)
+
+    # =========================================================================
+    # VENUE VIBE PROFILE METHODS
+    # =========================================================================
+
+    def set_venue_vibe_profile(self, profile: VenueVibeProfile) -> None:
+        """Cache AI vibe profile for a venue (no TTL).
+
+        Args:
+            profile: VenueVibeProfile object
+        """
+        key = VENUE_VIBE_PROFILE_KEY_FORMAT.format(profile.venue_id)
+        json_data = profile.model_dump_json(by_alias=True)
+        self.client.set(key, json_data)
+        logger.debug(
+            f"[RedisVenueDAO] Cached vibe profile for {profile.venue_id} "
+            f"(confidence={profile.overall_confidence:.2f})"
+        )
+
+    def get_venue_vibe_profile(self, venue_id: str) -> Optional[VenueVibeProfile]:
+        """Retrieve cached AI vibe profile for a venue.
+
+        Args:
+            venue_id: Venue identifier
+
+        Returns:
+            VenueVibeProfile or None if not found
+        """
+        key = VENUE_VIBE_PROFILE_KEY_FORMAT.format(venue_id)
+        try:
+            json_str = self.client.get(key)
+            if json_str is None:
+                return None
+            return VenueVibeProfile.model_validate_json(json_str)
+        except redis.RedisError as e:
+            logger.error(f"Failed to get venue vibe profile from Redis: {e}")
+            return None
+
+    def delete_venue_vibe_profile(self, venue_id: str) -> None:
+        """Delete cached vibe profile for a venue.
+
+        Args:
+            venue_id: Venue identifier
+        """
+        key = VENUE_VIBE_PROFILE_KEY_FORMAT.format(venue_id)
+        self.client.del_(key)
+
+    def list_cached_vibe_profile_venue_ids(self) -> list[str]:
+        """Return venue IDs for all cached vibe profiles.
+
+        Returns:
+            List of venue IDs
+        """
+        pattern = "venue_vibe_profile_v1:*"
+        keys = self.client.keys(pattern)
+        prefix = "venue_vibe_profile_v1:"
+        return [key.replace(prefix, "", 1) for key in keys]
+
+    def count_venues_with_vibe_profile(self) -> int:
+        """Count venues with cached vibe profiles.
+
+        Returns:
+            Number of venues with vibe profiles
+        """
+        pattern = "venue_vibe_profile_v1:*"
+        keys = self.client.keys(pattern)
+        return len(keys)

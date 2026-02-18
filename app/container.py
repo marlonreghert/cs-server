@@ -15,6 +15,14 @@ from app.services.photo_enrichment_service import PhotoEnrichmentService
 from app.api.apify_instagram_client import ApifyInstagramClient
 from app.services.instagram_enrichment_service import InstagramEnrichmentService
 from app.services.instagram_validator import InstagramValidator
+from app.api.s3_client import S3Client
+from app.api.serpapi_client import SerpApiClient
+from app.api.apify_menu_photos_client import ApifyMenuPhotosClient
+from app.api.openai_menu_client import OpenAIMenuClient
+from app.services.menu_photo_enrichment_service import MenuPhotoEnrichmentService
+from app.services.menu_extraction_service import MenuExtractionService
+from app.api.openai_vibe_client import OpenAIVibeClient
+from app.services.vibe_classifier_service import VibeClassifierService
 from app.handlers import VenueHandler
 
 logger = logging.getLogger(__name__)
@@ -130,6 +138,113 @@ class Container:
                 "Instagram discovery will be disabled."
             )
 
+        # Initialize SerpApi client (for menu photo category filtering)
+        self.serpapi_client = None
+        if settings.serpapi_api_key:
+            self.serpapi_client = SerpApiClient(api_key=settings.serpapi_api_key)
+            logger.info("[Container] SerpApi client initialized")
+
+        # Initialize Apify menu photos client (fallback for SerpApi)
+        self.apify_menu_photos_client = None
+        if settings.apify_api_token:
+            self.apify_menu_photos_client = ApifyMenuPhotosClient(
+                api_token=settings.apify_api_token,
+            )
+            logger.info("[Container] Apify Menu Photos client initialized (fallback)")
+
+        # Initialize Menu Photo Enrichment (needs: S3 + SerpApi + Google Places for placeId)
+        self.s3_client = None
+        self.menu_photo_enrichment_service = None
+        self.openai_menu_client = None
+        self.menu_extraction_service = None
+
+        if settings.s3_bucket and settings.s3_access_key_id:
+            self.s3_client = S3Client(
+                bucket=settings.s3_bucket,
+                region=settings.s3_region,
+                access_key_id=settings.s3_access_key_id,
+                secret_access_key=settings.s3_secret_access_key,
+            )
+            logger.info("[Container] S3 client initialized")
+
+            if self.serpapi_client and self.google_places_api:
+                self.menu_photo_enrichment_service = MenuPhotoEnrichmentService(
+                    serpapi_client=self.serpapi_client,
+                    s3_client=self.s3_client,
+                    venue_dao=self.redis_venue_dao,
+                    google_places_client=self.google_places_api,
+                    apify_client=self.apify_menu_photos_client if settings.menu_apify_fallback_enabled else None,
+                    enrichment_limit=settings.menu_enrichment_limit,
+                    photos_per_venue=settings.menu_photos_per_venue,
+                    menu_categories=settings.menu_photo_categories,
+                )
+                logger.info(
+                    "[Container] Menu Photo Enrichment service initialized "
+                    "(SerpApi primary, Apify fallback)"
+                )
+            else:
+                missing = []
+                if not self.serpapi_client:
+                    missing.append("SERPAPI_API_KEY")
+                if not self.google_places_api:
+                    missing.append("GOOGLE_PLACES_API_KEY")
+                logger.warning(
+                    f"[Container] Menu Photo Enrichment disabled "
+                    f"(missing: {', '.join(missing)})"
+                )
+        else:
+            logger.info(
+                "[Container] Menu Photo Enrichment disabled "
+                "(missing S3 bucket or S3 credentials)"
+            )
+
+        # Initialize Menu Extraction (needs: openai_api_key + s3_client for presigned URLs)
+        if settings.openai_api_key and self.s3_client:
+            self.openai_menu_client = OpenAIMenuClient(
+                api_key=settings.openai_api_key,
+                model=settings.menu_extraction_model,
+            )
+            self.menu_extraction_service = MenuExtractionService(
+                openai_client=self.openai_menu_client,
+                s3_client=self.s3_client,
+                venue_dao=self.redis_venue_dao,
+                extraction_model=settings.menu_extraction_model,
+                photo_filter_enabled=settings.menu_photo_filter_enabled,
+                photo_filter_confidence=settings.menu_photo_filter_confidence,
+            )
+            logger.info("[Container] OpenAI Menu client and Menu Extraction service initialized")
+        else:
+            logger.info(
+                "[Container] Menu Extraction disabled "
+                "(missing OpenAI API key or S3 client)"
+            )
+
+        # Initialize Vibe Classifier (needs: openai_api_key + photos in Redis)
+        self.openai_vibe_client = None
+        self.vibe_classifier_service = None
+
+        if settings.openai_api_key:
+            self.openai_vibe_client = OpenAIVibeClient(api_key=settings.openai_api_key)
+            self.vibe_classifier_service = VibeClassifierService(
+                openai_vibe_client=self.openai_vibe_client,
+                venue_dao=self.redis_venue_dao,
+                target_photos=settings.vibe_classifier_target_photos,
+                escalation_threshold=settings.vibe_classifier_escalation_threshold,
+                stage_b_photo_count=settings.vibe_classifier_stage_b_photos,
+                enrichment_limit=settings.vibe_classifier_limit,
+                early_stop_enabled=settings.vibe_classifier_early_stop_enabled,
+                early_stop_min_photos=settings.vibe_classifier_early_stop_min_photos,
+                early_stop_confidence=settings.vibe_classifier_early_stop_confidence,
+                stage_a_model=settings.vibe_classifier_stage_a_model,
+                stage_b_model=settings.vibe_classifier_stage_b_model,
+            )
+            logger.info("[Container] Vibe Classifier service initialized")
+        else:
+            logger.info(
+                "[Container] Vibe Classifier disabled "
+                "(missing OpenAI API key)"
+            )
+
         # Initialize services
         self.venue_service = VenueService(self.redis_venue_dao, self.besttime_api)
         self.venues_refresher_service = VenuesRefresherService(
@@ -137,6 +252,10 @@ class Container:
             self.besttime_api,
             venue_limit_override=settings.venue_limit_override,
             venue_total_limit=settings.venue_total_limit,
+            dev_mode=settings.dev_mode,
+            dev_lat=settings.dev_lat,
+            dev_lng=settings.dev_lng,
+            dev_radius=settings.dev_radius,
         )
 
         # Initialize handlers
@@ -166,3 +285,38 @@ class Container:
                 logger.info("[Container] Apify Instagram client closed")
             except Exception as e:
                 logger.error(f"[Container] Error closing Apify Instagram client: {e}")
+
+        if self.serpapi_client:
+            try:
+                await self.serpapi_client.close()
+                logger.info("[Container] SerpApi client closed")
+            except Exception as e:
+                logger.error(f"[Container] Error closing SerpApi client: {e}")
+
+        if self.apify_menu_photos_client:
+            try:
+                await self.apify_menu_photos_client.close()
+                logger.info("[Container] Apify Menu Photos client closed")
+            except Exception as e:
+                logger.error(f"[Container] Error closing Apify Menu Photos client: {e}")
+
+        if self.menu_photo_enrichment_service:
+            try:
+                await self.menu_photo_enrichment_service.close()
+                logger.info("[Container] Menu Photo Enrichment service closed")
+            except Exception as e:
+                logger.error(f"[Container] Error closing Menu Photo Enrichment service: {e}")
+
+        if self.openai_menu_client:
+            try:
+                await self.openai_menu_client.close()
+                logger.info("[Container] OpenAI Menu client closed")
+            except Exception as e:
+                logger.error(f"[Container] Error closing OpenAI Menu client: {e}")
+
+        if self.openai_vibe_client:
+            try:
+                await self.openai_vibe_client.close()
+                logger.info("[Container] OpenAI Vibe client closed")
+            except Exception as e:
+                logger.error(f"[Container] Error closing OpenAI Vibe client: {e}")

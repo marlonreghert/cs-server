@@ -16,9 +16,8 @@ logger = logging.getLogger(__name__)
 # Google Places API (New) base URL
 GOOGLE_PLACES_API_BASE = "https://places.googleapis.com/v1"
 
-# Field mask for fetching photos
-PHOTOS_FIELDS_MASK = "photos"
-
+# Field mask for fetching photos (include author attributions for copyright compliance)
+PHOTOS_FIELDS_MASK = "photos.name,photos.authorAttributions"
 # Field mask for vibe-related attributes
 # See: https://developers.google.com/maps/documentation/places/web-service/place-details
 VIBE_FIELDS_MASK = ",".join([
@@ -55,6 +54,8 @@ VIBE_FIELDS_MASK = ",".join([
     # Summaries
     "generativeSummary",
     "editorialSummary",
+    # Reviews
+    "reviews",
 ])
 
 # Language code for Portuguese (Brazil) - used for opening hours descriptions
@@ -308,6 +309,21 @@ class GooglePlacesAPIClient:
             if secondary_descriptions:
                 special_days = secondary_descriptions
 
+        # Parse reviews (top 5, sorted by relevance by API)
+        raw_reviews = data.get("reviews", []) or []
+        parsed_reviews = []
+        for r in raw_reviews[:5]:
+            text_obj = r.get("text", {})
+            author_obj = r.get("authorAttribution", {})
+            parsed_reviews.append({
+                "author_name": author_obj.get("displayName", ""),
+                "rating": r.get("rating", 0),
+                "text": text_obj.get("text", "") if isinstance(text_obj, dict) else "",
+                "relative_time": r.get("relativePublishTimeDescription", ""),
+                "language": text_obj.get("languageCode") if isinstance(text_obj, dict) else None,
+                "publish_time": r.get("publishTime"),
+            })
+
         return GooglePlacesDetailsResponse(
             place_id=place_id,
             display_name=display_name,
@@ -344,6 +360,8 @@ class GooglePlacesAPIClient:
             weekday_descriptions=weekday_descriptions,
             open_now=open_now,
             special_days=special_days,
+            # Reviews
+            reviews=parsed_reviews if parsed_reviews else None,
         )
 
     def details_to_vibe_attributes(
@@ -398,11 +416,11 @@ class GooglePlacesAPIClient:
         place_id: str,
         max_photos: int = 5,
         max_width: int = 800,
-    ) -> list[str]:
-        """Fetch photo URLs for a place.
+    ) -> list[dict]:
+        """Fetch photo URLs with author attribution for a place.
 
-        Uses the Google Places API (New) to get photo references, then constructs
-        the photo URLs.
+        Uses the Google Places API (New) to get photo references and
+        author attributions (required for copyright compliance).
 
         Args:
             place_id: Google Place ID (can be full resource name like 'places/ChIJ...' or just 'ChIJ...')
@@ -410,7 +428,7 @@ class GooglePlacesAPIClient:
             max_width: Maximum width in pixels for the photos (default 800)
 
         Returns:
-            List of photo URLs (may be empty if no photos available)
+            List of dicts: [{url: str, author_name: str | None}, ...]
         """
         # Handle both formats: 'places/ChIJ...' or just 'ChIJ...'
         if place_id.startswith("places/"):
@@ -440,17 +458,21 @@ class GooglePlacesAPIClient:
             GOOGLE_PLACES_API_CALL_DURATION_SECONDS.labels(endpoint="place_photos").observe(duration)
             GOOGLE_PLACES_API_CALLS_TOTAL.labels(endpoint="place_photos", status="success").inc()
 
-            # Extract photo URLs (limit to max_photos)
-            photo_urls = []
+            # Extract photo URLs with author attribution (limit to max_photos)
+            result = []
             for photo in photos[:max_photos]:
                 photo_name = photo.get("name")
                 if photo_name:
-                    # Construct the photo URL using the Places API photo endpoint
                     photo_url = f"{GOOGLE_PLACES_API_BASE}/{photo_name}/media?maxWidthPx={max_width}&key={self.api_key}"
-                    photo_urls.append(photo_url)
+                    # Extract first author attribution (if available)
+                    author_name = None
+                    attributions = photo.get("authorAttributions", [])
+                    if attributions:
+                        author_name = attributions[0].get("displayName")
+                    result.append({"url": photo_url, "author_name": author_name})
 
-            logger.debug(f"[GooglePlacesAPIClient] Found {len(photo_urls)} photos for {place_id}")
-            return photo_urls
+            logger.debug(f"[GooglePlacesAPIClient] Found {len(result)} photos for {place_id}")
+            return result
 
         except httpx.HTTPStatusError as e:
             duration = time.perf_counter() - start_time
@@ -466,7 +488,6 @@ class GooglePlacesAPIClient:
             GOOGLE_PLACES_API_CALLS_TOTAL.labels(endpoint="place_photos", status="error").inc()
             logger.error(f"[GooglePlacesAPIClient] Photo fetch exception for {place_id}: {e}")
             return []
-
 
 async def search_for_lgbtq_indicators(summary: Optional[str]) -> bool:
     """Analyze summary text for LGBTQ+ friendliness indicators.

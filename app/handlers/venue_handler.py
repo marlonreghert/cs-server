@@ -202,19 +202,21 @@ class VenueHandler:
             ):
                 live_busyness = m.live_forecast.analysis.venue_live_busyness
 
-            # Get vibe labels if available
+            # Get vibe labels and summary if available
             vibe_labels: Optional[list[str]] = None
+            venue_summary: Optional[str] = None
             try:
                 vibe_attrs = self.venue_dao.get_vibe_attributes(m.venue.venue_id)
                 if vibe_attrs:
                     vibe_labels = vibe_attrs.get_vibe_labels()
+                    venue_summary = vibe_attrs.generative_summary
             except Exception as e:
                 logger.debug(f"[VenueHandler] No vibe attributes for {m.venue.venue_id}: {e}")
 
             # Get venue photos if available
-            venue_photos_urls: Optional[list[str]] = None
+            venue_photos: Optional[list[dict]] = None
             try:
-                venue_photos_urls = self.venue_dao.get_venue_photos(m.venue.venue_id)
+                venue_photos = self.venue_dao.get_venue_photos(m.venue.venue_id)
             except Exception as e:
                 logger.debug(f"[VenueHandler] No photos for {m.venue.venue_id}: {e}")
 
@@ -242,6 +244,26 @@ class VenueHandler:
             except Exception as e:
                 logger.debug(f"[VenueHandler] No Instagram for {m.venue.venue_id}: {e}")
 
+            # Get reviews if available
+            venue_reviews: Optional[list[dict]] = None
+            try:
+                reviews_data = self.venue_dao.get_venue_reviews(m.venue.venue_id)
+                if reviews_data and reviews_data.reviews:
+                    venue_reviews = [r.model_dump() for r in reviews_data.reviews]
+            except Exception as e:
+                logger.debug(f"[VenueHandler] No reviews for {m.venue.venue_id}: {e}")
+
+            # Get AI vibe profile if available
+            vibe_profile_data: Optional[dict] = None
+            try:
+                vibe_profile = self.venue_dao.get_venue_vibe_profile(m.venue.venue_id)
+                if vibe_profile:
+                    vibe_profile_data = vibe_profile.model_dump(
+                        exclude={"venue_id", "classification_trace", "evidence_photos"}
+                    )
+            except Exception as e:
+                logger.debug(f"[VenueHandler] No vibe profile for {m.venue.venue_id}: {e}")
+
             minified.append(
                 MinifiedVenue(
                     forecast=m.venue.forecast,
@@ -259,12 +281,15 @@ class VenueHandler:
                     reviews=m.venue.reviews,
                     weekly_forecast=m.weekly_forecast,
                     vibe_labels=vibe_labels,
-                    venue_photos_urls=venue_photos_urls,
+                    venue_summary=venue_summary,
+                    venue_photos=venue_photos,
                     opening_hours=opening_hours,
                     special_days=special_days,
                     is_open_now=is_open_now,
                     instagram_handle=instagram_handle,
                     instagram_url=instagram_url,
+                    venue_reviews=venue_reviews,
+                    vibe_profile=vibe_profile_data,
                 )
             )
 

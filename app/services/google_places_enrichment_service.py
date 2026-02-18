@@ -18,6 +18,7 @@ from app.dao.redis_venue_dao import RedisVenueDAO
 from app.models.vibe_attributes import VibeAttributes
 from app.models.opening_hours import OpeningHours
 from app.models.instagram import VenueInstagram
+from app.models.venue_review import VenueReview, VenueReviews
 from app.metrics import (
     VIBE_ATTRIBUTES_FETCH_RESULTS,
     VENUES_WITH_VIBE_ATTRIBUTES,
@@ -171,6 +172,17 @@ class GooglePlacesEnrichmentService:
                 logger.debug(
                     f"[GooglePlacesEnrichment] Stored opening hours for {venue_id}: "
                     f"{len(details.weekday_descriptions)} days"
+                )
+
+            # Store reviews if available
+            if details.reviews:
+                venue_reviews = VenueReviews(
+                    venue_id=venue_id,
+                    reviews=[VenueReview(**r) for r in details.reviews],
+                )
+                self.venue_dao.set_venue_reviews(venue_reviews)
+                logger.debug(
+                    f"[GooglePlacesEnrichment] Stored {len(venue_reviews.reviews)} reviews for {venue_id}"
                 )
 
             # Extract Instagram handle from website URL if it's an Instagram link

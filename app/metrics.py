@@ -203,6 +203,132 @@ INSTAGRAM_APIFY_COST_ESTIMATE = Counter(
 )
 
 # =============================================================================
+# SERPAPI METRICS
+# =============================================================================
+
+# API call counter
+SERPAPI_API_CALLS_TOTAL = Counter(
+    "serpapi_api_calls_total",
+    "Total number of SerpApi API calls",
+    ["endpoint", "status"],  # endpoint: resolve_data_id, fetch_photos; status: success, error
+)
+
+# API call latency
+SERPAPI_API_CALL_DURATION_SECONDS = Histogram(
+    "serpapi_api_call_duration_seconds",
+    "SerpApi API call latency in seconds",
+    ["endpoint"],
+    buckets=(0.5, 1.0, 2.5, 5.0, 10.0, 30.0),
+)
+
+# API error counter by error type
+SERPAPI_API_ERRORS_TOTAL = Counter(
+    "serpapi_api_errors_total",
+    "Total number of SerpApi API errors",
+    ["endpoint", "error_type"],  # error_type: http_error, timeout, quota_exceeded
+)
+
+# =============================================================================
+# MENU ENRICHMENT METRICS
+# =============================================================================
+
+# Menu photo enrichment results
+MENU_PHOTO_ENRICHMENT_RESULTS = Counter(
+    "menu_photo_enrichment_results_total",
+    "Results of menu photo enrichment operations",
+    ["result"],  # result: enriched, cached, no_place_id, no_photos_found, error, credit_exhausted
+)
+
+# Venues with menu photos (snapshot gauge)
+MENU_VENUES_WITH_PHOTOS = Gauge(
+    "menu_venues_with_photos",
+    "Number of venues with cached menu photos",
+)
+
+# Menu photos stored total
+MENU_PHOTOS_STORED_TOTAL = Counter(
+    "menu_photos_stored_total",
+    "Total number of menu photos stored in S3",
+)
+
+# Menu extraction results
+MENU_EXTRACTION_RESULTS = Counter(
+    "menu_extraction_results_total",
+    "Results of menu data extraction operations",
+    ["result"],  # result: extracted, cached, no_photos, error
+)
+
+# Venues with extracted menu data (snapshot gauge)
+MENU_VENUES_WITH_DATA = Gauge(
+    "menu_venues_with_data",
+    "Number of venues with extracted menu data",
+)
+
+# Menu items extracted total
+MENU_ITEMS_EXTRACTED_TOTAL = Counter(
+    "menu_items_extracted_total",
+    "Total number of menu items extracted across all venues",
+)
+
+# S3 upload metrics
+S3_UPLOADS_TOTAL = Counter(
+    "s3_uploads_total",
+    "Total number of S3 upload operations",
+    ["status"],  # status: success, error
+)
+
+S3_UPLOAD_DURATION_SECONDS = Histogram(
+    "s3_upload_duration_seconds",
+    "S3 upload latency in seconds",
+    buckets=(0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0),
+)
+
+# OpenAI API metrics
+OPENAI_API_CALLS_TOTAL = Counter(
+    "openai_api_calls_total",
+    "Total number of OpenAI API calls",
+    ["endpoint", "status"],
+)
+
+OPENAI_API_CALL_DURATION_SECONDS = Histogram(
+    "openai_api_call_duration_seconds",
+    "OpenAI API call latency in seconds",
+    ["endpoint"],
+    buckets=(1.0, 5.0, 10.0, 30.0, 60.0, 120.0),
+)
+
+# =============================================================================
+# VIBE CLASSIFIER METRICS
+# =============================================================================
+
+# Vibe classification results
+VIBE_CLASSIFIER_RESULTS = Counter(
+    "vibe_classifier_results_total",
+    "Results of vibe classification operations",
+    ["result"],  # classified, cached, no_photos, error
+)
+
+# Stage B trigger tracking
+VIBE_CLASSIFIER_STAGE_B_TRIGGERS = Counter(
+    "vibe_classifier_stage_b_triggers_total",
+    "Number of times Stage B was triggered",
+    ["reason"],  # low_confidence, contradictions
+)
+
+# Venues with vibe profile (snapshot gauge)
+VENUES_WITH_VIBE_PROFILE = Gauge(
+    "venues_with_vibe_profile",
+    "Number of venues with AI vibe profiles",
+)
+
+# Confidence score distribution
+VIBE_CLASSIFIER_CONFIDENCE = Histogram(
+    "vibe_classifier_confidence",
+    "Distribution of vibe classifier confidence scores",
+    buckets=(0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0),
+)
+
+# =============================================================================
 # BACKGROUND JOB METRICS
 # =============================================================================
 

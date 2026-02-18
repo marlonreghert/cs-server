@@ -17,6 +17,12 @@ apscheduler==3.10.4
 pytz==2024.2
 python-dateutil==2.9.0
 
+# AWS S3 (menu photo storage)
+boto3>=1.35.0
+
+# OpenAI (menu extraction via GPT-4o vision)
+openai>=1.50.0
+
 # Metrics
 prometheus-client==0.24.1
 

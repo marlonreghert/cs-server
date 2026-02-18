@@ -143,8 +143,8 @@ class MinifiedVenue(BaseModel):
     # Vibe attributes (atmosphere labels)
     vibe_labels: Optional[list[str]] = None
 
-    # Venue photos (from Google Places API)
-    venue_photos_urls: Optional[list[str]] = None
+    # Venue photos with author attribution (from Google Places API)
+    venue_photos: Optional[list[dict]] = None  # [{url: str, author_name: str | None}, ...]
 
     # Opening hours (from Google Places API - in Portuguese)
     opening_hours: Optional[list[str]] = None  # ["Domingo: Fechado", "Segunda-feira: 20:00 – 03:00", ...]
@@ -154,5 +154,14 @@ class MinifiedVenue(BaseModel):
     # Instagram (from Apify enrichment)
     instagram_handle: Optional[str] = None
     instagram_url: Optional[str] = None
+
+    # AI/Editorial summary (from Google Places API)
+    venue_summary: Optional[str] = None
+
+    # Reviews (from Google Places API)
+    venue_reviews: Optional[list[dict]] = None
+
+    # AI Vibe Profile (from Vibe Classifier pipeline)
+    vibe_profile: Optional[dict] = None
 
     model_config = ConfigDict(populate_by_name=True)

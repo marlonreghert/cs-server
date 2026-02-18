@@ -41,7 +41,7 @@ class PhotoEnrichmentService:
         google_place_id: str,
         max_photos: int = 5,
         force_refresh: bool = False,
-    ) -> Optional[list[str]]:
+    ) -> Optional[list[dict]]:
         """Fetch photos for a single venue and cache them.
 
         Args:
@@ -51,7 +51,7 @@ class PhotoEnrichmentService:
             force_refresh: If True, fetch even if cached entry exists
 
         Returns:
-            List of photo URLs if successful, None on error
+            List of photo dicts [{url, author_name}] if successful, None on error
         """
         if not google_place_id:
             logger.warning(f"[PhotoEnrichmentService] No Google Place ID for venue {venue_id}")
@@ -66,25 +66,25 @@ class PhotoEnrichmentService:
 
         try:
             # Fetch photos from Google Places API
-            photo_urls = await self.google_places_client.get_place_photos(
+            photos = await self.google_places_client.get_place_photos(
                 place_id=google_place_id,
                 max_photos=max_photos,
             )
 
-            if not photo_urls:
+            if not photos:
                 logger.debug(f"[PhotoEnrichmentService] No photos found for {venue_id}")
                 # Cache empty list to avoid re-fetching
                 self.venue_dao.set_venue_photos(venue_id, [])
                 return []
 
             # Cache the results
-            self.venue_dao.set_venue_photos(venue_id, photo_urls)
+            self.venue_dao.set_venue_photos(venue_id, photos)
 
             logger.info(
-                f"[PhotoEnrichmentService] Cached {len(photo_urls)} photos for {venue_id}"
+                f"[PhotoEnrichmentService] Cached {len(photos)} photos for {venue_id}"
             )
 
-            return photo_urls
+            return photos
 
         except Exception as e:
             logger.error(f"[PhotoEnrichmentService] Error fetching photos for {venue_id}: {e}")
@@ -177,13 +177,13 @@ class PhotoEnrichmentService:
 
         return successful
 
-    def get_venue_photos(self, venue_id: str) -> Optional[list[str]]:
+    def get_venue_photos(self, venue_id: str) -> Optional[list[dict]]:
         """Get cached photos for a venue.
 
         Args:
             venue_id: Venue identifier
 
         Returns:
-            List of photo URLs or None if not cached
+            List of photo dicts [{url, author_name}] or None if not cached
         """
         return self.venue_dao.get_venue_photos(venue_id)

@@ -55,6 +55,29 @@
     "instagram_not_found_cache_ttl_days": 7
   },
 
+  "menu_enrichment": {
+    "_comment": "Menu photo fetching (SerpApi primary, Apify fallback) + S3 + OpenAI extraction",
+    "menu_enrichment_enabled": false,
+    "menu_enrichment_on_startup": false,
+    "menu_enrichment_cron": "0 5 1 * *",
+    "menu_enrichment_limit": 10,
+    "menu_photos_per_venue": 20,
+    "menu_photo_categories": ["menu", "cardápio", "cardapio", "preços", "valores"],
+    "serpapi_api_key": "",
+    "menu_apify_fallback_enabled": false,
+    "menu_photo_filter_enabled": true,
+    "menu_photo_filter_confidence": 0.6,
+    "s3_bucket": "",
+    "s3_region": "us-east-1",
+    "s3_access_key_id": "",
+    "s3_secret_access_key": "",
+    "openai_api_key": "",
+    "menu_extraction_enabled": false,
+    "menu_extraction_on_startup": false,
+    "menu_extraction_cron": "0 6 1 * *",
+    "menu_extraction_model": "gpt-4o"
+  },
+
   "server": {
     "_comment": "Server configuration",
     "server_port": 8080,

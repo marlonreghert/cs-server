@@ -20,7 +20,14 @@ from app.models import (
 @pytest.fixture
 def mock_venue_dao():
     """Create mock venue DAO."""
-    return Mock()
+    dao = Mock()
+    # Default return values for DAO methods called in the minified code path
+    dao.get_vibe_attributes.return_value = None
+    dao.get_venue_photos.return_value = None
+    dao.get_opening_hours.return_value = None
+    dao.get_venue_instagram.return_value = None
+    dao.get_venue_reviews.return_value = None
+    return dao
 
 
 @pytest.fixture

@@ -140,6 +140,57 @@ class Settings(BaseSettings):
     instagram_cache_ttl_days: int = 30
     instagram_not_found_cache_ttl_days: int = 7
 
+    # Menu Enrichment (Apify menu photo scraping + S3 storage)
+    menu_enrichment_enabled: bool = False
+    menu_enrichment_on_startup: bool = False
+    menu_enrichment_cron: str = "0 5 1 * *"  # Monthly: 1st at 5 AM
+    menu_enrichment_limit: int = 10           # Max venues per run
+    menu_photos_per_venue: int = 5
+    menu_photo_categories: list[str] = ["menu", "cardápio", "cardapio", "preços", "valores"]
+
+    # SerpApi (for menu photo category filtering)
+    serpapi_api_key: str = ""
+
+    # Apify fallback for menu photos (when SerpApi fails)
+    menu_apify_fallback_enabled: bool = False
+
+    # GPT-4o-mini photo pre-filter
+    menu_photo_filter_enabled: bool = True
+    menu_photo_filter_confidence: float = 0.6
+
+    # S3 (for menu photo storage)
+    s3_bucket: str = ""
+    s3_region: str = "us-east-1"
+    s3_access_key_id: str = ""
+    s3_secret_access_key: str = ""
+
+    # Menu Data Extraction (OpenAI GPT-4o)
+    openai_api_key: str = ""
+    menu_extraction_enabled: bool = False
+    menu_extraction_on_startup: bool = False
+    menu_extraction_cron: str = "0 6 1 * *"  # Monthly: 1st at 6 AM
+    menu_extraction_model: str = "gpt-4o"
+
+    # Vibe Classifier (OpenAI Vision - 2-stage hybrid)
+    vibe_classifier_enabled: bool = False
+    vibe_classifier_on_startup: bool = False
+    vibe_classifier_cron: str = "0 7 1 * *"        # Monthly: 1st at 7 AM
+    vibe_classifier_limit: int = 20                 # Max venues per run (0 = unlimited)
+    vibe_classifier_target_photos: int = 10         # Photos to send to Stage A
+    vibe_classifier_escalation_threshold: float = 0.80  # Below this -> Stage B
+    vibe_classifier_stage_b_photos: int = 5         # Photos for Stage B (highest relevance)
+    vibe_classifier_stage_a_model: str = "gpt-4o-mini"
+    vibe_classifier_stage_b_model: str = "gpt-4o"
+    vibe_classifier_early_stop_enabled: bool = True
+    vibe_classifier_early_stop_min_photos: int = 6
+    vibe_classifier_early_stop_confidence: float = 0.92
+
+    # Dev Mode - overrides default locations for venue discovery
+    dev_mode: bool = False
+    dev_lat: float = -8.07834       # Default: Recife ZS/ZN
+    dev_lng: float = -34.90938
+    dev_radius: int = 6000          # Meters
+
     # Server Configuration
     server_port: int = 8080
     log_level: str = "INFO"
