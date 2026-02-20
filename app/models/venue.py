@@ -164,4 +164,7 @@ class MinifiedVenue(BaseModel):
     # AI Vibe Profile (from Vibe Classifier pipeline)
     vibe_profile: Optional[dict] = None
 
+    # Menu data (extracted from photos via GPT-4o-mini)
+    venue_menu: Optional[dict] = None  # {sections: [...], currency_detected: str}
+
     model_config = ConfigDict(populate_by_name=True)

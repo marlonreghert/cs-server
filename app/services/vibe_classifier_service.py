@@ -108,16 +108,47 @@ class VibeClassifierService:
         venue_name = venue.venue_name if venue else ""
         venue_type = venue.venue_type if venue else ""
 
+        # 3b. Gather text context from Redis
+        instagram_bio = ""
+        instagram_posts_captions: list[str] = []
+        google_reviews_dicts: list[dict] = []
+        data_sources = ["photos"]
+
+        ig_data = self.venue_dao.get_venue_instagram(venue_id)
+        if ig_data and ig_data.bio:
+            instagram_bio = ig_data.bio
+            data_sources.append("ig_bio")
+
+        ig_posts_data = self.venue_dao.get_venue_ig_posts(venue_id)
+        if ig_posts_data and ig_posts_data.posts:
+            instagram_posts_captions = [
+                p.caption for p in ig_posts_data.posts if p.caption
+            ]
+            if instagram_posts_captions:
+                data_sources.append("ig_posts")
+
+        reviews_data = self.venue_dao.get_venue_reviews(venue_id)
+        if reviews_data and reviews_data.reviews:
+            google_reviews_dicts = [
+                {"author": r.author_name, "rating": r.rating, "text": r.text}
+                for r in reviews_data.reviews
+            ]
+            if google_reviews_dicts:
+                data_sources.append("google_reviews")
+
         # 4. Run Stage A
         logger.info(
             f"[VibeClassifier] Stage A for {venue_id} ({venue_name}): "
-            f"{len(photo_urls)} photos"
+            f"{len(photo_urls)} photos, data_sources={data_sources}"
         )
         stage_a_result = await self.openai_client.classify_venue_vibes_stage_a(
             photo_urls=photo_urls,
             venue_name=venue_name,
             venue_type=venue_type or "",
             model=self.stage_a_model,
+            instagram_bio=instagram_bio,
+            instagram_posts=instagram_posts_captions,
+            google_reviews=google_reviews_dicts,
         )
 
         if not stage_a_result:
@@ -147,6 +178,9 @@ class VibeClassifierService:
                 uncertain_facets=uncertain_facets,
                 venue_name=venue_name,
                 model=self.stage_b_model,
+                instagram_bio=instagram_bio,
+                instagram_posts=instagram_posts_captions,
+                google_reviews=google_reviews_dicts,
             )
 
             if stage_b_result:
@@ -163,6 +197,7 @@ class VibeClassifierService:
             photos=photos,
             photo_urls=photo_urls,
             stage_b_triggered=stage_b_triggered,
+            data_sources=data_sources,
         )
 
         # 8. Generate blurbs if not from Stage B
@@ -356,8 +391,9 @@ class VibeClassifierService:
             if facet_name in refined:
                 merged[facet_name] = refined[facet_name]
 
-        # Take blurbs from Stage B
-        for key in ("vibe_short_pt", "vibe_short_en", "vibe_long_pt", "vibe_long_en"):
+        # Take blurbs and social tags from Stage B
+        for key in ("vibe_short_pt", "vibe_short_en", "vibe_long_pt", "vibe_long_en",
+                     "social_life_tags_pt"):
             if key in stage_b and stage_b[key]:
                 merged[key] = stage_b[key]
 
@@ -378,6 +414,7 @@ class VibeClassifierService:
         photos: list,
         photo_urls: list[str],
         stage_b_triggered: bool,
+        data_sources: list[str] | None = None,
     ) -> VenueVibeProfile:
         """Convert raw API result dict to Pydantic VenueVibeProfile."""
 
@@ -401,6 +438,7 @@ class VibeClassifierService:
                 evidence_photos.append(EvidencePhoto(
                     photo_url=photo_urls[idx],
                     relevance_score=p.get("relevance", 0.0),
+                    vibe_appeal=p.get("vibe_appeal", 0.0),
                     photo_type=p.get("type", "other"),
                     evidence_tags=p.get("tags", []),
                 ))
@@ -473,6 +511,13 @@ class VibeClassifierService:
         if stage_b_triggered:
             classification_trace.append(f"{self.stage_b_model}:stage_b")
 
+        # Social life tags: prefer Stage B if available, else Stage A
+        social_life_tags = (
+            stage_b_result.get("social_life_tags_pt")
+            or result.get("social_life_tags_pt")
+            or []
+        )
+
         return VenueVibeProfile(
             venue_id=venue_id,
             core_venue_modes=parse_facet_scores(result.get("core_venue_modes", [])),
@@ -484,6 +529,9 @@ class VibeClassifierService:
             music=music,
             safety=safety,
             vibe_keywords=result.get("vibe_keywords", []),
+            social_life_tags_pt=social_life_tags,
+            text_evidence_summary=result.get("text_evidence_summary"),
+            data_sources=data_sources or ["photos"],
             vibe_short_pt=result.get("vibe_short_pt"),
             vibe_short_en=result.get("vibe_short_en"),
             vibe_long_pt=result.get("vibe_long_pt"),

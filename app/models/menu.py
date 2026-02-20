@@ -26,6 +26,7 @@ class VenueMenuPhotos(BaseModel):
     available_categories: list[str] = []  # Photo categories reported by Google Maps
     has_menu_category: bool = False        # Whether Google Maps lists a menu/cardápio category
     total_images_on_maps: int = 0          # Total photos reported by Google Maps
+    source: str = ""                       # "instagram_highlights" | "gmaps_extractor" | ""
     enriched_at: datetime = Field(default_factory=datetime.utcnow)
 
     def has_photos(self) -> bool:

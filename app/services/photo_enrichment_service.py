@@ -25,15 +25,18 @@ class PhotoEnrichmentService:
         self,
         google_places_client: GooglePlacesAPIClient,
         venue_dao: RedisVenueDAO,
+        enrichment_limit: Optional[int] = None,
     ):
         """Initialize PhotoEnrichmentService.
 
         Args:
             google_places_client: Google Places API client
             venue_dao: Redis venue DAO for caching
+            enrichment_limit: Max venues per run (None = use settings.photo_enrichment_limit)
         """
         self.google_places_client = google_places_client
         self.venue_dao = venue_dao
+        self.enrichment_limit = enrichment_limit
 
     async def fetch_and_cache_photos(
         self,
@@ -108,7 +111,7 @@ class PhotoEnrichmentService:
         """
         # Use config values if not specified
         if limit is None:
-            limit = settings.photo_enrichment_limit
+            limit = self.enrichment_limit if self.enrichment_limit is not None else settings.photo_enrichment_limit
         if max_photos_per_venue is None:
             max_photos_per_venue = settings.photos_per_venue
 

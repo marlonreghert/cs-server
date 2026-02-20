@@ -255,6 +255,7 @@ class VenueHandler:
 
             # Get AI vibe profile if available
             vibe_profile_data: Optional[dict] = None
+            vibe_profile = None
             try:
                 vibe_profile = self.venue_dao.get_venue_vibe_profile(m.venue.venue_id)
                 if vibe_profile:
@@ -263,6 +264,70 @@ class VenueHandler:
                     )
             except Exception as e:
                 logger.debug(f"[VenueHandler] No vibe profile for {m.venue.venue_id}: {e}")
+
+            # Sort venue photos by category priority + vibe_appeal from AI classification
+            if venue_photos and vibe_profile and vibe_profile.evidence_photos:
+                # Map AI photo types to user-friendly categories and sort priority
+                _TYPE_TO_CATEGORY = {
+                    "interior": "Ambiente", "exterior": "Ambiente", "crowd": "Ambiente",
+                    "food": "Comida", "drink": "Bebida",
+                    "event": "Evento",
+                    "menu": "Outro", "selfie": "Outro", "other": "Outro",
+                    # Backward compat for old food_drink type
+                    "food_drink": "Comida",
+                }
+                _CATEGORY_PRIORITY = {
+                    "Ambiente": 4, "Comida": 3, "Bebida": 2,
+                    "Evento": 1, "Outro": 0,
+                }
+
+                evidence_by_url = {
+                    ep.photo_url: ep
+                    for ep in vibe_profile.evidence_photos
+                }
+
+                def _photo_sort_key(p):
+                    url = p.get("url") if isinstance(p, dict) else p
+                    ep = evidence_by_url.get(url)
+                    if ep:
+                        cat = _TYPE_TO_CATEGORY.get(ep.photo_type, "Outro")
+                        return (_CATEGORY_PRIORITY.get(cat, 0), ep.vibe_appeal)
+                    return (0, 0.0)
+
+                venue_photos.sort(key=_photo_sort_key, reverse=True)
+
+                # Enrich photos with category tag
+                for p in venue_photos:
+                    if isinstance(p, dict):
+                        ep = evidence_by_url.get(p.get("url"))
+                        if ep:
+                            p["category"] = _TYPE_TO_CATEGORY.get(ep.photo_type, "Outro")
+
+            # Get extracted menu data if available
+            venue_menu: Optional[dict] = None
+            try:
+                menu_data = self.venue_dao.get_venue_menu_data(m.venue.venue_id)
+                if menu_data and menu_data.sections:
+                    venue_menu = {
+                        "sections": [
+                            {
+                                "name": s.name,
+                                "items": [
+                                    {
+                                        "name": item.name,
+                                        "description": item.description,
+                                        "prices": item.prices,
+                                        "dietary_tags": item.dietary_tags,
+                                    }
+                                    for item in s.items
+                                ],
+                            }
+                            for s in menu_data.sections
+                        ],
+                        "currency_detected": menu_data.currency_detected,
+                    }
+            except Exception as e:
+                logger.debug(f"[VenueHandler] No menu data for {m.venue.venue_id}: {e}")
 
             minified.append(
                 MinifiedVenue(
@@ -290,6 +355,7 @@ class VenueHandler:
                     instagram_url=instagram_url,
                     venue_reviews=venue_reviews,
                     vibe_profile=vibe_profile_data,
+                    venue_menu=venue_menu,
                 )
             )
 

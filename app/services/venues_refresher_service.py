@@ -73,8 +73,8 @@ class VenuesRefresherService:
         self,
         venue_dao: RedisVenueDAO,
         besttime_api: BestTimeAPIClient,
-        venue_limit_override: int = 0,
-        venue_total_limit: int = -1,
+        fetch_venue_limit_override: int = 0,
+        fetch_venue_total_limit: int = -1,
         dev_mode: bool = False,
         dev_lat: float = 0.0,
         dev_lng: float = 0.0,
@@ -85,8 +85,8 @@ class VenuesRefresherService:
         Args:
             venue_dao: Redis DAO for venue persistence
             besttime_api: BestTime API client
-            venue_limit_override: If > 0, overrides the limit for each location
-            venue_total_limit: Global cap on total venues across all locations (-1 = disabled, 0 = fetch none)
+            fetch_venue_limit_override: If > 0, overrides the limit for each location when fetching from BestTime API
+            fetch_venue_total_limit: Global cap on total venues fetched across all locations (-1 = disabled, 0 = fetch none)
             dev_mode: If True, use single dev location instead of DEFAULT_LOCATIONS
             dev_lat: Dev mode latitude
             dev_lng: Dev mode longitude
@@ -94,8 +94,8 @@ class VenuesRefresherService:
         """
         self.venue_dao = venue_dao
         self.besttime_api = besttime_api
-        self.venue_limit_override = venue_limit_override
-        self.venue_total_limit = venue_total_limit
+        self.fetch_venue_limit_override = fetch_venue_limit_override
+        self.fetch_venue_total_limit = fetch_venue_total_limit
         self.dev_mode = dev_mode
         self.dev_lat = dev_lat
         self.dev_lng = dev_lng
@@ -481,13 +481,13 @@ class VenuesRefresherService:
         own_venues_only = False
 
         # Global total limit: -1 = disabled, 0 = fetch none
-        if self.venue_total_limit == 0:
+        if self.fetch_venue_total_limit == 0:
             logger.info(
-                "[VenuesRefresherService] venue_total_limit=0, skipping venue fetch"
+                "[VenuesRefresherService] fetch_venue_total_limit=0, skipping venue fetch"
             )
             return
 
-        remaining_budget = self.venue_total_limit  # -1 means unlimited
+        remaining_budget = self.fetch_venue_total_limit  # -1 means unlimited
 
         # In dev mode, use single dev location instead of all defaults
         if self.dev_mode:
@@ -496,7 +496,7 @@ class VenuesRefresherService:
                     lat=self.dev_lat,
                     lng=self.dev_lng,
                     radius=self.dev_radius,
-                    limit=self.venue_total_limit if self.venue_total_limit > 0 else 500,
+                    limit=self.fetch_venue_total_limit if self.fetch_venue_total_limit > 0 else 500,
                 )
             ]
             logger.info(
@@ -509,7 +509,7 @@ class VenuesRefresherService:
         for loc in locations:
             # Use override limit if set, otherwise use location's default limit
             effective_limit = (
-                self.venue_limit_override if self.venue_limit_override > 0 else loc.limit
+                self.fetch_venue_limit_override if self.fetch_venue_limit_override > 0 else loc.limit
             )
 
             # Cap per-location limit by remaining global budget
@@ -517,8 +517,8 @@ class VenuesRefresherService:
                 effective_limit = min(effective_limit, remaining_budget)
                 if effective_limit <= 0:
                     logger.info(
-                        f"[VenuesRefresherService] Global venue_total_limit "
-                        f"({self.venue_total_limit}) reached, skipping remaining locations"
+                        f"[VenuesRefresherService] Global fetch_venue_total_limit "
+                        f"({self.fetch_venue_total_limit}) reached, skipping remaining locations"
                     )
                     break
 

@@ -140,19 +140,36 @@ class Settings(BaseSettings):
     instagram_cache_ttl_days: int = 30
     instagram_not_found_cache_ttl_days: int = 7
 
+    # Instagram Posts Scraping (feeds post captions into vibe classifier)
+    ig_posts_enrichment_enabled: bool = False
+    ig_posts_enrichment_on_startup: bool = False
+    ig_posts_enrichment_cron: str = "0 4 * * 3"  # Weekly: Wednesday at 4 AM
+    ig_posts_enrichment_limit: int = 20
+    ig_posts_per_venue: int = 10
+    ig_posts_cache_ttl_days: int = 30
+
     # Menu Enrichment (Apify menu photo scraping + S3 storage)
     menu_enrichment_enabled: bool = False
     menu_enrichment_on_startup: bool = False
     menu_enrichment_cron: str = "0 5 1 * *"  # Monthly: 1st at 5 AM
     menu_enrichment_limit: int = 10           # Max venues per run
-    menu_photos_per_venue: int = 5
-    menu_photo_categories: list[str] = ["menu", "cardápio", "cardapio", "preços", "valores"]
+    menu_photos_per_venue: int = 20
+    menu_photo_categories: list[str] = [
+        "menu", "cardapio", "preco", "valor",
+        "drink", "drinq", "bebid", "bebe",
+        "comid", "comes", "prato",
+        "entrada", "aperitiv", "petisco",
+        "porcao", "combo",
+    ]
 
-    # SerpApi (for menu photo category filtering)
+    # SerpApi (deprecated — no longer used, kept for backwards compat)
     serpapi_api_key: str = ""
 
-    # Apify fallback for menu photos (when SerpApi fails)
+    # Apify fallback for menu photos (deprecated — replaced by menu_gmaps_fallback_enabled)
     menu_apify_fallback_enabled: bool = False
+
+    # Google Maps menu photo fallback (compass/google-maps-extractor via Apify)
+    menu_gmaps_fallback_enabled: bool = False
 
     # GPT-4o-mini photo pre-filter
     menu_photo_filter_enabled: bool = True
@@ -164,12 +181,12 @@ class Settings(BaseSettings):
     s3_access_key_id: str = ""
     s3_secret_access_key: str = ""
 
-    # Menu Data Extraction (OpenAI GPT-4o)
+    # Menu Data Extraction (OpenAI GPT-4o-mini)
     openai_api_key: str = ""
     menu_extraction_enabled: bool = False
     menu_extraction_on_startup: bool = False
     menu_extraction_cron: str = "0 6 1 * *"  # Monthly: 1st at 6 AM
-    menu_extraction_model: str = "gpt-4o"
+    menu_extraction_model: str = "gpt-4o-mini"
 
     # Vibe Classifier (OpenAI Vision - 2-stage hybrid)
     vibe_classifier_enabled: bool = False
@@ -198,10 +215,13 @@ class Settings(BaseSettings):
     # Startup Configuration
     # If False, skip initial venue refresh on startup (only schedule jobs)
     refresh_on_startup: bool = True
-    # If set (> 0), overrides the limit for each location when fetching venues
-    venue_limit_override: int = 0
-    # Global cap on total venues fetched across all locations (-1 = disabled, 0 = fetch none)
-    venue_total_limit: int = -1
+    # If set (> 0), overrides the limit for each location when fetching venues from BestTime API
+    fetch_venue_limit_override: int = 0
+    # Global cap on total venues fetched from BestTime API across all locations (-1 = disabled, 0 = fetch none)
+    fetch_venue_total_limit: int = -1
+    # Global cap on how many venues get processed by enrichment services (photo, instagram, menu, vibe classifier)
+    # -1 = disabled (use each service's own limit), 0 = process none
+    process_venue_total_limit: int = -1
 
     # Project Paths
     project_root: str = ""

@@ -14,10 +14,11 @@ from app.services.google_places_enrichment_service import GooglePlacesEnrichment
 from app.services.photo_enrichment_service import PhotoEnrichmentService
 from app.api.apify_instagram_client import ApifyInstagramClient
 from app.services.instagram_enrichment_service import InstagramEnrichmentService
+from app.services.instagram_posts_enrichment_service import InstagramPostsEnrichmentService
 from app.services.instagram_validator import InstagramValidator
 from app.api.s3_client import S3Client
-from app.api.serpapi_client import SerpApiClient
-from app.api.apify_menu_photos_client import ApifyMenuPhotosClient
+from app.api.apify_instagram_highlights_client import ApifyInstagramHighlightsClient
+from app.api.apify_gmaps_extractor_client import ApifyGMapsExtractorClient
 from app.api.openai_menu_client import OpenAIMenuClient
 from app.services.menu_photo_enrichment_service import MenuPhotoEnrichmentService
 from app.services.menu_extraction_service import MenuExtractionService
@@ -43,6 +44,20 @@ class Container:
         """
         logger.info(f"[Container] Initializing container")
         self.settings = settings
+
+        # Global processing cap — applied to all enrichment services
+        global_cap = settings.process_venue_total_limit  # -1 = disabled
+
+        def _capped(service_limit: int) -> int:
+            """Apply global process_venue_total_limit cap to a per-service limit."""
+            if global_cap < 0:
+                return service_limit  # global cap disabled
+            if service_limit <= 0:
+                return global_cap  # service has no limit, use global
+            return min(service_limit, global_cap)
+
+        if global_cap >= 0:
+            logger.info(f"[Container] Global process_venue_total_limit={global_cap}")
 
         # Initialize Redis client
         logger.info(
@@ -99,6 +114,7 @@ class Container:
             self.photo_enrichment_service = PhotoEnrichmentService(
                 self.google_places_api,
                 self.redis_venue_dao,
+                enrichment_limit=_capped(settings.photo_enrichment_limit),
             )
             logger.info("[Container] Photo Enrichment service initialized")
         else:
@@ -127,7 +143,7 @@ class Container:
                 venue_dao=self.redis_venue_dao,
                 validator=validator,
                 search_candidates=settings.instagram_search_candidates,
-                enrichment_limit=settings.instagram_enrichment_limit,
+                enrichment_limit=_capped(settings.instagram_enrichment_limit),
                 cache_ttl_days=settings.instagram_cache_ttl_days,
                 not_found_ttl_days=settings.instagram_not_found_cache_ttl_days,
             )
@@ -138,21 +154,35 @@ class Container:
                 "Instagram discovery will be disabled."
             )
 
-        # Initialize SerpApi client (for menu photo category filtering)
-        self.serpapi_client = None
-        if settings.serpapi_api_key:
-            self.serpapi_client = SerpApiClient(api_key=settings.serpapi_api_key)
-            logger.info("[Container] SerpApi client initialized")
+        # Initialize Instagram Posts Enrichment (scrape post captions for vibe classifier)
+        self.instagram_posts_enrichment_service = None
+        if settings.apify_api_token and self.apify_instagram_client:
+            self.instagram_posts_enrichment_service = InstagramPostsEnrichmentService(
+                apify_client=self.apify_instagram_client,
+                venue_dao=self.redis_venue_dao,
+                enrichment_limit=_capped(settings.ig_posts_enrichment_limit),
+                posts_per_venue=settings.ig_posts_per_venue,
+                cache_ttl_days=settings.ig_posts_cache_ttl_days,
+            )
+            logger.info("[Container] Instagram Posts Enrichment service initialized")
 
-        # Initialize Apify menu photos client (fallback for SerpApi)
-        self.apify_menu_photos_client = None
+        # Initialize Instagram Highlights client (for menu photo discovery from IG)
+        self.apify_instagram_highlights_client = None
         if settings.apify_api_token:
-            self.apify_menu_photos_client = ApifyMenuPhotosClient(
+            self.apify_instagram_highlights_client = ApifyInstagramHighlightsClient(
                 api_token=settings.apify_api_token,
             )
-            logger.info("[Container] Apify Menu Photos client initialized (fallback)")
+            logger.info("[Container] Apify Instagram Highlights client initialized")
 
-        # Initialize Menu Photo Enrichment (needs: S3 + SerpApi + Google Places for placeId)
+        # Initialize Google Maps Extractor client (fallback for menu photos)
+        self.apify_gmaps_extractor_client = None
+        if settings.apify_api_token:
+            self.apify_gmaps_extractor_client = ApifyGMapsExtractorClient(
+                api_token=settings.apify_api_token,
+            )
+            logger.info("[Container] Apify Google Maps Extractor client initialized")
+
+        # Initialize Menu Photo Enrichment (needs: S3 + Apify token)
         self.s3_client = None
         self.menu_photo_enrichment_service = None
         self.openai_menu_client = None
@@ -167,30 +197,28 @@ class Container:
             )
             logger.info("[Container] S3 client initialized")
 
-            if self.serpapi_client and self.google_places_api:
+            if settings.apify_api_token:
                 self.menu_photo_enrichment_service = MenuPhotoEnrichmentService(
-                    serpapi_client=self.serpapi_client,
+                    instagram_highlights_client=self.apify_instagram_highlights_client,
+                    gmaps_extractor_client=(
+                        self.apify_gmaps_extractor_client
+                        if settings.menu_gmaps_fallback_enabled
+                        else None
+                    ),
                     s3_client=self.s3_client,
                     venue_dao=self.redis_venue_dao,
-                    google_places_client=self.google_places_api,
-                    apify_client=self.apify_menu_photos_client if settings.menu_apify_fallback_enabled else None,
-                    enrichment_limit=settings.menu_enrichment_limit,
+                    enrichment_limit=_capped(settings.menu_enrichment_limit),
                     photos_per_venue=settings.menu_photos_per_venue,
                     menu_categories=settings.menu_photo_categories,
                 )
                 logger.info(
                     "[Container] Menu Photo Enrichment service initialized "
-                    "(SerpApi primary, Apify fallback)"
+                    "(Instagram highlights primary, Google Maps fallback)"
                 )
             else:
-                missing = []
-                if not self.serpapi_client:
-                    missing.append("SERPAPI_API_KEY")
-                if not self.google_places_api:
-                    missing.append("GOOGLE_PLACES_API_KEY")
                 logger.warning(
-                    f"[Container] Menu Photo Enrichment disabled "
-                    f"(missing: {', '.join(missing)})"
+                    "[Container] Menu Photo Enrichment disabled "
+                    "(missing APIFY_API_TOKEN)"
                 )
         else:
             logger.info(
@@ -231,7 +259,7 @@ class Container:
                 target_photos=settings.vibe_classifier_target_photos,
                 escalation_threshold=settings.vibe_classifier_escalation_threshold,
                 stage_b_photo_count=settings.vibe_classifier_stage_b_photos,
-                enrichment_limit=settings.vibe_classifier_limit,
+                enrichment_limit=_capped(settings.vibe_classifier_limit),
                 early_stop_enabled=settings.vibe_classifier_early_stop_enabled,
                 early_stop_min_photos=settings.vibe_classifier_early_stop_min_photos,
                 early_stop_confidence=settings.vibe_classifier_early_stop_confidence,
@@ -250,8 +278,8 @@ class Container:
         self.venues_refresher_service = VenuesRefresherService(
             self.redis_venue_dao,
             self.besttime_api,
-            venue_limit_override=settings.venue_limit_override,
-            venue_total_limit=settings.venue_total_limit,
+            fetch_venue_limit_override=settings.fetch_venue_limit_override,
+            fetch_venue_total_limit=settings.fetch_venue_total_limit,
             dev_mode=settings.dev_mode,
             dev_lat=settings.dev_lat,
             dev_lng=settings.dev_lng,
@@ -286,19 +314,19 @@ class Container:
             except Exception as e:
                 logger.error(f"[Container] Error closing Apify Instagram client: {e}")
 
-        if self.serpapi_client:
+        if self.apify_instagram_highlights_client:
             try:
-                await self.serpapi_client.close()
-                logger.info("[Container] SerpApi client closed")
+                await self.apify_instagram_highlights_client.close()
+                logger.info("[Container] Apify Instagram Highlights client closed")
             except Exception as e:
-                logger.error(f"[Container] Error closing SerpApi client: {e}")
+                logger.error(f"[Container] Error closing Apify Instagram Highlights client: {e}")
 
-        if self.apify_menu_photos_client:
+        if self.apify_gmaps_extractor_client:
             try:
-                await self.apify_menu_photos_client.close()
-                logger.info("[Container] Apify Menu Photos client closed")
+                await self.apify_gmaps_extractor_client.close()
+                logger.info("[Container] Apify Google Maps Extractor client closed")
             except Exception as e:
-                logger.error(f"[Container] Error closing Apify Menu Photos client: {e}")
+                logger.error(f"[Container] Error closing Apify Google Maps Extractor client: {e}")
 
         if self.menu_photo_enrichment_service:
             try:

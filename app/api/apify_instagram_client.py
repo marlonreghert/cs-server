@@ -166,6 +166,52 @@ class ApifyInstagramClient:
             logger.error(f"[ApifyInstagram] Failed to parse profile for @{username}: {e}")
             return None
 
+    async def fetch_recent_posts(
+        self, username: str, results_limit: int = 10
+    ) -> list[dict]:
+        """Fetch recent posts for an Instagram profile.
+
+        Uses apify/instagram-scraper with resultsType="posts".
+        Only returns caption text + engagement metrics (no image URLs — they expire).
+
+        Args:
+            username: Instagram username (without @)
+            results_limit: Max posts to return (default 10)
+
+        Returns:
+            List of post dicts with keys: caption, likes_count, comments_count,
+            timestamp, post_type. Empty list on error.
+        """
+        run_input = {
+            "directUrls": [f"https://www.instagram.com/{username}/"],
+            "resultsType": "posts",
+            "resultsLimit": results_limit,
+        }
+
+        items = await self._run_actor_sync(
+            "apify~instagram-scraper", run_input, endpoint_label="instagram_posts"
+        )
+
+        if not items:
+            return []
+
+        posts = []
+        for item in items:
+            if "error" in item:
+                continue
+            posts.append({
+                "caption": item.get("caption", ""),
+                "likes_count": item.get("likesCount", 0),
+                "comments_count": item.get("commentsCount", 0),
+                "timestamp": item.get("timestamp", ""),
+                "post_type": item.get("type", "image"),
+            })
+
+        logger.info(
+            f"[ApifyInstagram] Fetched {len(posts)} posts for @{username}"
+        )
+        return posts
+
     async def _run_actor_sync(
         self, actor_id: str, run_input: dict, endpoint_label: str
     ) -> Optional[list[dict]]:

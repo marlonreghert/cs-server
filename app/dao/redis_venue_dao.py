@@ -8,7 +8,7 @@ from app.db.geo_redis_client import GeoRedisClient
 from app.models import Venue, LiveForecastResponse, WeekRawDay
 from app.models.vibe_attributes import VibeAttributes
 from app.models.opening_hours import OpeningHours
-from app.models.instagram import VenueInstagram
+from app.models.instagram import VenueInstagram, VenueInstagramPosts
 from app.models.venue_review import VenueReviews
 from app.models.menu import VenueMenuPhotos, VenueMenuData
 from app.models.vibe_profile import VenueVibeProfile
@@ -27,6 +27,7 @@ VENUE_INSTAGRAM_KEY_FORMAT = "venue_instagram_v1:{}"
 VENUE_REVIEWS_KEY_FORMAT = "venue_reviews_v1:{}"
 VENUE_MENU_PHOTOS_KEY_FORMAT = "venue_menu_photos_v1:{}"
 VENUE_MENU_RAW_DATA_KEY_FORMAT = "venue_menu_raw_data_v1:{}"
+VENUE_IG_POSTS_KEY_FORMAT = "venue_ig_posts_v1:{}"
 VENUE_VIBE_PROFILE_KEY_FORMAT = "venue_vibe_profile_v1:{}"
 
 
@@ -590,6 +591,67 @@ class RedisVenueDAO:
             except Exception:
                 continue
         return count
+
+    # =========================================================================
+    # VENUE INSTAGRAM POSTS METHODS
+    # =========================================================================
+
+    def set_venue_ig_posts(
+        self, posts: VenueInstagramPosts, cache_ttl_days: int = 30
+    ) -> None:
+        """Cache Instagram posts for a venue with TTL.
+
+        Args:
+            posts: VenueInstagramPosts object
+            cache_ttl_days: TTL in days
+        """
+        key = VENUE_IG_POSTS_KEY_FORMAT.format(posts.venue_id)
+        json_data = posts.model_dump_json(by_alias=True)
+        ttl_seconds = cache_ttl_days * 86400
+        self.client.setex(key, ttl_seconds, json_data)
+        logger.debug(
+            f"[RedisVenueDAO] Cached {len(posts.posts)} IG posts for {posts.venue_id}, "
+            f"ttl={ttl_seconds}s"
+        )
+
+    def get_venue_ig_posts(self, venue_id: str) -> Optional[VenueInstagramPosts]:
+        """Retrieve cached Instagram posts for a venue.
+
+        Args:
+            venue_id: Venue identifier
+
+        Returns:
+            VenueInstagramPosts or None if not cached / expired
+        """
+        key = VENUE_IG_POSTS_KEY_FORMAT.format(venue_id)
+        try:
+            json_str = self.client.get(key)
+            if json_str is None:
+                return None
+            return VenueInstagramPosts.model_validate_json(json_str)
+        except redis.RedisError as e:
+            logger.error(f"Failed to get venue IG posts from Redis: {e}")
+            return None
+
+    def delete_venue_ig_posts(self, venue_id: str) -> None:
+        """Delete cached Instagram posts for a venue.
+
+        Args:
+            venue_id: Venue identifier
+        """
+        key = VENUE_IG_POSTS_KEY_FORMAT.format(venue_id)
+        self.client.del_(key)
+
+    def list_cached_ig_posts_venue_ids(self) -> list[str]:
+        """Return venue IDs for all cached Instagram posts.
+
+        Returns:
+            List of venue IDs
+        """
+        pattern = "venue_ig_posts_v1:*"
+        keys = self.client.keys(pattern)
+        prefix = "venue_ig_posts_v1:"
+        return [key.replace(prefix, "", 1) for key in keys]
 
     # =========================================================================
     # VENUE MENU PHOTOS METHODS

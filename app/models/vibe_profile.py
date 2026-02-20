@@ -21,7 +21,8 @@ class EvidencePhoto(BaseModel):
     """Per-photo evidence for explainability and debugging."""
     photo_url: str
     relevance_score: float = 0.0   # 0-10
-    photo_type: str = ""           # crowd|interior|exterior|food_drink|event|menu|selfie|other
+    vibe_appeal: float = 0.0       # 0-10: how well photo communicates venue atmosphere
+    photo_type: str = ""           # interior|exterior|crowd|food|drink|event|menu|selfie|other
     evidence_tags: list[str] = []  # e.g., ["crowded", "neon_lighting", "standing_dancefloor"]
 
 
@@ -105,7 +106,12 @@ class VenueVibeProfile(BaseModel):
     vibe_long_pt: Optional[str] = None
     vibe_long_en: Optional[str] = None
 
-    # 10. Evidence & Debug
+    # 10. GPT-generated social life tags (informal PT-BR)
+    social_life_tags_pt: list[str] = []   # e.g. ["Dá pra dançar", "Boteco raiz", "Pagode"]
+    text_evidence_summary: Optional[str] = None  # What text signals revealed beyond photos
+    data_sources: list[str] = []          # e.g. ["photos", "ig_bio", "ig_posts", "google_reviews"]
+
+    # 11. Evidence & Debug
     evidence_photos: list[EvidencePhoto] = []
     per_label_confidence: dict[str, float] = {}
     photos_analyzed: int = 0

@@ -19,15 +19,20 @@ from app.metrics import (
 logger = logging.getLogger(__name__)
 
 # Stage A prompt: compact JSON output, no prose
-STAGE_A_PROMPT = """You are VibeSense's venue vibe classifier. Analyze all photos from this venue and return ONLY a JSON object.
+STAGE_A_PROMPT = """You are VibeSense's venue vibe classifier. Analyze ALL available evidence (photos + text signals) and return ONLY a JSON object.
 
 Context: Venue name: "{venue_name}" | Type: "{venue_type}"
-
+{text_context}
 ## Instructions
-1. For each photo, assess its relevance and extract observable vibe signals.
-2. Aggregate across all photos into a single venue vibe profile.
-3. All numeric scores must be 0-10 scale.
-4. Return ONLY valid JSON, no explanations.
+1. For each photo, assess its relevance and vibe appeal, and extract observable vibe signals.
+   - "relevance": how useful this photo is for classifying the venue (0-10).
+   - "vibe_appeal": how well this photo communicates the venue's atmosphere to a potential visitor browsing the app (0-10). Prefer photos showing the interior ambiance, crowd, lighting, and decor over menus, logos, or blurry selfies.
+2. Use photos for VISUAL signals (decor, lighting, crowd density, environment).
+3. Use Instagram content for PROMOTIONAL signals (events, specials, music style, target audience).
+4. Use Google reviews for EXPERIENTIAL signals (service quality, atmosphere descriptions, crowd behavior).
+5. Cross-reference sources: if reviews mention "loud live music every night" but photos look calm, trust reviews for music_prominence. If IG posts show DJ events, raise dance_likelihood.
+6. Aggregate into a single venue vibe profile. All numeric scores 0-10.
+7. Return ONLY valid JSON, no explanations.
 
 ## Output Schema
 {{
@@ -35,7 +40,8 @@ Context: Venue name: "{venue_name}" | Type: "{venue_type}"
     {{
       "index": 0,
       "relevance": 7.5,
-      "type": "interior|exterior|crowd|food_drink|event|menu|selfie|other",
+      "vibe_appeal": 8.0,
+      "type": "interior|exterior|crowd|food|drink|event|menu|selfie|other",
       "tags": ["dim_lighting", "crowded", "neon_signs"]
     }}
   ],
@@ -70,13 +76,25 @@ Context: Venue name: "{venue_name}" | Type: "{venue_type}"
     "perceived_safety": 8, "accessibility_score": 6, "crowd_diversity_signal": 7
   }},
   "vibe_keywords": ["energetic", "casual", "music"],
+  "social_life_tags_pt": ["Dá pra dançar", "Boteco raiz", "Pagode", "Baratinho"],
+  "text_evidence_summary": "Brief note on what text signals revealed beyond photos",
   "overall_confidence": 0.82,
   "uncertainty_reasons": []
 }}
 
+## social_life_tags_pt guidance
+Generate 4-8 informal Portuguese tags that capture the venue's social identity — what makes someone choose THIS place over others on a night out. Think as a young Brazilian deciding where to go tonight:
+- Activity: "Dá pra dançar", "Bom de papo", "Clima de date", "Cola com a galera"
+- Character: "Boteco raiz", "Balada", "Lounge", "Pé na areia", "Som ao vivo"
+- Crowd: "Galera da facul", "Underground", "After work", "LGBTQ+"
+- Music: "Pagode", "Sertanejo", "Rock", "Funk", "Eletrônica"
+- Price: "Baratinho", "Chique"
+- Aesthetic: "Instagramável", "Ao ar livre"
+Be specific over generic. Prefer "Pagode às terças" over "Música". Synthesize from ALL evidence sources.
+
 ## Rules
 - Only include labels you are confident about (confidence >= 0.5).
-- If a facet cannot be determined from photos, set to null.
+- If a facet cannot be determined from any source, set to null.
 - For multi-label fields (core_venue_modes, crowd_types, decor_styles, genres), include only relevant labels.
 - Be concise: no explanations, only the JSON object."""
 
@@ -84,7 +102,7 @@ Context: Venue name: "{venue_name}" | Type: "{venue_type}"
 STAGE_B_PROMPT = """You are VibeSense's venue vibe classifier performing a REFINEMENT pass.
 
 Context: Venue name: "{venue_name}"
-
+{text_context}
 ## Previous Stage A Results (partial)
 {stage_a_json}
 
@@ -93,9 +111,10 @@ Context: Venue name: "{venue_name}"
 
 ## Instructions
 1. Look at these HIGH-RESOLUTION photos carefully.
-2. ONLY provide refined values for the uncertain facets listed above.
-3. Also generate bilingual venue description blurbs.
-4. Return ONLY valid JSON.
+2. Use text signals (IG bio, IG posts, Google reviews) to help resolve uncertain facets.
+3. ONLY provide refined values for the uncertain facets listed above.
+4. Also generate bilingual venue description blurbs and social life tags.
+5. Return ONLY valid JSON.
 
 ## Output Schema
 {{
@@ -103,13 +122,24 @@ Context: Venue name: "{venue_name}"
     // Only include facets from the uncertain list above
     // Use same structure as Stage A for each facet
   }},
+  "social_life_tags_pt": ["Dá pra dançar", "Boteco raiz", "Pagode", "Baratinho"],
   "vibe_short_pt": "Descrição curta do ambiente em português (max 100 chars)",
   "vibe_short_en": "Short vibe description in English (max 100 chars)",
   "vibe_long_pt": "Descrição detalhada do ambiente em português (2-3 frases)",
   "vibe_long_en": "Detailed vibe description in English (2-3 sentences)",
   "overall_confidence": 0.88,
   "uncertainty_reasons": []
-}}"""
+}}
+
+## social_life_tags_pt guidance
+Generate 4-8 informal Portuguese tags that capture the venue's social identity — what makes someone choose THIS place over others on a night out. Think as a young Brazilian deciding where to go tonight:
+- Activity: "Dá pra dançar", "Bom de papo", "Clima de date", "Cola com a galera"
+- Character: "Boteco raiz", "Balada", "Lounge", "Pé na areia", "Som ao vivo"
+- Crowd: "Galera da facul", "Underground", "After work", "LGBTQ+"
+- Music: "Pagode", "Sertanejo", "Rock", "Funk", "Eletrônica"
+- Price: "Baratinho", "Chique"
+- Aesthetic: "Instagramável", "Ao ar livre"
+Be specific over generic. Prefer "Pagode às terças" over "Música". Synthesize from ALL evidence sources."""
 
 
 class OpenAIVibeClient:
@@ -128,6 +158,9 @@ class OpenAIVibeClient:
         venue_name: str = "",
         venue_type: str = "",
         model: str = "gpt-4o-mini",
+        instagram_bio: str = "",
+        instagram_posts: list[str] | None = None,
+        google_reviews: list[dict] | None = None,
     ) -> dict:
         """Stage A: Score photos + extract vibe facets in one call.
 
@@ -138,6 +171,9 @@ class OpenAIVibeClient:
             venue_name: Venue name for context
             venue_type: Venue type for context (e.g., "bar", "restaurant")
             model: Model to use (default: gpt-4o-mini)
+            instagram_bio: Instagram bio text
+            instagram_posts: List of recent IG post captions
+            google_reviews: List of review dicts with "rating" and "text" keys
 
         Returns:
             Parsed JSON dict with vibe profile, or empty dict on error.
@@ -145,9 +181,14 @@ class OpenAIVibeClient:
         if not photo_urls:
             return {}
 
+        text_context = self._build_text_context(
+            instagram_bio, instagram_posts, google_reviews,
+        )
+
         prompt = STAGE_A_PROMPT.format(
             venue_name=venue_name or "Unknown",
             venue_type=venue_type or "Unknown",
+            text_context=text_context,
         )
 
         content = [{"type": "text", "text": prompt}]
@@ -163,7 +204,7 @@ class OpenAIVibeClient:
                 model=model,
                 messages=[{"role": "user", "content": content}],
                 temperature=0.2,
-                max_tokens=2048,
+                max_tokens=2560,
                 response_format={"type": "json_object"},
             )
 
@@ -194,6 +235,9 @@ class OpenAIVibeClient:
         uncertain_facets: list[str],
         venue_name: str = "",
         model: str = "gpt-4o",
+        instagram_bio: str = "",
+        instagram_posts: list[str] | None = None,
+        google_reviews: list[dict] | None = None,
     ) -> dict:
         """Stage B: Refine uncertain facets using high-resolution photos.
 
@@ -205,6 +249,9 @@ class OpenAIVibeClient:
             uncertain_facets: List of facet names to refine
             venue_name: Venue name for context
             model: Model to use (default: gpt-4o)
+            instagram_bio: Instagram bio text
+            instagram_posts: List of recent IG post captions
+            google_reviews: List of review dicts with "rating" and "text" keys
 
         Returns:
             Parsed JSON dict with refined facets + blurbs, or empty dict on error.
@@ -220,10 +267,15 @@ class OpenAIVibeClient:
                       "overall_confidence", "uncertainty_reasons")
         }
 
+        text_context = self._build_text_context(
+            instagram_bio, instagram_posts, google_reviews,
+        )
+
         prompt = STAGE_B_PROMPT.format(
             venue_name=venue_name or "Unknown",
             stage_a_json=json.dumps(stage_a_compact, ensure_ascii=False, indent=None),
             uncertain_facets=", ".join(uncertain_facets),
+            text_context=text_context,
         )
 
         content = [{"type": "text", "text": prompt}]
@@ -263,6 +315,58 @@ class OpenAIVibeClient:
             OPENAI_API_CALLS_TOTAL.labels(endpoint="vibe_stage_b", status="error").inc()
             logger.error(f"[VibeClient] Stage B failed: {e}")
             return {}
+
+    @staticmethod
+    def _build_text_context(
+        instagram_bio: str = "",
+        instagram_posts: list[str] | None = None,
+        google_reviews: list[dict] | None = None,
+    ) -> str:
+        """Format IG bio + post captions + reviews as a text block for the prompt.
+
+        Returns empty string if no text signals are available.
+        """
+        sections: list[str] = []
+
+        # Instagram Bio
+        if instagram_bio:
+            sections.append(
+                f"### Instagram Bio\n{instagram_bio.strip()}"
+            )
+
+        # Recent Instagram Posts (captions only)
+        if instagram_posts:
+            lines = []
+            for i, caption in enumerate(instagram_posts[:10], 1):
+                truncated = caption[:300].strip()
+                if len(caption) > 300:
+                    truncated += "..."
+                lines.append(f"{i}. {truncated}")
+            sections.append(
+                "### Recent Instagram Posts (captions)\n" + "\n".join(lines)
+            )
+
+        # Google Reviews
+        if google_reviews:
+            lines = []
+            for review in google_reviews[:5]:
+                rating = review.get("rating", "?")
+                text = (review.get("text") or "")[:200].strip()
+                if len(review.get("text") or "") > 200:
+                    text += "..."
+                lines.append(f"- [{rating}/5] {text}")
+            sections.append(
+                "### Google Reviews (top 5)\n" + "\n".join(lines)
+            )
+
+        if not sections:
+            return ""
+
+        return (
+            "\n## Additional Context (text signals — use alongside photos)\n\n"
+            + "\n\n".join(sections)
+            + "\n"
+        )
 
     def _parse_json_response(self, raw_text: str) -> dict:
         """Parse JSON response, stripping markdown fences if present.

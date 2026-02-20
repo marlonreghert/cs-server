@@ -189,6 +189,33 @@ async def run_instagram_enrichment_job():
         logger.error(f"[Scheduler] InstagramEnrichmentJob failed: {e}")
 
 
+async def run_ig_posts_enrichment_job():
+    """Background job: Scrape recent Instagram posts for venues with IG handles."""
+    job_name = "ig_posts_enrichment"
+    logger.info("[Scheduler] Running IGPostsEnrichmentJob")
+    start_time = time.perf_counter()
+
+    if container.instagram_posts_enrichment_service is None:
+        logger.warning(
+            "[Scheduler] IGPostsEnrichmentJob skipped: "
+            "Apify API not configured"
+        )
+        return
+
+    try:
+        await container.instagram_posts_enrichment_service.enrich_all_venues()
+        duration = time.perf_counter() - start_time
+        BACKGROUND_JOB_DURATION_SECONDS.labels(job_name=job_name).observe(duration)
+        BACKGROUND_JOB_RUNS_TOTAL.labels(job_name=job_name, status="success").inc()
+        BACKGROUND_JOB_LAST_RUN_TIMESTAMP.labels(job_name=job_name).set_to_current_time()
+        logger.info("[Scheduler] IGPostsEnrichmentJob completed")
+    except Exception as e:
+        duration = time.perf_counter() - start_time
+        BACKGROUND_JOB_DURATION_SECONDS.labels(job_name=job_name).observe(duration)
+        BACKGROUND_JOB_RUNS_TOTAL.labels(job_name=job_name, status="error").inc()
+        logger.error(f"[Scheduler] IGPostsEnrichmentJob failed: {e}")
+
+
 async def run_menu_photo_enrichment_job():
     """Background job: Fetch menu photos from Google Maps via Apify and store on S3."""
     job_name = "menu_photo_enrichment"
@@ -371,6 +398,25 @@ def start_background_jobs(settings: Settings):
             "(INSTAGRAM_ENRICHMENT_ENABLED=false or missing Apify API token)"
         )
 
+    # Job 10: IG posts enrichment (only if enabled and configured)
+    if settings.ig_posts_enrichment_enabled and settings.apify_api_token:
+        scheduler.add_job(
+            run_ig_posts_enrichment_job,
+            trigger=CronTrigger.from_crontab(settings.ig_posts_enrichment_cron),
+            id="ig_posts_enrichment",
+            name="Instagram Posts Enrichment (Weekly)",
+            replace_existing=True,
+        )
+        logger.info(
+            f"[Scheduler] Scheduled IG posts enrichment with cron: "
+            f"{settings.ig_posts_enrichment_cron}"
+        )
+    else:
+        logger.info(
+            "[Scheduler] IG posts enrichment disabled "
+            "(IG_POSTS_ENRICHMENT_ENABLED=false or missing Apify API token)"
+        )
+
     # Job 7: Menu photo enrichment (only if enabled and configured)
     if settings.menu_enrichment_enabled and container.menu_photo_enrichment_service is not None:
         scheduler.add_job(
@@ -539,6 +585,21 @@ async def startup_sequence(settings: Settings):
             logger.error(f"[Main] Initial Instagram enrichment failed: {e}")
     else:
         logger.info("[Main] Skipping initial Instagram enrichment")
+
+    # Step 6b: Initial IG posts enrichment (if enabled)
+    if (
+        settings.ig_posts_enrichment_on_startup
+        and settings.apify_api_token
+        and container.instagram_posts_enrichment_service is not None
+    ):
+        logger.info("[Main] Running IG posts enrichment (initial load)")
+        try:
+            await container.instagram_posts_enrichment_service.enrich_all_venues()
+            logger.info("[Main] Initial IG posts enrichment completed")
+        except Exception as e:
+            logger.error(f"[Main] Initial IG posts enrichment failed: {e}")
+    else:
+        logger.info("[Main] Skipping initial IG posts enrichment")
 
     # Step 7: Initial menu photo enrichment (if enabled)
     if (

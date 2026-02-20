@@ -92,7 +92,14 @@ class MenuExtractionService:
             return None
 
         # Pre-filter: classify which photos are menus using GPT-4o-mini
-        if self.photo_filter_enabled and len(presigned_urls) > 1:
+        # Skip for Instagram-sourced photos (already filtered by highlight title)
+        # Skip for GMaps-sourced photos (no category filtering available;
+        # owner-prioritized photos are sent directly to extraction)
+        if (
+            self.photo_filter_enabled
+            and len(presigned_urls) > 1
+            and menu_photos.source not in ("instagram_highlights", "gmaps_extractor")
+        ):
             try:
                 menu_indices = await self.openai_client.classify_menu_photos(
                     presigned_urls,

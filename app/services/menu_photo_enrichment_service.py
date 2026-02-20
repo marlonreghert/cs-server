@@ -1,15 +1,15 @@
-"""Service for fetching venue photos from Google Maps and storing them on S3.
+"""Service for fetching venue menu photos and storing them on S3.
 
-Uses SerpApi (primary) to discover menu-specific photos via Google Maps
-photo categories, with Apify as a fallback.
+Uses Instagram Highlights (primary) to discover menu photos from venue
+Instagram accounts, with Google Maps photos via compass/google-maps-extractor
+as a fallback.
 
 For each venue:
-1. Look up Google Place ID (reuses google_places_client.search_place_id)
-2. Resolve SerpApi data_id from place_id
-3. Fetch photos with menu-category filtering (SerpApi)
-4. On SerpApi failure: fallback to Apify actor
-5. Download photos and upload to S3
-6. Store metadata in Redis
+1. Check if venue has an Instagram handle (from instagram_enrichment)
+2. PRIMARY: Fetch highlights via apify/instagram-scraper, filter by menu keywords
+3. FALLBACK: Fetch categorized photos via compass/google-maps-extractor
+4. Download photos and upload to S3
+5. Store metadata in Redis
 
 Follows the same pattern as instagram_enrichment_service.py.
 """
@@ -20,10 +20,9 @@ from typing import Optional
 
 import httpx
 
-from app.api.serpapi_client import SerpApiClient
-from app.api.apify_menu_photos_client import ApifyMenuPhotosClient
+from app.api.apify_instagram_highlights_client import ApifyInstagramHighlightsClient
+from app.api.apify_gmaps_extractor_client import ApifyGMapsExtractorClient
 from app.api.apify_instagram_client import ApifyCreditExhaustedError
-from app.api.google_places_client import GooglePlacesAPIClient
 from app.api.s3_client import S3Client
 from app.dao.redis_venue_dao import RedisVenueDAO
 from app.models.menu import MenuPhoto, VenueMenuPhotos
@@ -43,28 +42,26 @@ DEFAULT_MENU_CATEGORIES = ["menu", "cardápio", "cardapio", "preços", "valores"
 
 
 class MenuPhotoEnrichmentService:
-    """Fetches and caches venue photos from Google Maps.
+    """Fetches and caches venue menu photos.
 
-    Primary: SerpApi with menu-category filtering.
-    Fallback: Apify thescrappa/google-maps-photos-scraper.
+    Primary: Instagram Highlights via apify/instagram-scraper.
+    Fallback: Google Maps photos via compass/google-maps-extractor.
     """
 
     def __init__(
         self,
-        serpapi_client: SerpApiClient,
+        instagram_highlights_client: Optional[ApifyInstagramHighlightsClient],
+        gmaps_extractor_client: Optional[ApifyGMapsExtractorClient],
         s3_client: S3Client,
         venue_dao: RedisVenueDAO,
-        google_places_client: GooglePlacesAPIClient,
-        apify_client: Optional[ApifyMenuPhotosClient] = None,
         enrichment_limit: int = 10,
-        photos_per_venue: int = 20,
+        photos_per_venue: int = 10,
         menu_categories: Optional[list[str]] = None,
     ):
-        self.serpapi_client = serpapi_client
+        self.instagram_highlights_client = instagram_highlights_client
+        self.gmaps_extractor_client = gmaps_extractor_client
         self.s3_client = s3_client
         self.venue_dao = venue_dao
-        self.google_places_client = google_places_client
-        self.apify_client = apify_client
         self.enrichment_limit = enrichment_limit
         self.photos_per_venue = photos_per_venue
         self.menu_categories = menu_categories or DEFAULT_MENU_CATEGORIES
@@ -75,9 +72,9 @@ class MenuPhotoEnrichmentService:
         await self._download_client.aclose()
 
     async def enrich_venue(self, venue_id: str, force_refresh: bool = False) -> Optional[VenueMenuPhotos]:
-        """Fetch and store photos for a single venue.
+        """Fetch and store menu photos for a single venue.
 
-        Tries SerpApi first (with menu-category filtering), falls back to Apify.
+        Tries Instagram Highlights first, falls back to Google Maps extractor.
 
         Args:
             venue_id: Internal venue ID
@@ -100,34 +97,26 @@ class MenuPhotoEnrichmentService:
             logger.warning(f"[MenuPhotoEnrichment] Venue not found: {venue_id}")
             return None
 
-        # Get Google Place ID
-        google_place_id = await self.google_places_client.search_place_id(
-            venue_name=venue.venue_name,
-            venue_address=venue.venue_address,
-            lat=venue.venue_lat,
-            lng=venue.venue_lng,
-        )
-        if not google_place_id:
-            logger.warning(
-                f"[MenuPhotoEnrichment] No Place ID for {venue.venue_name}"
-            )
-            MENU_PHOTO_ENRICHMENT_RESULTS.labels(result="no_place_id").inc()
-            return None
+        # Try Instagram Highlights (primary)
+        photo_data = None
+        if self.instagram_highlights_client:
+            ig_data = self.venue_dao.get_venue_instagram(venue_id)
+            if ig_data and ig_data.instagram_handle:
+                photo_data = await self._fetch_via_instagram(
+                    ig_data.instagram_handle, venue.venue_name
+                )
 
-        # Try SerpApi (primary)
-        photo_data = await self._fetch_via_serpapi(google_place_id, venue.venue_name)
-
-        # Fallback to Apify if SerpApi failed
-        if photo_data is None and self.apify_client:
+        # Fallback to Google Maps Extractor
+        if photo_data is None and self.gmaps_extractor_client:
             logger.info(
-                f"[MenuPhotoEnrichment] SerpApi failed for {venue.venue_name}, "
-                f"trying Apify fallback"
+                f"[MenuPhotoEnrichment] No IG highlights for {venue.venue_name}, "
+                f"trying Google Maps fallback"
             )
-            photo_data = await self._fetch_via_apify(google_place_id, venue.venue_name)
+            photo_data = await self._fetch_via_gmaps(venue)
 
         if not photo_data or not photo_data.get("photos"):
             logger.info(
-                f"[MenuPhotoEnrichment] No photos found for {venue.venue_name}"
+                f"[MenuPhotoEnrichment] No menu photos found for {venue.venue_name}"
             )
             MENU_PHOTO_ENRICHMENT_RESULTS.labels(result="no_photos_found").inc()
             result = VenueMenuPhotos(venue_id=venue_id)
@@ -137,6 +126,7 @@ class MenuPhotoEnrichmentService:
         photos_list = photo_data["photos"]
         categories = photo_data.get("categories", [])
         has_menu_category = photo_data.get("has_menu_category", False)
+        source = photo_data.get("source", "")
 
         # Download and upload each photo to S3
         all_photos: list[MenuPhoto] = []
@@ -169,6 +159,7 @@ class MenuPhotoEnrichmentService:
             available_categories=categories,
             has_menu_category=has_menu_category,
             total_images_on_maps=len(photos_list),
+            source=source,
         )
         self.venue_dao.set_venue_menu_photos(result)
 
@@ -177,7 +168,7 @@ class MenuPhotoEnrichmentService:
             MENU_PHOTOS_STORED_TOTAL.inc(len(all_photos))
             logger.info(
                 f"[MenuPhotoEnrichment] Stored {len(all_photos)} photos for "
-                f"{venue.venue_name}"
+                f"{venue.venue_name} (source: {source})"
             )
         else:
             MENU_PHOTO_ENRICHMENT_RESULTS.labels(result="no_photos_found").inc()
@@ -187,121 +178,100 @@ class MenuPhotoEnrichmentService:
 
         return result
 
-    async def _fetch_via_serpapi(
-        self, place_id: str, venue_name: str
+    async def _fetch_via_instagram(
+        self, instagram_handle: str, venue_name: str
     ) -> Optional[dict]:
-        """Fetch photos via SearchApi.io with menu-category filtering.
-
-        Uses place_id directly (no data_id resolution needed).
+        """Fetch menu photos from Instagram highlights.
 
         Returns:
-            Dict with keys: photos (list of {image_url, author_name}),
-            categories (list of str), has_menu_category (bool),
-            or None on failure.
+            Dict with keys: photos, categories, has_menu_category, source
+            or None on failure / no results.
         """
         try:
-            # Step 1: Fetch photos + categories using place_id directly
-            result = await self.serpapi_client.fetch_photos(place_id=place_id)
-            if not result:
-                return None
-
-            categories = result.get("categories", [])
-            category_titles = [c.get("title", "") for c in categories]
-
-            # Step 2: Check for menu category
-            menu_category_id = self.serpapi_client.find_menu_category(
-                categories, self.menu_categories
+            highlight_photos = await self.instagram_highlights_client.fetch_menu_highlights(
+                username=instagram_handle,
+                menu_keywords=self.menu_categories,
             )
 
-            has_menu_category = menu_category_id is not None
-            photos = result.get("photos", [])
-
-            # If menu category found, re-fetch with category filter
-            if menu_category_id:
-                filtered_result = await self.serpapi_client.fetch_photos(
-                    place_id=place_id, category_id=menu_category_id
-                )
-                if filtered_result and filtered_result.get("photos"):
-                    photos = filtered_result["photos"]
-                    logger.info(
-                        f"[MenuPhotoEnrichment] SearchApi: {len(photos)} menu-category "
-                        f"photos for {venue_name}"
-                    )
-            else:
+            if not highlight_photos:
                 logger.info(
-                    f"[MenuPhotoEnrichment] SearchApi: no menu category for {venue_name}, "
-                    f"using {len(photos)} unfiltered photos. "
-                    f"Available categories: {category_titles}"
+                    f"[MenuPhotoEnrichment] No menu highlights for @{instagram_handle} "
+                    f"({venue_name})"
                 )
-
-            if not photos:
                 return None
 
-            # Normalize to common format
-            normalized = [
-                {
-                    "image_url": p.get("image", p.get("thumbnail", "")),
-                    "author_name": (p.get("user") or {}).get("name"),
-                }
-                for p in photos
-            ]
-
             return {
-                "photos": normalized,
-                "categories": category_titles,
-                "has_menu_category": has_menu_category,
-            }
-
-        except Exception as e:
-            logger.error(
-                f"[MenuPhotoEnrichment] SearchApi error for {venue_name}: {e}"
-            )
-            return None
-
-    async def _fetch_via_apify(
-        self, place_id: str, venue_name: str
-    ) -> Optional[dict]:
-        """Fetch photos via Apify fallback.
-
-        Returns:
-            Dict with keys: photos (list of {image_url, author_name}),
-            categories (list), has_menu_category (bool),
-            or None on failure.
-        """
-        try:
-            photos = await self.apify_client.fetch_venue_photos(
-                place_id=place_id,
-                max_images=self.photos_per_venue,
-            )
-
-            if not photos:
-                return None
-
-            # Normalize to common format
-            normalized = [
-                {
-                    "image_url": p.get("photo_url", ""),
-                    "author_name": None,
-                }
-                for p in photos
-            ]
-
-            return {
-                "photos": normalized,
-                "categories": [],
-                "has_menu_category": False,
+                "photos": [
+                    {"image_url": p["image_url"], "author_name": None}
+                    for p in highlight_photos
+                ],
+                "categories": list(set(
+                    p.get("highlight_title", "") for p in highlight_photos
+                )),
+                "has_menu_category": True,
+                "source": "instagram_highlights",
             }
 
         except ApifyCreditExhaustedError:
             logger.error(
-                f"[MenuPhotoEnrichment] Apify credits exhausted for {venue_name}"
+                f"[MenuPhotoEnrichment] Apify credits exhausted for "
+                f"@{instagram_handle} ({venue_name})"
             )
             MENU_PHOTO_ENRICHMENT_RESULTS.labels(result="credit_exhausted").inc()
-            return None
+            raise
 
         except Exception as e:
             logger.error(
-                f"[MenuPhotoEnrichment] Apify error for {venue_name}: {e}"
+                f"[MenuPhotoEnrichment] Instagram highlights error for "
+                f"@{instagram_handle} ({venue_name}): {e}"
+            )
+            return None
+
+    async def _fetch_via_gmaps(self, venue) -> Optional[dict]:
+        """Fetch menu photos from Google Maps via compass extractor.
+
+        Builds a search query from venue name + address.
+
+        Returns:
+            Dict with keys: photos, categories, has_menu_category, source
+            or None on failure / no results.
+        """
+        search_query = f"{venue.venue_name} {venue.venue_address}"
+
+        try:
+            photos = await self.gmaps_extractor_client.fetch_venue_menu_photos(
+                search_query=search_query,
+                menu_keywords=self.menu_categories,
+                max_photos=self.photos_per_venue,
+            )
+
+            if not photos:
+                return None
+
+            return {
+                "photos": [
+                    {"image_url": p["image_url"], "author_name": None}
+                    for p in photos
+                ],
+                "categories": list(set(
+                    p.get("category", "") for p in photos
+                )),
+                "has_menu_category": any(p.get("category") for p in photos),
+                "source": "gmaps_extractor",
+            }
+
+        except ApifyCreditExhaustedError:
+            logger.error(
+                f"[MenuPhotoEnrichment] Apify credits exhausted for "
+                f"{venue.venue_name}"
+            )
+            MENU_PHOTO_ENRICHMENT_RESULTS.labels(result="credit_exhausted").inc()
+            raise
+
+        except Exception as e:
+            logger.error(
+                f"[MenuPhotoEnrichment] GMaps extractor error for "
+                f"{venue.venue_name}: {e}"
             )
             return None
 
@@ -353,6 +323,13 @@ class MenuPhotoEnrichmentService:
                     enriched_count += 1
                 processed += 1
 
+            except ApifyCreditExhaustedError:
+                logger.error(
+                    "[MenuPhotoEnrichment] Apify credits exhausted. "
+                    "Stopping enrichment."
+                )
+                break
+
             except Exception as e:
                 logger.error(
                     f"[MenuPhotoEnrichment] Error processing {venue_id}: {e}"
@@ -385,7 +362,7 @@ class MenuPhotoEnrichmentService:
 
         Args:
             venue_id: Venue identifier
-            image_url: Photo URL (SerpApi or Apify)
+            image_url: Photo URL (Instagram or Google Maps)
             author_name: Photo author
 
         Returns:

@@ -55,6 +55,29 @@
     "instagram_not_found_cache_ttl_days": 7
   },
 
+  "ig_posts_enrichment": {
+    "_comment": "Instagram post scraping — feeds captions into vibe classifier for richer vibe extraction",
+    "ig_posts_enrichment_enabled": false,
+    "ig_posts_enrichment_on_startup": false,
+    "ig_posts_enrichment_cron": "0 4 * * 3",
+    "ig_posts_enrichment_limit": 20,
+    "ig_posts_per_venue": 10,
+    "ig_posts_cache_ttl_days": 30
+  },
+
+  "vibe_classifier": {
+    "_comment": "AI vibe classification from photos + text signals (IG bio/posts, Google reviews)",
+    "vibe_classifier_enabled": false,
+    "vibe_classifier_on_startup": false,
+    "vibe_classifier_cron": "0 7 1 * *",
+    "vibe_classifier_limit": 20,
+    "vibe_classifier_target_photos": 10,
+    "vibe_classifier_escalation_threshold": 0.80,
+    "vibe_classifier_stage_b_photos": 5,
+    "vibe_classifier_stage_a_model": "gpt-4o-mini",
+    "vibe_classifier_stage_b_model": "gpt-4o"
+  },
+
   "menu_enrichment": {
     "_comment": "Menu photo fetching (SerpApi primary, Apify fallback) + S3 + OpenAI extraction",
     "menu_enrichment_enabled": false,
@@ -87,7 +110,8 @@
   "startup": {
     "_comment": "Startup behavior",
     "refresh_on_startup": true,
-    "venue_limit_override": 0,
-    "venue_total_limit": -1
+    "fetch_venue_limit_override": 0,
+    "fetch_venue_total_limit": -1,
+    "process_venue_total_limit": -1
   }
 }

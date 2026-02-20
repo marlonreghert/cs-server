@@ -53,3 +53,23 @@ class VenueInstagram(BaseModel):
     def has_instagram(self) -> bool:
         """Check if a valid Instagram handle was found."""
         return self.status in ("found", "low_confidence") and self.instagram_handle is not None
+
+
+class InstagramPost(BaseModel):
+    """A single Instagram post (caption-only, no image URLs — they expire)."""
+    caption: Optional[str] = None
+    likes_count: int = 0
+    comments_count: int = 0
+    timestamp: Optional[str] = None
+    post_type: str = "image"  # image | video | carousel
+
+
+class VenueInstagramPosts(BaseModel):
+    """Cached Instagram posts for a venue.
+
+    Stored in Redis at key: venue_ig_posts_v1:{venue_id}
+    """
+    venue_id: str
+    instagram_handle: str
+    posts: list[InstagramPost] = []
+    scraped_at: datetime = Field(default_factory=datetime.utcnow)
