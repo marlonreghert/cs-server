@@ -265,6 +265,7 @@ class Container:
                 early_stop_confidence=settings.vibe_classifier_early_stop_confidence,
                 stage_a_model=settings.vibe_classifier_stage_a_model,
                 stage_b_model=settings.vibe_classifier_stage_b_model,
+                priority_venues=settings.dev_vibesense_pipeline_priority_venues,
             )
             logger.info("[Container] Vibe Classifier service initialized")
         else:

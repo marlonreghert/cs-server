@@ -1,8 +1,10 @@
 """OpenAI Vision client for venue vibe classification.
 
 2-stage hybrid architecture:
-- Stage A (gpt-4o-mini, detail="low"): photo scoring + vibe extraction in one call
-- Stage B (gpt-4o, detail="high"): refinement for uncertain facets + blurb generation
+- Stage A (gpt-4o-mini, detail="low"): photo scoring + fixed-taxonomy classification
+- Stage B (gpt-4o, detail="high"): refinement for uncertain categories + blurb generation
+
+v2: Fixed-taxonomy system with 8 categories and strict label vocabulary.
 """
 import json
 import logging
@@ -18,21 +20,67 @@ from app.metrics import (
 
 logger = logging.getLogger(__name__)
 
-# Stage A prompt: compact JSON output, no prose
-STAGE_A_PROMPT = """You are VibeSense's venue vibe classifier. Analyze ALL available evidence (photos + text signals) and return ONLY a JSON object.
+# Stage A prompt: fixed-taxonomy classification + photo scoring
+STAGE_A_PROMPT = """You are VibeSense Venue Vibe Classifier for bars and nightlife in Recife, Brazil. Analyze ALL available evidence (photos + text signals) and return ONLY a JSON object. You must be precise, conservative, and return ONLY valid labels from the provided taxonomy. Do not invent new labels. If evidence is weak, return an empty list for that category and reduce confidence.
 
 Context: Venue name: "{venue_name}" | Type: "{venue_type}"
 {text_context}
 ## Instructions
-1. For each photo, assess its relevance and vibe appeal, and extract observable vibe signals.
+1. For each photo, score its relevance and vibe appeal, and classify its type.
    - "relevance": how useful this photo is for classifying the venue (0-10).
    - "vibe_appeal": how well this photo communicates the venue's atmosphere to a potential visitor browsing the app (0-10). Prefer photos showing the interior ambiance, crowd, lighting, and decor over menus, logos, or blurry selfies.
-2. Use photos for VISUAL signals (decor, lighting, crowd density, environment).
-3. Use Instagram content for PROMOTIONAL signals (events, specials, music style, target audience).
-4. Use Google reviews for EXPERIENTIAL signals (service quality, atmosphere descriptions, crowd behavior).
-5. Cross-reference sources: if reviews mention "loud live music every night" but photos look calm, trust reviews for music_prominence. If IG posts show DJ events, raise dance_likelihood.
-6. Aggregate into a single venue vibe profile. All numeric scores 0-10.
-7. Return ONLY valid JSON, no explanations.
+2. Classify the venue into 8 fixed taxonomy categories. Use ONLY the labels listed below — never invent new ones.
+3. Use BOTH modalities:
+   - PHOTOS are primary for: Estética, Estilo do Lugar, Dress Code, Clima Social (barulho/ambiente), "Pra dançar"
+   - REVIEWS/TEXT are primary for: Música (gênero), Formato Musical (ao vivo/DJ/karaokê), Público, Intenção, Clima Social
+4. Be CONSERVATIVE: if you cannot confidently assign a label, leave the category empty rather than guess. Max 4 labels per category.
+5. Do not infer sensitive traits beyond what is clearly indicated (e.g., LGBTQ+ only if explicitly stated in reviews or strongly signaled by venue positioning/branding visible in text).
+6. For evidence, cite photo indices (0-based) and brief review quotes that support each category.
+7. Generate top_vibes: the 6 most defining tags across all categories — what makes someone choose THIS place on a night out.
+   Prioritize: Estilo do Lugar, Intenção, Música, Público, Estética.
+8. Generate short blurbs in Portuguese and English describing the venue's atmosphere.
+9. Return ONLY valid JSON, no explanations.
+
+## Fixed Taxonomy Labels (ONLY THESE ARE ALLOWED)
+
+### Público (crowd types — who goes there)
+Turistas, Alternativo, Gótico, LGBTQ+, Casais, Galera 50+, Galera 30+, Galera jovem, Família, Artistas / criativos, Público misto
+
+### Música (genre — what you'll hear)
+Pagode, Samba, Sertanejo, Funk, Eletrônica, Techno, House, Pop, Rock, Indie, Rap / Trap, MPB, Reggaeton, Forró, Jazz, Música ambiente, Brega, Frevo
+
+### Formato Musical (how music is delivered)
+DJ, Som ao vivo, Banda ao vivo, Roda de samba, Karaokê, Playlist ambiente, Open mic, Instrumental
+
+### Estilo do Lugar (venue style)
+Boteco raiz, Gastrobar, Bar tradicional, Lounge, Balada, Club, Pub, Rooftop, Pé na areia, Beach club, Wine bar, Coquetelaria, Bar com jogos, Speakeasy, Cultural / alternativo, Inferninho
+
+### Estética (look and feel)
+Instagramável, Minimalista, Retrô, Underground, Neon, Intimista, Sofisticado, Moderno, Rústico, Ao ar livre, Vista bonita, Beira-mar, Nature vibe
+
+### Intenção (why you'd go)
+Pra dançar, Clima de date, Sentar com a galera, Aniversário, Comemoração, Jantar tranquilo, Virar a noite, Conhecer gente nova, Beber de leve, Happy hour, After
+
+### Dress Code (what to wear)
+Casual, Arrumadinho, Esporte fino, Praia, Alternativo, Sem dress code
+
+### Clima Social (social energy)
+Intimista, Social, Animado, Agitado, Fervendo, Tranquilo
+
+## Heuristics
+A) Evidence rules:
+- "DJ", "Karaokê", "Som ao vivo", "Roda de samba" should be supported by a review mention OR a clear visual cue (stage, mic, instruments, DJ booth).
+- "Pé na areia" / "Beira-mar" must be supported by photo evidence (sand, shoreline) or strong review mention.
+- "Rooftop" must be supported by photo evidence (open skyline/terrace) or explicit mention.
+- "LGBTQ+" only if explicit text in reviews/branding or strong textual cues like "gay friendly" / "LGBT" / "drag night". Don't infer from crowd appearance.
+B) Clima social and barulho:
+- If photos show small tables, warm lighting, and reviews mention "conversa", set "Tranquilo" or "Intimista".
+C) Dress code:
+- Infer from attire in photos + venue style: Beach/sand => "Praia", Club/lux => "Esporte fino", Boteco => "Casual" / "Sem dress code".
+D) Limits:
+- Up to 4 labels per category per venue.
+- Prefer specificity: "Coquetelaria" over "Bar tradicional" if clear cocktail bar cues exist.
+- If venue_type suggests but evidence is missing, keep confidence low or empty.
 
 ## Output Schema
 {{
@@ -45,101 +93,145 @@ Context: Venue name: "{venue_name}" | Type: "{venue_type}"
       "tags": ["dim_lighting", "crowded", "neon_signs"]
     }}
   ],
-  "core_venue_modes": [
-    {{"label": "bar_social|dining_restaurant|club_party|lounge_cocktail|boteco_raiz|cafe_brunch|outdoor_beer_garden|live_music_venue|cultural_space|mixed_use", "confidence": 0.9}}
-  ],
-  "crowd_types": [
-    {{"label": "alternativo_indie|mainstream_social|corporate_professional|university_student|tourist|family_friendly|upscale_affluent|local_regulars|fitness_wellness|lgbtq_friendly", "confidence": 0.8}}
-  ],
-  "energy": {{
-    "energy_level": 7, "party_intensity": 5, "conversation_focus": 6,
-    "date_friendly": 7, "group_friendly": 8, "networking_friendly": 4, "dance_likelihood": 3
+  "publico": {{
+    "labels": ["Galera jovem"],
+    "confidence": 0.75,
+    "evidence": {{
+      "photo_indices": [2, 5],
+      "review_quotes": ["Público jovem e diverso"]
+    }}
   }},
-  "price": {{
-    "price_score": 5, "price_tier": "budget|mid_range|upscale|premium",
-    "predictability_score": 3
+  "musica": {{
+    "labels": ["Eletrônica", "House"],
+    "confidence": 0.80,
+    "evidence": {{
+      "photo_indices": [],
+      "review_quotes": ["DJ tocando house music toda sexta"]
+    }}
   }},
-  "environment": {{
-    "aesthetic_score": 7, "instagrammable_score": 6, "cleanliness_score": 7, "comfort_score": 6,
-    "indoor_outdoor": "indoor|outdoor|mixed",
-    "lighting": "bright|dim_ambient|dark|natural|neon",
-    "decor_styles": [{{"label": "modern|rustic|industrial|tropical|classic|eclectic|vintage|minimalist", "confidence": 0.8}}]
+  "music_format": {{
+    "labels": ["DJ"],
+    "confidence": 0.85,
+    "evidence": {{
+      "photo_indices": [3],
+      "review_quotes": []
+    }}
   }},
-  "crowd_density": {{
-    "crowd_density_visible": 6, "seating_vs_standing_ratio": 4
+  "estilo_do_lugar": {{
+    "labels": ["Balada"],
+    "confidence": 0.90,
+    "evidence": {{
+      "photo_indices": [0, 1, 4],
+      "review_quotes": []
+    }}
   }},
-  "music": {{
-    "music_prominence": 7,
-    "genres": [{{"label": "rock|sertanejo|pagode|funk|electronic|mpb|jazz|pop|hip_hop|reggae|forro", "confidence": 0.7}}]
+  "estetica": {{
+    "labels": ["Neon", "Underground"],
+    "confidence": 0.70,
+    "evidence": {{
+      "photo_indices": [0, 1],
+      "review_quotes": []
+    }}
   }},
-  "safety": {{
-    "perceived_safety": 8, "accessibility_score": 6, "crowd_diversity_signal": 7
+  "intencao": {{
+    "labels": ["Pra dançar", "Virar a noite"],
+    "confidence": 0.80,
+    "evidence": {{
+      "photo_indices": [],
+      "review_quotes": ["O melhor lugar pra dançar"]
+    }}
   }},
-  "vibe_keywords": ["energetic", "casual", "music"],
-  "social_life_tags_pt": ["Dá pra dançar", "Boteco raiz", "Pagode", "Baratinho"],
-  "text_evidence_summary": "Brief note on what text signals revealed beyond photos",
-  "overall_confidence": 0.82,
-  "uncertainty_reasons": []
+  "dress_code": {{
+    "labels": ["Casual"],
+    "confidence": 0.60,
+    "evidence": {{
+      "photo_indices": [2],
+      "review_quotes": []
+    }}
+  }},
+  "clima_social": {{
+    "labels": ["Agitado", "Fervendo"],
+    "confidence": 0.85,
+    "evidence": {{
+      "photo_indices": [2, 5],
+      "review_quotes": ["Lotado toda sexta"]
+    }}
+  }},
+  "top_vibes": ["Pra dançar", "Eletrônica", "Balada", "Neon", "Galera jovem", "Virar a noite"],
+  "overall_confidence": 0.78,
+  "notes": "Strong visual evidence for club atmosphere; music genres confirmed by reviews.",
+  "vibe_short_pt": "Balada eletrônica com vibe underground e neon.",
+  "vibe_short_en": "Underground electronic club with neon vibes and non-stop dancing.",
+  "vibe_long_pt": "Uma balada eletrônica com estética underground e iluminação neon. O público é jovem e diverso, com DJ tocando house e eletrônica. O clima é agitado — ideal pra quem quer dançar e virar a noite.",
+  "vibe_long_en": "An underground electronic club with neon aesthetics. The crowd is young and diverse, with DJs spinning house and electronic music. The energy is high — perfect for dancing the night away."
 }}
 
-## social_life_tags_pt guidance
-Generate 4-8 informal Portuguese tags that capture the venue's social identity — what makes someone choose THIS place over others on a night out. Think as a young Brazilian deciding where to go tonight:
-- Activity: "Dá pra dançar", "Bom de papo", "Clima de date", "Cola com a galera"
-- Character: "Boteco raiz", "Balada", "Lounge", "Pé na areia", "Som ao vivo"
-- Crowd: "Galera da facul", "Underground", "After work", "LGBTQ+"
-- Music: "Pagode", "Sertanejo", "Rock", "Funk", "Eletrônica"
-- Price: "Baratinho", "Chique"
-- Aesthetic: "Instagramável", "Ao ar livre"
-Be specific over generic. Prefer "Pagode às terças" over "Música". Synthesize from ALL evidence sources.
-
 ## Rules
-- Only include labels you are confident about (confidence >= 0.5).
-- If a facet cannot be determined from any source, set to null.
-- For multi-label fields (core_venue_modes, crowd_types, decor_styles, genres), include only relevant labels.
-- Be concise: no explanations, only the JSON object."""
+- ONLY use labels from the taxonomy above. No free-form labels.
+- Max 4 labels per category.
+- Confidence 0.0-1.0 per category.
+- If you cannot determine a category, set labels to [] and confidence to 0.
+- top_vibes: pick up to 6 tags from across all categories that best capture the venue's social identity.
+- overall_confidence: average of non-empty category confidences, penalized by 0.05 for each empty category.
+- Be Recife/Brazil aware: know local venue types (boteco, inferninho), music (frevo, brega, manguebeat context), and cultural norms.
+- For evidence, photo_indices are 0-based matching the photo order sent. review_quotes should be short excerpts (max 50 chars).
+- Return ONLY the JSON object, no markdown fences or explanations."""
 
-# Stage B prompt: focused refinement + blurb generation
-STAGE_B_PROMPT = """You are VibeSense's venue vibe classifier performing a REFINEMENT pass.
+# Stage B prompt: focused refinement for uncertain categories
+STAGE_B_PROMPT = """You are VibeSense Venue Vibe Classifier performing a REFINEMENT pass for a venue in Recife, Brazil.
 
 Context: Venue name: "{venue_name}"
 {text_context}
-## Previous Stage A Results (partial)
+## Previous Stage A Results
 {stage_a_json}
 
-## Uncertain Facets to Refine
-{uncertain_facets}
+## Categories to Refine
+{uncertain_categories}
 
 ## Instructions
 1. Look at these HIGH-RESOLUTION photos carefully.
-2. Use text signals (IG bio, IG posts, Google reviews) to help resolve uncertain facets.
-3. ONLY provide refined values for the uncertain facets listed above.
-4. Also generate bilingual venue description blurbs and social life tags.
-5. Return ONLY valid JSON.
+2. Use text signals (IG bio, IG posts, Google reviews) to help resolve the uncertain categories listed above.
+3. ONLY provide refined values for the categories listed above — do NOT repeat already-confident categories.
+4. Also regenerate top_vibes (up to 6 tags) and blurbs based on the full picture.
+5. Use ONLY labels from the fixed taxonomy (same as Stage A).
+6. Return ONLY valid JSON.
+
+## Fixed Taxonomy Labels (same as Stage A)
+- Público: Turistas, Alternativo, Gótico, LGBTQ+, Casais, Galera 50+, Galera 30+, Galera jovem, Família, Artistas / criativos, Público misto
+- Música: Pagode, Samba, Sertanejo, Funk, Eletrônica, Techno, House, Pop, Rock, Indie, Rap / Trap, MPB, Reggaeton, Forró, Jazz, Música ambiente, Brega, Frevo
+- Formato Musical: DJ, Som ao vivo, Banda ao vivo, Roda de samba, Karaokê, Playlist ambiente, Open mic, Instrumental
+- Estilo do Lugar: Boteco raiz, Gastrobar, Bar tradicional, Lounge, Balada, Club, Pub, Rooftop, Pé na areia, Beach club, Wine bar, Coquetelaria, Bar com jogos, Speakeasy, Cultural / alternativo, Inferninho
+- Estética: Instagramável, Minimalista, Retrô, Underground, Neon, Intimista, Sofisticado, Moderno, Rústico, Ao ar livre, Vista bonita, Beira-mar, Nature vibe
+- Intenção: Pra dançar, Clima de date, Sentar com a galera, Aniversário, Comemoração, Jantar tranquilo, Virar a noite, Conhecer gente nova, Beber de leve, Happy hour, After
+- Dress Code: Casual, Arrumadinho, Esporte fino, Praia, Alternativo, Sem dress code
+- Clima Social: Intimista, Social, Animado, Agitado, Fervendo, Tranquilo
 
 ## Output Schema
 {{
-  "refined_facets": {{
-    // Only include facets from the uncertain list above
-    // Use same structure as Stage A for each facet
+  "refined_categories": {{
+    "estilo_do_lugar": {{
+      "labels": ["Boteco raiz"],
+      "confidence": 0.90,
+      "evidence": {{
+        "photo_indices": [0, 2],
+        "review_quotes": ["Boteco clássico de esquina"]
+      }}
+    }}
   }},
-  "social_life_tags_pt": ["Dá pra dançar", "Boteco raiz", "Pagode", "Baratinho"],
-  "vibe_short_pt": "Descrição curta do ambiente em português (max 100 chars)",
-  "vibe_short_en": "Short vibe description in English (max 100 chars)",
-  "vibe_long_pt": "Descrição detalhada do ambiente em português (2-3 frases)",
-  "vibe_long_en": "Detailed vibe description in English (2-3 sentences)",
-  "overall_confidence": 0.88,
-  "uncertainty_reasons": []
+  "top_vibes": ["Boteco raiz", "Pagode", "Sentar com a galera", "Galera 30+", "Casual", "Animado"],
+  "overall_confidence": 0.85,
+  "notes": "Refined estilo_do_lugar from high-res photos showing classic boteco decor.",
+  "vibe_short_pt": "Boteco raiz com pagode ao vivo, clima animado e galera de todas as idades.",
+  "vibe_short_en": "Classic neighborhood boteco with live pagode, lively atmosphere and mixed crowd.",
+  "vibe_long_pt": "Um boteco raiz com mesas na calçada e pagode ao vivo. O público é de todas as idades, com galera de 30+ predominando. Ambiente casual e animado — ideal pra sentar com a galera e beber cerveja.",
+  "vibe_long_en": "A classic sidewalk boteco with live pagode music. The crowd spans all ages with 30-somethings predominating. Casual and lively — perfect for hanging with friends over cold beers."
 }}
 
-## social_life_tags_pt guidance
-Generate 4-8 informal Portuguese tags that capture the venue's social identity — what makes someone choose THIS place over others on a night out. Think as a young Brazilian deciding where to go tonight:
-- Activity: "Dá pra dançar", "Bom de papo", "Clima de date", "Cola com a galera"
-- Character: "Boteco raiz", "Balada", "Lounge", "Pé na areia", "Som ao vivo"
-- Crowd: "Galera da facul", "Underground", "After work", "LGBTQ+"
-- Music: "Pagode", "Sertanejo", "Rock", "Funk", "Eletrônica"
-- Price: "Baratinho", "Chique"
-- Aesthetic: "Instagramável", "Ao ar livre"
-Be specific over generic. Prefer "Pagode às terças" over "Música". Synthesize from ALL evidence sources."""
+## Rules
+- refined_categories: only include the categories listed in "Categories to Refine" above.
+- ONLY use labels from the fixed taxonomy. Max 4 per category.
+- top_vibes: up to 6 tags from all categories (including the unrefined ones from Stage A).
+- Return ONLY the JSON object, no markdown fences or explanations."""
 
 
 class OpenAIVibeClient:
@@ -204,7 +296,7 @@ class OpenAIVibeClient:
                 model=model,
                 messages=[{"role": "user", "content": content}],
                 temperature=0.2,
-                max_tokens=2560,
+                max_tokens=3072,
                 response_format={"type": "json_object"},
             )
 
@@ -262,9 +354,9 @@ class OpenAIVibeClient:
         # Build a compact version of Stage A results for context
         stage_a_compact = {
             k: v for k, v in stage_a_result.items()
-            if k in ("core_venue_modes", "crowd_types", "energy", "price",
-                      "environment", "crowd_density", "music", "safety",
-                      "overall_confidence", "uncertainty_reasons")
+            if k in ("publico", "musica", "music_format", "estilo_do_lugar",
+                      "estetica", "intencao", "dress_code", "clima_social",
+                      "top_vibes", "overall_confidence", "notes")
         }
 
         text_context = self._build_text_context(
@@ -274,7 +366,7 @@ class OpenAIVibeClient:
         prompt = STAGE_B_PROMPT.format(
             venue_name=venue_name or "Unknown",
             stage_a_json=json.dumps(stage_a_compact, ensure_ascii=False, indent=None),
-            uncertain_facets=", ".join(uncertain_facets),
+            uncertain_categories=", ".join(uncertain_facets),
             text_context=text_context,
         )
 

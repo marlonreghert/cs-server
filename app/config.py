@@ -207,6 +207,7 @@ class Settings(BaseSettings):
     dev_lat: float = -8.07834       # Default: Recife ZS/ZN
     dev_lng: float = -34.90938
     dev_radius: int = 6000          # Meters
+    dev_vibesense_pipeline_priority_venues: list[str] = []  # Venue names to classify first
 
     # Server Configuration
     server_port: int = 8080

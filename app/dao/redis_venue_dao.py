@@ -28,7 +28,7 @@ VENUE_REVIEWS_KEY_FORMAT = "venue_reviews_v1:{}"
 VENUE_MENU_PHOTOS_KEY_FORMAT = "venue_menu_photos_v1:{}"
 VENUE_MENU_RAW_DATA_KEY_FORMAT = "venue_menu_raw_data_v1:{}"
 VENUE_IG_POSTS_KEY_FORMAT = "venue_ig_posts_v1:{}"
-VENUE_VIBE_PROFILE_KEY_FORMAT = "venue_vibe_profile_v1:{}"
+VENUE_VIBE_PROFILE_KEY_FORMAT = "venue_vibe_profile_v2:{}"
 
 
 class RedisVenueDAO:
@@ -816,9 +816,9 @@ class RedisVenueDAO:
         Returns:
             List of venue IDs
         """
-        pattern = "venue_vibe_profile_v1:*"
+        pattern = "venue_vibe_profile_v2:*"
         keys = self.client.keys(pattern)
-        prefix = "venue_vibe_profile_v1:"
+        prefix = "venue_vibe_profile_v2:"
         return [key.replace(prefix, "", 1) for key in keys]
 
     def count_venues_with_vibe_profile(self) -> int:
@@ -827,6 +827,6 @@ class RedisVenueDAO:
         Returns:
             Number of venues with vibe profiles
         """
-        pattern = "venue_vibe_profile_v1:*"
+        pattern = "venue_vibe_profile_v2:*"
         keys = self.client.keys(pattern)
         return len(keys)
