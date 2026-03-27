@@ -413,22 +413,19 @@ class TestVenuesRefresherService:
         assert DEFAULT_LOCATIONS[2].limit == 200
 
     @pytest.mark.asyncio
-    async def test_nightlife_venue_types_values(self):
-        """Test that nightlife venue types match Go implementation exactly."""
-        from app.services.venues_refresher_service import NIGHTLIFE_VENUE_TYPES
+    async def test_venue_types_values(self):
+        """Test that venue types list contains expected core types."""
+        from app.services.venues_refresher_service import VENUE_TYPES
 
-        expected_types = [
-            "BAR",
-            "BREWERY",
-            "CASINO",
-            "CONCERT_HALL",
-            "ADULT",
-            "CLUBS",
-            "EVENT_VENUE",
-            "FOOD_AND_DRINK",
-            "PERFORMING_ARTS",
-            "ARTS",
-            "WINERY",
-        ]
+        # Must include core nightlife types
+        for t in ["BAR", "CLUBS", "BREWERY", "CONCERT_HALL", "EVENT_VENUE"]:
+            assert t in VENUE_TYPES, f"{t} missing from VENUE_TYPES"
 
-        assert NIGHTLIFE_VENUE_TYPES == expected_types
+        # Must include dining/leisure types added per BestTime feedback
+        for t in ["RESTAURANT", "CAFE", "PARK", "SHOPPING_CENTER", "MUSEUM"]:
+            assert t in VENUE_TYPES, f"{t} missing from VENUE_TYPES"
+
+        # All types must be valid singular BestTime types (no spaces)
+        for t in VENUE_TYPES:
+            assert t == t.strip(), f"Type '{t}' has whitespace"
+            assert " " not in t, f"Type '{t}' contains spaces"

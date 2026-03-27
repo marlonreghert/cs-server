@@ -113,7 +113,7 @@ class VenueFilterParams(BaseModel):
         if self.live is not None:
             params["live"] = "true" if self.live else "false"
         if self.types is not None and len(self.types) > 0:
-            params["types"] = ",".join(self.types)
+            params["types"] = ",".join(t.strip() for t in self.types)
         if self.lat is not None:
             params["lat"] = str(self.lat)
         if self.lng is not None:

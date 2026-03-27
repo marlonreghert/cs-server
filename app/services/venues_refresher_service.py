@@ -41,28 +41,38 @@ class Location:
     limit: int   # Max venues to fetch
 
 
-# CRITICAL: Default locations - exact values from Go implementation
-# Lines 39-41 in service/venues_refresher_service.go
+# Default locations for venue discovery (radius in meters)
 DEFAULT_LOCATIONS = [
-    Location(lat=-8.07834, lng=-34.90938, radius=6000, limit=500),  # ZS/ZN - C1
-    Location(lat=-7.99081, lng=-34.85141, radius=6000, limit=200),  # Olinda
-    Location(lat=-8.18160, lng=-34.92980, radius=6000, limit=200),  # Jaboatao/Candeias
+    Location(lat=-8.07834, lng=-34.90938, radius=15000, limit=500),  # ZS/ZN - C1
+    Location(lat=-7.99081, lng=-34.85141, radius=15000, limit=500),  # Olinda
+    Location(lat=-8.18160, lng=-34.92980, radius=15000, limit=500),  # Jaboatao/Candeias
 ]
 
-# CRITICAL: Nightlife venue types - exact list from Go implementation
-# Lines 60-96 in service/venues_refresher_service.go
-NIGHTLIFE_VENUE_TYPES = [
+# Venue types for BestTime /venues/filter API
+# Reference: BestTime support confirmed these are valid singular types.
+# See valid list at https://besttime.app API docs.
+VENUE_TYPES = [
+    # Nightlife & entertainment
     "BAR",
     "BREWERY",
-    "CASINO",
-    "CONCERT_HALL",
-    "ADULT",
     "CLUBS",
+    "CONCERT_HALL",
     "EVENT_VENUE",
-    "FOOD_AND_DRINK",
     "PERFORMING_ARTS",
     "ARTS",
     "WINERY",
+    "CASINO",
+    # Dining
+    "RESTAURANT",
+    "FOOD_AND_DRINK",
+    "CAFE",
+    # Leisure & culture
+    "PARK",
+    "SHOPPING_CENTER",
+    "SHOPPING",
+    "MUSEUM",
+    "LIBRARY",
+    "FITNESS",
 ]
 
 
@@ -477,7 +487,7 @@ class VenuesRefresherService:
         )
 
         total_inserted = 0
-        min_busy = 1
+        min_busy = 0
         own_venues_only = False
 
         # Global total limit: -1 = disabled, 0 = fetch none
@@ -536,7 +546,7 @@ class VenuesRefresherService:
                 foot_traffic="both",
                 limit=effective_limit,
                 own_venues_only=own_venues_only,
-                types=NIGHTLIFE_VENUE_TYPES,
+                types=VENUE_TYPES,
             )
 
             location_label = f"{loc.lat:.4f},{loc.lng:.4f}"
