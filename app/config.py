@@ -249,6 +249,14 @@ class Settings(BaseSettings):
         # Load JSON config first (if CONFIG_FILE is set)
         json_config = load_json_config()
 
+        # Remove JSON config keys that have env var overrides set,
+        # so pydantic-settings can pick up the env var value instead.
+        # (pydantic-settings treats kwargs as highest priority, above env vars)
+        for key in list(json_config.keys()):
+            if os.getenv(key.upper()) is not None:
+                logger.info(f"Env var {key.upper()} overrides JSON config for '{key}'")
+                del json_config[key]
+
         # Merge: kwargs override JSON config
         merged_kwargs = {**json_config, **kwargs}
 
