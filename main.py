@@ -1,13 +1,12 @@
 """Main entry point for cs-server Python application.
 
-Implements exact startup sequence from Go main.go (lines 139-165):
-1. Initialize DI container
-2. Run initial venue discovery (with live forecasts)
-3. Run initial live forecast refresh
-4. Run initial weekly forecast refresh
-5. Start scheduled background jobs
-6. Start HTTP server with FastAPI
+Startup is split into two phases for zero-downtime deploys:
+1. Essential init (blocking): DI container + router injection
+2. Server starts accepting requests (serves existing Redis data)
+3. Enrichment pipelines run in background (photo, IG, etc.)
+4. Scheduled background jobs run on their cron/interval triggers
 """
+import asyncio
 import logging
 import time
 from contextlib import asynccontextmanager
@@ -479,16 +478,17 @@ def start_background_jobs(settings: Settings):
     logger.info("[Scheduler] Background jobs started")
 
 
-async def startup_sequence(settings: Settings):
-    """Run initial data loads before starting jobs.
+async def startup_essential(settings: Settings):
+    """Essential initialization — must complete before serving requests.
 
-    Implements exact sequence from Go main.go.
+    Only does DI container setup + router injection so the server can
+    immediately serve data already persisted in Redis.
     """
     global container
 
-    logger.info("[Main] Starting startup sequence")
+    logger.info("[Main] Starting essential startup")
 
-    # Initialize container
+    # Initialize container (connects to Redis)
     logger.info("[Main] Initializing DI container")
     container = Container(settings)
 
@@ -500,9 +500,19 @@ async def startup_sequence(settings: Settings):
     # Inject dependencies for debug router
     set_debug_dependencies(container.redis_venue_dao, container.google_places_api)
 
-    # Check if we should run initial refresh
+    logger.info("[Main] Essential startup completed — server is ready to serve")
+
+
+async def startup_background_pipelines(settings: Settings):
+    """Run enrichment pipelines and data refreshes in the background.
+
+    These run AFTER the server is already accepting requests, so existing
+    Redis data can be served while pipelines update it incrementally.
+    """
+    logger.info("[Main] Starting background enrichment pipelines")
+
+    # Initial data refresh (if enabled)
     if settings.refresh_on_startup:
-        # Step 1: Initial venue discovery (with live forecasts)
         logger.info("[Main] Refreshing venues data (initial load)")
         try:
             await container.venues_refresher_service.refresh_venues_by_filter_for_default_locations(
@@ -512,7 +522,6 @@ async def startup_sequence(settings: Settings):
         except Exception as e:
             logger.error(f"[Main] Initial venue refresh failed: {e}")
 
-        # Step 2: Initial live forecast refresh
         logger.info("[Main] Refreshing venues live forecast (initial load)")
         try:
             await container.venues_refresher_service.refresh_live_forecasts_for_all_venues()
@@ -520,7 +529,6 @@ async def startup_sequence(settings: Settings):
         except Exception as e:
             logger.error(f"[Main] Initial live forecast refresh failed: {e}")
 
-        # Step 3: Initial weekly forecast refresh
         logger.info("[Main] Refreshing weekly forecasts (initial load)")
         try:
             await container.venues_refresher_service.refresh_weekly_forecasts_for_all_venues()
@@ -530,22 +538,14 @@ async def startup_sequence(settings: Settings):
     else:
         logger.info("[Main] Skipping initial refresh (REFRESH_ON_STARTUP=false)")
 
-    # Step 4: Initial Google Places enrichment (if enabled)
+    # Google Places enrichment
     if (
         settings.google_places_enrichment_on_startup
         and settings.google_places_api_key
         and container.google_places_enrichment_service is not None
     ):
-        # Force refresh if permanently closed removal is enabled
-        # This ensures we re-check all venues for permanently closed status
         force_refresh = settings.remove_permanently_closed_venues
-        if force_refresh:
-            logger.info(
-                "[Main] Running Google Places enrichment with force_refresh=True "
-                "(remove_permanently_closed_venues is enabled)"
-            )
-        else:
-            logger.info("[Main] Running Google Places enrichment (initial load)")
+        logger.info(f"[Main] Running Google Places enrichment (force_refresh={force_refresh})")
         try:
             await container.google_places_enrichment_service.enrich_all_venues(
                 force_refresh=force_refresh
@@ -553,101 +553,83 @@ async def startup_sequence(settings: Settings):
             logger.info("[Main] Initial Google Places enrichment completed")
         except Exception as e:
             logger.error(f"[Main] Initial Google Places enrichment failed: {e}")
-    else:
-        logger.info("[Main] Skipping initial Google Places enrichment")
 
-    # Step 5: Initial photo enrichment (if enabled)
+    # Photo enrichment
     if (
         settings.photo_enrichment_on_startup
         and settings.google_places_api_key
         and container.photo_enrichment_service is not None
     ):
-        logger.info("[Main] Enriching venues with photos (initial load)")
+        logger.info("[Main] Enriching venues with photos (background)")
         try:
             await container.photo_enrichment_service.refresh_photos_for_venues()
             logger.info("[Main] Initial photo enrichment completed")
         except Exception as e:
             logger.error(f"[Main] Initial photo enrichment failed: {e}")
-    else:
-        logger.info("[Main] Skipping initial photo enrichment")
 
-    # Step 6: Initial Instagram enrichment (if enabled)
+    # Instagram enrichment
     if (
         settings.instagram_enrichment_on_startup
         and settings.apify_api_token
         and container.instagram_enrichment_service is not None
     ):
-        logger.info("[Main] Running Instagram enrichment (initial load)")
+        logger.info("[Main] Running Instagram enrichment (background)")
         try:
             await container.instagram_enrichment_service.enrich_all_venues()
             logger.info("[Main] Initial Instagram enrichment completed")
         except Exception as e:
             logger.error(f"[Main] Initial Instagram enrichment failed: {e}")
-    else:
-        logger.info("[Main] Skipping initial Instagram enrichment")
 
-    # Step 6b: Initial IG posts enrichment (if enabled)
+    # IG posts enrichment
     if (
         settings.ig_posts_enrichment_on_startup
         and settings.apify_api_token
         and container.instagram_posts_enrichment_service is not None
     ):
-        logger.info("[Main] Running IG posts enrichment (initial load)")
+        logger.info("[Main] Running IG posts enrichment (background)")
         try:
             await container.instagram_posts_enrichment_service.enrich_all_venues()
             logger.info("[Main] Initial IG posts enrichment completed")
         except Exception as e:
             logger.error(f"[Main] Initial IG posts enrichment failed: {e}")
-    else:
-        logger.info("[Main] Skipping initial IG posts enrichment")
 
-    # Step 7: Initial menu photo enrichment (if enabled)
+    # Menu photo enrichment
     if (
         settings.menu_enrichment_on_startup
         and container.menu_photo_enrichment_service is not None
     ):
-        logger.info("[Main] Running menu photo enrichment (initial load)")
+        logger.info("[Main] Running menu photo enrichment (background)")
         try:
             await container.menu_photo_enrichment_service.enrich_all_venues()
             logger.info("[Main] Initial menu photo enrichment completed")
         except Exception as e:
             logger.error(f"[Main] Initial menu photo enrichment failed: {e}")
-    else:
-        logger.info("[Main] Skipping initial menu photo enrichment")
 
-    # Step 8: Initial menu extraction (if enabled)
+    # Menu extraction
     if (
         settings.menu_extraction_on_startup
         and container.menu_extraction_service is not None
     ):
-        logger.info("[Main] Running menu extraction (initial load)")
+        logger.info("[Main] Running menu extraction (background)")
         try:
             await container.menu_extraction_service.extract_all_venues()
             logger.info("[Main] Initial menu extraction completed")
         except Exception as e:
             logger.error(f"[Main] Initial menu extraction failed: {e}")
-    else:
-        logger.info("[Main] Skipping initial menu extraction")
 
-    # Step 9: Initial vibe classification (if enabled)
+    # Vibe classification
     if (
         settings.vibe_classifier_on_startup
         and container.vibe_classifier_service is not None
     ):
-        logger.info("[Main] Running vibe classification (initial load)")
+        logger.info("[Main] Running vibe classification (background)")
         try:
             await container.vibe_classifier_service.classify_all_venues()
             logger.info("[Main] Initial vibe classification completed")
         except Exception as e:
             logger.error(f"[Main] Initial vibe classification failed: {e}")
-    else:
-        logger.info("[Main] Skipping initial vibe classification")
 
-    # Step 10: Start background jobs
-    logger.info("[Main] Starting periodic jobs")
-    start_background_jobs(settings)
-
-    logger.info("[Main] Startup sequence completed")
+    logger.info("[Main] Background enrichment pipelines completed")
 
 
 async def shutdown_sequence():
@@ -671,12 +653,33 @@ async def shutdown_sequence():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """FastAPI lifespan context manager for startup and shutdown."""
-    # Startup
+    """FastAPI lifespan context manager for startup and shutdown.
+
+    The server starts serving immediately after essential init (DI + routes).
+    Enrichment pipelines and scheduled jobs run in the background so existing
+    Redis data can be served without delay.
+    """
     settings = Settings()
-    await startup_sequence(settings)
-    yield
+
+    # Phase 1: Essential init (blocking) — server won't accept requests until done
+    await startup_essential(settings)
+
+    # Phase 2: Start scheduled background jobs
+    logger.info("[Main] Starting periodic jobs")
+    start_background_jobs(settings)
+
+    # Phase 3: Enrichment pipelines run as a background task AFTER yield,
+    # meaning the server is already accepting requests.
+    enrichment_task = asyncio.create_task(startup_background_pipelines(settings))
+
+    yield  # ← Server is now accepting requests
+
     # Shutdown
+    enrichment_task.cancel()
+    try:
+        await enrichment_task
+    except asyncio.CancelledError:
+        pass
     await shutdown_sequence()
 
 
