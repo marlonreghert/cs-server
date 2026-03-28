@@ -20,7 +20,7 @@ from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
 
 from app.config import Settings
 from app.container import Container
-from app.routers import venue_router, set_venue_handler, debug_router, set_debug_dependencies
+from app.routers import venue_router, set_venue_handler, debug_router, set_debug_dependencies, admin_trigger_router, set_admin_container
 from app.middleware import PrometheusMiddleware
 from app.metrics import (
     BACKGROUND_JOB_RUNS_TOTAL,
@@ -500,6 +500,9 @@ async def startup_essential(settings: Settings):
     # Inject dependencies for debug router
     set_debug_dependencies(container.redis_venue_dao, container.google_places_api)
 
+    # Inject container for admin trigger router
+    set_admin_container(container)
+
     logger.info("[Main] Essential startup completed — server is ready to serve")
 
 
@@ -698,6 +701,7 @@ app.add_middleware(PrometheusMiddleware)
 # Register routers at app creation time (before uvicorn starts)
 app.include_router(venue_router)
 app.include_router(debug_router)
+app.include_router(admin_trigger_router)
 
 
 # Health check endpoint
