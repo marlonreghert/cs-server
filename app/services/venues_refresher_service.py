@@ -66,13 +66,6 @@ VENUE_TYPES = [
     "RESTAURANT",
     "FOOD_AND_DRINK",
     "CAFE",
-    # Leisure & culture
-    "PARK",
-    "SHOPPING_CENTER",
-    "SHOPPING",
-    "MUSEUM",
-    "LIBRARY",
-    "FITNESS",
 ]
 
 
