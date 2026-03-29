@@ -1,4 +1,5 @@
 """Venues refresher service with background job orchestration."""
+import json
 import logging
 from typing import Optional
 from dataclasses import dataclass
@@ -72,10 +73,13 @@ VENUE_TYPES = [
 class VenuesRefresherService:
     """Service for refreshing venue data from BestTime API."""
 
+    ADMIN_CONFIG_DISCOVERY_POINTS_KEY = "admin_config:discovery_points"
+
     def __init__(
         self,
         venue_dao: RedisVenueDAO,
         besttime_api: BestTimeAPIClient,
+        redis_client=None,
         fetch_venue_limit_override: int = 0,
         fetch_venue_total_limit: int = -1,
         dev_mode: bool = False,
@@ -88,6 +92,7 @@ class VenuesRefresherService:
         Args:
             venue_dao: Redis DAO for venue persistence
             besttime_api: BestTime API client
+            redis_client: Raw Redis client for reading admin config
             fetch_venue_limit_override: If > 0, overrides the limit for each location when fetching from BestTime API
             fetch_venue_total_limit: Global cap on total venues fetched across all locations (-1 = disabled, 0 = fetch none)
             dev_mode: If True, use single dev location instead of DEFAULT_LOCATIONS
@@ -97,6 +102,7 @@ class VenuesRefresherService:
         """
         self.venue_dao = venue_dao
         self.besttime_api = besttime_api
+        self.redis_client = redis_client
         self.fetch_venue_limit_override = fetch_venue_limit_override
         self.fetch_venue_total_limit = fetch_venue_total_limit
         self.dev_mode = dev_mode
@@ -464,64 +470,167 @@ class VenuesRefresherService:
                 )
                 LIVE_FORECAST_FETCH_RESULTS.labels(result="error").inc()
 
-    async def refresh_venues_by_filter_for_default_locations(
-        self, fetch_and_cache_live: bool = False
-    ) -> None:
-        """Refresh venues for all default locations using VenueFilter.
+    # ---- Discovery Points (admin-configurable locations) ----
 
-        Implements exact logic from Go (lines 486-536).
+    def _get_discovery_points(self) -> list[dict]:
+        """Read discovery points from admin config in Redis.
 
-        Args:
-            fetch_and_cache_live: Whether to fetch and cache live forecasts
+        Returns list of point dicts or empty list if not configured.
         """
-        logger.info(
-            f"[VenuesRefresherService] Starting VenueFilter refresh for "
-            f"{len(DEFAULT_LOCATIONS)} default locations"
-        )
+        if self.redis_client is None:
+            return []
+        try:
+            raw = self.redis_client.get(self.ADMIN_CONFIG_DISCOVERY_POINTS_KEY)
+            if raw is None:
+                return []
+            config = json.loads(raw)
+            return config.get("points", [])
+        except Exception as e:
+            logger.error(f"[VenuesRefresherService] Failed to read discovery points: {e}")
+            return []
 
-        total_inserted = 0
-        min_busy = 0
-        own_venues_only = False
-
-        # Global total limit: -1 = disabled, 0 = fetch none
-        if self.fetch_venue_total_limit == 0:
-            logger.info(
-                "[VenuesRefresherService] fetch_venue_total_limit=0, skipping venue fetch"
-            )
+    def _save_discovery_points(self, points: list[dict]) -> None:
+        """Write updated discovery points back to admin config in Redis."""
+        if self.redis_client is None:
             return
-
-        remaining_budget = self.fetch_venue_total_limit  # -1 means unlimited
-
-        # In dev mode, use single dev location instead of all defaults
-        if self.dev_mode:
-            locations = [
-                Location(
-                    lat=self.dev_lat,
-                    lng=self.dev_lng,
-                    radius=self.dev_radius,
-                    limit=self.fetch_venue_total_limit if self.fetch_venue_total_limit > 0 else 500,
-                )
-            ]
-            logger.info(
-                f"[VenuesRefresherService] DEV MODE: using single location "
-                f"lat={self.dev_lat:.5f}, lng={self.dev_lng:.5f}, radius={self.dev_radius}"
+        try:
+            self.redis_client.set(
+                self.ADMIN_CONFIG_DISCOVERY_POINTS_KEY,
+                json.dumps({"points": points}, ensure_ascii=False),
             )
-        else:
-            locations = DEFAULT_LOCATIONS
+        except Exception as e:
+            logger.error(f"[VenuesRefresherService] Failed to save discovery points: {e}")
+
+    def recount_discovery_points(self) -> list[dict]:
+        """Recount venues for each discovery point using GEORADIUS.
+
+        Returns updated list of discovery points with recounted current values.
+        """
+        points = self._get_discovery_points()
+        if not points:
+            logger.warning("[VenuesRefresherService] No discovery points to recount")
+            return []
+
+        for point in points:
+            lat = point.get("lat", 0)
+            lng = point.get("lng", 0)
+            radius = point.get("radius", 15000)
+            point_id = point.get("id", "unknown")
+
+            count = self.venue_dao.count_venues_in_radius(lat, lng, float(radius))
+            old_current = point.get("current", 0)
+            point["current"] = count
+
+            logger.info(
+                f"[VenuesRefresherService] Recount '{point_id}': "
+                f"old={old_current}, new={count} (radius={radius}m)"
+            )
+
+        self._save_discovery_points(points)
+        logger.info(f"[VenuesRefresherService] Recount complete for {len(points)} points")
+        return points
+
+    async def _refresh_with_discovery_points(
+        self,
+        points: list[dict],
+        remaining_budget: int,
+        fetch_and_cache_live: bool,
+    ) -> int:
+        """Refresh using admin-configured discovery points with per-point counters."""
+        total_inserted = 0
+        points_updated = False
+
+        for point in points:
+            point_id = point.get("id", "unknown")
+            current = point.get("current", 0)
+            limit = point.get("limit", 500)
+            lat = point.get("lat", 0)
+            lng = point.get("lng", 0)
+            radius = point.get("radius", 15000)
+
+            headroom = limit - current
+            if headroom <= 0:
+                logger.info(
+                    f"[VenuesRefresherService] Skipping '{point_id}' "
+                    f"(current={current} >= limit={limit})"
+                )
+                continue
+
+            effective_limit = headroom
+            if self.fetch_venue_limit_override > 0:
+                effective_limit = min(effective_limit, self.fetch_venue_limit_override)
+            if remaining_budget >= 0:
+                effective_limit = min(effective_limit, remaining_budget)
+                if effective_limit <= 0:
+                    logger.info("[VenuesRefresherService] Global budget reached, skipping remaining")
+                    break
+
+            logger.info(
+                f"[VenuesRefresherService] Discovery point '{point_id}': "
+                f"lat={lat:.6f}, lng={lng:.6f}, radius={radius}, "
+                f"current={current}/{limit}, fetching up to {effective_limit}"
+            )
+
+            params = VenueFilterParams(
+                busy_min=0,
+                lat=lat,
+                lng=lng,
+                radius=radius,
+                foot_traffic="both",
+                limit=effective_limit,
+                own_venues_only=False,
+                types=VENUE_TYPES,
+            )
+
+            location_label = f"{lat:.4f},{lng:.4f}"
+            try:
+                ids = await self.refresh_venues_data_by_venues_filter(
+                    params, fetch_and_cache_live
+                )
+                fetched_count = len(ids)
+                logger.info(
+                    f"[VenuesRefresherService] Discovery point '{point_id}': "
+                    f"upserted {fetched_count} venues"
+                )
+                REFRESH_VENUES_DISCOVERED.labels(location=location_label).set(fetched_count)
+
+                point["current"] = current + fetched_count
+                points_updated = True
+                total_inserted += fetched_count
+                if remaining_budget >= 0:
+                    remaining_budget -= fetched_count
+            except Exception as e:
+                logger.error(
+                    f"[VenuesRefresherService] Discovery point '{point_id}' failed: {e}"
+                )
+                REFRESH_VENUES_DISCOVERED.labels(location=location_label).set(0)
+                continue
+
+        if points_updated:
+            self._save_discovery_points(points)
+            logger.info("[VenuesRefresherService] Updated discovery point counters in Redis")
+
+        return total_inserted
+
+    async def _refresh_with_locations(
+        self,
+        locations: list[Location],
+        remaining_budget: int,
+        fetch_and_cache_live: bool,
+    ) -> int:
+        """Refresh using Location objects (legacy/dev mode path)."""
+        total_inserted = 0
 
         for loc in locations:
-            # Use override limit if set, otherwise use location's default limit
             effective_limit = (
                 self.fetch_venue_limit_override if self.fetch_venue_limit_override > 0 else loc.limit
             )
-
-            # Cap per-location limit by remaining global budget
             if remaining_budget >= 0:
                 effective_limit = min(effective_limit, remaining_budget)
                 if effective_limit <= 0:
                     logger.info(
                         f"[VenuesRefresherService] Global fetch_venue_total_limit "
-                        f"({self.fetch_venue_total_limit}) reached, skipping remaining locations"
+                        f"({self.fetch_venue_total_limit}) reached, skipping remaining"
                     )
                     break
 
@@ -532,13 +641,13 @@ class VenuesRefresherService:
             )
 
             params = VenueFilterParams(
-                busy_min=min_busy,
+                busy_min=0,
                 lat=loc.lat,
                 lng=loc.lng,
                 radius=loc.radius,
                 foot_traffic="both",
                 limit=effective_limit,
-                own_venues_only=own_venues_only,
+                own_venues_only=False,
                 types=VENUE_TYPES,
             )
 
@@ -563,12 +672,67 @@ class VenuesRefresherService:
                 REFRESH_VENUES_DISCOVERED.labels(location=location_label).set(0)
                 continue
 
-        logger.info(
-            f"[VenuesRefresherService] Finished VenueFilter refresh for all locations; "
-            f"total venues upserted={total_inserted}"
-        )
+        return total_inserted
 
-        # Update data quality metrics after catalog refresh
+    async def refresh_venues_by_filter_for_default_locations(
+        self, fetch_and_cache_live: bool = False
+    ) -> None:
+        """Refresh venues for configured discovery points or default locations.
+
+        Uses admin-configured discovery points from Redis if available,
+        otherwise falls back to hardcoded DEFAULT_LOCATIONS.
+        """
+        # Global total limit: -1 = disabled, 0 = fetch none
+        if self.fetch_venue_total_limit == 0:
+            logger.info(
+                "[VenuesRefresherService] fetch_venue_total_limit=0, skipping venue fetch"
+            )
+            return
+
+        remaining_budget = self.fetch_venue_total_limit  # -1 means unlimited
+
+        # Dev mode: single location, no discovery points
+        if self.dev_mode:
+            locations = [
+                Location(
+                    lat=self.dev_lat,
+                    lng=self.dev_lng,
+                    radius=self.dev_radius,
+                    limit=self.fetch_venue_total_limit if self.fetch_venue_total_limit > 0 else 500,
+                )
+            ]
+            logger.info(
+                f"[VenuesRefresherService] DEV MODE: using single location "
+                f"lat={self.dev_lat:.5f}, lng={self.dev_lng:.5f}, radius={self.dev_radius}"
+            )
+            total = await self._refresh_with_locations(locations, remaining_budget, fetch_and_cache_live)
+            logger.info(f"[VenuesRefresherService] DEV MODE refresh done; total={total}")
+            self.update_data_quality_metrics()
+            return
+
+        # Production: try discovery points from Redis, fall back to DEFAULT_LOCATIONS
+        discovery_points = self._get_discovery_points()
+
+        if discovery_points:
+            logger.info(
+                f"[VenuesRefresherService] Using {len(discovery_points)} discovery points from admin config"
+            )
+            total = await self._refresh_with_discovery_points(
+                discovery_points, remaining_budget, fetch_and_cache_live
+            )
+        else:
+            logger.info(
+                f"[VenuesRefresherService] No discovery points in admin config, "
+                f"falling back to {len(DEFAULT_LOCATIONS)} hardcoded locations"
+            )
+            total = await self._refresh_with_locations(
+                DEFAULT_LOCATIONS, remaining_budget, fetch_and_cache_live
+            )
+
+        logger.info(
+            f"[VenuesRefresherService] Finished VenueFilter refresh; "
+            f"total venues upserted={total}"
+        )
         self.update_data_quality_metrics()
 
     async def refresh_live_forecasts_for_all_venues(self) -> None:

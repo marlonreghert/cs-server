@@ -198,3 +198,21 @@ async def trigger_job(job_name: str):
         job=job_name,
         message=f"{JOB_REGISTRY[job_name]['label']} started in background",
     )
+
+
+@router.post("/recount-discovery-points")
+async def recount_discovery_points():
+    """Recount venues per discovery point using GEORADIUS and update counters."""
+    if _container is None:
+        raise HTTPException(status_code=503, detail="Container not initialized")
+
+    try:
+        points = _container.venues_refresher_service.recount_discovery_points()
+        return {
+            "status": "ok",
+            "points": points,
+            "message": f"Recounted {len(points)} discovery points",
+        }
+    except Exception as e:
+        logger.error(f"[AdminTrigger] Recount discovery points failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))

@@ -279,6 +279,7 @@ class Container:
         self.venues_refresher_service = VenuesRefresherService(
             self.redis_venue_dao,
             self.besttime_api,
+            redis_client=redis_internal_client,
             fetch_venue_limit_override=settings.fetch_venue_limit_override,
             fetch_venue_total_limit=settings.fetch_venue_total_limit,
             dev_mode=settings.dev_mode,

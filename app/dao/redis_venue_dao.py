@@ -173,6 +173,28 @@ class RedisVenueDAO:
         logger.info(f"Finished getting nearby venues: found {len(venues)}")
         return venues
 
+    def count_venues_in_radius(self, lat: float, lon: float, radius_m: float) -> int:
+        """Count venues within a radius without loading full venue data.
+
+        Uses GEORADIUS to count geo set members (no JSON parsing).
+
+        Args:
+            lat: Center latitude
+            lon: Center longitude
+            radius_m: Radius in meters
+
+        Returns:
+            Number of venues within the radius
+        """
+        results = self.client.client.georadius(
+            VENUES_GEO_KEY_V1,
+            longitude=lon,
+            latitude=lat,
+            radius=radius_m / 1000.0,
+            unit="km",
+        )
+        return len(results)
+
     def set_live_forecast(self, forecast: LiveForecastResponse) -> None:
         """Cache live forecast for a venue by its ID.
 
