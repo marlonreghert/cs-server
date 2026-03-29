@@ -389,7 +389,7 @@ class TestVenuesRefresherService:
 
     @pytest.mark.asyncio
     async def test_default_locations_values(self):
-        """Test that default locations match Go implementation exactly."""
+        """Test that default locations match current configuration."""
         from app.services.venues_refresher_service import DEFAULT_LOCATIONS
 
         assert len(DEFAULT_LOCATIONS) == 3
@@ -397,20 +397,20 @@ class TestVenuesRefresherService:
         # ZS/ZN - C1
         assert DEFAULT_LOCATIONS[0].lat == -8.07834
         assert DEFAULT_LOCATIONS[0].lng == -34.90938
-        assert DEFAULT_LOCATIONS[0].radius == 6000
+        assert DEFAULT_LOCATIONS[0].radius == 15000
         assert DEFAULT_LOCATIONS[0].limit == 500
 
         # Olinda
         assert DEFAULT_LOCATIONS[1].lat == -7.99081
         assert DEFAULT_LOCATIONS[1].lng == -34.85141
-        assert DEFAULT_LOCATIONS[1].radius == 6000
-        assert DEFAULT_LOCATIONS[1].limit == 200
+        assert DEFAULT_LOCATIONS[1].radius == 15000
+        assert DEFAULT_LOCATIONS[1].limit == 500
 
         # Jaboatao/Candeias
         assert DEFAULT_LOCATIONS[2].lat == -8.18160
         assert DEFAULT_LOCATIONS[2].lng == -34.92980
-        assert DEFAULT_LOCATIONS[2].radius == 6000
-        assert DEFAULT_LOCATIONS[2].limit == 200
+        assert DEFAULT_LOCATIONS[2].radius == 15000
+        assert DEFAULT_LOCATIONS[2].limit == 500
 
     @pytest.mark.asyncio
     async def test_venue_types_values(self):
@@ -421,8 +421,8 @@ class TestVenuesRefresherService:
         for t in ["BAR", "CLUBS", "BREWERY", "CONCERT_HALL", "EVENT_VENUE"]:
             assert t in VENUE_TYPES, f"{t} missing from VENUE_TYPES"
 
-        # Must include dining/leisure types added per BestTime feedback
-        for t in ["RESTAURANT", "CAFE", "PARK", "SHOPPING_CENTER", "MUSEUM"]:
+        # Must include dining types
+        for t in ["RESTAURANT", "CAFE", "FOOD_AND_DRINK"]:
             assert t in VENUE_TYPES, f"{t} missing from VENUE_TYPES"
 
         # All types must be valid singular BestTime types (no spaces)

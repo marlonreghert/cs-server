@@ -123,3 +123,30 @@ class TestRedisVenueDAOUnit:
         result = venue_dao.get_week_raw_forecast("nonexistent", day_int=0)
 
         assert result is None
+
+    def test_count_venues_in_radius_calls_georadius(self, venue_dao, mock_redis_client):
+        """Test that count_venues_in_radius uses GEORADIUS with correct params."""
+        inner_client = Mock()
+        inner_client.georadius.return_value = ["member1", "member2", "member3"]
+        mock_redis_client.client = inner_client
+
+        count = venue_dao.count_venues_in_radius(lat=-8.07834, lon=-34.90938, radius_m=15000)
+
+        assert count == 3
+        inner_client.georadius.assert_called_once_with(
+            "venues_geo_v1",
+            longitude=-34.90938,
+            latitude=-8.07834,
+            radius=15.0,  # 15000m -> 15km
+            unit="km",
+        )
+
+    def test_count_venues_in_radius_returns_zero_for_empty(self, venue_dao, mock_redis_client):
+        """Test count returns 0 when no venues in radius."""
+        inner_client = Mock()
+        inner_client.georadius.return_value = []
+        mock_redis_client.client = inner_client
+
+        count = venue_dao.count_venues_in_radius(lat=0, lon=0, radius_m=1000)
+
+        assert count == 0
