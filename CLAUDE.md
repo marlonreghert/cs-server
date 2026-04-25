@@ -28,31 +28,37 @@ main.py         # Entry point
 
 ## Running
 
+### Docker (recommended)
+
 ```bash
-# Docker (recommended)
-docker-compose up -d
+docker-compose up -d       # Starts cs-server + Redis, all env vars pre-configured
+curl http://localhost:8080/ping
+```
 
-# Manual
-pip install -r requirements.txt
+### Manual (without Docker)
 
-# Required env vars for local development (outside Docker):
-export REDIS_HOST=localhost          # Docker default is "redis"
+```bash
+# 1. Set env vars (required — Docker sets these automatically, manual does not)
+export REDIS_HOST=localhost
 export REDIS_PORT=6379
 # Optional but useful:
 export LOG_LEVEL=DEBUG
 export REFRESH_ON_STARTUP=false     # Skip venue refresh on startup for faster dev cycles
 
-# Start a local Redis first:
+# 2. Install dependencies
+pip install -r requirements.txt
+
+# 3. Start Redis
 redis-server                        # in a separate terminal
 
-# Run the app:
+# 4. Run the app
 uvicorn main:app --host 0.0.0.0 --port 8080
 
-# Health check
+# 5. Health check
 curl http://localhost:8080/ping
 ```
 
-**Note**: API keys (`BESTTIME_PRIVATE_KEY`, `BESTTIME_PUBLIC_KEY`, `GOOGLE_PLACES_API_KEY`, `OPENAI_API_KEY`, `APIFY_API_TOKEN`) have defaults or are optional. See `app/config.py` for the full list, or copy from `.env.example`.
+**Note**: API keys (`BESTTIME_PRIVATE_KEY`, `BESTTIME_PUBLIC_KEY`, `GOOGLE_PLACES_API_KEY`, `OPENAI_API_KEY`, `APIFY_API_TOKEN`) have embedded defaults or are optional. See `app/config.py` for the full list, or copy from `.env.example`.
 
 ## Testing
 
