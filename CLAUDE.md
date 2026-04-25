@@ -34,11 +34,25 @@ docker-compose up -d
 
 # Manual
 pip install -r requirements.txt
+
+# Required env vars for local development (outside Docker):
+export REDIS_HOST=localhost          # Docker default is "redis"
+export REDIS_PORT=6379
+# Optional but useful:
+export LOG_LEVEL=DEBUG
+export REFRESH_ON_STARTUP=false     # Skip venue refresh on startup for faster dev cycles
+
+# Start a local Redis first:
+redis-server                        # in a separate terminal
+
+# Run the app:
 uvicorn main:app --host 0.0.0.0 --port 8080
 
 # Health check
 curl http://localhost:8080/ping
 ```
+
+**Note**: API keys (`BESTTIME_PRIVATE_KEY`, `BESTTIME_PUBLIC_KEY`, `GOOGLE_PLACES_API_KEY`, `OPENAI_API_KEY`, `APIFY_API_TOKEN`) have defaults or are optional. See `app/config.py` for the full list, or copy from `.env.example`.
 
 ## Testing
 
@@ -99,10 +113,15 @@ Priority: **env vars > JSON config (`config/`) > defaults** (see `app/config.py`
 - Prefer simple, readable code over clever solutions. Minimize complexity.
 
 ### Testing
-- Every new feature or bug fix must include unit tests. Update existing tests when behavior changes.
-- Use `unittest.mock` (Mock, AsyncMock, patch) — match the existing test patterns in `tests/`.
+- **Functional tests are the primary testing strategy.** Focus on testing real behavior through the API (FastAPI TestClient + real or test Redis) rather than unit-testing individual functions in isolation. This validates that the system works end-to-end and catches integration issues that unit tests miss.
+- Unit tests are complementary — use them for complex pure logic (scoring, transformations, config parsing) where functional tests would be overkill.
+- **Write only the most important tests.** Over-testing leads to a verbose, brittle suite that is hard to maintain and troubleshoot. Prioritize: critical paths (venue query, refresh pipeline), edge cases that have caused bugs, and non-obvious business rules. Skip trivial getters, simple CRUD wrappers, and obvious pass-throughs.
+- Use `unittest.mock` (Mock, AsyncMock, patch) sparingly — match the existing test patterns in `tests/`. Prefer real dependencies (TestClient, test Redis) over heavy mocking.
 - Mark tests with `@pytest.mark.integration` if they need Redis; all others should run without external deps.
 - Run the full test suite before considering work done: `pytest tests/ -v`
+
+### Documentation
+- **Always update the README** when making important changes: new endpoints, new env vars, changed setup steps, new dependencies, architectural changes, or anything that affects how someone runs or understands the project. The README is the entry point for anyone working on cs-server — keep it accurate and current.
 
 ### CI/CD
 - cs-server is built from source on EC2 via vibes_bot's CI/CD. If you change the build process (Dockerfile, dependencies), verify it still works with `[FULL-RESTART]`.
