@@ -97,12 +97,27 @@ Priority: **env vars > JSON config (`config/`) > defaults** (see `app/config.py`
 
 **Gotcha**: pydantic-settings treats `__init__` kwargs as highest priority (above env vars). JSON keys that have env var overrides must be removed before passing to `super().__init__`.
 
+## Key Behaviors
+
+### Venue Type Filtering
+- `VENUE_TYPES`: types requested from BestTime (`BAR`, `BREWERY`, `CLUBS`, `CONCERT_HALL`, `EVENT_VENUE`, `PERFORMING_ARTS`, `ARTS`, `WINERY`, `CASINO`, `FOOD_AND_DRINK`)
+- `BLOCKED_VENUE_TYPES`: filtered at query time even if in Redis (`PARK`, `SHOPPING`, `SHOPPING_CENTER`, `CAFE`, `RESTAURANT`, `SUPERMARKET`, etc.)
+
+### Opening Hours
+- Google Places hours (from enrichment) → `hours_source: "google"` — reliable for open/closed
+- BestTime-derived hours (from weekly forecast) → `hours_source: "besttime"` — display only, not reliable for open/closed
+- Fallback: if no Google Places hours, derives from BestTime `venue_open_close_v2` data in Portuguese format
+
+### Enrichment Caching
+- Google Places & photo enrichment cache empty results for failed lookups so they don't retry every run
+- Instagram handles are validated via HEAD request to `instagram.com/{handle}/` before caching — 404 profiles are discarded
+
 ## Key API Endpoints
 
 - `GET /v1/venues/nearby?lat=...&lon=...&radius=...` — main venue query
 - `GET /ping` — health check
-- `POST /admin/trigger/refresh` — trigger venue refresh
-- `POST /admin/trigger/photos` — trigger photo enrichment
+- `POST /admin/trigger/{job_name}` — trigger enrichment jobs (venue_catalog, photos, google_places, instagram_validate, etc.)
+- `GET /admin/jobs` — list all jobs with availability and running status
 - `POST /admin/recount-discovery-points` — recount venue density per discovery point
 
 ## Code Style
