@@ -60,6 +60,18 @@ curl http://localhost:8080/ping
 
 **Note**: API keys (`BESTTIME_PRIVATE_KEY`, `BESTTIME_PUBLIC_KEY`, `GOOGLE_PLACES_API_KEY`, `OPENAI_API_KEY`, `APIFY_API_TOKEN`) have embedded defaults or are optional. See `app/config.py` for the full list, or copy from `.env.example`.
 
+### Dev Mode
+
+When running locally for development, always use dev mode to limit API calls and venue count:
+
+```bash
+export DEV_MODE=true
+export FETCH_VENUE_TOTAL_LIMIT=10   # Only fetch ~10 venues (saves BestTime API quota)
+export REFRESH_ON_STARTUP=true      # Fetch venues on startup so there's data to work with
+```
+
+Dev mode uses a single location (Recife ZS/ZN by default: `DEV_LAT=-8.07834`, `DEV_LNG=-34.90938`, `DEV_RADIUS=6000`) instead of cycling through all discovery points.
+
 ## Testing
 
 ```bash
@@ -72,7 +84,12 @@ pytest tests/ -v -m "not integration"
 
 - pytest with `asyncio_mode = auto` (see pytest.ini)
 - Markers: `unit`, `integration`
-- Mocking: `unittest.mock` (Mock, AsyncMock, patch)
+- **Functional tests are the primary testing strategy.** Focus on testing real behavior through the API (FastAPI TestClient + real or test Redis) rather than unit-testing individual functions in isolation. This validates that the system works end-to-end and catches integration issues that unit tests miss.
+- Unit tests are complementary — use them for complex pure logic (scoring, transformations, config parsing) where functional tests would be overkill.
+- **Write only the most important tests.** Over-testing leads to a verbose, brittle suite that is hard to maintain and troubleshoot. Prioritize: critical paths (venue query, refresh pipeline), edge cases that have caused bugs, and non-obvious business rules. Skip trivial getters, simple CRUD wrappers, and obvious pass-throughs.
+- Use `unittest.mock` (Mock, AsyncMock, patch) sparingly — match the existing test patterns in `tests/`. Prefer real dependencies (TestClient, test Redis) over heavy mocking.
+- Mark tests with `@pytest.mark.integration` if they need Redis; all others should run without external deps.
+- Run the full test suite before considering work done: `pytest tests/ -v`
 
 ## Configuration
 
@@ -118,6 +135,11 @@ Priority: **env vars > JSON config (`config/`) > defaults** (see `app/config.py`
 - Keep business logic in `services/`, HTTP concerns in `routers/` and `handlers/`.
 - Prefer simple, readable code over clever solutions. Minimize complexity.
 
+### Dev Mode
+- **When running locally, always use `DEV_MODE=true` with `FETCH_VENUE_TOTAL_LIMIT=10`.** This limits venue fetching to ~10 venues in the Recife dev region, saving BestTime API quota and keeping Redis lightweight.
+- Dev mode coordinates (`DEV_LAT`, `DEV_LNG`, `DEV_RADIUS`) should match the region the mobile app is configured for.
+- All enrichment services (photos, Instagram, menu, vibe classifier) should be disabled in dev unless actively testing them.
+
 ### Testing
 - **Functional tests are the primary testing strategy.** Focus on testing real behavior through the API (FastAPI TestClient + real or test Redis) rather than unit-testing individual functions in isolation. This validates that the system works end-to-end and catches integration issues that unit tests miss.
 - Unit tests are complementary — use them for complex pure logic (scoring, transformations, config parsing) where functional tests would be overkill.
@@ -158,4 +180,3 @@ Priority: **env vars > JSON config (`config/`) > defaults** (see `app/config.py`
 - cs-server does NOT have its own CI/CD — it's built from source on EC2 via vibes_bot's CI/CD pipeline when commit message contains `[FULL-RESTART]`
 - Discovery points rotation: configurable via admin panel, stored in Redis as `admin_config:discovery_points`
 - DEFAULT_LOCATIONS radius is 15000m, limit 500
-

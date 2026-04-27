@@ -52,8 +52,10 @@ DEFAULT_LOCATIONS = [
 # Venue types for BestTime /venues/filter API
 # Reference: BestTime support confirmed these are valid singular types.
 # See valid list at https://besttime.app API docs.
+#
+# NOTE: RESTAURANT and CAFE are intentionally excluded — they pull in regular
+# restaurants, buffets, coffee shops, and other non-nightlife venues.
 VENUE_TYPES = [
-    # Nightlife & entertainment
     "BAR",
     "BREWERY",
     "CLUBS",
@@ -63,11 +65,27 @@ VENUE_TYPES = [
     "ARTS",
     "WINERY",
     "CASINO",
-    # Dining
-    "RESTAURANT",
     "FOOD_AND_DRINK",
-    "CAFE",
 ]
+
+# Venue types that must NEVER be served to clients, even if they end up in Redis
+# (e.g. from legacy BestTime search or misclassification).
+# This is enforced at query time in venue_handler.py.
+BLOCKED_VENUE_TYPES = {
+    "PARK",
+    "SHOPPING",
+    "SHOPPING_CENTER",
+    "CAFE",
+    "RESTAURANT",
+    "SUPERMARKET",
+    "LIBRARY",
+    "SCHOOL",
+    "CHURCH",
+    "GYM",
+    "HOSPITAL",
+    "BANK",
+    "GAS_STATION",
+}
 
 
 class VenuesRefresherService:
