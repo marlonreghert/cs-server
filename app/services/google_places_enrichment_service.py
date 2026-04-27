@@ -150,6 +150,8 @@ class GooglePlacesEnrichmentService:
 
             # Convert to our vibe attributes model
             vibe_attrs = self.google_places_client.details_to_vibe_attributes(venue_id, details)
+            vibe_attrs.google_place_id = google_place_id
+            vibe_attrs.google_primary_type = details.primary_type
 
             # Check for LGBTQ+ indicators in the summary
             if details.generative_summary or details.editorial_summary:

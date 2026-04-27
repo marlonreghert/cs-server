@@ -50,12 +50,10 @@ DEFAULT_LOCATIONS = [
 ]
 
 # Venue types for BestTime /venues/filter API
-# Reference: BestTime support confirmed these are valid singular types.
-# See valid list at https://besttime.app API docs.
-#
-# NOTE: RESTAURANT and CAFE are intentionally excluded — they pull in regular
-# restaurants, buffets, coffee shops, and other non-nightlife venues.
+# We fetch broadly (including OTHER which contains ~60% of BestTime venues)
+# and rely on BLOCKED_VENUE_TYPES to filter out junk at query time.
 VENUE_TYPES = [
+    # Nightlife & entertainment
     "BAR",
     "BREWERY",
     "CLUBS",
@@ -66,27 +64,113 @@ VENUE_TYPES = [
     "WINERY",
     "CASINO",
     "FOOD_AND_DRINK",
+    "BEER",
+    "BISTRO",
+    # Catch-all — many bars/restaurants are misclassified as OTHER by BestTime
+    "OTHER",
 ]
 
-# Venue types that must NEVER be served to clients, even if they end up in Redis
-# (e.g. from legacy BestTime search or misclassification).
-# This is enforced at query time in venue_handler.py.
-BLOCKED_VENUE_TYPES = {
+# Venue types that must NEVER be served to clients, even if they end up in Redis.
+# This is the default set — can be overridden via admin panel
+# (admin_config:blocked_venue_types).
+# Enforced at query time in venue_handler.py.
+DEFAULT_BLOCKED_VENUE_TYPES = {
     "PARK",
+    "CITY_PARK",
     "SHOPPING",
     "SHOPPING_CENTER",
-    "CAFE",
-    "RESTAURANT",
+    "DEPARTMENT_STORE",
     "SUPERMARKET",
+    "GROCERY",
+    "MARKET",
+    "CAFE",
+    "COFFEE",
+    "RESTAURANT",
+    "FAST_FOOD",
+    "BAKERY",
+    "DESSERT",
     "LIBRARY",
     "SCHOOL",
     "CHURCH",
+    "TEMPLE",
     "GYM",
+    "FITNESS",
     "HOSPITAL",
+    "PHARMACY",
     "BANK",
     "GAS_STATION",
     "MUSEUM",
+    "MODERN_ART_MUSEUM",
+    "APPAREL",
+    "GIFTS",
+    "PERSONAL_CARE",
+    "TELECOMMUNICATIONS_SERVICE_PROVIDER",
+    "BUSINESS_MANAGEMENT_CONSULTANT",
+    "SOCIAL_SERVICES_ORGANIZATION",
+    "TOURIST_DESTINATION",
+    "HISTORICAL",
+    "PLAZA",
+    "SPORTS_COMPLEX",
+    "SPORTS_CLUB",
+    "GOLF",
+    "BOATING",
 }
+
+# Google Places types to block at query time.
+# More accurate than BestTime types since Google classifies venues correctly.
+BLOCKED_GOOGLE_TYPES = {
+    "park", "city_park", "garden", "national_park",
+    "shopping_mall", "department_store",
+    "store", "home_goods_store", "furniture_store", "electronics_store",
+    "auto_parts_store", "cell_phone_store", "shoe_store", "cosmetics_store",
+    "candy_store", "food_store",
+    "museum", "art_museum", "history_museum",
+    "library", "book_store",
+    "warehouse_store", "building_materials_store",
+    "drugstore", "pharmacy",
+    "plaza",
+    "supermarket", "grocery_store",
+    "florist",
+    "sports_club",
+    "tour_agency",
+    "consultant",
+    "telecommunications_service_provider",
+    "lodging", "hotel",
+    "church", "mosque", "synagogue", "hindu_temple",
+    "hospital", "doctor", "dentist",
+    "school", "university",
+    "gas_station",
+    "bank", "atm",
+    "gym",
+    "post_office", "postal_code",
+    "business_center",
+}
+
+# Name keywords that indicate non-nightlife venues (case-insensitive).
+# Applied to venues typed as OTHER since BestTime's type is unreliable for them.
+BLOCKED_NAME_KEYWORDS = [
+    "shopping", "mall", "parque", "park", "praça", "plaza",
+    "supermercado", "atacado", "atacadão", "mercado",
+    "farmácia", "farmacia", "drogaria",
+    "hospital", "clínica", "clinica",
+    "igreja", "catedral", "temple", "capela",
+    "escola", "colégio", "colegio", "universidade", "faculdade",
+    "academia", "gym", "fitness",
+    "banco", "caixa econômica", "bradesco", "itaú", "santander",
+    "posto", "gas station",
+    "loja ", "lojas ", "casas bahia", "magazine luiza", "americanas",
+    "home center", "ferreira costa", "leroy merlin",
+    "livraria", "biblioteca",
+    "museu", "museum", "instituto",
+    "correios", "cartório", "delegacia", "tribunal",
+    "estacionamento", "parking",
+    "condomínio", "condominio", "edifício", "edificio",
+    "catamaran", "passeio", "tour",
+    "pet shop", "veterinár",
+    "salão", "salao", "barbearia",
+    "nagem", "tim ", "claro ", "vivo ",
+    "multicoisas", "game station",
+]
 
 
 class VenuesRefresherService:

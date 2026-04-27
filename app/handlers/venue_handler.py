@@ -6,7 +6,11 @@ from typing import Optional
 import pytz
 
 from app.dao import RedisVenueDAO
-from app.services.venues_refresher_service import BLOCKED_VENUE_TYPES
+from app.services.venues_refresher_service import (
+    DEFAULT_BLOCKED_VENUE_TYPES,
+    BLOCKED_NAME_KEYWORDS,
+    BLOCKED_GOOGLE_TYPES,
+)
 
 # BestTime day_int → Portuguese weekday name (BestTime: 0=Mon, 6=Sun)
 _BESTTIME_DAY_NAMES = [
@@ -109,16 +113,40 @@ class VenueHandler:
             f"radius={radius:.2f}km, verbose={verbose}"
         )
 
-        # 1. Load nearby venues and filter out blocked types
+        # 1. Load nearby venues and filter out blocked types + name keywords
         venues = self._load_nearby(lat, lon, radius)
         total = len(venues)
-        venues = [
-            v for v in venues
-            if not v.venue_type or v.venue_type.upper() not in BLOCKED_VENUE_TYPES
-        ]
+
+        # Pre-load Google types for filtering
+        google_type_cache = {}
+        for v in venues:
+            if v.venue_id:
+                try:
+                    va = self.venue_dao.get_vibe_attributes(v.venue_id)
+                    if va and va.google_primary_type:
+                        google_type_cache[v.venue_id] = va.google_primary_type
+                except Exception:
+                    pass
+
+        def _is_blocked(v) -> bool:
+            # 1. Block by Google Places type (most accurate)
+            gtype = google_type_cache.get(v.venue_id)
+            if gtype and gtype.lower() in BLOCKED_GOOGLE_TYPES:
+                return True
+            # 2. Block by BestTime type
+            if v.venue_type and v.venue_type.upper() in DEFAULT_BLOCKED_VENUE_TYPES:
+                return True
+            # 3. Block OTHER-typed venues by name keywords (fallback for unenriched)
+            if v.venue_type and v.venue_type.upper() == "OTHER" and not gtype and v.venue_name:
+                name_lower = v.venue_name.lower()
+                if any(kw in name_lower for kw in BLOCKED_NAME_KEYWORDS):
+                    return True
+            return False
+
+        venues = [v for v in venues if not _is_blocked(v)]
         blocked = total - len(venues)
         if blocked:
-            logger.info(f"[VenueHandler] Filtered out {blocked} venues with blocked types")
+            logger.info(f"[VenueHandler] Filtered out {blocked} venues with blocked types/names")
         logger.info(f"[VenueHandler] Found {len(venues)} nearby venues")
 
         # 2. Merge with live and weekly forecasts
@@ -264,14 +292,16 @@ class VenueHandler:
             ):
                 live_busyness = m.live_forecast.analysis.venue_live_busyness
 
-            # Get vibe labels and summary if available
+            # Get vibe labels, summary, and Google type if available
             vibe_labels: Optional[list[str]] = None
             venue_summary: Optional[str] = None
+            google_places_type: Optional[str] = None
             try:
                 vibe_attrs = self.venue_dao.get_vibe_attributes(m.venue.venue_id)
                 if vibe_attrs:
                     vibe_labels = vibe_attrs.get_vibe_labels()
                     venue_summary = vibe_attrs.generative_summary
+                    google_places_type = vibe_attrs.google_primary_type
             except Exception as e:
                 logger.debug(f"[VenueHandler] No vibe attributes for {m.venue.venue_id}: {e}")
 
@@ -413,6 +443,7 @@ class VenueHandler:
                     venue_name=m.venue.venue_name,
                     venue_id=m.venue.venue_id,
                     venue_type=m.venue.venue_type,
+                    google_places_type=google_places_type,
                     price_level=m.venue.price_level,
                     rating=m.venue.rating,
                     reviews=m.venue.reviews,
