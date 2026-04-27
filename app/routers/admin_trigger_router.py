@@ -226,3 +226,45 @@ async def recount_discovery_points():
     except Exception as e:
         logger.error(f"[AdminTrigger] Recount discovery points failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/venue-type-breakdown")
+async def venue_type_breakdown():
+    """Get a breakdown of all venues by BestTime type and Google Places type."""
+    if _container is None:
+        raise HTTPException(status_code=503, detail="Container not initialized")
+
+    try:
+        venue_dao = _container.venue_dao
+        all_ids = venue_dao.list_all_venue_ids()
+
+        besttime_types: dict[str, int] = {}
+        google_types: dict[str, int] = {}
+        total = 0
+        with_google_type = 0
+
+        for vid in all_ids:
+            venue = venue_dao.get_venue(vid)
+            if not venue:
+                continue
+            total += 1
+
+            bt = venue.venue_type or "unknown"
+            besttime_types[bt] = besttime_types.get(bt, 0) + 1
+
+            # Check Google Places type from vibe attributes
+            vibe_attrs = venue_dao.get_vibe_attributes(vid)
+            if vibe_attrs and vibe_attrs.google_primary_type:
+                gt = vibe_attrs.google_primary_type
+                google_types[gt] = google_types.get(gt, 0) + 1
+                with_google_type += 1
+
+        return {
+            "total_venues": total,
+            "with_google_type": with_google_type,
+            "besttime_types": dict(sorted(besttime_types.items(), key=lambda x: -x[1])),
+            "google_places_types": dict(sorted(google_types.items(), key=lambda x: -x[1])),
+        }
+    except Exception as e:
+        logger.error(f"[AdminTrigger] Venue type breakdown failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))

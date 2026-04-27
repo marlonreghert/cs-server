@@ -18,6 +18,8 @@ class VibeAttributes(BaseModel):
     the atmosphere and crowd characteristics of a venue.
     """
     venue_id: str
+    google_place_id: Optional[str] = None
+    google_primary_type: Optional[str] = None  # Google Places primary type (e.g. "bar", "night_club")
 
     # LGBTQ+ Related
     lgbtq_friendly: Optional[bool] = None
@@ -92,6 +94,7 @@ class GooglePlacesDetailsResponse(BaseModel):
     """Parsed response from Google Places API (New) for vibe-related fields."""
     place_id: str
     display_name: Optional[str] = None
+    primary_type: Optional[str] = None  # Google's primary type (e.g. "bar", "night_club")
 
     # Business status from Google Places API
     # Values: OPERATIONAL, CLOSED_TEMPORARILY, CLOSED_PERMANENTLY

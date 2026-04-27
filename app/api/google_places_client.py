@@ -23,6 +23,7 @@ PHOTOS_FIELDS_MASK = "photos.name,photos.authorAttributions"
 VIBE_FIELDS_MASK = ",".join([
     "id",
     "displayName",
+    "primaryType",
     # Business status (OPERATIONAL, CLOSED_TEMPORARILY, CLOSED_PERMANENTLY)
     "businessStatus",
     # Website (used to detect Instagram URLs)
@@ -327,6 +328,7 @@ class GooglePlacesAPIClient:
         return GooglePlacesDetailsResponse(
             place_id=place_id,
             display_name=display_name,
+            primary_type=data.get("primaryType"),
             website_uri=data.get("websiteUri"),
             # Business status (OPERATIONAL, CLOSED_TEMPORARILY, CLOSED_PERMANENTLY)
             business_status=data.get("businessStatus"),
