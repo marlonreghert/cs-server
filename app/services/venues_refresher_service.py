@@ -85,6 +85,7 @@ BLOCKED_VENUE_TYPES = {
     "HOSPITAL",
     "BANK",
     "GAS_STATION",
+    "MUSEUM",
 }
 
 
