@@ -187,7 +187,7 @@ class GooglePlacesEnrichmentService:
 
             # Extract Instagram handle from website URL if it's an Instagram link
             # This provides a free, high-confidence source before Apify fallback
-            self._try_extract_instagram_from_website(venue_id, details.website_uri)
+            await self._try_extract_instagram_from_website(venue_id, details.website_uri)
 
             logger.info(
                 f"[GooglePlacesEnrichment] Enriched {venue_id}: "
@@ -379,7 +379,7 @@ class GooglePlacesEnrichmentService:
             return attrs.get_vibe_labels()
         return []
 
-    def _try_extract_instagram_from_website(
+    async def _try_extract_instagram_from_website(
         self, venue_id: str, website_uri: Optional[str]
     ) -> None:
         """Extract Instagram handle from a venue's website URL if it's an Instagram link.
