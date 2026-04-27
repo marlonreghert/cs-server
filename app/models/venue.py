@@ -132,7 +132,8 @@ class MinifiedVenue(BaseModel):
     venue_lng: float
     venue_name: str
     venue_id: str = ""  # Venue identifier for client-side navigation
-    venue_type: Optional[str] = None
+    venue_type: Optional[str] = None          # BestTime primary type (BAR, CLUBS, OTHER, etc.)
+    google_places_type: Optional[str] = None  # Google Places type (if enriched)
     price_level: Optional[int] = None
     rating: Optional[float] = None
     reviews: Optional[int] = None
