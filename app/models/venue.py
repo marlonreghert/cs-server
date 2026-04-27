@@ -150,6 +150,7 @@ class MinifiedVenue(BaseModel):
     opening_hours: Optional[list[str]] = None  # ["Domingo: Fechado", "Segunda-feira: 20:00 – 03:00", ...]
     special_days: Optional[list[str]] = None   # Holiday hours: ["25 de dezembro: Fechado", ...]
     is_open_now: Optional[bool] = None         # Current open status
+    hours_source: Optional[str] = None         # "google" (reliable) or "besttime" (estimated from foot traffic)
 
     # Instagram (from Apify enrichment)
     instagram_handle: Optional[str] = None

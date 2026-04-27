@@ -156,6 +156,8 @@ class PhotoEnrichmentService:
 
             if not google_place_id:
                 logger.warning(f"[PhotoEnrichmentService] Could not find Google Place ID for {venue.venue_name}")
+                # Cache empty list so we don't retry this venue every run
+                self.venue_dao.set_venue_photos(venue_id, [])
                 await asyncio.sleep(REQUEST_DELAY)
                 continue
 
