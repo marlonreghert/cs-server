@@ -6,6 +6,18 @@ from typing import Optional
 import pytz
 
 from app.dao import RedisVenueDAO
+from app.services.venues_refresher_service import BLOCKED_VENUE_TYPES
+
+# BestTime day_int → Portuguese weekday name (BestTime: 0=Mon, 6=Sun)
+_BESTTIME_DAY_NAMES = [
+    "segunda-feira",
+    "terça-feira",
+    "quarta-feira",
+    "quinta-feira",
+    "sexta-feira",
+    "sábado",
+    "domingo",
+]
 from app.models import (
     Venue,
     VenueWithLive,
@@ -27,6 +39,48 @@ class VenueHandler:
             venue_dao: Redis DAO for venue data access
         """
         self.venue_dao = venue_dao
+
+    def _derive_hours_from_forecast(self, venue_id: str) -> Optional[list[str]]:
+        """Derive opening hours from BestTime weekly forecast data.
+
+        Builds Portuguese-formatted hours strings from venue_open_close_v2
+        when Google Places hours are not available.
+
+        Returns:
+            List of 7 strings like ["segunda-feira: 11:00 – 00:00", ...] or None
+        """
+        descriptions: list[str] = []
+        any_data = False
+        try:
+            for day_int in range(7):  # 0=Mon .. 6=Sun
+                raw_day = self.venue_dao.get_week_raw_forecast(venue_id, day_int)
+                day_name = _BESTTIME_DAY_NAMES[day_int]
+                if not raw_day:
+                    descriptions.append(f"{day_name}: Fechado")
+                    continue
+                any_data = True
+                day_info = raw_day.day_info
+                oc_v2 = day_info.venue_open_close_v2 if day_info else None
+                periods = oc_v2.h24 if oc_v2 else []
+                if not periods:
+                    if raw_day.day_raw and any(v > 0 for v in raw_day.day_raw):
+                        descriptions.append(f"{day_name}: Horário não disponível")
+                    else:
+                        descriptions.append(f"{day_name}: Fechado")
+                    continue
+                parts = []
+                for p in periods:
+                    om = p.opens_minutes or 0
+                    cm = p.closes_minutes or 0
+                    parts.append(
+                        f"{p.opens:02d}:{om:02d}\u2009–\u2009{p.closes:02d}:{cm:02d}"
+                    )
+                descriptions.append(f"{day_name}: {', '.join(parts)}")
+        except Exception as e:
+            logger.debug(f"[VenueHandler] Failed to derive hours from forecast for {venue_id}: {e}")
+            return None
+
+        return descriptions if any_data else None
 
     def get_venues_nearby(
         self, lat: float, lon: float, radius: float, verbose: bool = False
@@ -55,8 +109,16 @@ class VenueHandler:
             f"radius={radius:.2f}km, verbose={verbose}"
         )
 
-        # 1. Load nearby venues
+        # 1. Load nearby venues and filter out blocked types
         venues = self._load_nearby(lat, lon, radius)
+        total = len(venues)
+        venues = [
+            v for v in venues
+            if not v.venue_type or v.venue_type.upper() not in BLOCKED_VENUE_TYPES
+        ]
+        blocked = total - len(venues)
+        if blocked:
+            logger.info(f"[VenueHandler] Filtered out {blocked} venues with blocked types")
         logger.info(f"[VenueHandler] Found {len(venues)} nearby venues")
 
         # 2. Merge with live and weekly forecasts
@@ -232,6 +294,10 @@ class VenueHandler:
                     is_open_now = hours.open_now
             except Exception as e:
                 logger.debug(f"[VenueHandler] No opening hours for {m.venue.venue_id}: {e}")
+
+            # Fallback: derive opening hours from BestTime weekly forecast
+            if not opening_hours:
+                opening_hours = self._derive_hours_from_forecast(m.venue.venue_id)
 
             # Get Instagram handle if available
             instagram_handle: Optional[str] = None
