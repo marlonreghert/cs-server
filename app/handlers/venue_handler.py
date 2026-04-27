@@ -286,18 +286,24 @@ class VenueHandler:
             opening_hours: Optional[list[str]] = None
             special_days: Optional[list[str]] = None
             is_open_now: Optional[bool] = None
+            hours_source: Optional[str] = None
             try:
                 hours = self.venue_dao.get_opening_hours(m.venue.venue_id)
                 if hours:
                     opening_hours = hours.weekday_descriptions if hours.has_hours() else None
                     special_days = hours.special_days
                     is_open_now = hours.open_now
+                    if opening_hours:
+                        hours_source = "google"
             except Exception as e:
                 logger.debug(f"[VenueHandler] No opening hours for {m.venue.venue_id}: {e}")
 
             # Fallback: derive opening hours from BestTime weekly forecast
+            # These are estimated from foot traffic, NOT reliable for open/closed checks
             if not opening_hours:
                 opening_hours = self._derive_hours_from_forecast(m.venue.venue_id)
+                if opening_hours:
+                    hours_source = "besttime"
 
             # Get Instagram handle if available
             instagram_handle: Optional[str] = None
@@ -417,6 +423,7 @@ class VenueHandler:
                     opening_hours=opening_hours,
                     special_days=special_days,
                     is_open_now=is_open_now,
+                    hours_source=hours_source,
                     instagram_handle=instagram_handle,
                     instagram_url=instagram_url,
                     venue_reviews=venue_reviews,

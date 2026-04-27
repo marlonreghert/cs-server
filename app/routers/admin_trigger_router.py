@@ -72,6 +72,10 @@ JOB_REGISTRY = {
         "label": "Vibe Classifier (AI)",
         "description": "Classify venue vibes from photos using 2-stage GPT pipeline",
     },
+    "instagram_validate": {
+        "label": "Instagram Handle Validation",
+        "description": "Check all cached Instagram handles and remove invalid ones (404 profiles)",
+    },
 }
 
 
@@ -116,6 +120,10 @@ async def _run_job(job_name: str):
         if c.vibe_classifier_service is None:
             raise ValueError("Vibe classifier not configured (missing OpenAI API key)")
         await c.vibe_classifier_service.classify_all_venues()
+    elif job_name == "instagram_validate":
+        if c.google_places_enrichment_service is None:
+            raise ValueError("Google Places enrichment not configured")
+        await c.google_places_enrichment_service.validate_cached_instagram_handles()
     else:
         raise ValueError(f"Unknown job: {job_name}")
 
@@ -146,6 +154,8 @@ async def list_jobs():
         elif name == "menu_extraction" and _container.menu_extraction_service is None:
             available = False
         elif name == "vibe_classifier" and _container.vibe_classifier_service is None:
+            available = False
+        elif name == "instagram_validate" and _container.google_places_enrichment_service is None:
             available = False
 
         # Check if currently running

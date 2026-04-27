@@ -316,6 +316,11 @@ class GooglePlacesEnrichmentService:
             if not google_place_id:
                 logger.warning(f"[GooglePlacesEnrichment] Could not find Google Place ID for {venue.venue_name}")
                 VIBE_ATTRIBUTES_FETCH_RESULTS.labels(result="skipped_no_place_id").inc()
+                # Cache empty attributes so we don't retry this venue every run
+                self.venue_dao.set_vibe_attributes(VibeAttributes(
+                    venue_id=venue_id,
+                    google_place_id="",
+                ))
                 await asyncio.sleep(REQUEST_DELAY)
                 continue
 
@@ -398,6 +403,15 @@ class GooglePlacesEnrichmentService:
         if not handle:
             return
 
+        # Validate the profile exists before caching
+        if not await self._instagram_profile_exists(handle):
+            logger.warning(
+                f"[GooglePlacesEnrichment] Instagram @{handle} does not exist, "
+                f"skipping for {venue_id}"
+            )
+            INSTAGRAM_ENRICHMENT_RESULTS.labels(result="invalid_handle").inc()
+            return
+
         ig_data = VenueInstagram(
             venue_id=venue_id,
             instagram_handle=handle,
@@ -415,6 +429,58 @@ class GooglePlacesEnrichmentService:
             f"[GooglePlacesEnrichment] Extracted Instagram @{handle} "
             f"from website for {venue_id}"
         )
+
+    @staticmethod
+    async def _instagram_profile_exists(handle: str) -> bool:
+        """Check if an Instagram profile exists by requesting the page.
+
+        Returns True if the profile page returns 200, False for 404 or errors.
+        """
+        import httpx
+        url = f"https://www.instagram.com/{handle}/"
+        try:
+            async with httpx.AsyncClient(
+                follow_redirects=True,
+                timeout=10,
+                headers={"User-Agent": "Mozilla/5.0"},
+            ) as client:
+                resp = await client.head(url)
+                exists = resp.status_code == 200
+                if not exists:
+                    logger.debug(
+                        f"[GooglePlacesEnrichment] Instagram @{handle} "
+                        f"returned status {resp.status_code}"
+                    )
+                return exists
+        except Exception as e:
+            logger.debug(f"[GooglePlacesEnrichment] Instagram check failed for @{handle}: {e}")
+            return True  # On error, assume exists (don't block enrichment)
+
+    async def validate_cached_instagram_handles(self) -> int:
+        """Check all cached Instagram handles and remove invalid ones.
+
+        Returns number of handles removed.
+        """
+        all_venue_ids = self.venue_dao.list_all_venue_ids()
+        removed = 0
+
+        for venue_id in all_venue_ids:
+            ig_data = self.venue_dao.get_venue_instagram(venue_id)
+            if ig_data is None or not ig_data.has_instagram():
+                continue
+
+            handle = ig_data.instagram_handle
+            if not await self._instagram_profile_exists(handle):
+                self.venue_dao.delete_venue_instagram(venue_id)
+                removed += 1
+                logger.info(
+                    f"[GooglePlacesEnrichment] Removed invalid Instagram @{handle} "
+                    f"for {venue_id}"
+                )
+            await asyncio.sleep(1)  # Rate limit
+
+        logger.info(f"[GooglePlacesEnrichment] Instagram validation: removed {removed} invalid handles")
+        return removed
 
     @staticmethod
     def _parse_instagram_handle(url: str) -> Optional[str]:
