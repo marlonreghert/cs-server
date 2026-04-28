@@ -11,6 +11,7 @@ from app.services.venues_refresher_service import (
     BLOCKED_NAME_KEYWORDS,
     BLOCKED_GOOGLE_TYPES,
 )
+from app.models.venue_category import resolve_venue_display
 
 # BestTime day_int → Portuguese weekday name (BestTime: 0=Mon, 6=Sun)
 _BESTTIME_DAY_NAMES = [
@@ -444,6 +445,7 @@ class VenueHandler:
                     venue_id=m.venue.venue_id,
                     venue_type=m.venue.venue_type,
                     google_places_type=google_places_type,
+                    **resolve_venue_display(google_places_type, m.venue.venue_type),
                     price_level=m.venue.price_level,
                     rating=m.venue.rating,
                     reviews=m.venue.reviews,

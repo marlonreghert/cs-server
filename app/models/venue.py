@@ -133,7 +133,13 @@ class MinifiedVenue(BaseModel):
     venue_name: str
     venue_id: str = ""  # Venue identifier for client-side navigation
     venue_type: Optional[str] = None          # BestTime primary type (BAR, CLUBS, OTHER, etc.)
-    google_places_type: Optional[str] = None  # Google Places type (if enriched)
+    google_places_type: Optional[str] = None  # Google Places granular type (bar, night_club, cocktail_bar, etc.)
+    category: Optional[str] = None            # VibeSense display category (BAR, NIGHTCLUB, RESTAURANT, etc.)
+    granular_type: Optional[str] = None       # Most specific type (cocktail_bar, japanese_restaurant, etc.)
+    granular_label: Optional[str] = None      # PT-BR granular label ("Restaurante Japonês", "Pub Irlandês")
+    label: Optional[str] = None               # PT-BR category label ("Bar", "Balada", "Restaurante")
+    emoji: Optional[str] = None               # Category emoji
+    color: Optional[str] = None               # Category color hex
     price_level: Optional[int] = None
     rating: Optional[float] = None
     reviews: Optional[int] = None

@@ -130,6 +130,7 @@ BLOCKED_GOOGLE_TYPES = {
     "drugstore", "pharmacy",
     "plaza",
     "supermarket", "grocery_store",
+    "liquor_store",
     "florist",
     "sports_club",
     "tour_agency",
