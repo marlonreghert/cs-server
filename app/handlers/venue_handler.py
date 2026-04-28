@@ -6,7 +6,11 @@ from typing import Optional
 import pytz
 
 from app.dao import RedisVenueDAO
-from app.services.venues_refresher_service import DEFAULT_BLOCKED_VENUE_TYPES, BLOCKED_NAME_KEYWORDS
+from app.services.venues_refresher_service import (
+    DEFAULT_BLOCKED_VENUE_TYPES,
+    BLOCKED_NAME_KEYWORDS,
+    BLOCKED_GOOGLE_TYPES,
+)
 
 # BestTime day_int → Portuguese weekday name (BestTime: 0=Mon, 6=Sun)
 _BESTTIME_DAY_NAMES = [
@@ -113,12 +117,27 @@ class VenueHandler:
         venues = self._load_nearby(lat, lon, radius)
         total = len(venues)
 
+        # Pre-load Google types for filtering
+        google_type_cache = {}
+        for v in venues:
+            if v.venue_id:
+                try:
+                    va = self.venue_dao.get_vibe_attributes(v.venue_id)
+                    if va and va.google_primary_type:
+                        google_type_cache[v.venue_id] = va.google_primary_type
+                except Exception:
+                    pass
+
         def _is_blocked(v) -> bool:
-            # Block by BestTime type
+            # 1. Block by Google Places type (most accurate)
+            gtype = google_type_cache.get(v.venue_id)
+            if gtype and gtype.lower() in BLOCKED_GOOGLE_TYPES:
+                return True
+            # 2. Block by BestTime type
             if v.venue_type and v.venue_type.upper() in DEFAULT_BLOCKED_VENUE_TYPES:
                 return True
-            # Block OTHER-typed venues by name keywords
-            if v.venue_type and v.venue_type.upper() == "OTHER" and v.venue_name:
+            # 3. Block OTHER-typed venues by name keywords (fallback for unenriched)
+            if v.venue_type and v.venue_type.upper() == "OTHER" and not gtype and v.venue_name:
                 name_lower = v.venue_name.lower()
                 if any(kw in name_lower for kw in BLOCKED_NAME_KEYWORDS):
                     return True

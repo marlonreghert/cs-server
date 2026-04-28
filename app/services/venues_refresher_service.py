@@ -116,6 +116,36 @@ DEFAULT_BLOCKED_VENUE_TYPES = {
     "BOATING",
 }
 
+# Google Places types to block at query time.
+# More accurate than BestTime types since Google classifies venues correctly.
+BLOCKED_GOOGLE_TYPES = {
+    "park", "city_park", "garden", "national_park",
+    "shopping_mall", "department_store",
+    "store", "home_goods_store", "furniture_store", "electronics_store",
+    "auto_parts_store", "cell_phone_store", "shoe_store", "cosmetics_store",
+    "candy_store", "food_store",
+    "museum", "art_museum", "history_museum",
+    "library", "book_store",
+    "warehouse_store", "building_materials_store",
+    "drugstore", "pharmacy",
+    "plaza",
+    "supermarket", "grocery_store",
+    "florist",
+    "sports_club",
+    "tour_agency",
+    "consultant",
+    "telecommunications_service_provider",
+    "lodging", "hotel",
+    "church", "mosque", "synagogue", "hindu_temple",
+    "hospital", "doctor", "dentist",
+    "school", "university",
+    "gas_station",
+    "bank", "atm",
+    "gym",
+    "post_office", "postal_code",
+    "business_center",
+}
+
 # Name keywords that indicate non-nightlife venues (case-insensitive).
 # Applied to venues typed as OTHER since BestTime's type is unreliable for them.
 BLOCKED_NAME_KEYWORDS = [

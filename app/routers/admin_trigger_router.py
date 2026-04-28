@@ -2,8 +2,9 @@
 import asyncio
 import logging
 import time
+from typing import Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Body
 from pydantic import BaseModel
 
 logger = logging.getLogger(__name__)
@@ -47,10 +48,12 @@ JOB_REGISTRY = {
     "google_places": {
         "label": "Google Places Enrichment",
         "description": "Enrich venues with Google Places vibe attributes and business status",
+        "default_config": {"force_refresh": False},
     },
     "photos": {
         "label": "Photo Enrichment",
         "description": "Fetch venue photos from Google Places API",
+        "default_config": {"limit": 200, "photos_per_venue": 5},
     },
     "instagram": {
         "label": "Instagram Discovery",
@@ -79,9 +82,12 @@ JOB_REGISTRY = {
 }
 
 
-async def _run_job(job_name: str):
-    """Execute an enrichment job by name."""
+async def _run_job(job_name: str, config: Optional[dict] = None):
+    """Execute an enrichment job by name with optional config overrides."""
     c = _container
+    cfg = config or {}
+    force = cfg.get("force_refresh", False)
+    limit = cfg.get("limit")
     start = time.perf_counter()
 
     if job_name == "venue_catalog":
@@ -95,11 +101,14 @@ async def _run_job(job_name: str):
     elif job_name == "google_places":
         if c.google_places_enrichment_service is None:
             raise ValueError("Google Places API not configured")
-        await c.google_places_enrichment_service.enrich_all_venues()
+        await c.google_places_enrichment_service.enrich_all_venues(force_refresh=force)
     elif job_name == "photos":
         if c.photo_enrichment_service is None:
             raise ValueError("Photo enrichment not configured (missing Google Places API key)")
-        await c.photo_enrichment_service.refresh_photos_for_venues()
+        await c.photo_enrichment_service.refresh_photos_for_venues(
+            limit=limit,
+            max_photos_per_venue=cfg.get("photos_per_venue"),
+        )
     elif job_name == "instagram":
         if c.instagram_enrichment_service is None:
             raise ValueError("Instagram enrichment not configured (missing Apify API token)")
@@ -128,7 +137,7 @@ async def _run_job(job_name: str):
         raise ValueError(f"Unknown job: {job_name}")
 
     duration = time.perf_counter() - start
-    logger.info(f"[AdminTrigger] Job '{job_name}' completed in {duration:.1f}s")
+    logger.info(f"[AdminTrigger] Job '{job_name}' completed in {duration:.1f}s (config={cfg})")
 
 
 @router.get("/jobs")
@@ -168,14 +177,20 @@ async def list_jobs():
             "description": info["description"],
             "available": available,
             "running": running,
+            "default_config": info.get("default_config"),
         })
 
     return {"jobs": jobs}
 
 
 @router.post("/trigger/{job_name}")
-async def trigger_job(job_name: str):
-    """Trigger an enrichment job to run in the background."""
+async def trigger_job(job_name: str, config: Optional[dict] = None):
+    """Trigger an enrichment job to run in the background.
+
+    Optional JSON body with config overrides, e.g.:
+    - {"force_refresh": true} — re-process already cached venues
+    - {"limit": 50} — override the default venue limit
+    """
     if _container is None:
         raise HTTPException(status_code=503, detail="Container not initialized")
 
@@ -194,7 +209,7 @@ async def trigger_job(job_name: str):
     # Launch as background task
     async def _wrapper():
         try:
-            await _run_job(job_name)
+            await _run_job(job_name, config=config)
         except Exception as e:
             logger.error(f"[AdminTrigger] Job '{job_name}' failed: {e}")
         finally:

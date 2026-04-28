@@ -142,3 +142,34 @@ class TestGooglePlacesDetailsPrimaryType:
         from app.models.vibe_attributes import GooglePlacesDetailsResponse
         resp = GooglePlacesDetailsResponse(place_id="ChIJ_test")
         assert resp.primary_type is None
+
+
+class TestBlockedGoogleTypes:
+    """Verify BLOCKED_GOOGLE_TYPES catches junk from Google Places."""
+
+    def test_blocks_parks(self):
+        from app.services.venues_refresher_service import BLOCKED_GOOGLE_TYPES
+        for t in ["park", "city_park", "garden", "national_park"]:
+            assert t in BLOCKED_GOOGLE_TYPES
+
+    def test_blocks_shopping(self):
+        from app.services.venues_refresher_service import BLOCKED_GOOGLE_TYPES
+        for t in ["shopping_mall", "department_store", "store"]:
+            assert t in BLOCKED_GOOGLE_TYPES
+
+    def test_blocks_museums(self):
+        from app.services.venues_refresher_service import BLOCKED_GOOGLE_TYPES
+        for t in ["museum", "art_museum", "history_museum"]:
+            assert t in BLOCKED_GOOGLE_TYPES
+
+    def test_does_not_block_nightlife(self):
+        from app.services.venues_refresher_service import BLOCKED_GOOGLE_TYPES
+        for t in ["bar", "night_club", "cocktail_bar", "pub", "irish_pub",
+                   "bar_and_grill", "brewery", "bistro", "event_venue"]:
+            assert t not in BLOCKED_GOOGLE_TYPES, f"{t} should NOT be blocked"
+
+    def test_does_not_block_restaurants(self):
+        from app.services.venues_refresher_service import BLOCKED_GOOGLE_TYPES
+        for t in ["restaurant", "brazilian_restaurant", "buffet_restaurant",
+                   "snack_bar", "cafeteria", "deli"]:
+            assert t not in BLOCKED_GOOGLE_TYPES, f"{t} should NOT be blocked"
