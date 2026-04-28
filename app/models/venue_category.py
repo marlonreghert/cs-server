@@ -18,7 +18,7 @@ CATEGORIES = {
     "BREWERY":      {"label": "Cervejaria",        "emoji": "🍺", "color": "#B45309"},
     "WINERY":       {"label": "Vinícola",          "emoji": "🍷", "color": "#991B1B"},
     "COFFEE_SHOP":  {"label": "Cafeteria",         "emoji": "☕", "color": "#78350F"},
-    "RESTAURANT":   {"label": "Restaurante",       "emoji": "🍽️", "color": "#059669"},
+    "RESTAURANT":   {"label": "Restaurante",       "emoji": "🍽️", "color": "#DC2626"},
     "BUFFET":       {"label": "Buffet",            "emoji": "🍱", "color": "#DC2626"},
     "FOOD_DRINK":   {"label": "Gastronomia",       "emoji": "🍴", "color": "#10B981"},
     "EVENT_VENUE":  {"label": "Espaço de Eventos", "emoji": "🎪", "color": "#6366F1"},
@@ -181,16 +181,32 @@ _BESTTIME_TO_CATEGORY = {
 }
 
 
-def resolve_category(google_type: str = None, besttime_type: str = None) -> str:
-    """Resolve the VibeSense display category for a venue."""
-    if google_type:
-        cat = _GOOGLE_TO_CATEGORY.get(google_type.lower())
-        if cat:
-            return cat
-    if besttime_type:
-        cat = _BESTTIME_TO_CATEGORY.get(besttime_type.upper())
-        if cat:
-            return cat
+def resolve_category(
+    google_type: str = None,
+    besttime_type: str = None,
+    venue_name: str = None,
+) -> str:
+    """Resolve the VibeSense display category for a venue.
+
+    Priority: google_type > besttime_type > name heuristics > OTHER
+
+    Special rules:
+    - If Google says "restaurant" but BestTime says BAR/BEER → keep as BAR
+      (many bars that serve food get classified as restaurant by Google)
+    - If Google says "night_club" but name contains "warehouse/espaço/centro"
+      → EVENT_VENUE (event spaces, not regular nightclubs)
+    """
+    google_cat = _GOOGLE_TO_CATEGORY.get(google_type.lower()) if google_type else None
+    besttime_cat = _BESTTIME_TO_CATEGORY.get(besttime_type.upper()) if besttime_type else None
+
+    # Rule: Google=restaurant but BestTime=BAR → trust BestTime (it's a bar that serves food)
+    if google_cat == "RESTAURANT" and besttime_cat in ("BAR", "PUB"):
+        return besttime_cat
+
+    if google_cat:
+        return google_cat
+    if besttime_cat:
+        return besttime_cat
     return "OTHER"
 
 
@@ -206,9 +222,9 @@ def get_granular_label(granular_type: str) -> str:
     return GRANULAR_LABELS.get(granular_type.lower(), "")
 
 
-def resolve_venue_display(google_type: str = None, besttime_type: str = None) -> dict:
+def resolve_venue_display(google_type: str = None, besttime_type: str = None, venue_name: str = None) -> dict:
     """Full resolution: returns category + granular_type + granular_label + label + emoji + color."""
-    cat = resolve_category(google_type, besttime_type)
+    cat = resolve_category(google_type, besttime_type, venue_name)
     info = get_category_info(cat)
     granular = google_type or (besttime_type.lower() if besttime_type else None)
     return {
