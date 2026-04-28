@@ -445,7 +445,7 @@ class VenueHandler:
                     venue_id=m.venue.venue_id,
                     venue_type=m.venue.venue_type,
                     google_places_type=google_places_type,
-                    **resolve_venue_display(google_places_type, m.venue.venue_type),
+                    **resolve_venue_display(google_places_type, m.venue.venue_type, m.venue.venue_name),
                     price_level=m.venue.price_level,
                     rating=m.venue.rating,
                     reviews=m.venue.reviews,
