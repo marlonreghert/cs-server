@@ -295,7 +295,8 @@ class GooglePlacesAPIClient:
         # Extract opening hours
         regular_hours = data.get("regularOpeningHours", {})
         current_hours = data.get("currentOpeningHours", {})
-        secondary_hours = data.get("currentSecondaryOpeningHours", {})
+        # currentSecondaryOpeningHours is an ARRAY of objects per the API spec
+        secondary_hours_list = data.get("currentSecondaryOpeningHours") or []
 
         # Get weekday descriptions (pre-formatted strings in Portuguese)
         weekday_descriptions = regular_hours.get("weekdayDescriptions", []) if regular_hours else None
@@ -305,10 +306,12 @@ class GooglePlacesAPIClient:
 
         # Get special days descriptions (holidays)
         special_days = None
-        if secondary_hours:
-            secondary_descriptions = secondary_hours.get("weekdayDescriptions", [])
-            if secondary_descriptions:
-                special_days = secondary_descriptions
+        if isinstance(secondary_hours_list, list) and secondary_hours_list:
+            first_secondary = secondary_hours_list[0]
+            if isinstance(first_secondary, dict):
+                secondary_descriptions = first_secondary.get("weekdayDescriptions", [])
+                if secondary_descriptions:
+                    special_days = secondary_descriptions
 
         # Parse reviews (top 5, sorted by relevance by API)
         raw_reviews = data.get("reviews", []) or []

@@ -123,7 +123,7 @@ BLOCKED_GOOGLE_TYPES = {
     "shopping_mall", "department_store",
     "store", "home_goods_store", "furniture_store", "electronics_store",
     "auto_parts_store", "cell_phone_store", "shoe_store", "cosmetics_store",
-    "candy_store", "food_store",
+    "candy_store", "food_store", "health_food_store",
     "museum", "art_museum", "history_museum",
     "library", "book_store",
     "warehouse_store", "building_materials_store",
@@ -169,6 +169,8 @@ BLOCKED_NAME_KEYWORDS = [
     "catamaran", "passeio", "tour",
     "pet shop", "veterinár",
     "salão", "salao", "barbearia",
+    "floricultura",
+    "plantation square",
     "nagem", "tim ", "claro ", "vivo ",
     "multicoisas", "game station",
 ]
