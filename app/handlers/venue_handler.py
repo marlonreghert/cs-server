@@ -306,10 +306,12 @@ class VenueHandler:
             except Exception as e:
                 logger.debug(f"[VenueHandler] No vibe attributes for {m.venue.venue_id}: {e}")
 
-            # Get venue photos if available
+            # Get venue photos — full set for verbose, first 2 for list (card thumbnail)
             venue_photos: Optional[list[dict]] = None
             try:
-                venue_photos = self.venue_dao.get_venue_photos(m.venue.venue_id)
+                all_photos = self.venue_dao.get_venue_photos(m.venue.venue_id)
+                if all_photos:
+                    venue_photos = all_photos if verbose else all_photos[:2]
             except Exception as e:
                 logger.debug(f"[VenueHandler] No photos for {m.venue.venue_id}: {e}")
 
@@ -347,14 +349,15 @@ class VenueHandler:
             except Exception as e:
                 logger.debug(f"[VenueHandler] No Instagram for {m.venue.venue_id}: {e}")
 
-            # Get reviews if available
+            # Reviews are heavy (~3KB per venue) — only load for verbose/detail mode
             venue_reviews: Optional[list[dict]] = None
-            try:
-                reviews_data = self.venue_dao.get_venue_reviews(m.venue.venue_id)
-                if reviews_data and reviews_data.reviews:
-                    venue_reviews = [r.model_dump() for r in reviews_data.reviews]
-            except Exception as e:
-                logger.debug(f"[VenueHandler] No reviews for {m.venue.venue_id}: {e}")
+            if verbose:
+                try:
+                    reviews_data = self.venue_dao.get_venue_reviews(m.venue.venue_id)
+                    if reviews_data and reviews_data.reviews:
+                        venue_reviews = [r.model_dump() for r in reviews_data.reviews]
+                except Exception as e:
+                    logger.debug(f"[VenueHandler] No reviews for {m.venue.venue_id}: {e}")
 
             # Get AI vibe profile if available
             vibe_profile_data: Optional[dict] = None
@@ -406,31 +409,32 @@ class VenueHandler:
                         if ep:
                             p["category"] = _TYPE_TO_CATEGORY.get(ep.photo_type, "Outro")
 
-            # Get extracted menu data if available
+            # Menu data is heavy — only load for verbose/detail mode
             venue_menu: Optional[dict] = None
-            try:
-                menu_data = self.venue_dao.get_venue_menu_data(m.venue.venue_id)
-                if menu_data and menu_data.sections:
-                    venue_menu = {
-                        "sections": [
-                            {
-                                "name": s.name,
-                                "items": [
-                                    {
-                                        "name": item.name,
-                                        "description": item.description,
-                                        "prices": item.prices,
-                                        "dietary_tags": item.dietary_tags,
-                                    }
-                                    for item in s.items
-                                ],
-                            }
-                            for s in menu_data.sections
-                        ],
-                        "currency_detected": menu_data.currency_detected,
-                    }
-            except Exception as e:
-                logger.debug(f"[VenueHandler] No menu data for {m.venue.venue_id}: {e}")
+            if verbose:
+                try:
+                    menu_data = self.venue_dao.get_venue_menu_data(m.venue.venue_id)
+                    if menu_data and menu_data.sections:
+                        venue_menu = {
+                            "sections": [
+                                {
+                                    "name": s.name,
+                                    "items": [
+                                        {
+                                            "name": item.name,
+                                            "description": item.description,
+                                            "prices": item.prices,
+                                            "dietary_tags": item.dietary_tags,
+                                        }
+                                        for item in s.items
+                                    ],
+                                }
+                                for s in menu_data.sections
+                            ],
+                            "currency_detected": menu_data.currency_detected,
+                        }
+                except Exception as e:
+                    logger.debug(f"[VenueHandler] No menu data for {m.venue.venue_id}: {e}")
 
             minified.append(
                 MinifiedVenue(
