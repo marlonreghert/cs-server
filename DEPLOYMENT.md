@@ -55,9 +55,9 @@ docker-compose down
 
 To remove volumes (Redis data):
 
-```bash
-docker-compose down -v
-```
+Do this only for disposable local data. Never remove Redis volumes or run
+volume-removal commands in any environment that may point at shared or cloud
+Redis.
 
 ## Environment Variables
 

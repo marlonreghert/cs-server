@@ -1,0 +1,4 @@
+interface:
+  display_name: "Plan Feature"
+  short_description: "Plan CS-Server work with BDD"
+  default_prompt: "Use $plan-feature to plan a CS-Server feature with BDD acceptance criteria."

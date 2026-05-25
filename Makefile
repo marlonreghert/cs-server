@@ -6,12 +6,55 @@ REDIS_CONTAINER=redis-container-2
 CS_SERVER_CONTAINER=cs-server-2
 KUBERNETES_DEPLOYMENT=deployment/deployment.yaml
 KUBERNETES_CLUSTER=cs-server-cluster
+PYTHON ?= $(shell if [ -x .venv/bin/python ]; then echo .venv/bin/python; else echo python3; fi)
 
 setup-root:
 	export PROJECT_ROOT=`pwd`
 
 # Phony targets to avoid conflicts with files of the same name
-.PHONY: build image network run-network k8s-deploy k8s-scale-down k8s-port-forward k8s-logs request clean
+.PHONY: build push network run-network run-docker-compose request clean test-unit test-integration test-bdd test-feature test
+
+test-unit:
+	$(PYTHON) -m pytest \
+		tests/test_models.py \
+		tests/test_redis_dao_unit.py \
+		tests/test_besttime_client.py \
+		tests/test_services.py \
+		tests/test_handlers.py \
+		tests/test_instagram_enrichment_service.py \
+		tests/test_instagram_validator.py \
+		-v
+
+test-integration:
+	$(PYTHON) -m pytest tests/test_redis_dao.py -v
+
+test-bdd:
+	@if ! find tests/bdd -name '*.feature' -print -quit | grep -q .; then \
+		echo "No feature files found under tests/bdd/. Skipping BDD suite."; \
+	else \
+		if ! $(PYTHON) -c "import behave" >/dev/null 2>&1; then \
+			echo "behave is not installed. Run: .venv/bin/python -m pip install -r requirements-dev.txt"; \
+			exit 1; \
+		fi; \
+		$(PYTHON) -m behave; \
+	fi
+
+test-feature:
+	@if [ -z "$(FEATURE)" ]; then \
+		echo "FEATURE is required. Usage: make test-feature FEATURE=tests/bdd/<domain>/<slug>.feature"; \
+		exit 2; \
+	fi
+	@if [ ! -f "$(FEATURE)" ]; then \
+		echo "Feature file not found: $(FEATURE)"; \
+		exit 2; \
+	fi
+	@if ! $(PYTHON) -c "import behave" >/dev/null 2>&1; then \
+		echo "behave is not installed. Run: .venv/bin/python -m pip install -r requirements-dev.txt"; \
+		exit 1; \
+	fi
+	$(PYTHON) -m behave "$(FEATURE)"
+
+test: test-unit test-bdd
 
 # Build the Docker image
 build:
@@ -31,7 +74,6 @@ run-network:
 	docker run -d --network $(NETWORK_NAME) -p 8080:8080 $(IMAGE_NAME)
 
 run-docker-compose:
-	docker-compose down -v
 	docker-compose up -d
 
 # Send a request to the server
@@ -42,4 +84,3 @@ request:
 clean:
 	docker rm -f $(REDIS_CONTAINER) $(CS_SERVER_CONTAINER) || true
 	docker network rm $(NETWORK_NAME) || true
-

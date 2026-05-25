@@ -1,0 +1,4 @@
+interface:
+  display_name: "Execute Feature"
+  short_description: "Execute CS-Server plans with BDD"
+  default_prompt: "Use $execute-feature to execute an approved CS-Server plan through BDD and pytest verification."

@@ -27,6 +27,8 @@ def mock_venue_dao():
     dao.get_opening_hours.return_value = None
     dao.get_venue_instagram.return_value = None
     dao.get_venue_reviews.return_value = None
+    dao.get_venue_vibe_profile.return_value = None
+    dao.get_venue_menu_data.return_value = None
     return dao
 
 
@@ -178,8 +180,8 @@ class TestVenueHandler:
 
         venue_handler.get_venues_nearby(lat=-8.0, lon=-34.9, radius=5.0)
 
-        # Should request day_int=0 (Monday)
-        mock_venue_dao.get_week_raw_forecast.assert_called_once_with("v1", 0)
+        # The merge path should request day_int=0 (Monday) before fallback hours load all days
+        assert mock_venue_dao.get_week_raw_forecast.call_args_list[0].args == ("v1", 0)
 
     @patch("app.handlers.venue_handler.datetime")
     def test_day_conversion_sunday(
@@ -201,8 +203,8 @@ class TestVenueHandler:
 
         venue_handler.get_venues_nearby(lat=-8.0, lon=-34.9, radius=5.0)
 
-        # Should request day_int=6 (Sunday)
-        mock_venue_dao.get_week_raw_forecast.assert_called_once_with("v1", 6)
+        # The merge path should request day_int=6 (Sunday) before fallback hours load all days
+        assert mock_venue_dao.get_week_raw_forecast.call_args_list[0].args == ("v1", 6)
 
     def test_verbose_mode_returns_full_structure(self, venue_handler, mock_venue_dao):
         """Test verbose=True returns full VenueWithLive."""

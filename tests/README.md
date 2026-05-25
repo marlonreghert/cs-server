@@ -1,100 +1,102 @@
 # CS-Server Tests
 
-## Test Structure
+The test suite has three layers:
 
-- **test_models.py** - Unit tests for Pydantic data models (11 tests)
-- **test_redis_dao_unit.py** - Unit tests for Redis DAO (mocked, no Redis required) (8 tests)
-- **test_besttime_client.py** - Unit tests for BestTime API client (mocked, no API required) (11 tests)
-- **test_services.py** - Unit tests for business logic services (mocked, no dependencies) (13 tests)
-- **test_handlers.py** - Unit tests for HTTP request handlers (mocked, no dependencies) (13 tests)
-- **test_redis_dao.py** - Integration tests for Redis DAO (requires running Redis) (10 tests)
+- Unit tests that run without Redis or external services.
+- Redis integration tests that require a local Redis instance.
+- BDD feature contracts written in Gherkin and executed with Behave.
 
-## Running Tests
+## Prerequisites
 
-### Unit Tests (No dependencies required)
+Install runtime and development dependencies:
 
 ```bash
-source venv/bin/activate
-pytest tests/test_models.py tests/test_redis_dao_unit.py tests/test_besttime_client.py tests/test_services.py tests/test_handlers.py -v
-# 56 tests total
+.venv/bin/python -m pip install -r requirements.txt
+.venv/bin/python -m pip install -r requirements-dev.txt
 ```
 
-### Integration Tests (Requires Redis)
-
-1. Start Redis using Docker Compose:
-   ```bash
-   docker-compose up -d redis
-   ```
-
-2. Run integration tests:
-   ```bash
-   pytest tests/test_redis_dao.py -v
-   ```
-
-3. Stop Redis when done:
-   ```bash
-   docker-compose down
-   ```
-
-### Run All Tests
+For Redis integration tests, start Redis first:
 
 ```bash
-pytest tests/ -v
+docker-compose up -d redis
 ```
 
-## Test Database
+## Unit Tests
 
-Integration tests use Redis database 15 to avoid conflicts with production data. The test database is automatically flushed after each test run.
+The default unit target covers the stable no-dependency suite for Pydantic
+models, mocked Redis DAO behavior, BestTime client behavior, services, handlers,
+and Instagram enrichment/validation logic.
 
-## Key Testing Points
+```bash
+make test-unit
+```
 
-### Redis Key Compatibility
+Run additional focused test files directly when working in that area.
 
-All Redis key formats are tested for exact compatibility with the Go implementation:
+## Redis Integration Tests
 
-- **Geo index**: `venues_geo_v1`
-- **Venue data**: `venues_geo_place_v1:{venue_id}`
-- **Live forecast**: `live_forecast_v1:{venue_id}`
-- **Weekly forecast**: `weekly_forecast_v1:{venue_id}_{day_int}`
+Redis integration tests use Redis database `15` and flush that test database
+after each run.
 
-### Critical Business Logic
+```bash
+make test-integration
+```
 
-Tests verify:
-- JSON serialization/deserialization matches Go
-- Field aliases work correctly (`venue_lng`, `24h`, `12h`)
-- Custom validators (int/string conversion for `venue_open`/`venue_closed`)
-- Geospatial queries return correct results
-- Cache operations maintain data integrity
+These tests validate real Redis geospatial behavior and key compatibility.
 
-### BestTime API Client
+## BDD Tests
 
-Tests verify:
-- Async HTTP client with proper connection pooling
-- Query parameter construction matches Go implementation
-- API key injection (public vs private keys)
-- Error handling for HTTP errors and network failures
-- Proper use of venue_filter (preferred), get_live_forecast, and get_week_raw_forecast endpoints
-- Parameter validation (e.g., venue_id or venue_name+venue_address required)
+Gherkin feature files live under `tests/bdd/<domain>/`, with Behave step
+definitions under `tests/bdd/steps/`.
 
-### Business Logic Services
+Domains:
 
-Tests verify **CRITICAL** business logic preservation:
-- **Deduplication algorithm**: By `venue_id` first, then by `venue_name` (exact Go logic from lines 374-417)
-- **Live forecast filtering**: Only cache when `status == "OK"` AND `venue_live_busyness_available == True` (lines 254-265)
-- **Venue mapping**: VenueFilterVenue → Venue conversion preserves all fields correctly (lines 432-469)
-- **Default locations**: Exact lat/lng/radius/limit values for 3 Recife locations (lines 39-41)
-- **Nightlife venue types**: Exact 11-type list matching Go implementation (lines 60-96)
-- **Weekly forecast caching**: All 7 days cached per venue, non-OK status skipped (lines 538-581)
-- Empty venue ID and name handling (skipped during deduplication)
+- `api`: HTTP contracts, response shapes, validation, health, and debug behavior
+- `refresh`: BestTime discovery, live forecast refresh, weekly forecast refresh,
+  scheduling, and startup refresh behavior
+- `enrichment`: optional Google Places, Instagram, menu, and vibe classifier
+  behavior
+- `persistence`: Redis key compatibility, DAO behavior, cache boundaries, and
+  migrations
+- `observability`: metrics, tracing, logging, and background-job failure
+  visibility
 
-### HTTP Request Handlers
+Run all BDD features:
 
-Tests verify **CRITICAL** handler logic preservation:
-- **Day index conversion**: Python weekday (0=Mon, 6=Sun) matches BestTime day_int directly (no conversion needed)
-- **Venue sorting**: Venues with live data first, sorted by busyness descending; then venues without live data
-- **Verbose mode**: Returns full VenueWithLive structure with nested venue, live_forecast, and weekly_forecast
-- **Minified mode**: Returns MinifiedVenue with essential fields only
-- **Live busyness extraction**: Only included when available (venue_live_busyness_available == True)
-- **Weekly forecast inclusion**: WeekRawDay for current day (Recife timezone) included when available
-- **Error handling**: Missing live/weekly forecasts don't crash, set to None
-- **Health check**: Ping endpoint returns {"status": "pong"}
+```bash
+make test-bdd
+```
+
+Run one feature:
+
+```bash
+make test-feature FEATURE=tests/bdd/api/<slug>.feature
+```
+
+When no `.feature` files exist yet, `make test-bdd` skips cleanly.
+
+## Run The Default Suite
+
+```bash
+make test
+```
+
+`make test` runs unit tests and BDD tests. Run `make test-integration`
+separately when Redis is available.
+
+## Critical Behavior Covered By Existing Pytest Tests
+
+Existing pytest coverage protects:
+
+- Redis key compatibility with the original Go implementation:
+  `venues_geo_v1`, `venues_geo_place_v1:{venue_id}`,
+  `live_forecast_v1:{venue_id}`, and
+  `weekly_forecast_v1:{venue_id}_{day_int}`.
+- JSON serialization/deserialization and field aliases such as `venue_lng`,
+  `24h`, and `12h`.
+- BestTime client request construction, API key usage, and error handling.
+- Venue refresh rules, including default Recife locations, nightlife venue
+  types, deduplication, live forecast caching, weekly forecast caching, and
+  non-OK response handling.
+- Handler behavior, including Recife day selection, live-first sorting,
+  minified/verbose responses, optional cache data, and health responses.

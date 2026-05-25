@@ -421,9 +421,12 @@ class TestVenuesRefresherService:
         for t in ["BAR", "CLUBS", "BREWERY", "CONCERT_HALL", "EVENT_VENUE"]:
             assert t in VENUE_TYPES, f"{t} missing from VENUE_TYPES"
 
-        # Must include dining types
-        for t in ["RESTAURANT", "CAFE", "FOOD_AND_DRINK"]:
+        # Must include broad food/drink and catch-all types without serving blocked categories
+        for t in ["FOOD_AND_DRINK", "BEER", "BISTRO", "OTHER"]:
             assert t in VENUE_TYPES, f"{t} missing from VENUE_TYPES"
+
+        for t in ["RESTAURANT", "CAFE"]:
+            assert t not in VENUE_TYPES, f"{t} should be filtered by blocked venue rules"
 
         # All types must be valid singular BestTime types (no spaces)
         for t in VENUE_TYPES:
