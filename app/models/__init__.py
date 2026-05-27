@@ -25,6 +25,11 @@ from app.models.venue_filter import (
     VenueFilterParams,
     FilterWindow,
 )
+from app.models.new_venue import (
+    NewVenueResponse,
+    NewVenueInfo,
+    AccountInventoryVenue,
+)
 
 __all__ = [
     # Venue models
@@ -49,4 +54,8 @@ __all__ = [
     "VenueFilterVenue",
     "VenueFilterParams",
     "FilterWindow",
+    # Add-venue / inventory models
+    "NewVenueResponse",
+    "NewVenueInfo",
+    "AccountInventoryVenue",
 ]

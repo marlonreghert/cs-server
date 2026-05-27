@@ -4,11 +4,15 @@ import time
 from typing import Optional
 import httpx
 
+from typing import AsyncIterator
+
 from app.models import (
     LiveForecastResponse,
     WeekRawResponse,
     VenueFilterParams,
     VenueFilterResponse,
+    NewVenueResponse,
+    AccountInventoryVenue,
 )
 from app.metrics import (
     BESTTIME_API_CALLS_TOTAL,
@@ -254,6 +258,127 @@ class BestTimeAPIClient:
         )
 
         return response_data
+
+    async def add_venue_to_account(
+        self, venue_name: str, venue_address: str
+    ) -> NewVenueResponse:
+        """Register a venue in our BestTime account inventory.
+
+        Calls POST /forecasts which is BestTime's "add new venue" endpoint.
+        On success returns the venue_info (id, name, address, lat, lng,
+        timezone, rating, reviews, price_level) and the 7-day analysis when
+        available. On geocoder failure or monthly-cap-exceeded, BestTime
+        returns HTTP 4xx with body {"status":"Error","message":"..."}.
+
+        We treat HTTP 5xx and transport errors as raise-worthy (the caller
+        knows BestTime is unhealthy). HTTP 4xx with a parseable Error body
+        is returned as a NewVenueResponse with status="Error" so the
+        handler can branch into the geo-fallback path.
+        """
+        query_params = {
+            "api_key_private": self.api_key_private,
+            "venue_name": venue_name,
+            "venue_address": venue_address,
+        }
+        endpoint = "/forecasts"
+        url = f"{self.base_url}{endpoint}"
+        start_time = time.perf_counter()
+        try:
+            response = await self.client.request(
+                method="POST",
+                url=url,
+                params=query_params,
+                headers={"Content-Type": "application/json"},
+            )
+            duration = time.perf_counter() - start_time
+            BESTTIME_API_CALL_DURATION_SECONDS.labels(endpoint=endpoint).observe(duration)
+
+            # 5xx is non-recoverable: raise so the handler returns 502
+            # without attempting the geo fallback.
+            if response.status_code >= 500:
+                BESTTIME_API_CALLS_TOTAL.labels(endpoint=endpoint, status="error").inc()
+                BESTTIME_API_ERRORS_TOTAL.labels(
+                    endpoint=endpoint, error_type="http_5xx"
+                ).inc()
+                response.raise_for_status()
+
+            try:
+                body = response.json()
+            except Exception:
+                BESTTIME_API_ERRORS_TOTAL.labels(
+                    endpoint=endpoint, error_type="invalid_json"
+                ).inc()
+                raise
+
+            parsed = NewVenueResponse.model_validate(body)
+            if parsed.is_ok():
+                BESTTIME_API_CALLS_TOTAL.labels(endpoint=endpoint, status="success").inc()
+            else:
+                BESTTIME_API_CALLS_TOTAL.labels(endpoint=endpoint, status="error").inc()
+                logger.warning(
+                    f"[BestTimeAPIClient] add_venue_to_account non-OK: "
+                    f"status={parsed.status} message={parsed.message!r}"
+                )
+            return parsed
+        except httpx.HTTPStatusError as e:
+            BESTTIME_API_ERRORS_TOTAL.labels(
+                endpoint=endpoint, error_type="http_error"
+            ).inc()
+            logger.error(f"[BestTimeAPIClient] HTTP error on POST {endpoint}: {e}")
+            raise
+        except httpx.TimeoutException as e:
+            BESTTIME_API_CALLS_TOTAL.labels(endpoint=endpoint, status="error").inc()
+            BESTTIME_API_ERRORS_TOTAL.labels(
+                endpoint=endpoint, error_type="timeout"
+            ).inc()
+            logger.error(f"[BestTimeAPIClient] Timeout on POST {endpoint}: {e}")
+            raise
+        except httpx.RequestError as e:
+            BESTTIME_API_CALLS_TOTAL.labels(endpoint=endpoint, status="error").inc()
+            BESTTIME_API_ERRORS_TOTAL.labels(
+                endpoint=endpoint, error_type="connection_error"
+            ).inc()
+            logger.error(f"[BestTimeAPIClient] Request error on POST {endpoint}: {e}")
+            raise
+
+    async def list_account_inventory(
+        self, page_size: int = 1000
+    ) -> AsyncIterator[AccountInventoryVenue]:
+        """Paginate GET /api/v1/venues, yielding every venue in our account inventory.
+
+        This endpoint does not consume BestTime credits — it just enumerates
+        venues already registered to the API key. Yields one venue at a
+        time; the caller decides how to batch or filter.
+        """
+        endpoint = "/venues"
+        page = 0
+        while True:
+            params = {
+                "api_key_private": self.api_key_private,
+                "limit": page_size,
+                "page": page,
+            }
+            try:
+                data = await self._request("GET", endpoint, params=params)
+            except Exception as e:
+                logger.error(
+                    f"[BestTimeAPIClient] list_account_inventory page={page} failed: {e}"
+                )
+                raise
+            if not isinstance(data, list) or not data:
+                return
+            for row in data:
+                try:
+                    yield AccountInventoryVenue.model_validate(row)
+                except Exception as e:
+                    logger.warning(
+                        f"[BestTimeAPIClient] Skipping bad inventory row on page "
+                        f"{page}: {e}"
+                    )
+                    continue
+            if len(data) < page_size:
+                return
+            page += 1
 
     async def get_venue_search_progress(
         self, job_id: str, collection_id: Optional[str] = None

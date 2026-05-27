@@ -4,8 +4,13 @@ import logging
 import time
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException, Body
+from fastapi import APIRouter, HTTPException, Body, Response
 from pydantic import BaseModel
+
+from app.handlers.add_venue_handler import (
+    AddVenueHandler,
+    AddVenueByAddressRequest,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -79,6 +84,10 @@ JOB_REGISTRY = {
         "label": "Instagram Handle Validation",
         "description": "Check all cached Instagram handles and remove invalid ones (404 profiles)",
     },
+    "inventory_sync": {
+        "label": "BestTime Inventory Sync",
+        "description": "Pull every venue in our BestTime account inventory into Redis. Free — does not spend the monthly new-venue budget.",
+    },
 }
 
 
@@ -94,6 +103,8 @@ async def _run_job(job_name: str, config: Optional[dict] = None):
         await c.venues_refresher_service.refresh_venues_by_filter_for_default_locations(
             fetch_and_cache_live=True
         )
+    elif job_name == "inventory_sync":
+        await c.venues_refresher_service.sync_account_inventory_to_redis()
     elif job_name == "live_forecast":
         await c.venues_refresher_service.refresh_live_forecasts_for_all_venues()
     elif job_name == "weekly_forecast":
@@ -223,6 +234,48 @@ async def trigger_job(job_name: str, config: Optional[dict] = None):
         job=job_name,
         message=f"{JOB_REGISTRY[job_name]['label']} started in background",
     )
+
+
+@router.post("/venues/by-address")
+async def add_venue_by_address(request: AddVenueByAddressRequest, response: Response):
+    """Register a venue in our BestTime account inventory by name + address.
+
+    Body: AddVenueByAddressRequest. See app/handlers/add_venue_handler.py for
+    the full status-code matrix.
+    """
+    if _container is None:
+        raise HTTPException(status_code=503, detail="Container not initialized")
+    if getattr(_container, "add_venue_handler", None) is None:
+        raise HTTPException(
+            status_code=503,
+            detail="add-venue handler not configured",
+        )
+    handler: AddVenueHandler = _container.add_venue_handler
+    outcome = await handler.add(request)
+    response.status_code = outcome.status_code
+    return outcome.body
+
+
+@router.get("/venues/monthly-budget")
+async def get_monthly_budget():
+    """Return the current state of the monthly new-venue budget."""
+    if _container is None:
+        raise HTTPException(status_code=503, detail="Container not initialized")
+    budget = getattr(_container, "venue_budget_service", None)
+    if budget is None:
+        raise HTTPException(
+            status_code=503,
+            detail="venue budget service not configured",
+        )
+    snap = budget.get_snapshot()
+    return {
+        "quota": snap.quota,
+        "manual_reserve": snap.manual_reserve,
+        "month_counter": snap.month_counter,
+        "year_month": snap.year_month,
+        "discovery_effective_cap_remaining": snap.discovery_effective_cap_remaining,
+        "manual_add_available": snap.manual_add_available,
+    }
 
 
 @router.post("/recount-discovery-points")

@@ -459,6 +459,40 @@ VENUES_BY_PRICE_LEVEL = Gauge(
 )
 
 # =============================================================================
+# ADD-VENUE-BY-ADDRESS + MONTHLY BUDGET METRICS
+# =============================================================================
+
+ADD_VENUE_BY_ADDRESS_TOTAL = Counter(
+    "add_venue_by_address_total",
+    "Outcomes of POST /admin/venues/by-address",
+    ["result"],  # created | already_exists | matched_via_geo_fallback |
+                 # quota_exhausted | besttime_error | besttime_rejected_no_geo_match |
+                 # validation_error
+)
+
+INVENTORY_SYNC_VENUES_TOTAL = Counter(
+    "inventory_sync_venues_total",
+    "Per-venue outcomes during the monthly BestTime inventory sync",
+    ["result"],  # seen | upserted | skipped | error
+)
+
+INVENTORY_SYNC_RUNS_TOTAL = Counter(
+    "inventory_sync_runs_total",
+    "Outcomes of the monthly BestTime inventory sync runs",
+    ["outcome"],  # ok | partial | failed
+)
+
+DISCOVERY_SKIPPED_DUE_TO_MONTHLY_CAP_TOTAL = Counter(
+    "discovery_skipped_due_to_monthly_cap_total",
+    "Discovery cycles or batches skipped because the monthly new-venue cap was reached",
+)
+
+VENUE_MONTHLY_NEW_COUNT = Gauge(
+    "venue_monthly_new_count",
+    "Current month's running count of new venue additions to the BestTime account inventory",
+)
+
+# =============================================================================
 # APPLICATION INFO
 # =============================================================================
 

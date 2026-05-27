@@ -1,0 +1,9 @@
+{
+  "probe": "D_fresh_create",
+  "_status": "PLACEHOLDER — Probe D is blocked by the monthly cap until 2026-06-01.",
+  "_see_also": "tests/fixtures/besttime/PROBE_MANIFEST.md and plans/add_venue_by_address_26_05_26.md (Pre-Implementation Verification).",
+  "_captured": false,
+  "context": {
+    "expected_outcome": "Once captured, this file will contain the full POST /forecasts response for a real venue not previously in the BestTime account inventory. The current handler and Pydantic model already tolerate partial analysis arrays; re-probe after 2026-06-01 to lock the exact shape."
+  }
+}

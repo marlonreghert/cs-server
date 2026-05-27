@@ -1,0 +1,53 @@
+{
+  "probe": "A_idempotent_readd_with_google_formatted_address",
+  "request": {
+    "method": "POST",
+    "url": "https://besttime.app/api/v1/forecasts",
+    "params": {
+      "api_key_private": "<redacted>",
+      "venue_name": "Casas Bahia",
+      "venue_address": "Av. Gov. Agamenon Magalhães, 153 - Santo Amaro, Recife - PE, 50110-000, Brazil"
+    },
+    "body": null
+  },
+  "response": {
+    "status_code": 400,
+    "headers": {
+      "date": "Tue, 26 May 2026 16:16:43 GMT",
+      "content-type": "application/json",
+      "content-length": "187",
+      "connection": "keep-alive",
+      "cf-ray": "a01e15f96c793709-GIG",
+      "cf-cache-status": "DYNAMIC",
+      "access-control-allow-origin": "*",
+      "cache-control": "public, max-age=30",
+      "retry-after": "60",
+      "server": "cloudflare",
+      "nel": "{\"report_to\":\"cf-nel\",\"success_fraction\":0.0,\"max_age\":604800}",
+      "report-to": "{\"group\":\"cf-nel\",\"max_age\":604800,\"endpoints\":[{\"url\":\"https://a.nel.cloudflare.com/report/v4?s=KzOOWsN%2BSaBjyU2JKIJQNAhzySIhdCX7p1u9iZNAT3QW9J%2F7EtabMeE15LuZA0cJLrfGH9%2Bkjf0ge0TjgWpmjh2LSgSS5gvWMKsaHVZIpJItYzYqQUWftUL1msTd1%2BMibPcNY%2BECxJq%2B3%2Bc%3D\"}]}",
+      "alt-svc": "h3=\":443\"; ma=86400",
+      "x-ratelimit-limit": "300",
+      "x-ratelimit-remaining": "299",
+      "x-ratelimit-reset": "1779812264"
+    },
+    "body": {
+      "status": "Error",
+      "message": "Error: Max amount of monthly venues (500) reached. Venue counter will reset at midnight on the first day of the month. Contact us for a higher monthly limit"
+    }
+  },
+  "context": {
+    "google_places_match": {
+      "id": "ChIJY3Fnct0YqwcRXPa4uNmTmYg",
+      "displayName": {
+        "text": "Casas Bahia",
+        "languageCode": "pt"
+      },
+      "formattedAddress": "Av. Gov. Agamenon Magalhães, 153 - Santo Amaro, Recife - PE, 50110-000, Brazil",
+      "location": {
+        "latitude": -8.041994899999999,
+        "longitude": -34.882320899999996
+      }
+    },
+    "expected_outcome": "status=OK, venue_info.venue_id == existing inventory id"
+  }
+}

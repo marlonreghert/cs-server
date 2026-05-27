@@ -28,6 +28,10 @@ from app.metrics import (
     VENUES_AVERAGE_RATING,
     VENUES_AVERAGE_REVIEWS,
     VENUES_BY_PRICE_LEVEL,
+    INVENTORY_SYNC_VENUES_TOTAL,
+    INVENTORY_SYNC_RUNS_TOTAL,
+    DISCOVERY_SKIPPED_DUE_TO_MONTHLY_CAP_TOTAL,
+    VENUE_MONTHLY_NEW_COUNT,
 )
 
 logger = logging.getLogger(__name__)
@@ -213,6 +217,13 @@ class VenuesRefresherService:
         self.dev_lat = dev_lat
         self.dev_lng = dev_lng
         self.dev_radius = dev_radius
+        # Optional: set later via set_budget_service so the container can wire
+        # this up after construction (avoids a circular import).
+        self.budget_service = None
+
+    def set_budget_service(self, budget_service) -> None:
+        """Wire the VenueBudgetService used to enforce the monthly cap."""
+        self.budget_service = budget_service
 
     def update_data_quality_metrics(self) -> None:
         """Compute and update all data quality metrics from cached venues.
@@ -469,6 +480,17 @@ class VenuesRefresherService:
                 f"name={venue.venue_name!r}, lat={venue.venue_lat:.6f}, lng={venue.venue_lng:.6f}"
             )
 
+            # Detect "new to our Redis state" before upsert so we can count
+            # it toward the monthly budget exactly once.
+            was_new_to_redis = False
+            if venue.venue_id:
+                try:
+                    was_new_to_redis = self.venue_dao.get_venue(venue.venue_id) is None
+                except Exception:
+                    # Be defensive: if we can't tell, assume new (it's only
+                    # counter drift, BestTime is the source of truth).
+                    was_new_to_redis = True
+
             try:
                 self.venue_dao.upsert_venue(venue)
             except Exception as e:
@@ -476,6 +498,16 @@ class VenuesRefresherService:
                     f"[VenuesRefresherService] Upsert failed for {venue.venue_id}: {e}"
                 )
                 continue
+
+            if was_new_to_redis and self.budget_service is not None:
+                try:
+                    new_count = self.budget_service.record_new_venue_from_discovery()
+                    VENUE_MONTHLY_NEW_COUNT.set(new_count)
+                except Exception as e:
+                    logger.warning(
+                        f"[VenuesRefresherService] failed to record new venue "
+                        f"{venue.venue_id} against monthly counter: {e}"
+                    )
 
             # Track as seen
             if venue.venue_id:
@@ -778,14 +810,95 @@ class VenuesRefresherService:
 
         return total_inserted
 
+    async def sync_account_inventory_to_redis(self) -> dict:
+        """Pull every venue from BestTime /api/v1/venues into Redis.
+
+        For each inventory venue not already in our geo index, upsert it.
+        Never increments the monthly new-venue counter — these venues are
+        already in the BestTime account inventory and cost no credits.
+
+        Returns a summary dict with seen/upserted/skipped/errors counts.
+        """
+        summary = {"seen": 0, "upserted": 0, "skipped": 0, "errors": 0}
+        try:
+            iterator = self.besttime_api.list_account_inventory()
+        except Exception as e:
+            logger.error(
+                f"[VenuesRefresherService] inventory list failed to start: {e}"
+            )
+            INVENTORY_SYNC_RUNS_TOTAL.labels(outcome="failed").inc()
+            return summary
+
+        try:
+            async for inv in iterator:
+                summary["seen"] += 1
+                INVENTORY_SYNC_VENUES_TOTAL.labels(result="seen").inc()
+                try:
+                    if not inv.venue_id:
+                        summary["errors"] += 1
+                        INVENTORY_SYNC_VENUES_TOTAL.labels(result="error").inc()
+                        continue
+                    existing = self.venue_dao.get_venue(inv.venue_id)
+                    if existing is not None:
+                        summary["skipped"] += 1
+                        INVENTORY_SYNC_VENUES_TOTAL.labels(result="skipped").inc()
+                        continue
+                    venue = Venue(
+                        processed=True,
+                        forecast=bool(inv.venue_forecasted),
+                        venue_id=inv.venue_id,
+                        venue_name=inv.venue_name or "",
+                        venue_address=inv.venue_address or "",
+                        venue_lat=float(inv.venue_lat or 0.0),
+                        venue_lng=float(inv.venue_lng or 0.0),
+                    )
+                    self.venue_dao.upsert_venue(venue)
+                    summary["upserted"] += 1
+                    INVENTORY_SYNC_VENUES_TOTAL.labels(result="upserted").inc()
+                except Exception as e:
+                    summary["errors"] += 1
+                    INVENTORY_SYNC_VENUES_TOTAL.labels(result="error").inc()
+                    logger.warning(
+                        f"[VenuesRefresherService] inventory upsert failed for "
+                        f"{getattr(inv, 'venue_id', '?')}: {e}"
+                    )
+        except Exception as e:
+            logger.error(
+                f"[VenuesRefresherService] inventory sync iteration failed: {e}"
+            )
+            INVENTORY_SYNC_RUNS_TOTAL.labels(outcome="partial").inc()
+            return summary
+
+        outcome = "ok" if summary["errors"] == 0 else "partial"
+        INVENTORY_SYNC_RUNS_TOTAL.labels(outcome=outcome).inc()
+        logger.info(
+            f"[VenuesRefresherService] inventory sync: seen={summary['seen']} "
+            f"upserted={summary['upserted']} skipped={summary['skipped']} "
+            f"errors={summary['errors']}"
+        )
+        return summary
+
     async def refresh_venues_by_filter_for_default_locations(
         self, fetch_and_cache_live: bool = False
     ) -> None:
         """Refresh venues for configured discovery points or default locations.
 
-        Uses admin-configured discovery points from Redis if available,
-        otherwise falls back to hardcoded DEFAULT_LOCATIONS.
+        Step 1: sync the full BestTime account inventory into Redis (no
+                credit cost; failure is logged but does not abort step 2).
+        Step 2: discovery refresh via /venues/filter, respecting the
+                monthly new-venue cap and manual-add reserve.
         """
+        # Step 1: inventory sync (skip in dev_mode to keep per-iteration
+        # latency low for local development).
+        if not self.dev_mode:
+            try:
+                await self.sync_account_inventory_to_redis()
+            except Exception as e:
+                logger.error(
+                    f"[VenuesRefresherService] inventory sync raised; "
+                    f"continuing with discovery: {e}"
+                )
+
         # Global total limit: -1 = disabled, 0 = fetch none
         if self.fetch_venue_total_limit == 0:
             logger.info(
@@ -793,7 +906,24 @@ class VenuesRefresherService:
             )
             return
 
+        # Step 2: apply monthly cap on top of fetch_venue_total_limit.
         remaining_budget = self.fetch_venue_total_limit  # -1 means unlimited
+        if self.budget_service is not None:
+            monthly_remaining = self.budget_service.discovery_effective_cap_remaining()
+            VENUE_MONTHLY_NEW_COUNT.set(
+                self.budget_service.get_snapshot().month_counter
+            )
+            if monthly_remaining <= 0:
+                logger.warning(
+                    f"[VenuesRefresherService] monthly new-venue cap reached "
+                    f"(discovery_effective_cap_remaining=0); skipping discovery"
+                )
+                DISCOVERY_SKIPPED_DUE_TO_MONTHLY_CAP_TOTAL.inc()
+                return
+            if remaining_budget < 0:
+                remaining_budget = monthly_remaining
+            else:
+                remaining_budget = min(remaining_budget, monthly_remaining)
 
         # Dev mode: single location, no discovery points
         if self.dev_mode:
