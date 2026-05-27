@@ -232,7 +232,7 @@ class VibeClassifierService:
         Returns:
             Number of venues successfully classified.
         """
-        all_venue_ids = self.venue_dao.list_all_venue_ids()
+        all_venue_ids = self.venue_dao.list_active_venue_ids()
         venues_with_photos = set(self.venue_dao.list_cached_venue_photos_ids())
         venues_with_profiles = set(self.venue_dao.list_cached_vibe_profile_venue_ids())
 

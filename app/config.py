@@ -112,14 +112,15 @@ class Settings(BaseSettings):
     google_places_enrichment_cron: str = "0 3 * * *"  # Daily at 3 AM
     google_places_enrichment_on_startup: bool = False  # If True, run enrichment on startup
 
-    # Permanently closed venue removal (uses Google Places API businessStatus)
-    # When enabled, venues marked as CLOSED_PERMANENTLY by Google are removed from the database
+    # Permanently closed venue handling (uses Google Places API businessStatus)
+    # When enabled, venues marked as CLOSED_PERMANENTLY by Google are soft-deprecated
+    # and retained in Redis for troubleshooting.
     # This runs during the google_places_enrichment refresh
     remove_permanently_closed_venues: bool = True  # Enabled by default when enrichment runs
 
-    # Temporarily closed venue removal (uses Google Places API businessStatus)
-    # When enabled, venues marked as CLOSED_TEMPORARILY by Google are removed from the database
-    # This runs during the google_places_enrichment refresh
+    # Temporarily closed venue handling (uses Google Places API businessStatus)
+    # Accepted for backward-compatible config only. CLOSED_TEMPORARILY venues
+    # remain active so live busyness can continue to refresh.
     remove_temporarily_closed_venues: bool = True  # Enabled by default when enrichment runs
 
     # Photo enrichment configuration (uses Google Places API)

@@ -32,6 +32,8 @@ from app.metrics import (
     INVENTORY_SYNC_RUNS_TOTAL,
     DISCOVERY_SKIPPED_DUE_TO_MONTHLY_CAP_TOTAL,
     VENUE_MONTHLY_NEW_COUNT,
+    VENUES_ACTIVE_TOTAL,
+    VENUES_DEPRECATED_TOTAL,
 )
 
 logger = logging.getLogger(__name__)
@@ -232,13 +234,17 @@ class VenuesRefresherService:
         gauges with counts and statistics about data quality.
         """
         try:
-            venues = self.venue_dao.list_all_venues()
+            all_venues = self.venue_dao.list_all_venues()
         except Exception as e:
             logger.error(f"[VenuesRefresherService] Failed to list venues for metrics: {e}")
             return
 
+        venues = [venue for venue in all_venues if venue.is_active()]
+        deprecated_count = len(all_venues) - len(venues)
         total = len(venues)
         VENUES_TOTAL.set(total)
+        VENUES_ACTIVE_TOTAL.set(total)
+        VENUES_DEPRECATED_TOTAL.set(deprecated_count)
 
         if total == 0:
             # Reset all gauges to 0 when no venues
@@ -367,7 +373,8 @@ class VenuesRefresherService:
         logger.info(
             f"[VenuesRefresherService] Updated data quality metrics: "
             f"total={total}, with_address={with_address}, with_rating={with_rating}, "
-            f"with_live={live_count}, with_weekly={weekly_count}"
+            f"with_live={live_count}, with_weekly={weekly_count}, "
+            f"deprecated={deprecated_count}"
         )
 
     def _map_venue_filter_venue_to_venue(self, vf: VenueFilterVenue) -> Venue:
@@ -975,7 +982,7 @@ class VenuesRefresherService:
         Implements logic from Go (lines 305-315).
         """
         try:
-            ids = self.venue_dao.list_all_venue_ids()
+            ids = self.venue_dao.list_active_venue_ids()
         except Exception as e:
             logger.error(f"[VenuesRefresherService] ListAllVenueIDs failed: {e}")
             raise
@@ -995,7 +1002,7 @@ class VenuesRefresherService:
         Implements exact logic from Go (lines 538-581).
         """
         try:
-            ids = self.venue_dao.list_all_venue_ids()
+            ids = self.venue_dao.list_active_venue_ids()
         except Exception as e:
             logger.error(
                 f"[VenuesRefresherService] ListAllVenueIDs failed for weekly refresh: {e}"

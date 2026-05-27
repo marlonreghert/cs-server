@@ -117,6 +117,11 @@ class VenueHandler:
         # 1. Load nearby venues and filter out blocked types + name keywords
         venues = self._load_nearby(lat, lon, radius)
         total = len(venues)
+        venues = [v for v in venues if v.is_active()]
+        deprecated = total - len(venues)
+        if deprecated:
+            logger.info(f"[VenueHandler] Filtered out {deprecated} deprecated venues")
+        total = len(venues)
 
         # Pre-load Google types for filtering
         google_type_cache = {}

@@ -198,6 +198,7 @@ def mock_venue_dao():
     dao.set_venue_menu_photos = Mock()
     dao.set_venue_menu_data = Mock()
     dao.list_all_venue_ids.return_value = ["v1", "v2", "v3"]
+    dao.list_active_venue_ids.return_value = ["v1", "v2", "v3"]
     dao.list_cached_menu_photos_venue_ids.return_value = ["v1"]
     dao.count_venues_with_menu_photos.return_value = 0
     return dao
@@ -822,6 +823,7 @@ class TestMenuPhotoEnrichmentService:
     ):
         """enrich_all_venues stops after enrichment_limit venues."""
         mock_venue_dao.list_all_venue_ids.return_value = ["v1", "v2", "v3", "v4", "v5", "v6"]
+        mock_venue_dao.list_active_venue_ids.return_value = ["v1", "v2", "v3", "v4", "v5", "v6"]
         mock_venue_dao.get_venue_menu_photos.return_value = None
         mock_serpapi_client.fetch_photos.return_value = {"photos": [], "categories": []}
 
@@ -847,6 +849,7 @@ class TestMenuPhotoEnrichmentService:
     ):
         """No venues returns 0."""
         mock_venue_dao.list_all_venue_ids.return_value = []
+        mock_venue_dao.list_active_venue_ids.return_value = []
 
         result = await photo_enrichment_service.enrich_all_venues()
 

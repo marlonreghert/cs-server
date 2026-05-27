@@ -206,7 +206,7 @@ class InstagramEnrichmentService:
         Returns:
             Number of venues with Instagram handles found
         """
-        all_venue_ids = self.venue_dao.list_all_venue_ids()
+        all_venue_ids = self.venue_dao.list_active_venue_ids()
         logger.info(
             f"[InstagramEnrichment] Starting enrichment for "
             f"{len(all_venue_ids)} venues (force_refresh={force_refresh})"

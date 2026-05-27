@@ -2,10 +2,13 @@
 from __future__ import annotations
 
 import json
+import asyncio
 
 import httpx
 from behave import given, when, then  # type: ignore[import-untyped]
+from pydantic import ValidationError
 
+from app.handlers.add_venue_handler import AddVenueByAddressRequest
 from app.models import (
     NewVenueResponse,
     LiveForecastResponse,
@@ -24,6 +27,16 @@ _DEFAULT_VENUE = {
     "venue_lat": -8.05,
     "venue_lng": -34.88,
 }
+
+
+class _StepResponse:
+    def __init__(self, status_code: int, body: dict):
+        self.status_code = status_code
+        self._body = body
+        self.text = json.dumps(body)
+
+    def json(self) -> dict:
+        return self._body
 
 
 def _ok_response(venue_id: str, payload: dict) -> NewVenueResponse:
@@ -52,7 +65,14 @@ def _live_unavailable(venue_id: str) -> LiveForecastResponse:
 
 def _post(context, body: dict):
     context.last_request_body = body
-    context.response = context.client.post("/admin/venues/by-address", json=body)
+    try:
+        request = AddVenueByAddressRequest.model_validate(body)
+    except ValidationError as exc:
+        context.response = _StepResponse(422, {"detail": exc.errors()})
+        return
+
+    outcome = asyncio.run(context.add_venue_handler.add(request))
+    context.response = _StepResponse(outcome.status_code, outcome.body)
 
 
 # ---------------------------------------------------------------------------

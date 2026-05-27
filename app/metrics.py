@@ -126,10 +126,11 @@ VENUES_BY_BUSINESS_STATUS = Counter(
     ["status"],  # status: operational, closed_temporarily, closed_permanently, unknown
 )
 
-# Permanently closed venues removed
+# Legacy hard-removal counter retained for dashboards; the soft-delete path
+# must not increment it.
 VENUES_PERMANENTLY_CLOSED_REMOVED = Counter(
     "venues_permanently_closed_removed_total",
-    "Total number of permanently closed venues removed from database",
+    "Legacy counter for permanently closed venues hard-removed from database",
 )
 
 # Current count of permanently closed venues detected (snapshot)
@@ -138,16 +139,36 @@ VENUES_PERMANENTLY_CLOSED_DETECTED = Gauge(
     "Number of permanently closed venues detected in last refresh",
 )
 
-# Temporarily closed venues removed
+# Legacy hard-removal counter retained for dashboards; temporarily closed venues
+# stay active and this must not increment.
 VENUES_TEMPORARILY_CLOSED_REMOVED = Counter(
     "venues_temporarily_closed_removed_total",
-    "Total number of temporarily closed venues removed from database",
+    "Legacy counter for temporarily closed venues hard-removed from database",
 )
 
 # Current count of temporarily closed venues detected (snapshot)
 VENUES_TEMPORARILY_CLOSED_DETECTED = Gauge(
     "venues_temporarily_closed_detected",
     "Number of temporarily closed venues detected in last refresh",
+)
+
+# Soft-deleted venues retained for troubleshooting
+VENUES_SOFT_DELETED_TOTAL = Counter(
+    "venues_soft_deleted_total",
+    "Total number of venues soft-deprecated and retained in Redis",
+    ["reason", "source"],
+)
+
+# Current deprecated venue count
+VENUES_DEPRECATED_TOTAL = Gauge(
+    "venues_deprecated_total",
+    "Number of venues marked as deprecated and retained in Redis",
+)
+
+# Current active venue count
+VENUES_ACTIVE_TOTAL = Gauge(
+    "venues_active_total",
+    "Number of venues eligible for serving and enrichment",
 )
 
 # =============================================================================

@@ -172,8 +172,14 @@ class MenuExtractionService:
         Returns:
             Number of venues successfully extracted
         """
-        # Get venue IDs with menu photos
-        photo_venue_ids = self.venue_dao.list_cached_menu_photos_venue_ids()
+        # Get active venue IDs with menu photos. Deprecated venues are retained
+        # for admin troubleshooting and should not receive enrichment work.
+        active_venue_ids = set(self.venue_dao.list_active_venue_ids())
+        photo_venue_ids = [
+            venue_id
+            for venue_id in self.venue_dao.list_cached_menu_photos_venue_ids()
+            if venue_id in active_venue_ids
+        ]
         logger.info(
             f"[MenuExtraction] Starting extraction for "
             f"{len(photo_venue_ids)} venues with menu photos"

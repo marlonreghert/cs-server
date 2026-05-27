@@ -25,12 +25,14 @@
   },
 
   "google_places_api": {
-    "_comment": "Google Places API enrichment (vibe attributes, business status, permanently closed detection)",
+    "_comment": "Google Places API enrichment (vibe attributes, business status, permanently closed soft-deprecation)",
+    "_temporarily_closed_policy": "CLOSED_TEMPORARILY remains active; remove_temporarily_closed_venues is accepted only for backward-compatible config.",
     "google_places_api_key": "",
     "google_places_enrichment_enabled": false,
     "google_places_enrichment_cron": "0 3 * * *",
     "google_places_enrichment_on_startup": false,
-    "remove_permanently_closed_venues": true
+    "remove_permanently_closed_venues": true,
+    "remove_temporarily_closed_venues": true
   },
 
   "photo_enrichment": {

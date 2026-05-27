@@ -35,6 +35,7 @@ def mock_venue_dao():
     )
     dao.set_venue_instagram = Mock()
     dao.list_all_venue_ids.return_value = ["v1", "v2"]
+    dao.list_active_venue_ids.return_value = ["v1", "v2"]
     dao.count_venues_with_instagram.return_value = 0
     return dao
 
@@ -268,6 +269,7 @@ class TestEnrichAllVenues:
     async def test_empty_venue_list(self, service, mock_venue_dao):
         """No venues -> returns 0."""
         mock_venue_dao.list_all_venue_ids.return_value = []
+        mock_venue_dao.list_active_venue_ids.return_value = []
 
         result = await service.enrich_all_venues()
 

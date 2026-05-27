@@ -4,7 +4,7 @@ import logging
 import time
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException, Body, Response
+from fastapi import APIRouter, HTTPException, Body, Query, Response
 from pydantic import BaseModel
 
 from app.handlers.add_venue_handler import (
@@ -276,6 +276,116 @@ async def get_monthly_budget():
         "discovery_effective_cap_remaining": snap.discovery_effective_cap_remaining,
         "manual_add_available": snap.manual_add_available,
     }
+
+
+def _get_venue_dao_from_container():
+    if _container is None:
+        raise HTTPException(status_code=503, detail="Container not initialized")
+    venue_dao = getattr(_container, "venue_dao", None) or getattr(
+        _container, "redis_venue_dao", None
+    )
+    if venue_dao is None:
+        raise HTTPException(status_code=503, detail="venue DAO not configured")
+    return venue_dao
+
+
+def _venue_cache_flags(venue_dao, venue_id: str) -> dict[str, bool]:
+    weekly_forecast = False
+    for day_int in range(7):
+        try:
+            if venue_dao.get_week_raw_forecast(venue_id, day_int) is not None:
+                weekly_forecast = True
+                break
+        except Exception:
+            continue
+
+    return {
+        "live_forecast": venue_dao.get_live_forecast(venue_id) is not None,
+        "weekly_forecast": weekly_forecast,
+        "vibe_attributes": venue_dao.get_vibe_attributes(venue_id) is not None,
+        "photos": bool(venue_dao.get_venue_photos(venue_id)),
+        "opening_hours": venue_dao.get_opening_hours(venue_id) is not None,
+        "instagram": venue_dao.get_venue_instagram(venue_id) is not None,
+        "reviews": venue_dao.get_venue_reviews(venue_id) is not None,
+        "menu_photos": venue_dao.get_venue_menu_photos(venue_id) is not None,
+        "menu_data": venue_dao.get_venue_menu_data(venue_id) is not None,
+        "vibe_profile": venue_dao.get_venue_vibe_profile(venue_id) is not None,
+    }
+
+
+@router.get("/venues/inventory")
+async def list_venue_inventory(
+    status: str = Query("active", pattern="^(active|deprecated|all)$"),
+    q: Optional[str] = Query(None, description="Case-insensitive venue name/address search"),
+    limit: int = Query(50, ge=1, le=250),
+    cursor: Optional[str] = Query(None, description="Offset cursor from previous response"),
+):
+    """List active/deprecated venues for the vibes_bot admin panel."""
+    venue_dao = _get_venue_dao_from_container()
+    try:
+        offset = int(cursor) if cursor else 0
+    except ValueError:
+        raise HTTPException(status_code=400, detail="cursor must be an integer offset")
+
+    try:
+        all_venues = venue_dao.list_all_venues()
+        active_count = sum(1 for venue in all_venues if venue.is_active())
+        deprecated_count = len(all_venues) - active_count
+
+        if status == "active":
+            venues = [venue for venue in all_venues if venue.is_active()]
+        elif status == "deprecated":
+            venues = [venue for venue in all_venues if venue.is_deprecated()]
+        else:
+            venues = all_venues
+
+        if q:
+            needle = q.lower()
+            venues = [
+                venue
+                for venue in venues
+                if needle in (venue.venue_name or "").lower()
+                or needle in (venue.venue_address or "").lower()
+                or needle in (venue.venue_id or "").lower()
+            ]
+
+        venues.sort(key=lambda venue: (venue.venue_name or "", venue.venue_id or ""))
+        page = venues[offset: offset + limit]
+        next_offset = offset + limit
+        next_cursor = str(next_offset) if next_offset < len(venues) else None
+
+        return {
+            "items": [
+                {
+                    "venue_id": venue.venue_id,
+                    "venue_name": venue.venue_name,
+                    "venue_address": venue.venue_address,
+                    "venue_lat": venue.venue_lat,
+                    "venue_lng": venue.venue_lng,
+                    "lifecycle_status": venue.lifecycle_status,
+                    "deprecated_reason": venue.deprecated_reason,
+                    "deprecated_source": venue.deprecated_source,
+                    "deprecated_at": (
+                        venue.deprecated_at.isoformat() if venue.deprecated_at else None
+                    ),
+                    "google_business_status": venue.google_business_status,
+                    "cache_flags": _venue_cache_flags(venue_dao, venue.venue_id),
+                }
+                for venue in page
+            ],
+            "next_cursor": next_cursor,
+            "counts": {
+                "active": active_count,
+                "deprecated": deprecated_count,
+                "total": len(all_venues),
+                "filtered": len(venues),
+            },
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"[AdminTrigger] Venue inventory listing failed: {e}")
+        raise HTTPException(status_code=500, detail="venue inventory listing failed")
 
 
 @router.post("/recount-discovery-points")
