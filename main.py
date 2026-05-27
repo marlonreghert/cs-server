@@ -105,7 +105,7 @@ async def run_google_places_enrichment_job():
     This includes:
     - Vibe attributes (pet friendly, outdoor seating, etc.)
     - Business status checks (operational, temporarily/permanently closed)
-    - Removal of permanently closed venues
+    - Soft-deprecation of permanently closed venues
     """
     job_name = "google_places_enrichment"
     logger.info("[Scheduler] Running GooglePlacesEnrichmentJob")

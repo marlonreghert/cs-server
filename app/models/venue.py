@@ -1,4 +1,5 @@
 """Venue data models using Pydantic."""
+from datetime import datetime
 from typing import Optional, Any, Union
 from pydantic import BaseModel, Field, field_validator, ConfigDict
 
@@ -99,7 +100,22 @@ class Venue(BaseModel):
     # Forecast data (optional)
     venue_foot_traffic_forecast: Optional[list[FootTrafficForecast]] = None
 
+    # Lifecycle metadata. Missing fields in legacy Redis JSON are active.
+    lifecycle_status: str = "active"
+    deprecated_at: Optional[datetime] = None
+    deprecated_reason: Optional[str] = None
+    deprecated_source: Optional[str] = None
+    google_business_status: Optional[str] = None
+
     model_config = ConfigDict(populate_by_name=True)
+
+    def is_deprecated(self) -> bool:
+        """Return True when this venue should be hidden from active flows."""
+        return self.lifecycle_status == "deprecated"
+
+    def is_active(self) -> bool:
+        """Return True when this venue should be used by serving/enrichment."""
+        return not self.is_deprecated()
 
     def __str__(self) -> str:
         """String representation matching Go's ToString method."""

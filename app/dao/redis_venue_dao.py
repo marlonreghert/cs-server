@@ -1,6 +1,7 @@
 """Redis-based Data Access Object for venue operations."""
 import json
 import logging
+from datetime import datetime, timezone
 from typing import Optional
 import redis
 
@@ -48,6 +49,16 @@ class RedisVenueDAO:
         Args:
             venue: Venue object to store
         """
+        existing = self.get_venue(venue.venue_id) if venue.venue_id else None
+        if existing is not None and existing.is_deprecated() and venue.is_active():
+            venue.lifecycle_status = existing.lifecycle_status
+            venue.deprecated_at = existing.deprecated_at
+            venue.deprecated_reason = existing.deprecated_reason
+            venue.deprecated_source = existing.deprecated_source
+            venue.google_business_status = existing.google_business_status
+        elif existing is not None and existing.google_business_status and not venue.google_business_status:
+            venue.google_business_status = existing.google_business_status
+
         venue_key = VENUES_GEO_PLACE_MEMBER_FORMAT_V1.format(venue.venue_id)
         self.client.add_location_with_json(
             geo_key=VENUES_GEO_KEY_V1,
@@ -75,6 +86,54 @@ class RedisVenueDAO:
         except Exception as e:
             logger.error(f"Failed to get venue {venue_id}: {e}")
             return None
+
+    def soft_delete_venue(
+        self,
+        venue_id: str,
+        reason: str,
+        source: str,
+        google_business_status: Optional[str] = None,
+    ) -> bool:
+        """Mark a venue deprecated while preserving all Redis records.
+
+        The venue JSON and geo member stay in their existing v1 keys. Associated
+        cache keys are intentionally left untouched for troubleshooting.
+        """
+        venue = self.get_venue(venue_id)
+        if venue is None:
+            logger.warning(f"[RedisVenueDAO] Venue {venue_id} not found, cannot soft-delete")
+            return False
+
+        venue.lifecycle_status = "deprecated"
+        venue.deprecated_reason = reason
+        venue.deprecated_source = source
+        venue.deprecated_at = datetime.now(timezone.utc)
+        venue.google_business_status = google_business_status
+
+        venue_key = VENUES_GEO_PLACE_MEMBER_FORMAT_V1.format(venue.venue_id)
+        self.client.add_location_with_json(
+            geo_key=VENUES_GEO_KEY_V1,
+            member_key=venue_key,
+            lat=venue.venue_lat,
+            lon=venue.venue_lng,
+            data=venue,
+        )
+        logger.info(
+            f"[RedisVenueDAO] Soft-deprecated venue {venue_id}: "
+            f"reason={reason}, source={source}, google_business_status={google_business_status}"
+        )
+        return True
+
+    def set_google_business_status(self, venue_id: str, business_status: Optional[str]) -> bool:
+        """Persist Google business status without changing venue lifecycle."""
+        venue = self.get_venue(venue_id)
+        if venue is None:
+            logger.warning(f"[RedisVenueDAO] Venue {venue_id} not found, cannot set business status")
+            return False
+
+        venue.google_business_status = business_status
+        self.upsert_venue(venue)
+        return True
 
     def delete_venue(self, venue_id: str) -> bool:
         """Delete a venue and all its associated data from Redis.
@@ -144,7 +203,13 @@ class RedisVenueDAO:
             logger.error(f"[RedisVenueDAO] Failed to delete venue {venue_id}: {e}")
             return False
 
-    def get_nearby_venues(self, lat: float, lon: float, radius: float) -> list[Venue]:
+    def get_nearby_venues(
+        self,
+        lat: float,
+        lon: float,
+        radius: float,
+        include_deprecated: bool = False,
+    ) -> list[Venue]:
         """Retrieve nearby venues within a given radius.
 
         Args:
@@ -165,7 +230,8 @@ class RedisVenueDAO:
         for venue_json in venues_json:
             try:
                 venue = Venue.model_validate_json(venue_json)
-                venues.append(venue)
+                if include_deprecated or venue.is_active():
+                    venues.append(venue)
             except Exception as e:
                 logger.error(f"Failed to unmarshal venue JSON: {e}")
                 continue
@@ -248,6 +314,14 @@ class RedisVenueDAO:
         venue_ids = [key.replace(prefix, "", 1) for key in keys]
         return venue_ids
 
+    def list_active_venue_ids(self) -> list[str]:
+        """Return venue IDs that are not deprecated."""
+        return [venue.venue_id for venue in self.list_active_venues()]
+
+    def list_deprecated_venue_ids(self) -> list[str]:
+        """Return venue IDs marked as deprecated."""
+        return [venue.venue_id for venue in self.list_deprecated_venues()]
+
     def list_all_venue_ids(self) -> list[str]:
         """Return all venue IDs present in the geo index.
 
@@ -283,6 +357,18 @@ class RedisVenueDAO:
                 continue
 
         return venues
+
+    def list_active_venues(self) -> list[Venue]:
+        """Return venues eligible for public serving and enrichment."""
+        return [venue for venue in self.list_all_venues() if venue.is_active()]
+
+    def list_deprecated_venues(self) -> list[Venue]:
+        """Return venues retained for admin troubleshooting."""
+        return [venue for venue in self.list_all_venues() if venue.is_deprecated()]
+
+    def count_deprecated_venues(self) -> int:
+        """Return the number of deprecated venues."""
+        return len(self.list_deprecated_venues())
 
     def set_week_raw_forecast(self, venue_id: str, day: WeekRawDay) -> None:
         """Cache a single day's raw weekly forecast for a venue.

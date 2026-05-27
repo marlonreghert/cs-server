@@ -115,8 +115,9 @@ class PhotoEnrichmentService:
         if max_photos_per_venue is None:
             max_photos_per_venue = settings.photos_per_venue
 
-        # Get all cached venues
-        all_venue_ids = self.venue_dao.list_all_venue_ids()
+        # Get active cached venues. Deprecated venues are retained for admin
+        # troubleshooting and should not receive enrichment work.
+        all_venue_ids = self.venue_dao.list_active_venue_ids()
         venues_with_photos = set(self.venue_dao.list_cached_venue_photos_ids())
 
         # Filter to only venues without photos

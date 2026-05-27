@@ -3,8 +3,8 @@
 This service handles:
 - Vibe attributes (pet friendly, outdoor seating, etc.)
 - Business status checks (operational, temporarily/permanently closed)
-- Removal of permanently closed venues
-- Removal of temporarily closed venues (configurable via remove_temporarily_closed_venues)
+- Soft-deprecation of permanently closed venues
+- Active retention of temporarily closed venues
 - Instagram handle extraction from venue website URLs
 """
 import asyncio
@@ -23,10 +23,10 @@ from app.metrics import (
     VIBE_ATTRIBUTES_FETCH_RESULTS,
     VENUES_WITH_VIBE_ATTRIBUTES,
     VENUES_BY_BUSINESS_STATUS,
-    VENUES_PERMANENTLY_CLOSED_REMOVED,
     VENUES_PERMANENTLY_CLOSED_DETECTED,
-    VENUES_TEMPORARILY_CLOSED_REMOVED,
     VENUES_TEMPORARILY_CLOSED_DETECTED,
+    VENUES_DEPRECATED_TOTAL,
+    VENUES_SOFT_DELETED_TOTAL,
     INSTAGRAM_ENRICHMENT_RESULTS,
 )
 
@@ -45,8 +45,8 @@ class GooglePlacesEnrichmentService:
     and caching it in Redis. This includes:
     - Vibe attributes (pet friendly, outdoor seating, etc.)
     - Business status (operational, temporarily closed, permanently closed)
-    - Permanently closed venue detection and removal
-    - Temporarily closed venue detection and removal (configurable)
+    - Permanently closed venue detection and soft-deprecation
+    - Temporarily closed venue status tracking without deprecation
     """
 
     def __init__(
@@ -75,7 +75,7 @@ class GooglePlacesEnrichmentService:
         """Enrich a single venue with Google Places data.
 
         Fetches vibe attributes and checks business status.
-        Removes venue from database if permanently closed.
+        Soft-deprecates venue if permanently closed.
 
         Args:
             venue_id: Our internal venue ID
@@ -83,7 +83,7 @@ class GooglePlacesEnrichmentService:
             force_refresh: If True, fetch even if cached entry exists
 
         Returns:
-            VibeAttributes if successful, None on error or if venue was removed
+            VibeAttributes if successful, None on error or if venue was deprecated
         """
         if not google_place_id:
             logger.warning(f"[GooglePlacesEnrichment] No Google Place ID for venue {venue_id}")
@@ -111,17 +111,32 @@ class GooglePlacesEnrichmentService:
             status_label = (details.business_status or "unknown").lower()
             VENUES_BY_BUSINESS_STATUS.labels(status=status_label).inc()
 
-            # Check if permanently closed - remove venue from database (if enabled)
+            self.venue_dao.set_google_business_status(venue_id, details.business_status)
+
+            # Check if permanently closed - soft-deprecate venue if enabled
             if details.is_permanently_closed():
                 if settings.remove_permanently_closed_venues:
                     logger.warning(
                         f"[GooglePlacesEnrichment] Venue {venue_id} is PERMANENTLY CLOSED, "
-                        f"removing from database"
+                        "marking as deprecated"
                     )
-                    self.venue_dao.delete_venue(venue_id)
+                    soft_deleted = self.venue_dao.soft_delete_venue(
+                        venue_id=venue_id,
+                        reason="google_places_closed_permanently",
+                        source="google_places",
+                        google_business_status=details.business_status,
+                    )
                     self._permanently_closed_in_run += 1
-                    VENUES_PERMANENTLY_CLOSED_REMOVED.inc()
-                    VIBE_ATTRIBUTES_FETCH_RESULTS.labels(result="removed_permanently_closed").inc()
+                    if soft_deleted:
+                        VENUES_SOFT_DELETED_TOTAL.labels(
+                            reason="google_places_closed_permanently",
+                            source="google_places",
+                        ).inc()
+                        try:
+                            VENUES_DEPRECATED_TOTAL.set(self.venue_dao.count_deprecated_venues())
+                        except Exception:
+                            pass
+                    VIBE_ATTRIBUTES_FETCH_RESULTS.labels(result="soft_deleted_permanently_closed").inc()
                     return None
                 else:
                     logger.warning(
@@ -130,23 +145,14 @@ class GooglePlacesEnrichmentService:
                     )
                     VIBE_ATTRIBUTES_FETCH_RESULTS.labels(result="skipped_permanently_closed").inc()
 
-            # Check if temporarily closed - remove venue from database (if enabled)
+            # Temporarily closed venues remain active so live busyness can keep
+            # refreshing and public clients can show them when data is available.
             if details.is_temporarily_closed():
-                if settings.remove_temporarily_closed_venues:
-                    logger.warning(
-                        f"[GooglePlacesEnrichment] Venue {venue_id} is TEMPORARILY CLOSED, "
-                        f"removing from database"
-                    )
-                    self.venue_dao.delete_venue(venue_id)
-                    self._temporarily_closed_in_run += 1
-                    VENUES_TEMPORARILY_CLOSED_REMOVED.inc()
-                    VIBE_ATTRIBUTES_FETCH_RESULTS.labels(result="removed_temporarily_closed").inc()
-                    return None
-                else:
-                    logger.info(
-                        f"[GooglePlacesEnrichment] Venue {venue_id} is temporarily closed, "
-                        f"but removal is disabled by config"
-                    )
+                logger.info(
+                    f"[GooglePlacesEnrichment] Venue {venue_id} is temporarily closed; "
+                    "keeping active for live busyness"
+                )
+                self._temporarily_closed_in_run += 1
 
             # Convert to our vibe attributes model
             vibe_attrs = self.google_places_client.details_to_vibe_attributes(venue_id, details)
@@ -259,8 +265,8 @@ class GooglePlacesEnrichmentService:
         This method fetches all venues from Redis and searches Google Places
         by name/address to get the Google Place ID, then fetches enrichment data.
 
-        Also checks business status from Google Places API and removes
-        permanently closed venues from the database.
+        Also checks business status from Google Places API, soft-deprecates
+        permanently closed venues, and leaves temporarily closed venues active.
 
         Args:
             force_refresh: If True, re-check all venues even if already enriched.
@@ -270,8 +276,9 @@ class GooglePlacesEnrichmentService:
         Returns:
             Number of venues successfully enriched
         """
-        # Get all venue IDs
-        all_venue_ids = self.venue_dao.list_all_venue_ids()
+        # Get active venue IDs. Deprecated venues are retained only for admin
+        # troubleshooting and must not be reprocessed by enrichment.
+        all_venue_ids = self.venue_dao.list_active_venue_ids()
         logger.info(
             f"[GooglePlacesEnrichment] Found {len(all_venue_ids)} venues to process "
             f"(force_refresh={force_refresh})"
@@ -463,7 +470,7 @@ class GooglePlacesEnrichmentService:
 
         Returns number of handles removed.
         """
-        all_venue_ids = self.venue_dao.list_all_venue_ids()
+        all_venue_ids = self.venue_dao.list_active_venue_ids()
         removed = 0
 
         for venue_id in all_venue_ids:

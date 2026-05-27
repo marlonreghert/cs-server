@@ -59,6 +59,25 @@ class TestVenueHandler:
         assert len(result) == 1
         mock_venue_dao.get_nearby_venues.assert_called_once_with(-8.0, -34.9, 5.0)
 
+    def test_get_venues_nearby_filters_deprecated_venues(
+        self, venue_handler, mock_venue_dao
+    ):
+        """Deprecated venues are hidden even when a DAO mock returns them."""
+        active = Venue(venue_id="active", venue_lat=-8.0, venue_lng=-34.9)
+        deprecated = Venue(
+            venue_id="closed",
+            venue_lat=-8.01,
+            venue_lng=-34.91,
+            lifecycle_status="deprecated",
+        )
+        mock_venue_dao.get_nearby_venues.return_value = [active, deprecated]
+        mock_venue_dao.get_live_forecast.return_value = None
+        mock_venue_dao.get_week_raw_forecast.return_value = None
+
+        result = venue_handler.get_venues_nearby(lat=-8.0, lon=-34.9, radius=5.0)
+
+        assert [venue.venue_id for venue in result] == ["active"]
+
     def test_sorting_venues_with_live_first(self, venue_handler, mock_venue_dao):
         """Test CRITICAL sorting logic - venues with live data come first."""
         # Create venues: one with live, one without

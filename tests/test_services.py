@@ -25,6 +25,7 @@ def mock_venue_dao():
     dao = Mock()
     # update_data_quality_metrics() calls list_all_venues() and then len() on the result
     dao.list_all_venues.return_value = []
+    dao.list_active_venue_ids.return_value = []
     return dao
 
 
@@ -344,6 +345,7 @@ class TestVenuesRefresherService:
     ):
         """Test weekly forecast refresh for all venues."""
         mock_venue_dao.list_all_venue_ids.return_value = ["v1", "v2"]
+        mock_venue_dao.list_active_venue_ids.return_value = ["v1", "v2"]
 
         mock_besttime_api.get_week_raw_forecast.return_value = WeekRawResponse(
             status="OK",
@@ -372,6 +374,7 @@ class TestVenuesRefresherService:
     ):
         """Test that weekly forecast with non-OK status is not cached."""
         mock_venue_dao.list_all_venue_ids.return_value = ["v1"]
+        mock_venue_dao.list_active_venue_ids.return_value = ["v1"]
 
         mock_besttime_api.get_week_raw_forecast.return_value = WeekRawResponse(
             status="ERROR",  # Not OK

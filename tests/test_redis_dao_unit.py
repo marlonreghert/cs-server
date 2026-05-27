@@ -57,6 +57,82 @@ class TestRedisVenueDAOUnit:
             "venues_geo_v1", -8.0, -34.9, 5.0
         )
 
+    def test_get_nearby_venues_filters_deprecated_by_default(self, venue_dao, mock_redis_client):
+        """Deprecated venues stay in Redis but are hidden from active nearby lookups."""
+        active_json = """{"venue_id": "active", "venue_lat": -8.0, "venue_lng": -34.9}"""
+        deprecated_json = """{"venue_id": "closed", "venue_lat": -8.0, "venue_lng": -34.9,
+                              "lifecycle_status": "deprecated"}"""
+        mock_redis_client.get_locations_within_radius.return_value = [active_json, deprecated_json]
+
+        venues = venue_dao.get_nearby_venues(lat=-8.0, lon=-34.9, radius=5.0)
+
+        assert [venue.venue_id for venue in venues] == ["active"]
+
+        all_venues = venue_dao.get_nearby_venues(
+            lat=-8.0,
+            lon=-34.9,
+            radius=5.0,
+            include_deprecated=True,
+        )
+        assert {venue.venue_id for venue in all_venues} == {"active", "closed"}
+
+    def test_soft_delete_venue_marks_lifecycle_without_deleting_keys(
+        self, venue_dao, mock_redis_client
+    ):
+        """Soft-delete updates venue JSON/geo member and leaves cache deletes untouched."""
+        venue = Venue(
+            venue_id="closed",
+            venue_lat=-8.0,
+            venue_lng=-34.9,
+            venue_name="Closed Venue",
+        )
+        mock_redis_client.get.return_value = venue.model_dump_json(by_alias=True)
+
+        result = venue_dao.soft_delete_venue(
+            "closed",
+            reason="google_places_closed_permanently",
+            source="google_places",
+            google_business_status="CLOSED_PERMANENTLY",
+        )
+
+        assert result is True
+        mock_redis_client.zrem.assert_not_called()
+        mock_redis_client.del_.assert_not_called()
+        stored = mock_redis_client.add_location_with_json.call_args.kwargs["data"]
+        assert stored.lifecycle_status == "deprecated"
+        assert stored.deprecated_reason == "google_places_closed_permanently"
+        assert stored.deprecated_source == "google_places"
+        assert stored.google_business_status == "CLOSED_PERMANENTLY"
+
+    def test_upsert_preserves_existing_deprecated_lifecycle(
+        self, venue_dao, mock_redis_client
+    ):
+        """Inventory/discovery upserts must not reactivate deprecated venues."""
+        existing = Venue(
+            venue_id="closed",
+            venue_lat=-8.0,
+            venue_lng=-34.9,
+            lifecycle_status="deprecated",
+            deprecated_reason="google_places_closed_permanently",
+            deprecated_source="google_places",
+            google_business_status="CLOSED_PERMANENTLY",
+        )
+        mock_redis_client.get.return_value = existing.model_dump_json(by_alias=True)
+
+        venue_dao.upsert_venue(
+            Venue(
+                venue_id="closed",
+                venue_lat=-8.01,
+                venue_lng=-34.91,
+                venue_name="Re-seen Venue",
+            )
+        )
+
+        stored = mock_redis_client.add_location_with_json.call_args.kwargs["data"]
+        assert stored.lifecycle_status == "deprecated"
+        assert stored.deprecated_reason == "google_places_closed_permanently"
+        assert stored.google_business_status == "CLOSED_PERMANENTLY"
+
     def test_set_live_forecast_uses_correct_key_format(self, venue_dao, mock_redis_client):
         """Test that live forecast uses correct Redis key format."""
         forecast = LiveForecastResponse(

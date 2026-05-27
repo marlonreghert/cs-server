@@ -40,7 +40,7 @@ class InstagramPostsEnrichmentService:
         Returns:
             Number of venues successfully enriched.
         """
-        all_venue_ids = self.venue_dao.list_all_venue_ids()
+        all_venue_ids = self.venue_dao.list_active_venue_ids()
         venues_with_posts = set(self.venue_dao.list_cached_ig_posts_venue_ids())
 
         # Find venues that have an IG handle but no cached posts

@@ -21,6 +21,8 @@ test-unit:
 		tests/test_besttime_client.py \
 		tests/test_services.py \
 		tests/test_handlers.py \
+		tests/test_google_places_soft_delete.py \
+		tests/test_admin_venue_inventory.py \
 		tests/test_instagram_enrichment_service.py \
 		tests/test_instagram_validator.py \
 		tests/test_venue_budget.py \
