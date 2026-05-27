@@ -84,6 +84,10 @@ JOB_REGISTRY = {
         "label": "Instagram Handle Validation",
         "description": "Check all cached Instagram handles and remove invalid ones (404 profiles)",
     },
+    "inventory_sync": {
+        "label": "BestTime Inventory Sync",
+        "description": "Pull every venue in our BestTime account inventory into Redis. Free — does not spend the monthly new-venue budget.",
+    },
 }
 
 
@@ -99,6 +103,8 @@ async def _run_job(job_name: str, config: Optional[dict] = None):
         await c.venues_refresher_service.refresh_venues_by_filter_for_default_locations(
             fetch_and_cache_live=True
         )
+    elif job_name == "inventory_sync":
+        await c.venues_refresher_service.sync_account_inventory_to_redis()
     elif job_name == "live_forecast":
         await c.venues_refresher_service.refresh_live_forecasts_for_all_venues()
     elif job_name == "weekly_forecast":

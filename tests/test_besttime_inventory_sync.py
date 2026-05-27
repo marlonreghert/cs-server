@@ -296,6 +296,20 @@ async def test_sync_does_not_increment_monthly_counter(refresher_pair):
     assert fake.get("venue_add_counter_v1:2026-05") is None
 
 
+def test_inventory_sync_job_is_registered():
+    """Standalone inventory_sync admin trigger must be in JOB_REGISTRY.
+
+    Vibes_bot's admin UI proxies cs-server's /admin/trigger/<name>; a
+    missing entry here would break the 'Run Inventory Sync' button.
+    """
+    from app.routers.admin_trigger_router import JOB_REGISTRY
+
+    assert "inventory_sync" in JOB_REGISTRY
+    info = JOB_REGISTRY["inventory_sync"]
+    assert "label" in info and info["label"]
+    assert "description" in info and "free" in info["description"].lower()
+
+
 @pytest.mark.asyncio
 async def test_sync_continues_on_per_venue_error(refresher_pair):
     fake, venue_dao, _budget = refresher_pair
