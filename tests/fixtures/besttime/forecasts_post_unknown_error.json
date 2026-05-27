@@ -1,0 +1,41 @@
+{
+  "probe": "B_deliberate_fake_address",
+  "request": {
+    "method": "POST",
+    "url": "https://besttime.app/api/v1/forecasts",
+    "params": {
+      "api_key_private": "<redacted>",
+      "venue_name": "Bar Inexistente Que Nao Existe Em Lugar Algum",
+      "venue_address": "Rua Inventada 99999, Cidade Que Nao Existe, ZZ 00000-000 Brazil"
+    },
+    "body": null
+  },
+  "response": {
+    "status_code": 400,
+    "headers": {
+      "date": "Tue, 26 May 2026 16:16:44 GMT",
+      "content-type": "application/json",
+      "content-length": "187",
+      "connection": "keep-alive",
+      "cf-ray": "a01e16015b246508-GIG",
+      "cf-cache-status": "DYNAMIC",
+      "access-control-allow-origin": "*",
+      "cache-control": "public, max-age=30",
+      "retry-after": "59",
+      "server": "cloudflare",
+      "nel": "{\"report_to\":\"cf-nel\",\"success_fraction\":0.0,\"max_age\":604800}",
+      "report-to": "{\"group\":\"cf-nel\",\"max_age\":604800,\"endpoints\":[{\"url\":\"https://a.nel.cloudflare.com/report/v4?s=JhS6q%2Bc%2BKpIWxUkRQfeO1K7XiH32%2FbfQP5HiqT4a5prbAKp3Vs2SlmTC1bFufa%2FDrn2bEwnc9peAtObo4PXufN5crHrnpoSVeN4NpDK4qIwOVBTAr4hCC4u%2BFj6E7Lpz5KTHrnLr9n1ILWI%3D\"}]}",
+      "alt-svc": "h3=\":443\"; ma=86400",
+      "x-ratelimit-limit": "300",
+      "x-ratelimit-remaining": "298",
+      "x-ratelimit-reset": "1779812264"
+    },
+    "body": {
+      "status": "Error",
+      "message": "Error: Max amount of monthly venues (500) reached. Venue counter will reset at midnight on the first day of the month. Contact us for a higher monthly limit"
+    }
+  },
+  "context": {
+    "expected_outcome": "HTTP 400 or 200 with status=Error and no venue_info.venue_id"
+  }
+}

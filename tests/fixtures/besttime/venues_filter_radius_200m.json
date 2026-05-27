@@ -1,0 +1,162 @@
+{
+  "probe": "C_venues_filter_radius_200m",
+  "request": {
+    "method": "GET",
+    "url": "https://besttime.app/api/v1/venues/filter",
+    "params": {
+      "api_key_private": "<redacted>",
+      "lat": -8.0419949,
+      "lng": -34.8823209,
+      "radius": 200,
+      "foot_traffic": "both",
+      "limit": 25,
+      "busy_min": 0
+    },
+    "body": null
+  },
+  "response": {
+    "status_code": 200,
+    "headers": {
+      "date": "Tue, 26 May 2026 16:16:45 GMT",
+      "content-type": "application/json",
+      "transfer-encoding": "chunked",
+      "connection": "keep-alive",
+      "cf-ray": "a01e16078d40f28d-GIG",
+      "cf-cache-status": "MISS",
+      "nel": "{\"report_to\":\"cf-nel\",\"success_fraction\":0.0,\"max_age\":604800}",
+      "access-control-allow-origin": "*",
+      "cache-control": "public, max-age=2595",
+      "last-modified": "Tue, 26 May 2026 16:16:45 GMT",
+      "retry-after": "60",
+      "server": "cloudflare",
+      "alt-svc": "h3=\":443\"; ma=86400",
+      "x-ratelimit-limit": "30",
+      "x-ratelimit-remaining": "29",
+      "x-ratelimit-reset": "1779812265",
+      "report-to": "{\"group\":\"cf-nel\",\"max_age\":604800,\"endpoints\":[{\"url\":\"https://a.nel.cloudflare.com/report/v4?s=K9AiG0D20I2iPZxmlQ0R%2B931CVSUheRvAMagSGmZu13w6I3abyS3tk6b0MgY2vvEiSmgVaHn3DBNGku4LTHqnPLSd6YXXb4SOxZvoW0vzBErZ0hfSaD7kSAtibCdg9IgsVFTX1o6f56WJGA%3D\"}]}",
+      "content-encoding": "zstd"
+    },
+    "body": {
+      "status": "OK",
+      "venues": [
+        {
+          "venue_id": "ven_67596d546d4e753461505852637771593074636e4633594a496843",
+          "day_int": 1,
+          "day_raw": [
+            0,
+            0,
+            0,
+            35,
+            40,
+            45,
+            40,
+            35,
+            30,
+            35,
+            55,
+            75,
+            85,
+            85,
+            80,
+            65,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "day_raw_whole": [
+            0,
+            0,
+            0,
+            35,
+            40,
+            45,
+            40,
+            35,
+            30,
+            35,
+            55,
+            75,
+            85,
+            85,
+            80,
+            65,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "day_info": {
+            "day_int": 1,
+            "day_text": "Tuesday",
+            "venue_open": 9,
+            "venue_closed": 22,
+            "day_rank_mean": 7,
+            "day_rank_max": 4,
+            "day_mean": 54,
+            "day_max": 87,
+            "venue_open_close_v2": {
+              "24h": [
+                {
+                  "opens": 9,
+                  "closes": 22,
+                  "opens_minutes": 0,
+                  "closes_minutes": 0
+                }
+              ],
+              "12h": [
+                "9am–10pm"
+              ],
+              "special_day": {
+                "message": "Tiradentes Day might affect these hours",
+                "name": "Tiradentes Day"
+              },
+              "open_24h": false,
+              "crosses_midnight": false,
+              "day_text": "Tuesday"
+            },
+            "note": "Update: venue_open_close_v2 replaces venue_open and venue_closed and supports multiple opening times per day."
+          },
+          "rating": 4.2,
+          "reviews": 2582,
+          "price_level": 0,
+          "venue_name": "Casas Bahia",
+          "venue_address": "Av. Gov. Agamenon Magalhães, 153 - Santo Amaro Recife - PE 50110-000 Brazil",
+          "venue_lat": -8.0419949,
+          "venue_lng": -34.8823209,
+          "venue_type": "SHOPPING",
+          "venue_dwell_time_min": 10,
+          "venue_dwell_time_max": 120
+        }
+      ],
+      "venues_n": 1,
+      "window": {
+        "time_window_start": 6,
+        "time_window_start_ix": 0,
+        "time_window_start_12h": "6AM",
+        "day_window_start_int": 1,
+        "day_window_start_txt": "Tuesday",
+        "day_window_end_int": 2,
+        "day_window_end_txt": "Wednesday",
+        "time_window_end": 5,
+        "time_window_end_ix": 23,
+        "time_window_end_12h": "5AM",
+        "day_window": "Tuesday 6AM until Wednesday 5AM",
+        "time_local": 13,
+        "time_local_12": "1PM",
+        "time_local_index": 7
+      }
+    }
+  },
+  "context": {
+    "expected_outcome": "Response includes the Probe A inventory venue (proves geo fallback can match an existing inventory venue from coordinates alone)."
+  }
+}

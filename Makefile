@@ -23,6 +23,9 @@ test-unit:
 		tests/test_handlers.py \
 		tests/test_instagram_enrichment_service.py \
 		tests/test_instagram_validator.py \
+		tests/test_venue_budget.py \
+		tests/test_add_venue_handler.py \
+		tests/test_besttime_inventory_sync.py \
 		-v
 
 test-integration:

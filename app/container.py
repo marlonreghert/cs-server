@@ -6,10 +6,11 @@ import redis
 
 from app.config import Settings
 from app.db import GeoRedisClient
-from app.dao import RedisVenueDAO
+from app.dao import RedisVenueDAO, VenueBudgetDao
 from app.api import BestTimeAPIClient
 from app.api.google_places_client import GooglePlacesAPIClient
-from app.services import VenueService, VenuesRefresherService
+from app.services import VenueService, VenuesRefresherService, VenueBudgetService
+from app.handlers import AddVenueHandler
 from app.services.google_places_enrichment_service import GooglePlacesEnrichmentService
 from app.services.photo_enrichment_service import PhotoEnrichmentService
 from app.api.apify_instagram_client import ApifyInstagramClient
@@ -290,6 +291,25 @@ class Container:
 
         # Initialize handlers
         self.venue_handler = VenueHandler(self.redis_venue_dao)
+
+        # Monthly budget DAO + service (used by add-by-address + discovery).
+        self.venue_budget_dao = VenueBudgetDao(redis_internal_client)
+        self.venue_budget_service = VenueBudgetService(
+            redis_client=redis_internal_client,
+            budget_dao=self.venue_budget_dao,
+        )
+
+        # Add-by-address handler
+        self.add_venue_handler = AddVenueHandler(
+            venue_dao=self.redis_venue_dao,
+            besttime_api=self.besttime_api,
+            budget_service=self.venue_budget_service,
+            redis_client=redis_internal_client,
+        )
+
+        # Expose the budget service to the refresher so discovery can
+        # observe the monthly cap and reserve.
+        self.venues_refresher_service.set_budget_service(self.venue_budget_service)
 
         logger.info("[Container] Container initialized successfully")
 

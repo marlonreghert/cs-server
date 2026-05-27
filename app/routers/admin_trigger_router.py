@@ -4,8 +4,13 @@ import logging
 import time
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException, Body
+from fastapi import APIRouter, HTTPException, Body, Response
 from pydantic import BaseModel
+
+from app.handlers.add_venue_handler import (
+    AddVenueHandler,
+    AddVenueByAddressRequest,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -223,6 +228,48 @@ async def trigger_job(job_name: str, config: Optional[dict] = None):
         job=job_name,
         message=f"{JOB_REGISTRY[job_name]['label']} started in background",
     )
+
+
+@router.post("/venues/by-address")
+async def add_venue_by_address(request: AddVenueByAddressRequest, response: Response):
+    """Register a venue in our BestTime account inventory by name + address.
+
+    Body: AddVenueByAddressRequest. See app/handlers/add_venue_handler.py for
+    the full status-code matrix.
+    """
+    if _container is None:
+        raise HTTPException(status_code=503, detail="Container not initialized")
+    if getattr(_container, "add_venue_handler", None) is None:
+        raise HTTPException(
+            status_code=503,
+            detail="add-venue handler not configured",
+        )
+    handler: AddVenueHandler = _container.add_venue_handler
+    outcome = await handler.add(request)
+    response.status_code = outcome.status_code
+    return outcome.body
+
+
+@router.get("/venues/monthly-budget")
+async def get_monthly_budget():
+    """Return the current state of the monthly new-venue budget."""
+    if _container is None:
+        raise HTTPException(status_code=503, detail="Container not initialized")
+    budget = getattr(_container, "venue_budget_service", None)
+    if budget is None:
+        raise HTTPException(
+            status_code=503,
+            detail="venue budget service not configured",
+        )
+    snap = budget.get_snapshot()
+    return {
+        "quota": snap.quota,
+        "manual_reserve": snap.manual_reserve,
+        "month_counter": snap.month_counter,
+        "year_month": snap.year_month,
+        "discovery_effective_cap_remaining": snap.discovery_effective_cap_remaining,
+        "manual_add_available": snap.manual_add_available,
+    }
 
 
 @router.post("/recount-discovery-points")
