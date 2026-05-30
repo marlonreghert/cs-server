@@ -128,6 +128,13 @@ class Settings(BaseSettings):
     photo_enrichment_on_startup: bool = False  # If True, fetch photos on startup
     photo_enrichment_limit: int = 20  # Max venues to enrich with photos per refresh cycle (to control API costs)
     photos_per_venue: int = 5  # Number of photos to fetch per venue
+    # TTL for `venue_photos_v1:*` Redis keys. Google rotates photo `name` tokens
+    # periodically; once rotated, the cached /media URL returns 400
+    # INVALID_ARGUMENT and the mobile app shows nothing. Eviction at this TTL
+    # forces the daily enrichment cron to repopulate the venue with fresh
+    # tokens. Can be overridden live via the vibesadmin
+    # `admin_config:venue_photos_cache_ttl_days` key.
+    photo_cache_ttl_days: int = 5
 
     # Instagram Discovery (Apify) Configuration
     apify_api_token: str = ""

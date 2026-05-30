@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from typing import Optional
 import redis
 
+from app.config import settings
 from app.db.geo_redis_client import GeoRedisClient
 from app.models import Venue, LiveForecastResponse, WeekRawDay
 from app.models.vibe_attributes import VibeAttributes
@@ -23,6 +24,9 @@ LIVE_FORECAST_KEY_FORMAT = "live_forecast_v1:{}"
 WEEKLY_FORECAST_KEY_FORMAT = "weekly_forecast_v1:{}_{}"
 VIBE_ATTRIBUTES_KEY_FORMAT = "vibe_attributes_v1:{}"
 VENUE_PHOTOS_KEY_FORMAT = "venue_photos_v1:{}"
+# Live admin override for the venue_photos TTL (vibesadmin writes this).
+# Stored as JSON: an integer number of days (e.g. `5`).
+ADMIN_CONFIG_PHOTOS_TTL_KEY = "admin_config:venue_photos_cache_ttl_days"
 OPENING_HOURS_KEY_FORMAT = "opening_hours_v1:{}"
 VENUE_INSTAGRAM_KEY_FORMAT = "venue_instagram_v1:{}"
 VENUE_REVIEWS_KEY_FORMAT = "venue_reviews_v1:{}"
@@ -476,8 +480,56 @@ class RedisVenueDAO:
     # VENUE PHOTOS METHODS
     # =========================================================================
 
+    def _resolve_photos_cache_ttl_seconds(self) -> int:
+        """Return the live TTL (seconds) to apply to venue_photos cache entries.
+
+        Order of precedence:
+          1. `admin_config:venue_photos_cache_ttl_days` in Redis (live, hot-tunable
+             via vibesadmin)
+          2. `settings.photo_cache_ttl_days` (env-var-backed default)
+
+        Invalid or non-positive values fall back to the settings default so a
+        bad admin write can never disable eviction or push a negative TTL into
+        Redis.
+        """
+        default_days = settings.photo_cache_ttl_days
+        try:
+            raw = self.client.get(ADMIN_CONFIG_PHOTOS_TTL_KEY)
+        except Exception as e:
+            logger.warning(
+                f"[RedisVenueDAO] Failed to read {ADMIN_CONFIG_PHOTOS_TTL_KEY}, "
+                f"using default {default_days}d: {e}"
+            )
+            return default_days * 24 * 3600
+
+        if raw is None:
+            return default_days * 24 * 3600
+
+        try:
+            override_days = int(json.loads(raw))
+        except (ValueError, TypeError, json.JSONDecodeError):
+            logger.warning(
+                f"[RedisVenueDAO] {ADMIN_CONFIG_PHOTOS_TTL_KEY}={raw!r} is not "
+                f"an int, using default {default_days}d"
+            )
+            return default_days * 24 * 3600
+
+        if override_days <= 0:
+            logger.warning(
+                f"[RedisVenueDAO] {ADMIN_CONFIG_PHOTOS_TTL_KEY}={override_days} "
+                f"<= 0, using default {default_days}d"
+            )
+            return default_days * 24 * 3600
+
+        return override_days * 24 * 3600
+
     def set_venue_photos(self, venue_id: str, photos: list[dict]) -> None:
-        """Cache photo data for a venue.
+        """Cache photo data for a venue with eviction TTL.
+
+        Google rotates photo `name` tokens periodically; once rotated, the
+        cached /media URLs return 400 INVALID_ARGUMENT. A finite TTL forces the
+        daily enrichment cron to repopulate this venue with fresh tokens
+        without an explicit invalidation step.
 
         Args:
             venue_id: Venue identifier
@@ -485,8 +537,12 @@ class RedisVenueDAO:
         """
         key = VENUE_PHOTOS_KEY_FORMAT.format(venue_id)
         json_data = json.dumps(photos)
-        self.client.set(key, json_data)
-        logger.debug(f"[RedisVenueDAO] Cached {len(photos)} photos for {venue_id}")
+        ttl_seconds = self._resolve_photos_cache_ttl_seconds()
+        self.client.setex(key, ttl_seconds, json_data)
+        logger.debug(
+            f"[RedisVenueDAO] Cached {len(photos)} photos for {venue_id} "
+            f"(TTL {ttl_seconds}s)"
+        )
 
     def get_venue_photos(self, venue_id: str) -> Optional[list[dict]]:
         """Retrieve cached photo data for a venue.
