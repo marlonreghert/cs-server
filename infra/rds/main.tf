@@ -17,7 +17,7 @@ resource "aws_db_subnet_group" "this" {
 # Only the cs-server EC2 security group may reach Postgres. No CIDR ingress.
 resource "aws_security_group" "rds" {
   name        = "vibesense-rds"
-  description = "RDS Postgres — ingress from cs-server EC2 SG only"
+  description = "RDS Postgres - ingress from cs-server EC2 SG only"
   vpc_id      = var.vpc_id
   tags        = var.tags
 }
