@@ -93,6 +93,29 @@ class Settings(BaseSettings):
     redis_password: str = ""
     redis_db: int = 0
 
+    # RDS (Postgres) system-of-record. Disabled by default: when off, all
+    # persistence stays Redis-only (today's behavior). See
+    # plans/rds_system_of_record_01_06_26.md.
+    rds_enabled: bool = False
+    rds_host: str = ""
+    rds_port: int = 5432
+    rds_db: str = "vibesense"
+    rds_user: str = ""
+    rds_password: str = ""
+    rds_sslmode: str = "require"
+    # Secret key used to HMAC-pseudonymize end-user ids before they are written
+    # to RDS (favorites/hot_likes). Never store raw user ids in RDS.
+    engagement_pseudonymization_key: str = ""
+
+    @property
+    def rds_sqlalchemy_url(self) -> str:
+        """SQLAlchemy URL for the RDS Postgres connection (psycopg v3 driver)."""
+        return (
+            f"postgresql+psycopg://{self.rds_user}:{self.rds_password}"
+            f"@{self.rds_host}:{self.rds_port}/{self.rds_db}"
+            f"?sslmode={self.rds_sslmode}"
+        )
+
     # Venues Refresher Configuration
     # 43200 minutes = 30 days
     venues_catalog_refresh_minutes: int = 43200

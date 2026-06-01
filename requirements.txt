@@ -7,6 +7,11 @@ pydantic-settings==2.6.0
 # Redis Client
 redis==5.2.0
 
+# RDS (Postgres) system-of-record — see plans/rds_system_of_record_01_06_26.md
+sqlalchemy>=2.0,<2.1
+alembic>=1.13
+psycopg[binary]>=3.1
+
 # HTTP Client
 httpx==0.27.2
 

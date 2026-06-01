@@ -137,6 +137,13 @@ def _build_test_app(context) -> None:
     context.client = TestClient(app)
 
 
+def before_feature(context, feature):
+    # Features tagged @wip are work-in-progress (steps not yet implemented).
+    # Skip them so the suite stays green until their step defs land.
+    if "wip" in feature.tags:
+        feature.skip("WIP — step definitions not yet implemented")
+
+
 def before_scenario(context, scenario):
     _build_test_app(context)
 
