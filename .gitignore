@@ -7,3 +7,9 @@ __py__cache/
 .idea/
 bounding_box_map.html
 
+# Local virtualenv + tool installers (not part of the repo)
+.venv/
+/aws/
+awscliv2.zip
+terraform.zip
+

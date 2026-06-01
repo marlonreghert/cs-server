@@ -7,6 +7,7 @@ import redis
 from app.config import Settings
 from app.db import GeoRedisClient
 from app.dao import RedisVenueDAO, VenueBudgetDao
+from app.dao.venue_repository import VenueRepository
 from app.api import BestTimeAPIClient
 from app.api.google_places_client import GooglePlacesAPIClient
 from app.services import VenueService, VenuesRefresherService, VenueBudgetService
@@ -26,6 +27,8 @@ from app.services.menu_extraction_service import MenuExtractionService
 from app.api.openai_vibe_client import OpenAIVibeClient
 from app.services.vibe_classifier_service import VibeClassifierService
 from app.handlers import VenueHandler
+from app.services.engagement_service import EngagementService
+from app.services.redis_projection_service import RedisProjectionService
 
 logger = logging.getLogger(__name__)
 
@@ -83,8 +86,26 @@ class Container:
         # Initialize Redis client wrapper
         self.redis_client = GeoRedisClient(redis_internal_client)
 
-        # Initialize Redis Venue DAO
-        self.redis_venue_dao = RedisVenueDAO(self.redis_client)
+        # Redis-only DAO used by the projection/rebuild path (writes Redis only,
+        # never RDS) so a rebuild does not re-write the system of record.
+        self.redis_only_dao = RedisVenueDAO(self.redis_client)
+
+        # RDS system-of-record store + write-through repository (flag-gated).
+        # When rds_enabled is false, rds_store is None and VenueRepository
+        # behaves exactly like RedisVenueDAO (today's Redis-only behavior).
+        self.rds_store = None
+        if settings.rds_enabled:
+            try:
+                from app.dao.rds_venue_store import RdsVenueStore
+
+                self.rds_store = RdsVenueStore(settings.rds_sqlalchemy_url)
+                logger.info("[Container] RDS system-of-record enabled")
+            except Exception as e:
+                logger.error(f"[Container] Failed to init RDS store: {e}")
+                raise
+        # All pipelines/handlers receive this as their venue DAO, so every write
+        # is write-through (RDS truth -> Redis projection) automatically.
+        self.redis_venue_dao = VenueRepository(self.redis_client, rds_store=self.rds_store)
 
         # Initialize BestTime API client
         self.besttime_api = BestTimeAPIClient(
@@ -291,6 +312,19 @@ class Container:
 
         # Initialize handlers
         self.venue_handler = VenueHandler(self.redis_venue_dao)
+
+        # Engagement (favorites/hot_likes) write-through API service, and the
+        # Redis<->RDS projection service (rebuild from RDS / one-time backfill).
+        self.engagement_service = EngagementService(
+            redis_client=self.redis_client.client,
+            rds_store=self.rds_store,
+            pseudonymization_key=settings.engagement_pseudonymization_key,
+        )
+        self.redis_projection_service = RedisProjectionService(
+            repository=self.redis_venue_dao,
+            redis_only_dao=self.redis_only_dao,
+            rds_store=self.rds_store,
+        )
 
         # Monthly budget DAO + service (used by add-by-address + discovery).
         self.venue_budget_dao = VenueBudgetDao(redis_internal_client)

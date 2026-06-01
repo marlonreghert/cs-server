@@ -98,6 +98,14 @@ JOB_REGISTRY = {
         "label": "Venue Eligibility Sweep",
         "description": "Soft-delete ineligible venues (drugstores, markets, churches, empty names, blocked Google types) with a rejection reason. Cache-first — makes no new Google calls.",
     },
+    "backfill_rds": {
+        "label": "Backfill RDS from Redis (one-time)",
+        "description": "Import the current Redis dataset into RDS as the system of record (venues first, then enrichment). Idempotent. Run once after enabling RDS.",
+    },
+    "rebuild_redis": {
+        "label": "Rebuild Redis from RDS",
+        "description": "Reconstruct the Redis serving projection (incl. the geo index and live busyness) from RDS. Disaster recovery / Redis warm.",
+    },
 }
 
 
@@ -117,6 +125,14 @@ async def _run_job(job_name: str, config: Optional[dict] = None):
         await c.venues_refresher_service.sync_account_inventory_to_redis()
     elif job_name == "venue_eligibility":
         await c.venues_refresher_service.run_eligibility_sweep()
+    elif job_name == "backfill_rds":
+        if getattr(c, "rds_store", None) is None:
+            raise ValueError("RDS not enabled (set rds_enabled=true)")
+        c.redis_projection_service.backfill_rds_from_redis()
+    elif job_name == "rebuild_redis":
+        if getattr(c, "rds_store", None) is None:
+            raise ValueError("RDS not enabled (set rds_enabled=true)")
+        c.redis_projection_service.rebuild_redis_from_rds()
     elif job_name == "live_forecast":
         await c.venues_refresher_service.refresh_live_forecasts_for_all_venues()
     elif job_name == "weekly_forecast":

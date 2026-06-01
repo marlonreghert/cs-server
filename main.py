@@ -20,7 +20,7 @@ from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
 
 from app.config import Settings
 from app.container import Container
-from app.routers import venue_router, set_venue_handler, debug_router, set_debug_dependencies, admin_trigger_router, set_admin_container
+from app.routers import venue_router, set_venue_handler, debug_router, set_debug_dependencies, admin_trigger_router, set_admin_container, engagement_router, set_engagement_service
 from app.middleware import PrometheusMiddleware
 from app.metrics import (
     BACKGROUND_JOB_RUNS_TOTAL,
@@ -503,6 +503,9 @@ async def startup_essential(settings: Settings):
     # Inject container for admin trigger router
     set_admin_container(container)
 
+    # Inject engagement service (favorites/hot_likes write-through API)
+    set_engagement_service(container.engagement_service)
+
     logger.info("[Main] Essential startup completed — server is ready to serve")
 
 
@@ -702,6 +705,7 @@ app.add_middleware(PrometheusMiddleware)
 app.include_router(venue_router)
 app.include_router(debug_router)
 app.include_router(admin_trigger_router)
+app.include_router(engagement_router)
 
 
 # Health check endpoint

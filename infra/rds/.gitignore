@@ -1,0 +1,10 @@
+# Terraform — NEVER commit state (contains the RDS master password in plaintext)
+# or provider binaries / local vars.
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+!*.tfvars.example
+crash.log
+override.tf
+override.tf.json
