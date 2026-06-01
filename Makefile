@@ -30,6 +30,7 @@ test-unit:
 		tests/test_besttime_inventory_sync.py \
 		tests/test_venue_eligibility.py \
 		tests/test_rds_repository.py \
+		tests/test_rds_store_contract.py \
 		-v
 
 test-integration:

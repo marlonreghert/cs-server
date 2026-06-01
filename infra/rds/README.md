@@ -50,6 +50,16 @@ aws ssm start-session --target <ec2-instance-id> \
 # then point DBeaver at localhost:5432 (SSL required), creds from Secrets Manager
 ```
 
+## 3b. Validate the real store SQL against Postgres (BEFORE backfill)
+The offline suite exercises the in-memory fake store only. Validate the real
+`RdsVenueStore` SQL against the migrated scratch/RDS DB before the prod backfill:
+```bash
+RDS_TEST_URL=postgresql+psycopg://<user>:<pw>@<endpoint>:5432/<db> \
+  .venv/bin/python -m pytest tests/test_rds_store_contract.py -v
+```
+The `[rds]` params run only when RDS_TEST_URL is set. Use a disposable DB/schema
+(the test writes rows and does not clean up).
+
 ## 4. Cut over cs-server to RDS (after code deploy)
 Set `rds_enabled=true` + the `RDS_*` env (from the secret) +
 `engagement_pseudonymization_key`, deploy, then run the one-time backfill
