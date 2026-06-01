@@ -5,6 +5,7 @@ fails after the RDS commit, the endpoint returns 5xx so vibes_bot retries
 (idempotent), keeping the user's read path consistent within seconds.
 """
 import logging
+from typing import Optional
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
@@ -24,6 +25,9 @@ def set_engagement_service(service) -> None:
 class EngagementRequest(BaseModel):
     user_id: str
     venue_id: str
+    # Only used by POST /v1/hot-likes (the trending TTL the client controls);
+    # ignored by favorites and by DELETE. Wire field name is `ttl_seconds`.
+    ttl_seconds: Optional[int] = None
 
 
 def _svc():
@@ -59,10 +63,22 @@ async def remove_favorite(req: EngagementRequest):
 @router.post("/hot-likes")
 async def add_hot_like(req: EngagementRequest):
     try:
-        _svc().add_hot_like(req.user_id, req.venue_id)
+        _svc().add_hot_like(req.user_id, req.venue_id, ttl_seconds=req.ttl_seconds)
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"[Engagement] add_hot_like failed: {e}")
         raise HTTPException(status_code=502, detail="hot-like write failed; retry")
+    return {"status": "ok"}
+
+
+@router.delete("/hot-likes")
+async def remove_hot_like(req: EngagementRequest):
+    try:
+        _svc().remove_hot_like(req.user_id, req.venue_id)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"[Engagement] remove_hot_like failed: {e}")
+        raise HTTPException(status_code=502, detail="hot-like remove failed; retry")
     return {"status": "ok"}

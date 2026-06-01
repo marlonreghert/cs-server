@@ -18,15 +18,28 @@ own lifecycle (companion plan in `vibes_bot/plans/`).
 
 ### 1. Favorites / hot_likes WRITES → cs-server engagement API
 Today `app/daos/favorites_dao.py` / `hot_likes_dao.py` write Redis directly.
-Switch the **write** paths to call cs-server (reads stay on Redis):
+Switch the **write** paths to call cs-server (reads stay on Redis). Endpoints
+(implemented + matched to vibes_bot's read keys, verified against its DAOs):
 - Add a favorite:    `POST   {CS}/v1/favorites`   body `{"user_id","venue_id"}`
 - Remove a favorite: `DELETE {CS}/v1/favorites`   body `{"user_id","venue_id"}`
-- Add a hot-like:    `POST   {CS}/v1/hot-likes`    body `{"user_id","venue_id"}`
-cs-server persists to RDS (pseudonymized) and projects the same Redis keys
-vibes_bot reads (`user_favorites:{user_id}`, `hot_likes:{venue_id}`). On a 5xx,
-**retry** (idempotent) so the user's read path stays consistent.
-Do NOT also write Redis directly from vibes_bot for these anymore (cs-server owns
-the projection).
+- Add a hot-like:    `POST   {CS}/v1/hot-likes`    body `{"user_id","venue_id","ttl_seconds"}`
+- Remove a hot-like: `DELETE {CS}/v1/hot-likes`    body `{"user_id","venue_id"}`
+
+cs-server persists to RDS (pseudonymized HMAC) and projects the **exact** Redis
+keys vibes_bot reads — `user_favorites:{user_id}` and `hot_likes:v1:{venue_id}`
+(matches `HotLikesDao.KEY_PREFIX = "hot_likes:v1:"`). `ttl_seconds` is the wire
+field cs-server uses for the hot-like Redis EXPIRE (vibes_bot passes its admin
+hot-likes TTL). Projection is synchronous before 200, so a count/already_liked
+read immediately after a write is consistent. On a 5xx, **retry** (idempotent).
+Do NOT write Redis directly from vibes_bot for these anymore (cs-server owns the
+projection).
+
+> Contract status: ✅ all four endpoints + the `hot_likes:v1:` key + `ttl_seconds`
+> are implemented in cs-server (PR #22) and locked by a unit test
+> (`tests/test_rds_repository.py::TestEngagementRedisContract`). Reads stay on
+> Redis. Requires `rds_enabled=true` + `ENGAGEMENT_*` flag on for durable RDS;
+> with the flag off, cs-server still projects Redis (favorites/hot_likes work,
+> RDS write is skipped).
 
 ### 2. Admin panel → cs-server admin API (replace direct Redis/RDS access)
 Today `app/admin/routes.py` + `app/admin/config_dao.py` read/write

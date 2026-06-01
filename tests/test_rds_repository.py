@@ -127,3 +127,30 @@ class TestEngagementPseudonymization:
         assert store.get_favorite(pseudo, "v1")["deleted_at"] is None
         svc.remove_favorite("user-123", "v1")
         assert store.get_favorite(pseudo, "v1")["deleted_at"] is not None
+
+
+class TestEngagementRedisContract:
+    """Projection keys MUST match what vibes_bot reads (silent-mismatch guard)."""
+
+    def _svc(self):
+        self.fake = __import__("fakeredis").FakeRedis(decode_responses=True)
+        return EngagementService(self.fake, rds_store=InMemoryRdsVenueStore(),
+                                 pseudonymization_key="k")
+
+    def test_favorite_key_matches_vibes_bot(self):
+        svc = self._svc()
+        svc.add_favorite("u1", "v1")
+        assert self.fake.sismember("user_favorites:u1", "v1")  # vibes_bot read key
+
+    def test_hot_like_key_is_versioned_and_ttl_honored(self):
+        svc = self._svc()
+        svc.add_hot_like("u1", "v1", ttl_seconds=120)
+        assert self.fake.sismember("hot_likes:v1:v1", "u1")    # hot_likes:v1:{venue}
+        assert not self.fake.exists("hot_likes:v1")            # not the unversioned key
+        assert 0 < self.fake.ttl("hot_likes:v1:v1") <= 120     # client ttl_seconds applied
+
+    def test_remove_hot_like_srem(self):
+        svc = self._svc()
+        svc.add_hot_like("u1", "v1")
+        svc.remove_hot_like("u1", "v1")
+        assert not self.fake.sismember("hot_likes:v1:v1", "u1")

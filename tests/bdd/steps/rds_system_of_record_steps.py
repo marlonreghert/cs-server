@@ -321,7 +321,8 @@ def step_rds_hot_event(context, vid):
 
 @then('the Redis trending hot_like counter for "{vid}" still reflects the like')
 def step_redis_hot(context, vid):
-    assert context.fake_redis.sismember(f"hot_likes:{vid}", context.uid)
+    # Key MUST match vibes_bot's read key: hot_likes:v1:{venue_id}
+    assert context.fake_redis.sismember(f"hot_likes:v1:{vid}", context.uid)
 
 
 # ── never-delete + history ────────────────────────────────────────────────────
