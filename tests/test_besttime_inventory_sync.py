@@ -268,7 +268,13 @@ async def test_sync_account_inventory_skips_existing_and_upserts_missing(refresh
         redis_client=fake,
     )
     summary = await refresher.sync_account_inventory_to_redis()
-    assert summary == {"seen": 2, "upserted": 1, "skipped": 1, "errors": 0}
+    assert summary == {
+        "seen": 2,
+        "upserted": 1,
+        "skipped": 1,
+        "errors": 0,
+        "deprecated": 0,
+    }
     assert fake.get("venues_geo_place_v1:v_missing") is not None
 
 

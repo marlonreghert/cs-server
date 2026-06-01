@@ -28,6 +28,7 @@ test-unit:
 		tests/test_venue_budget.py \
 		tests/test_add_venue_handler.py \
 		tests/test_besttime_inventory_sync.py \
+		tests/test_venue_eligibility.py \
 		-v
 
 test-integration:

@@ -49,7 +49,7 @@ class TestVenueHandler:
     def test_get_venues_nearby_delegates_to_dao(self, venue_handler, mock_venue_dao):
         """Test that get_venues_nearby delegates to DAO."""
         mock_venue_dao.get_nearby_venues.return_value = [
-            Venue(venue_id="v1", venue_lat=-8.0, venue_lng=-34.9)
+            Venue(venue_id="v1", venue_name="Bar v1", venue_lat=-8.0, venue_lng=-34.9)
         ]
         mock_venue_dao.get_live_forecast.return_value = None
         mock_venue_dao.get_week_raw_forecast.return_value = None
@@ -63,9 +63,10 @@ class TestVenueHandler:
         self, venue_handler, mock_venue_dao
     ):
         """Deprecated venues are hidden even when a DAO mock returns them."""
-        active = Venue(venue_id="active", venue_lat=-8.0, venue_lng=-34.9)
+        active = Venue(venue_id="active", venue_name="Bar active", venue_lat=-8.0, venue_lng=-34.9)
         deprecated = Venue(
             venue_id="closed",
+            venue_name="Bar Closed",
             venue_lat=-8.01,
             venue_lng=-34.91,
             lifecycle_status="deprecated",
@@ -112,9 +113,9 @@ class TestVenueHandler:
 
     def test_sorting_by_live_busyness_descending(self, venue_handler, mock_venue_dao):
         """Test CRITICAL sorting logic - venues sorted by busyness descending."""
-        v1 = Venue(venue_id="v1", venue_lat=-8.0, venue_lng=-34.9)
-        v2 = Venue(venue_id="v2", venue_lat=-8.01, venue_lng=-34.91)
-        v3 = Venue(venue_id="v3", venue_lat=-8.02, venue_lng=-34.92)
+        v1 = Venue(venue_id="v1", venue_name="Bar v1", venue_lat=-8.0, venue_lng=-34.9)
+        v2 = Venue(venue_id="v2", venue_name="Bar v2", venue_lat=-8.01, venue_lng=-34.91)
+        v3 = Venue(venue_id="v3", venue_name="Bar v3", venue_lat=-8.02, venue_lng=-34.92)
 
         mock_venue_dao.get_nearby_venues.return_value = [v1, v2, v3]
 
@@ -144,10 +145,10 @@ class TestVenueHandler:
 
     def test_sorting_mixed_live_and_no_live(self, venue_handler, mock_venue_dao):
         """Test CRITICAL sorting - live venues first, then no-live venues."""
-        v1 = Venue(venue_id="v1", venue_lat=-8.0, venue_lng=-34.9)
-        v2 = Venue(venue_id="v2", venue_lat=-8.01, venue_lng=-34.91)
-        v3 = Venue(venue_id="v3", venue_lat=-8.02, venue_lng=-34.92)
-        v4 = Venue(venue_id="v4", venue_lat=-8.03, venue_lng=-34.93)
+        v1 = Venue(venue_id="v1", venue_name="Bar v1", venue_lat=-8.0, venue_lng=-34.9)
+        v2 = Venue(venue_id="v2", venue_name="Bar v2", venue_lat=-8.01, venue_lng=-34.91)
+        v3 = Venue(venue_id="v3", venue_name="Bar v3", venue_lat=-8.02, venue_lng=-34.92)
+        v4 = Venue(venue_id="v4", venue_name="Bar v4", venue_lat=-8.03, venue_lng=-34.93)
 
         mock_venue_dao.get_nearby_venues.return_value = [v1, v2, v3, v4]
 
@@ -183,7 +184,7 @@ class TestVenueHandler:
         self, mock_datetime, venue_handler, mock_venue_dao
     ):
         """Test CRITICAL day conversion - Monday (Python weekday=0 -> BestTime day_int=0)."""
-        v1 = Venue(venue_id="v1", venue_lat=-8.0, venue_lng=-34.9)
+        v1 = Venue(venue_id="v1", venue_name="Bar v1", venue_lat=-8.0, venue_lng=-34.9)
         mock_venue_dao.get_nearby_venues.return_value = [v1]
         mock_venue_dao.get_live_forecast.return_value = None
 
@@ -207,7 +208,7 @@ class TestVenueHandler:
         self, mock_datetime, venue_handler, mock_venue_dao
     ):
         """Test CRITICAL day conversion - Sunday (Python weekday=6 -> BestTime day_int=6)."""
-        v1 = Venue(venue_id="v1", venue_lat=-8.0, venue_lng=-34.9)
+        v1 = Venue(venue_id="v1", venue_name="Bar v1", venue_lat=-8.0, venue_lng=-34.9)
         mock_venue_dao.get_nearby_venues.return_value = [v1]
         mock_venue_dao.get_live_forecast.return_value = None
 
@@ -227,7 +228,7 @@ class TestVenueHandler:
 
     def test_verbose_mode_returns_full_structure(self, venue_handler, mock_venue_dao):
         """Test verbose=True returns full VenueWithLive."""
-        v1 = Venue(venue_id="v1", venue_lat=-8.0, venue_lng=-34.9)
+        v1 = Venue(venue_id="v1", venue_name="Bar v1", venue_lat=-8.0, venue_lng=-34.9)
         mock_venue_dao.get_nearby_venues.return_value = [v1]
         mock_venue_dao.get_live_forecast.return_value = None
         mock_venue_dao.get_week_raw_forecast.return_value = None
@@ -277,7 +278,7 @@ class TestVenueHandler:
         self, venue_handler, mock_venue_dao
     ):
         """Test minified mode omits live_busyness when not available."""
-        v1 = Venue(venue_id="v1", venue_lat=-8.0, venue_lng=-34.9)
+        v1 = Venue(venue_id="v1", venue_name="Bar v1", venue_lat=-8.0, venue_lng=-34.9)
         mock_venue_dao.get_nearby_venues.return_value = [v1]
 
         # Live forecast exists but not available
@@ -301,7 +302,7 @@ class TestVenueHandler:
         self, venue_handler, mock_venue_dao
     ):
         """Test weekly forecast is included when available."""
-        v1 = Venue(venue_id="v1", venue_lat=-8.0, venue_lng=-34.9)
+        v1 = Venue(venue_id="v1", venue_name="Bar v1", venue_lat=-8.0, venue_lng=-34.9)
         mock_venue_dao.get_nearby_venues.return_value = [v1]
         mock_venue_dao.get_live_forecast.return_value = None
 
@@ -320,7 +321,7 @@ class TestVenueHandler:
         self, venue_handler, mock_venue_dao
     ):
         """Test that missing live forecast doesn't cause errors."""
-        v1 = Venue(venue_id="v1", venue_lat=-8.0, venue_lng=-34.9)
+        v1 = Venue(venue_id="v1", venue_name="Bar v1", venue_lat=-8.0, venue_lng=-34.9)
         mock_venue_dao.get_nearby_venues.return_value = [v1]
         mock_venue_dao.get_live_forecast.side_effect = Exception("Not found")
         mock_venue_dao.get_week_raw_forecast.return_value = None
@@ -337,7 +338,7 @@ class TestVenueHandler:
         self, venue_handler, mock_venue_dao
     ):
         """Test that missing weekly forecast doesn't cause errors."""
-        v1 = Venue(venue_id="v1", venue_lat=-8.0, venue_lng=-34.9)
+        v1 = Venue(venue_id="v1", venue_name="Bar v1", venue_lat=-8.0, venue_lng=-34.9)
         mock_venue_dao.get_nearby_venues.return_value = [v1]
         mock_venue_dao.get_live_forecast.return_value = None
         mock_venue_dao.get_week_raw_forecast.side_effect = Exception("Not found")

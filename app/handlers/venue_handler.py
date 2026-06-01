@@ -6,11 +6,7 @@ from typing import Optional
 import pytz
 
 from app.dao import RedisVenueDAO
-from app.services.venues_refresher_service import (
-    DEFAULT_BLOCKED_VENUE_TYPES,
-    BLOCKED_NAME_KEYWORDS,
-    BLOCKED_GOOGLE_TYPES,
-)
+from app.services.venue_eligibility import evaluate, load_eligibility_config
 from app.models.venue_category import resolve_venue_display
 
 # BestTime day_int → Portuguese weekday name (BestTime: 0=Mon, 6=Sun)
@@ -134,20 +130,22 @@ class VenueHandler:
                 except Exception:
                     pass
 
+        # Centralized eligibility: hide blocked types, blocked Google types,
+        # blocked name keywords, and empty-named venues. Uses the live,
+        # admin-tunable config (falls back to defaults).
+        eligibility_config = load_eligibility_config(
+            getattr(self.venue_dao, "client", None)
+        )
+
+        # Block-list policy: hide only HIGH-confidence ineligibility (empty name,
+        # blocked types, hard keywords). Ambiguous, unlabeled names ("Bar da
+        # Praça") stay visible until Google labeling resolves them — unknowns
+        # reach users by design.
         def _is_blocked(v) -> bool:
-            # 1. Block by Google Places type (most accurate)
             gtype = google_type_cache.get(v.venue_id)
-            if gtype and gtype.lower() in BLOCKED_GOOGLE_TYPES:
-                return True
-            # 2. Block by BestTime type
-            if v.venue_type and v.venue_type.upper() in DEFAULT_BLOCKED_VENUE_TYPES:
-                return True
-            # 3. Block OTHER-typed venues by name keywords (fallback for unenriched)
-            if v.venue_type and v.venue_type.upper() == "OTHER" and not gtype and v.venue_name:
-                name_lower = v.venue_name.lower()
-                if any(kw in name_lower for kw in BLOCKED_NAME_KEYWORDS):
-                    return True
-            return False
+            return evaluate(
+                v.venue_name, v.venue_type, gtype, eligibility_config
+            ).soft_deletable
 
         venues = [v for v in venues if not _is_blocked(v)]
         blocked = total - len(venues)
