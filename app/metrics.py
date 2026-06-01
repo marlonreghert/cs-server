@@ -165,6 +165,15 @@ VENUES_DEPRECATED_TOTAL = Gauge(
     "Number of venues marked as deprecated and retained in Redis",
 )
 
+# Current deprecated venue count broken down by rejection reason. Lets Grafana
+# show *why* venues were vetoed (e.g. ineligible_google_type vs
+# ineligible_name_keyword vs google_places_closed_permanently).
+VENUES_DEPRECATED_BY_REASON = Gauge(
+    "venues_deprecated_by_reason",
+    "Number of deprecated venues grouped by deprecated_reason",
+    ["reason"],
+)
+
 # Current active venue count
 VENUES_ACTIVE_TOTAL = Gauge(
     "venues_active_total",

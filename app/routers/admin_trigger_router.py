@@ -1,5 +1,6 @@
 """Admin trigger routes for on-demand enrichment jobs."""
 import asyncio
+import json
 import logging
 import time
 from typing import Optional
@@ -10,6 +11,11 @@ from pydantic import BaseModel
 from app.handlers.add_venue_handler import (
     AddVenueHandler,
     AddVenueByAddressRequest,
+)
+from app.services.venue_eligibility import (
+    ADMIN_CONFIG_ELIGIBILITY_KEY,
+    EligibilityConfig,
+    load_eligibility_config,
 )
 
 logger = logging.getLogger(__name__)
@@ -88,6 +94,10 @@ JOB_REGISTRY = {
         "label": "BestTime Inventory Sync",
         "description": "Pull every venue in our BestTime account inventory into Redis. Free — does not spend the monthly new-venue budget.",
     },
+    "venue_eligibility": {
+        "label": "Venue Eligibility Sweep",
+        "description": "Soft-delete ineligible venues (drugstores, markets, churches, empty names, blocked Google types) with a rejection reason. Cache-first — makes no new Google calls.",
+    },
 }
 
 
@@ -105,6 +115,8 @@ async def _run_job(job_name: str, config: Optional[dict] = None):
         )
     elif job_name == "inventory_sync":
         await c.venues_refresher_service.sync_account_inventory_to_redis()
+    elif job_name == "venue_eligibility":
+        await c.venues_refresher_service.run_eligibility_sweep()
     elif job_name == "live_forecast":
         await c.venues_refresher_service.refresh_live_forecasts_for_all_venues()
     elif job_name == "weekly_forecast":
@@ -287,6 +299,47 @@ def _get_venue_dao_from_container():
     if venue_dao is None:
         raise HTTPException(status_code=503, detail="venue DAO not configured")
     return venue_dao
+
+
+@router.get("/venues/eligibility-config")
+async def get_eligibility_config():
+    """Return the active venue-eligibility block-lists for the admin panel.
+
+    Reports whether the active config is the Redis admin override or the
+    built-in defaults so operators can see what is in effect.
+    """
+    venue_dao = _get_venue_dao_from_container()
+    config = load_eligibility_config(getattr(venue_dao, "client", None))
+    return config.to_public_dict()
+
+
+@router.post("/venues/eligibility-config")
+async def update_eligibility_config(config: dict = Body(...)):
+    """Update the venue-eligibility block-lists (admin-tunable, no redeploy).
+
+    Validates that each provided field is a list of strings, persists the
+    override to Redis, and returns the resulting active config. Invalid bodies
+    are rejected with HTTP 400 and the active config is left unchanged.
+
+    Note: tightening the blocked lists causes the next eligibility sweep to
+    soft-delete more venues, which is one-way in V1 (no restore).
+    """
+    venue_dao = _get_venue_dao_from_container()
+    try:
+        validated = EligibilityConfig.from_dict(config, from_admin_override=True)
+    except (ValueError, TypeError) as e:
+        raise HTTPException(status_code=400, detail=f"invalid eligibility config: {e}")
+
+    client = getattr(venue_dao, "client", None)
+    if client is None:
+        raise HTTPException(status_code=503, detail="venue DAO client not configured")
+    try:
+        client.set(ADMIN_CONFIG_ELIGIBILITY_KEY, json.dumps(config))
+    except Exception as e:
+        logger.error(f"[AdminTrigger] Failed to persist eligibility config: {e}")
+        raise HTTPException(status_code=500, detail="failed to persist eligibility config")
+
+    return validated.to_public_dict()
 
 
 def _venue_cache_flags(venue_dao, venue_id: str) -> dict[str, bool]:
