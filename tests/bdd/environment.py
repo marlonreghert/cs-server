@@ -139,13 +139,44 @@ def _build_test_app(context) -> None:
 
 def before_feature(context, feature):
     # Features tagged @wip are work-in-progress (steps not yet implemented).
-    # Skip them so the suite stays green until their step defs land.
     if "wip" in feature.tags:
         feature.skip("WIP — step definitions not yet implemented")
 
 
 def before_scenario(context, scenario):
+    # Scenario-level @wip skip (e.g. config-to-RDS lands with vibes_bot in Phase 2).
+    if "wip" in scenario.effective_tags:
+        scenario.skip("WIP — deferred to a later phase")
+        return
     _build_test_app(context)
+    _build_rds_layer(context)
+
+
+def _build_rds_layer(context) -> None:
+    """Attach the RDS write-through layer with an in-memory fake store.
+
+    Added alongside the plain context.venue_dao so existing features are
+    unaffected; the RDS feature uses context.repository / context.rds_store.
+    """
+    from app.dao.redis_venue_dao import RedisVenueDAO
+    from app.dao.venue_repository import VenueRepository
+    from app.services.engagement_service import EngagementService
+    from app.services.redis_projection_service import RedisProjectionService
+    from tests.rds_fake import InMemoryRdsVenueStore
+
+    context.rds_store = InMemoryRdsVenueStore()
+    context.repository = VenueRepository(context.geo_redis, rds_store=context.rds_store)
+    context.redis_only_dao = RedisVenueDAO(context.geo_redis)
+    context.redis_projection_service = RedisProjectionService(
+        repository=context.repository,
+        redis_only_dao=context.redis_only_dao,
+        rds_store=context.rds_store,
+    )
+    context.engagement_service = EngagementService(
+        redis_client=context.fake_redis,
+        rds_store=context.rds_store,
+        pseudonymization_key="test-hmac-key",
+    )
 
 
 def after_scenario(context, scenario):

@@ -1,4 +1,3 @@
-@wip
 Feature: RDS as the system of record with Redis serving projection
   As the VibeSense platform
   We must persist every venue pipeline output to an AWS RDS Postgres database as
@@ -42,6 +41,7 @@ Feature: RDS as the system of record with Redis serving projection
     And the venue "v1" is excluded from nearby serving
 
   # ── Admin config resolves from RDS, mirrored to Redis ─────────────────────
+  @wip
   Scenario: Admin configuration is stored in RDS and mirrored to Redis
     When an admin updates the venue eligibility configuration
     Then RDS holds the updated eligibility configuration as the system of record

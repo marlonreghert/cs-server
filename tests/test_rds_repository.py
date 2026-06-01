@@ -1,0 +1,129 @@
+"""Unit tests for the RDS write-through repository + projection (via fake store)."""
+import fakeredis
+import pytest
+
+from app.db.geo_redis_client import GeoRedisClient
+from app.dao.redis_venue_dao import RedisVenueDAO
+from app.dao.venue_repository import VenueRepository
+from app.models import Analysis, LiveForecastResponse, Venue, VenueInfo
+from app.models.vibe_attributes import VibeAttributes
+from app.services.redis_projection_service import RedisProjectionService
+from app.services.engagement_service import EngagementService
+from tests.rds_fake import InMemoryRdsVenueStore, RdsUnavailable
+
+_VA = "google_places.vibe_attributes"
+
+
+def _geo():
+    return GeoRedisClient(fakeredis.FakeRedis(decode_responses=True))
+
+
+def _venue(vid="v1", name="Bar X"):
+    return Venue(venue_id=vid, venue_name=name, venue_address="a",
+                 venue_lat=-8.05, venue_lng=-34.88, venue_type="BAR")
+
+
+class TestFlagOffParity:
+    def test_repository_without_store_behaves_as_dao(self):
+        repo = VenueRepository(_geo(), rds_store=None)  # rds_enabled=false
+        repo.upsert_venue(_venue())
+        repo.set_vibe_attributes(VibeAttributes(venue_id="v1", google_primary_type="bar"))
+        # Reads (inherited) work; no exception, no RDS dependency.
+        assert repo.get_venue("v1") is not None
+        assert repo.get_vibe_attributes("v1").google_primary_type == "bar"
+
+
+class TestWriteThrough:
+    def test_writes_rds_then_redis(self):
+        store = InMemoryRdsVenueStore()
+        repo = VenueRepository(_geo(), rds_store=store)
+        repo.upsert_venue(_venue())
+        assert store.get_venue("v1") is not None          # truth
+        assert repo.get_venue("v1") is not None            # projection
+
+    def test_live_forecast_persisted_to_rds(self):
+        store = InMemoryRdsVenueStore()
+        repo = VenueRepository(_geo(), rds_store=store)
+        repo.upsert_venue(_venue())
+        repo.set_live_forecast(LiveForecastResponse(
+            status="OK", venue_info=VenueInfo(venue_id="v1"),
+            analysis=Analysis(venue_live_busyness=42, venue_live_busyness_available=True)))
+        assert store.get_live_forecast("v1") is not None
+
+    def test_rds_outage_does_not_corrupt_redis_projection(self):
+        store = InMemoryRdsVenueStore()
+        repo = VenueRepository(_geo(), rds_store=store)
+        repo.upsert_venue(_venue(name="Original"))
+        store.set_unavailable(True)
+        with pytest.raises(RdsUnavailable):
+            repo.upsert_venue(_venue(name="Renamed"))
+        # RDS-first: projection never updated, original name intact.
+        assert repo.get_venue("v1").venue_name == "Original"
+
+
+class TestNeverDelete:
+    def test_delete_soft_deletes_rds_with_history(self):
+        store = InMemoryRdsVenueStore()
+        repo = VenueRepository(_geo(), rds_store=store)
+        repo.upsert_venue(_venue())
+        repo.set_vibe_attributes(VibeAttributes(venue_id="v1", google_primary_type="bar"))
+        repo.delete_vibe_attributes("v1")
+        rec = store.get_enrichment(_VA, "v1")
+        assert rec is not None and rec["deleted_at"] is not None  # soft, not gone
+        assert store.history_count(_VA, "v1") >= 1                # recoverable
+        assert repo.get_vibe_attributes("v1") is None             # Redis cache dropped
+
+    def test_photos_excluded_from_history(self):
+        store = InMemoryRdsVenueStore()
+        repo = VenueRepository(_geo(), rds_store=store)
+        repo.upsert_venue(_venue())
+        repo.set_venue_photos("v1", [{"url": "u", "author_name": "a"}])
+        assert store.get_enrichment("google_places.photos", "v1") is not None
+        assert store.history_count("google_places.photos", "v1") == 0
+
+
+class TestProjectionService:
+    def test_backfill_is_idempotent_and_venue_first(self):
+        store = InMemoryRdsVenueStore()
+        geo = _geo()
+        redis_only = RedisVenueDAO(geo)
+        repo = VenueRepository(geo, rds_store=store)
+        # pre-RDS Redis-only state
+        redis_only.upsert_venue(_venue())
+        redis_only.set_vibe_attributes(VibeAttributes(venue_id="v1", google_primary_type="bar"))
+        svc = RedisProjectionService(repo, redis_only, store)
+        svc.backfill_rds_from_redis()
+        svc.backfill_rds_from_redis()  # idempotent re-run
+        assert store.get_venue("v1") is not None
+        assert store.get_enrichment(_VA, "v1") is not None
+
+    def test_rebuild_restores_geo_and_live(self):
+        store = InMemoryRdsVenueStore()
+        geo = _geo()
+        redis_only = RedisVenueDAO(geo)
+        repo = VenueRepository(geo, rds_store=store)
+        repo.upsert_venue(_venue())
+        repo.set_live_forecast(LiveForecastResponse(
+            status="OK", venue_info=VenueInfo(venue_id="v1"),
+            analysis=Analysis(venue_live_busyness=42, venue_live_busyness_available=True)))
+        geo.client.flushall()  # lose Redis
+        assert redis_only.get_venue("v1") is None
+        RedisProjectionService(repo, redis_only, store).rebuild_redis_from_rds()
+        # geo index + json restored, nearby finds it, live restored
+        assert redis_only.get_venue("v1") is not None
+        assert {v.venue_id for v in redis_only.get_nearby_venues(-8.05, -34.88, 1.0)} == {"v1"}
+        assert redis_only.get_live_forecast("v1") is not None
+
+
+class TestEngagementPseudonymization:
+    def test_user_id_pseudonymized_and_favorite_roundtrip(self):
+        store = InMemoryRdsVenueStore()
+        svc = EngagementService(
+            fakeredis.FakeRedis(decode_responses=True), rds_store=store,
+            pseudonymization_key="k")
+        svc.add_favorite("user-123", "v1")
+        assert not store.contains_raw_value("user-123")     # raw id never stored
+        pseudo = svc.pseudonymize("user-123")
+        assert store.get_favorite(pseudo, "v1")["deleted_at"] is None
+        svc.remove_favorite("user-123", "v1")
+        assert store.get_favorite(pseudo, "v1")["deleted_at"] is not None
