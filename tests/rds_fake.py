@@ -30,6 +30,7 @@ class InMemoryRdsVenueStore:
         self.favorites: dict[tuple[str, str], dict] = {}
         self.hot_like_events: list[dict] = []
         self.history: list[dict] = []
+        self.admin_config: dict[str, dict] = {}
         self._down = False
 
     # ── test controls ────────────────────────────────────────────────────────
@@ -152,6 +153,24 @@ class InMemoryRdsVenueStore:
         self.hot_like_events.append({
             "user_pseudo": user_pseudo, "venue_id": venue_id, "created_at": _now(),
         })
+
+    # ── admin config (system of record; mirrored to Redis by AdminConfigService) ─
+    def upsert_admin_config(self, key, value, updated_by=None) -> None:
+        self._guard()
+        self.admin_config[key] = {
+            "key": key, "value": copy.deepcopy(value),
+            "updated_by": updated_by, "updated_at": _now(),
+        }
+
+    def get_admin_config(self, key) -> Optional[dict]:
+        return self.admin_config.get(key)
+
+    def delete_admin_config(self, key) -> None:
+        self._guard()
+        self.admin_config.pop(key, None)
+
+    def list_admin_config(self) -> list[dict]:
+        return list(self.admin_config.values())
 
     def hot_like_event_count(self, venue_id) -> int:
         return sum(1 for e in self.hot_like_events if e["venue_id"] == venue_id)

@@ -178,6 +178,21 @@ def _build_rds_layer(context) -> None:
         pseudonymization_key="test-hmac-key",
     )
 
+    from app.services.admin_config_service import AdminConfigService
+    from app.services.venue_eligibility import EligibilityConfig
+
+    def _validate_eligibility(value):
+        # Validate (raise on invalid) but persist the RAW body, byte-compatible
+        # with what load_eligibility_config parses.
+        EligibilityConfig.from_dict(value, from_admin_override=True)
+        return value
+
+    context.admin_config_service = AdminConfigService(
+        redis_client=context.fake_redis,
+        rds_store=context.rds_store,
+        validators={"venue_eligibility": _validate_eligibility},
+    )
+
 
 def after_scenario(context, scenario):
     try:

@@ -201,3 +201,30 @@ class RdsVenueStore:
             conn.execute(text(
                 "INSERT INTO engagement.hot_like_event (user_pseudo, venue_id) VALUES (:u, :v)"
             ), {"u": user_pseudo, "v": venue_id})
+
+    # ── admin config (system of record; mirrored to Redis by AdminConfigService) ─
+    def upsert_admin_config(self, key, value, updated_by=None) -> None:
+        with self.engine.begin() as conn:
+            conn.execute(text(
+                "INSERT INTO admin.admin_config (key, value, updated_by, updated_at) "
+                "VALUES (:k, CAST(:v AS jsonb), :u, now()) "
+                "ON CONFLICT (key) DO UPDATE SET "
+                "value=excluded.value, updated_by=excluded.updated_by, updated_at=now()"
+            ), {"k": key, "v": json.dumps(value), "u": updated_by})
+
+    def get_admin_config(self, key) -> Optional[dict]:
+        with self.engine.connect() as conn:
+            row = conn.execute(text(
+                "SELECT key, value, updated_by, updated_at FROM admin.admin_config WHERE key=:k"
+            ), {"k": key}).mappings().first()
+            return dict(row) if row else None
+
+    def delete_admin_config(self, key) -> None:
+        with self.engine.begin() as conn:
+            conn.execute(text("DELETE FROM admin.admin_config WHERE key=:k"), {"k": key})
+
+    def list_admin_config(self) -> list[dict]:
+        with self.engine.connect() as conn:
+            return [dict(r) for r in conn.execute(text(
+                "SELECT key, value, updated_by, updated_at FROM admin.admin_config"
+            )).mappings()]

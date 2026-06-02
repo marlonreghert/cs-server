@@ -106,6 +106,10 @@ JOB_REGISTRY = {
         "label": "Rebuild Redis from RDS",
         "description": "Reconstruct the Redis serving projection (incl. the geo index and live busyness) from RDS. Disaster recovery / Redis warm.",
     },
+    "admin_config_backfill": {
+        "label": "Backfill admin config into RDS (one-time)",
+        "description": "Import every Redis admin_config:* key into admin.admin_config as the system of record. Idempotent. Tiny (~tens of keys).",
+    },
 }
 
 
@@ -129,6 +133,10 @@ async def _run_job(job_name: str, config: Optional[dict] = None):
         if getattr(c, "rds_store", None) is None:
             raise ValueError("RDS not enabled (set rds_enabled=true)")
         c.redis_projection_service.backfill_rds_from_redis()
+    elif job_name == "admin_config_backfill":
+        if getattr(c, "rds_store", None) is None:
+            raise ValueError("RDS not enabled (set rds_enabled=true)")
+        c.admin_config_service.backfill_from_redis()
     elif job_name == "rebuild_redis":
         if getattr(c, "rds_store", None) is None:
             raise ValueError("RDS not enabled (set rds_enabled=true)")
@@ -356,6 +364,58 @@ async def update_eligibility_config(config: dict = Body(...)):
         raise HTTPException(status_code=500, detail="failed to persist eligibility config")
 
     return validated.to_public_dict()
+
+
+# ── generic admin config (RDS system of record, Redis mirror) ────────────────
+def _admin_config_service():
+    if _container is None:
+        raise HTTPException(status_code=503, detail="Container not initialized")
+    svc = getattr(_container, "admin_config_service", None)
+    if svc is None:
+        raise HTTPException(status_code=503, detail="admin config service not configured")
+    return svc
+
+
+@router.get("/config")
+async def list_admin_config():
+    """List the admin config keys owned by RDS (mirrored to Redis)."""
+    return {"keys": _admin_config_service().list_keys()}
+
+
+@router.get("/config/{key}")
+async def get_admin_config(key: str):
+    """Return the live value for a config key (Redis mirror; RDS is durable)."""
+    value = _admin_config_service().get(key)
+    if value is None:
+        raise HTTPException(status_code=404, detail=f"config key not found: {key}")
+    return {"key": key, "value": value}
+
+
+@router.put("/config/{key}")
+async def put_admin_config(key: str, value: dict = Body(...)):
+    """Write a config key to RDS (truth) then mirror Redis. Per-key validation
+    runs before any write; a failed mirror after the RDS commit returns 502 so
+    the caller retries (idempotent)."""
+    svc = _admin_config_service()
+    try:
+        stored = svc.set(key, value, updated_by="admin")
+    except (ValueError, TypeError) as e:
+        raise HTTPException(status_code=400, detail=f"invalid config for {key}: {e}")
+    except Exception as e:
+        logger.error(f"[AdminConfig] write failed for {key}: {e}")
+        raise HTTPException(status_code=502, detail=f"config write failed for {key}; retry")
+    return {"key": key, "value": stored}
+
+
+@router.delete("/config/{key}")
+async def delete_admin_config(key: str):
+    """Hard-delete a config key from RDS and the Redis mirror (readers default)."""
+    try:
+        _admin_config_service().delete(key)
+    except Exception as e:
+        logger.error(f"[AdminConfig] delete failed for {key}: {e}")
+        raise HTTPException(status_code=502, detail=f"config delete failed for {key}; retry")
+    return {"status": "ok", "key": key}
 
 
 def _venue_cache_flags(venue_dao, venue_id: str) -> dict[str, bool]:
