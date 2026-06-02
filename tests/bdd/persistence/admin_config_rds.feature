@@ -1,4 +1,3 @@
-@wip
 Feature: Admin configuration is the system of record in RDS, mirrored to Redis
   As the VibeSense platform
   Admin configuration (eligibility, discovery points, budget quota, photo TTL,

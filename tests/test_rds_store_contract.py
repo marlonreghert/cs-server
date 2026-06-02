@@ -102,3 +102,21 @@ def test_favorite_and_hot_like_event(store):
     store.upsert_favorite("pseudo-abc", vid)
     store.soft_delete_favorite("pseudo-abc", vid)  # un-favorite -> soft delete
     store.add_hot_like_event("pseudo-abc", vid)    # append-only, no error
+
+
+def test_admin_config_round_trip(store):
+    # Test-only key so it never clobbers real config; cleaned up at the end.
+    key = f"_contract_test_cfg_{uuid.uuid4().hex[:8]}"
+    payload = {"a": 1, "nested": {"x": [1, 2]}, "flag": True}
+    store.upsert_admin_config(key, payload, "contract-test")
+    row = store.get_admin_config(key)
+    assert row is not None and row["key"] == key
+    assert row["value"] == payload  # jsonb round-trip (dict in / dict out)
+
+    store.upsert_admin_config(key, {"a": 2}, "contract-test")  # ON CONFLICT upsert
+    assert store.get_admin_config(key)["value"] == {"a": 2}
+
+    assert key in {r["key"] for r in store.list_admin_config()}
+
+    store.delete_admin_config(key)
+    assert store.get_admin_config(key) is None

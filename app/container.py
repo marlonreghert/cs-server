@@ -326,6 +326,22 @@ class Container:
             rds_store=self.rds_store,
         )
 
+        # Admin config: RDS system of record + synchronous Redis mirror (carve-out
+        # like engagement, not the projector). Per-key validators dispatch before
+        # any write; eligibility keeps EligibilityConfig validation.
+        from app.services.admin_config_service import AdminConfigService
+        from app.services.venue_eligibility import EligibilityConfig
+
+        def _validate_eligibility_config(value):
+            EligibilityConfig.from_dict(value, from_admin_override=True)  # raises on invalid
+            return value  # persist raw body, byte-compatible with the reader
+
+        self.admin_config_service = AdminConfigService(
+            redis_client=self.redis_client.client,
+            rds_store=self.rds_store,
+            validators={"venue_eligibility": _validate_eligibility_config},
+        )
+
         # Monthly budget DAO + service (used by add-by-address + discovery).
         self.venue_budget_dao = VenueBudgetDao(redis_internal_client)
         self.venue_budget_service = VenueBudgetService(
