@@ -1,5 +1,36 @@
 # RDS As System Of Record With Redis Serving Projection
 
+> **STATUS (2026-06-02) — data plane DONE; config plane + engagement activation NOT.**
+> - **Phase 0 (provision RDS):** ✅ done — RDS up, Alembic baseline applied,
+>   dual-store contract test green.
+> - **Phase 1 (dual-write + cutover + backfill):** ✅ **DONE.** Deployed
+>   `rds_enabled=true` (2026-06-01, container healthy, "RDS system-of-record
+>   enabled"); `backfill_rds` ran clean — **1331 venues, 12299 enrichment,
+>   0 errors** (vibe_attributes 612, weekly 9274, live 371). RDS is now the
+>   populated system of record for venue/enrichment/live data. *(Not separately
+>   done: the staging "flush Redis + rebuild" drill — rebuild is exercised by the
+>   off-loop one-off / DBeaver smoke instead; no prod Redis flush.)*
+> - **Phase 2 (config→RDS + vibes_bot admin via API):** ❌ **NOT started.** Admin
+>   config (eligibility, discovery_points, budget, photos TTL + all vibes_bot
+>   admin-panel config) still lives **only in Redis**; `admin.admin_config` table
+>   is empty/unused; no config CRUD or venue-edit endpoints; budget counters still
+>   Redis. The `@wip` admin-config scenario is deferred. **Folded into** the
+>   decoupling plan ("admin writes on DB").
+> - **Engagement (favorites/hot_likes):** API is durable-capable now (flag on),
+>   but **vibes_bot `ENGAGEMENT_WRITE_THROUGH` is still OFF** → vibes_bot still
+>   writes Redis directly, so **nothing is persisted to `engagement.*` yet** (those
+>   tables are empty; backfill does not cover engagement). Activation pending the
+>   flag flip + the vibes_bot `http_requests_total` monitoring gap.
+> - **Phase 3 (engineer DBeaver/SSM access):** ✅ available — connection + SSM
+>   shell documented in `README.md`.
+> - **Superseded design:** the **synchronous write-through projection** described
+>   below (RDS-first → then project Redis in the same call) is **as-built and
+>   live**, but is to be replaced by an asynchronous, RDS-fed **projector**
+>   (pipelines write RDS only; pipelines read RDS; Redis fed only by the
+>   projector). See **`plans/redis_projection_decoupling_01_06_26.md`** (unbuilt).
+> - As-built engagement endpoints, key formats, and the contract test are
+>   captured in `VIBES_BOT_HANDOFF.md` (the as-built source of truth).
+
 ## Branch
 feature/rds-system-of-record
 

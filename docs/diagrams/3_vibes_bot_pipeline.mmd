@@ -1,0 +1,47 @@
+%%{init: {'theme':'base','themeVariables':{'fontSize':'15px','primaryColor':'#1e293b','primaryTextColor':'#e2e8f0','lineColor':'#94a3b8','clusterBkg':'#111c30','clusterBorder':'#334155'},'flowchart':{'curve':'basis','nodeSpacing':36,'rankSpacing':52}}}%%
+flowchart TB
+  classDef src fill:#2a2140,stroke:#a78bfa,color:#ede9fe,stroke-width:1.5px;
+  classDef enr fill:#14241d,stroke:#34d399,color:#d1fae5,stroke-width:1.5px;
+  classDef filt fill:#3a1620,stroke:#f43f5e,color:#ffe4e6,stroke-width:2.4px;
+  classDef drop fill:#450a0a,stroke:#ef4444,color:#fecaca,stroke-dasharray:3 3;
+  classDef ext fill:#0c2a33,stroke:#22d3ee,color:#cffafe,stroke-width:1.5px;
+
+  IN(["cs-server MinifiedVenue<br/>(HTTP verbose=false)"]):::src
+  IN -->|"venue_id · busyness · weekly_forecast<br/>hours · vibe_profile · vibe_labels"| S2
+
+  S2["2 · normalize coords (lng/lon/lng)"]:::enr
+  S2 --> S3["3 · forecast busyness<br/>from weekly_forecast, current/target hour (Recife)"]:::enr
+  S3 --> S4["4 · live fallback<br/>fill venue_live_busyness from forecast"]:::enr
+  S4 --> S5{{"5 · F DROP: no live busyness"}}:::filt
+  S5 -.->|"no live AND no estimate"| X5["dropped (major)"]:::drop
+  S5 -->|"has busyness"| S6
+
+  GM["Google Maps Find Place<br/>name+address · circle 200m"]:::ext
+  S6["6 · pricing"]:::enr
+  GM -->|"price_level (exact-name match)"| S6
+  S6 -->|"overwrites price_level ONLY when Google returns one<br/>(else keeps BestTime price)"| S7
+
+  S7["7 · open status<br/>hours_source=google -> Google hours<br/>else is_open = live busyness positive"]:::enr
+  S7 --> S8{{"8 · F open-now only<br/>unknown =&gt; DROP (default False)"}}:::filt
+  S8 -.->|"closed / unknown"| X8["dropped (major)"]:::drop
+  S8 -->|"open now"| S9
+
+  S9["9 · distance (km from origin)"]:::enr
+  S9 --> S10["10 · busyness label vazio..cheio + color"]:::enr
+  S10 --> S11["11 · busy predictions (next_busy_level_x)"]:::enr
+  S11 --> S12["12 · hot likes + user_has_liked"]:::enr
+  S12 --> S13["13 · score + sort<br/>rating^3 · log(reviews) · dist decay (8km) · busy · likes<br/>interleave A/A/A/B/C/D"]:::enr
+  S13 --> S14{{"14 · F name blacklist"}}:::filt
+  S14 -.->|"name in blacklist"| X14["dropped"]:::drop
+  S14 -->|"kept"| S15
+
+  S15["15 · venue type label/emoji/color"]:::enr
+  S15 --> S16["16 · vibe labels -> PT-BR + emoji"]:::enr
+  S16 --> S17["17 · AI vibe tags (from vibe_profile)"]:::enr
+  S17 --> S18["18 · similar venue ids"]:::enr
+  S18 --> S19["19 · busyness insights<br/>peak · arrival · momentum · timeline + rain overlay"]:::enr
+  WX["weather service"]:::ext -->|"rain probability"| S19
+  S19 --> S20["20 · vibe modes<br/>mode_eligibility + per-mode scores"]:::enr
+
+  S20 --> OUTM(["POST /venues (mobile / web)"]):::src
+  S20 --> OUTA(["POST /ask -> places_dataset.json -> LLM bot"]):::src

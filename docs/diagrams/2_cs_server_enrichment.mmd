@@ -1,0 +1,55 @@
+%%{init: {'theme':'base','themeVariables':{'fontSize':'15px','primaryColor':'#1e293b','primaryTextColor':'#e2e8f0','lineColor':'#94a3b8','clusterBkg':'#111c30','clusterBorder':'#334155'},'flowchart':{'curve':'basis','nodeSpacing':40,'rankSpacing':80}}}%%
+flowchart LR
+  classDef src fill:#3b1f29,stroke:#fb7185,color:#fde2e7,stroke-width:1.5px;
+  classDef act fill:#0c2a33,stroke:#22d3ee,color:#cffafe,stroke-width:1.5px;
+  classDef art fill:#14241d,stroke:#34d399,color:#d1fae5,stroke-width:1.5px;
+  classDef store fill:#2a2410,stroke:#fbbf24,color:#fef3c7,stroke-width:2px;
+  classDef note fill:#1e293b,stroke:#64748b,color:#cbd5e1,stroke-dasharray:4 3;
+
+  R1[("Redis #1<br/>active venues")]:::store
+
+  subgraph PHO["Photos (daily) — independent Google search"]
+    PS["Google searchText + place photos<br/>(its OWN search_place_id)"]:::act
+  end
+  R1 -->|"name + address + coords"| PS
+  PS -->|"place_id -> photos"| PH[("venue_photos<br/>url + author")]:::art
+
+  subgraph IGS["Instagram handle (Mon)"]
+    AIG["Apify IG search<br/>query = name + city"]:::act
+    VAL["InstagramValidator<br/>7 weighted signals"]:::act
+  end
+  R1 -->|"venues WITHOUT a handle"| AIG
+  AIG -->|"candidate profiles"| VAL
+  VAL -->|"best match + confidence"| IG[("VenueInstagram<br/>handle")]:::art
+  GWEB["handle from Google websiteUri<br/>(free · conf 1.0 · chart 1)"]:::note -.->|"preferred, fills first"| IG
+
+  IG -->|"handle"| APOST["Apify IG scraper (Wed)"]:::act
+  APOST --> POST[("IG post captions")]:::art
+
+  subgraph MEN["Menu (monthly)"]
+    MIGH["Apify IG highlights<br/>filter by menu keywords"]:::act
+    GMX["Apify GMaps extractor"]:::act
+    MX["OpenAI GPT-4o vision"]:::act
+  end
+  IG -->|"handle"| MIGH
+  MIGH -.->|"fallback if none"| GMX
+  MIGH -->|"download"| S3[("S3 menu photos")]:::art
+  GMX -->|"download"| S3
+  S3 -->|"presigned URLs"| MX
+  MX --> MENU[("VenueMenuData<br/>sections · items · prices")]:::art
+
+  subgraph VIB["Vibe classifier (monthly) — fuses 4 inputs"]
+    VC["GPT-4o-mini (score + classify)<br/>-> GPT-4o (refine uncertain)"]:::act
+  end
+  PH -->|"photos"| VC
+  IG -->|"bio"| VC
+  POST -->|"captions"| VC
+  RV["Reviews (from Google · chart 1)"]:::note -->|"review text"| VC
+  VC -->|"8-category taxonomy<br/>+ evidence photos"| VP[("VenueVibeProfile")]:::art
+
+  SERVE(["served on /v1/venues/nearby"]):::src
+  PH ==>|"first 2 photos only"| SERVE
+  VP ==>|"served"| SERVE
+  IG ==>|"served"| SERVE
+  MENU -.->|"stored, NOT served (verbose-only)"| SERVE
+  RV2["Reviews"]:::note -.->|"stored, NOT served (verbose-only)"| SERVE
