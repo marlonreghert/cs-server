@@ -17,6 +17,7 @@ from app.services.venue_eligibility import (
     EligibilityConfig,
     load_eligibility_config,
 )
+from app.services.admin_config_service import AdminConfigService
 
 logger = logging.getLogger(__name__)
 
@@ -342,26 +343,42 @@ async def update_eligibility_config(config: dict = Body(...)):
     """Update the venue-eligibility block-lists (admin-tunable, no redeploy).
 
     Validates that each provided field is a list of strings, persists the
-    override to Redis, and returns the resulting active config. Invalid bodies
-    are rejected with HTTP 400 and the active config is left unchanged.
+    override to RDS (system of record) then mirrors the existing Redis
+    `admin_config:venue_eligibility` key via AdminConfigService, and returns the
+    resulting active config. Invalid bodies are rejected with HTTP 400 and the
+    active config is left unchanged. Falls back to direct Redis when no admin
+    config service is wired (preserves today's behavior).
 
     Note: tightening the blocked lists causes the next eligibility sweep to
     soft-delete more venues, which is one-way in V1 (no restore).
     """
-    venue_dao = _get_venue_dao_from_container()
     try:
         validated = EligibilityConfig.from_dict(config, from_admin_override=True)
     except (ValueError, TypeError) as e:
         raise HTTPException(status_code=400, detail=f"invalid eligibility config: {e}")
 
-    client = getattr(venue_dao, "client", None)
-    if client is None:
-        raise HTTPException(status_code=503, detail="venue DAO client not configured")
-    try:
-        client.set(ADMIN_CONFIG_ELIGIBILITY_KEY, json.dumps(config))
-    except Exception as e:
-        logger.error(f"[AdminTrigger] Failed to persist eligibility config: {e}")
-        raise HTTPException(status_code=500, detail="failed to persist eligibility config")
+    svc = getattr(_container, "admin_config_service", None) if _container is not None else None
+    if isinstance(svc, AdminConfigService):
+        # RDS (truth) + Redis mirror. Input is already validated above, so any
+        # exception from set() is an RDS/mirror failure -> 502 (retryable).
+        try:
+            svc.set("venue_eligibility", config, updated_by="admin")
+        except Exception as e:
+            logger.error(f"[AdminTrigger] Failed to persist eligibility config to RDS: {e}")
+            raise HTTPException(
+                status_code=502, detail="failed to persist eligibility config; retry"
+            )
+    else:
+        # Fallback: no admin config service wired -> direct Redis (legacy behavior).
+        venue_dao = _get_venue_dao_from_container()
+        client = getattr(venue_dao, "client", None)
+        if client is None:
+            raise HTTPException(status_code=503, detail="venue DAO client not configured")
+        try:
+            client.set(ADMIN_CONFIG_ELIGIBILITY_KEY, json.dumps(config))
+        except Exception as e:
+            logger.error(f"[AdminTrigger] Failed to persist eligibility config: {e}")
+            raise HTTPException(status_code=500, detail="failed to persist eligibility config")
 
     return validated.to_public_dict()
 
