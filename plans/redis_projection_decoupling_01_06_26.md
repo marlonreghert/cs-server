@@ -442,13 +442,21 @@ Manual or integration checks:
   1–2 min cadence; only *user interactions* require immediacy (handled by §F, not
   the projector).
 
-### Remaining (lighter — measure/decide during execution, not blocking design)
-1. **Projector read cost at the chosen cadence.** A full reprojection is ~16 RDS
-   round-trips × ~1k venues per run — **measure on `db.t4g.small`** before locking
-   `redis_projection_minutes`. If uncomfortable, move to incremental/dirty-tracking
-   projection earlier than this plan assumes (v1 stays scheduled full).
-2. **`count_*` analytics reads.** Move to RDS or leave Redis-derived? Low impact;
-   defaulting to leave on Redis (admin/metrics only) unless you want DB-queryable.
+### Status: DEFERRED by user (2026-06-02) — decisions captured below; ready to `/execute-feature` when prioritized. (Data plane + admin config + engagement are done/in-flight; decoupling is the optional architectural finish.)
+
+### Resolved (2026-06-02, by user)
+- **Projector cadence = ~2 minutes** (`redis_projection_minutes=2`). Still
+  **measure** the ~16-RDS-reads × ~1k-venues cost at this cadence on
+  `db.t4g.small` at execute time; if uncomfortable, move to incremental
+  dirty-tracking (v1 remains scheduled full reprojection).
+- **`count_*` analytics reads → move to RDS** (DB-queryable, consistent with
+  RDS-as-truth). Fold into the execute.
+- **Off-loop mechanism = `run_in_executor` thread executor** (B0 default —
+  simplest; revisit only if the executor proves insufficient).
+
+### Remaining (decide/measure at execution)
+1. Confirm the ~2-min read cost is acceptable on `db.t4g.small` (measure); else
+   go incremental.
 3. **Off-loop execution mechanism (per B0).** Choose: thread executor
    (`run_in_executor`, simplest), a worker thread, or a sidecar process/cron.
    Also note the DBeaver-smoke step (`rebuild_redis`) and any manual admin trigger
