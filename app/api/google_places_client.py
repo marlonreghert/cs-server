@@ -57,6 +57,12 @@ VIBE_FIELDS_MASK = ",".join([
     "editorialSummary",
     # Reviews
     "reviews",
+    # Aggregate review signal — drives the venue-card "4.5 ★ (586)" UI.
+    # Inventory-synced venues come in without these populated; enrichment
+    # backfills them onto the Venue model (see GooglePlacesEnrichmentService).
+    "rating",
+    "userRatingCount",
+    "priceLevel",
 ])
 
 # Language code for Portuguese (Brazil) - used for opening hours descriptions
@@ -367,6 +373,11 @@ class GooglePlacesAPIClient:
             special_days=special_days,
             # Reviews
             reviews=parsed_reviews if parsed_reviews else None,
+            # Aggregate review signal (raw — enrichment service maps
+            # priceLevel enum → 0-4 int before writing to Venue).
+            rating=data.get("rating"),
+            user_rating_count=data.get("userRatingCount"),
+            price_level=data.get("priceLevel"),
         )
 
     def details_to_vibe_attributes(
