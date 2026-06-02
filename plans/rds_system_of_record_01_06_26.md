@@ -736,3 +736,52 @@ vibes_bot has its own `AGENTS.md` and `plans/`. The vibes_bot edits in section E
 `vibes_bot/plans/admin_via_cs_server_api_*.md`), not driven silently from this
 cs-server plan. This plan defines the cs-server admin API contract vibes_bot
 will consume; it does not itself edit vibes_bot.
+
+---
+
+# 📋 MASTER MIGRATION STATUS & REMAINING STEPS (durable — 2026-06-02)
+
+Single source of truth for finishing the full RDS migration across all repos.
+Written to survive a local machine wipe; everything below is committed to GitHub.
+
+## Key facts / references (for recovery)
+- **RDS endpoint (private):** `vibesense.cm1ie0s6iz4a.us-east-1.rds.amazonaws.com:5432`,
+  db `vibesense`, user `vibesense_admin`. No public endpoint.
+- **EC2 (runs cs-server):** `i-0893fb6d283243480` (the `vibes-bot` instance), region `us-east-1`, AWS SSO profile `vibesense`.
+- **Secrets Manager:** `vibesense/rds/credentials` (host/port/db/user/password). GitHub secrets on the **mcbsf/vibes_bot** repo: `RDS_HOST`, `RDS_PASSWORD`, `ENGAGEMENT_PSEUDONYMIZATION_KEY` (set).
+- **Repos:** cs-server = `marlonreghert/cs-server`; vibes_bot = `mcbsf/vibes_bot`. Deploy = push to **vibes_bot main** → CI rebuilds cs-server when its main SHA drifts.
+- **Connection/ops howto:** cs-server `README.md` (“Connecting to RDS (DBeaver)” + “Operating cs-server on the EC2”).
+- **Plans:** Plan 1 (this, umbrella/done) · Plan 2 `redis_projection_decoupling_01_06_26.md` (decoupling, @wip) · Plan 3 `admin_config_rds_02_06_26.md` (config, merged).
+- **cs-server PRs:** #21 eligibility · #22 RDS phase-1 (write-through) · #23 google_places rating/reviews · #24 docs+decoupling plan · #25 config plan+reconcile · #26 admin-config impl (`1c9e9cf`, on main).
+- **CRITICAL runtime rule:** `backfill_rds` / `rebuild_redis` are synchronous and **block the cs-server event loop** — run them as an **off-loop one-off** (`docker exec -d ... Container().redis_projection_service....`), NOT via the HTTP trigger. (`admin_config_backfill` is tiny — HTTP trigger is fine for it.)
+
+## ✅ DONE (delivered, on main)
+- **Phase 0** — RDS provisioned + Alembic baseline migrated; dual-store contract test green.
+- **Phase 1 (data plane) — LIVE in prod.** Deployed `rds_enabled=true`; `backfill_rds` ran clean: **1331 venues, 12299 enrichment, 0 errors**. RDS is the durable source for venue/enrichment/weekly/live.
+- **Engagement API** — favorites/hot_likes, HMAC-pseudonymized, RDS-first + immediate Redis mirror. Code live in prod.
+- **Admin config → RDS** (Plan 3) — `AdminConfigService` + `GET/PUT/DELETE /admin/config/{key}` + `admin_config_backfill` job. **Merged to cs-server main (#26, `1c9e9cf`) — NOT yet deployed.**
+- **vibes_bot engagement write-through** — merged + deployed **DORMANT** (`ENGAGEMENT_WRITE_THROUGH=false`).
+- Docs + 3-plan reconciliation (#24, #25); README ops guide.
+
+## ⏭ REMAINING — chronological, by owner
+1. **[YOU · deploy admin-config code]** Push to vibes_bot main → drift-sync rebuilds cs-server to `1c9e9cf` (no env change; RDS already on):
+   ```bash
+   cd ~/projects/vibes_bot && git checkout main && git pull origin main
+   git commit --allow-empty -m "deploy: rebuild cs-server to main (admin config → RDS)"
+   git push origin main
+   ```
+   Verify (SSM on `i-0893fb6d283243480`):
+   `sudo docker exec vibes_bot-cs-server-1 python -c "import urllib.request as u;print(u.urlopen('http://localhost:8080/admin/config',timeout=5).read())"` → `{"keys":[...]}`.
+2. **[YOU · backfill config]** Once `/admin/config` responds:
+   ```bash
+   sudo docker exec vibes_bot-cs-server-1 python -c "import urllib.request as u;print(u.urlopen(u.Request('http://localhost:8080/admin/trigger/admin_config_backfill',method='POST'),timeout=10).read())"
+   sudo docker logs -f vibes_bot-cs-server-1 2>&1 | grep -i AdminConfigBackfill   # {'keys': N, 'errors': 0}
+   ```
+   Verify `select count(*) from admin.admin_config` (DBeaver) == `redis-cli --scan --pattern 'admin_config:*' | wc -l`.
+3. **[ME · cs-server follow-up]** Reconcile the legacy `/venues/eligibility-config` endpoint to write through `AdminConfigService` (so eligibility via that path also lands in RDS). Low priority; no test depends on it. (`/execute-feature` or a small fix-PR.)
+4. **[vibes_bot · engagement activation — independent, anytime]** Set `ENGAGEMENT_WRITE_THROUGH=true` **+** close the `http_requests_total{job="vibesbot"}` monitoring gap (currently 0 series → 5xx/latency not observable). Re-run the post-deploy sanity check; confirm the `engagement_write` metric goes live.
+5. **[vibes_bot · admin-panel-via-API companion]** Plan + implement (vibes_bot lifecycle): repoint the admin panel’s config writes to cs-server `PUT /admin/config/{key}` so **vibes_bot-owned keys** (scoring_weights, feature_flags, busyness_labels, vibe_modes, venue_types, blacklist, …) become RDS-authoritative. Until then they’re a point-in-time snapshot (acceptable per decision). Contract is live on cs-server for it to consume.
+6. **[ME · later phase — Plan 2]** Projection decoupling (`redis_projection_decoupling_01_06_26.md`, @wip): pipelines stop writing Redis; off-loop projector feeds Redis; pipelines read RDS. Big architectural change with B0 (off-loop projector), B1 (deprecation removal), B2 (photo remaining-TTL). Gated on the §G never-empty-Redis transition. Resolve its remaining open questions first, then `/execute-feature`.
+
+## ✅ Definition of "RDS fully migrated"
+All durable state in RDS — venue/enrichment/live (**done**) + admin config (steps 1–2) + engagement (step 4) — and vibes_bot writes config + engagement **through cs-server's API** (steps 4–5). Step 3 closes the legacy-eligibility gap. Step 6 (decoupling) is the optional architectural finish (Redis becomes a pure projection).
