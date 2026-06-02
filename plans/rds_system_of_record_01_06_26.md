@@ -34,8 +34,10 @@
 > - **Engagement (favorites/hot_likes):** API is durable-capable now (flag on),
 >   but **vibes_bot `ENGAGEMENT_WRITE_THROUGH` is still OFF** → vibes_bot still
 >   writes Redis directly, so **nothing is persisted to `engagement.*` yet** (those
->   tables are empty; backfill does not cover engagement). Activation pending the
->   flag flip + the vibes_bot `http_requests_total` monitoring gap.
+>   tables are empty; backfill does not cover engagement). Activation pending only
+>   the flag flip (monitoring is already in place — vibes_bot instruments
+>   `vibesbot_http_requests_total`/`…_duration_seconds`; the old "0 series" was a
+>   metric-name mismatch, not a gap).
 > - **Phase 3 (engineer DBeaver/SSM access):** ✅ available — connection + SSM
 >   shell documented in `README.md`.
 > - **Superseded design:** the **synchronous write-through projection** described
@@ -779,7 +781,16 @@ Written to survive a local machine wipe; everything below is committed to GitHub
    ```
    Verify `select count(*) from admin.admin_config` (DBeaver) == `redis-cli --scan --pattern 'admin_config:*' | wc -l`.
 3. **[ME · cs-server follow-up]** Reconcile the legacy `/venues/eligibility-config` endpoint to write through `AdminConfigService` (so eligibility via that path also lands in RDS). Low priority; no test depends on it. (`/execute-feature` or a small fix-PR.)
-4. **[vibes_bot · engagement activation — independent, anytime]** Set `ENGAGEMENT_WRITE_THROUGH=true` **+** close the `http_requests_total{job="vibesbot"}` monitoring gap (currently 0 series → 5xx/latency not observable). Re-run the post-deploy sanity check; confirm the `engagement_write` metric goes live.
+4. **[vibes_bot · engagement activation — YOUR flag flip; monitoring already done]**
+   Set `ENGAGEMENT_WRITE_THROUGH=true` and deploy (your production action).
+   **Monitoring needs NO code** — the earlier "0 series" was a *query name mismatch*,
+   not a gap: vibes_bot already instruments `vibesbot_http_requests_total`
+   (not `http_requests_total`), `vibesbot_http_request_duration_seconds` (p95), via
+   `PrometheusMiddleware` + `/metrics` + the `vibesbot` scrape job. After the flip,
+   observe with the **correct** names: `rate(vibesbot_http_requests_total[5m])`,
+   `…{status_code=~"5.."}`, `histogram_quantile(0.95, vibesbot_http_request_duration_seconds_bucket)`,
+   plus the engagement counter (`favorites_operations_total` / the cs-server-call
+   metric). No vibes_bot PR required for monitoring.
 5. **[vibes_bot · admin-panel-via-API companion]** Plan + implement (vibes_bot lifecycle): repoint the admin panel’s config writes to cs-server `PUT /admin/config/{key}` so **vibes_bot-owned keys** (scoring_weights, feature_flags, busyness_labels, vibe_modes, venue_types, blacklist, …) become RDS-authoritative. Until then they’re a point-in-time snapshot (acceptable per decision). Contract is live on cs-server for it to consume.
 6. **[ME · later phase — Plan 2]** Projection decoupling (`redis_projection_decoupling_01_06_26.md`, @wip): pipelines stop writing Redis; off-loop projector feeds Redis; pipelines read RDS. Big architectural change with B0 (off-loop projector), B1 (deprecation removal), B2 (photo remaining-TTL). Gated on the §G never-empty-Redis transition. Resolve its remaining open questions first, then `/execute-feature`.
 
