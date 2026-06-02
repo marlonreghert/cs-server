@@ -1,6 +1,20 @@
 # RDS As System Of Record With Redis Serving Projection
 
 > **STATUS (2026-06-02) — data plane DONE; config plane + engagement activation NOT.**
+>
+> **Phase map (incremental, independent, non-conflicting):**
+> 1. ✅ **Delivered** — data-plane system of record (THIS plan, live in prod).
+> 2. ▶ **Next** — admin config → RDS: **`plans/admin_config_rds_02_06_26.md`**
+>    (planned, ready to `/execute-feature`).
+> 3. ⏭ **Later** — projection decoupling (pipelines stop writing Redis):
+>    **`plans/redis_projection_decoupling_01_06_26.md`** (planned, `@wip`).
+> 4. 🔀 **vibes_bot companions** — engagement flag flip + admin-panel-via-API
+>    (vibes_bot lifecycle).
+>
+> Config (2) is a synchronous-mirror carve-out the decoupling projector (3) never
+> touches, so 2 and 3 are independent and can land in either order; this plan (1)
+> is the as-built record they build on.
+>
 > - **Phase 0 (provision RDS):** ✅ done — RDS up, Alembic baseline applied,
 >   dual-store contract test green.
 > - **Phase 1 (dual-write + cutover + backfill):** ✅ **DONE.** Deployed
@@ -14,8 +28,9 @@
 >   config (eligibility, discovery_points, budget, photos TTL + all vibes_bot
 >   admin-panel config) still lives **only in Redis**; `admin.admin_config` table
 >   is empty/unused; no config CRUD or venue-edit endpoints; budget counters still
->   Redis. The `@wip` admin-config scenario is deferred. **Folded into** the
->   decoupling plan ("admin writes on DB").
+>   Redis. The `@wip` admin-config scenario is superseded by the dedicated plan
+>   **`plans/admin_config_rds_02_06_26.md`** (sync-mirror carve-out, NOT the
+>   decoupling projector); the vibes_bot admin-panel-via-API is a separate companion.
 > - **Engagement (favorites/hot_likes):** API is durable-capable now (flag on),
 >   but **vibes_bot `ENGAGEMENT_WRITE_THROUGH` is still OFF** → vibes_bot still
 >   writes Redis directly, so **nothing is persisted to `engagement.*` yet** (those
@@ -244,6 +259,10 @@ Introduce a Postgres layer without disturbing the Redis DAO's interface:
   for the initial migration.
 
 ### C. Config in RDS, mirrored to Redis
+> **Delegated — see `plans/admin_config_rds_02_06_26.md`** (the owning plan for
+> this work). The design below is correct and unchanged (synchronous
+> RDS-write-then-Redis-mirror); it has been carved into that dedicated plan with
+> the budget-counter scope boundary and the validation-dispatch detail resolved.
 - `admin.admin_config(key, value jsonb, updated_by, updated_at)` is truth.
 - cs-server admin config writes (eligibility-config, budget, discovery points,
   photos TTL, and the generic key CRUD vibes_bot needs) write RDS then mirror
