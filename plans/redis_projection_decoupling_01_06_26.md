@@ -234,11 +234,15 @@ details:**
   scheduled full reprojection; size the read cost before committing the cadence.
 
 ### C. Admin writes to RDS (cs-server side)
-- Admin venue-edit + generic config endpoints write **RDS only**; the projector
-  surfaces them to Redis. (This merges the old plan's Phase 2 "config in RDS,
-  mirrored to Redis" into the projector model — config mirror becomes part of
-  projection, not a synchronous mirror write.) vibes_bot admin panel proxying is
-  the separate companion plan.
+- **Admin config is NOT projector-fed** — it is a **synchronous RDS-write-then-
+  Redis-mirror carve-out** (the same shape as engagement §F), owned by
+  **`plans/admin_config_rds_02_06_26.md`** (config keys are global, not
+  venue-keyed, so the venue projector can't surface them, and config needs
+  immediate read-back). This plan does **not** re-spec config — see that plan.
+- **Admin venue edits** (mutating a venue's payload) DO follow the decoupled
+  model: write RDS only; the projector surfaces them to Redis on the next tick
+  (venue data is projector-fed). The vibes_bot admin-panel proxying is a separate
+  companion under vibes_bot's lifecycle.
 
 ### D. Pipeline read carve-out wiring (explicit per-call disposition)
 - **Read from RDS (data):** `get_venue`, `get_vibe_attributes`,
@@ -252,6 +256,13 @@ details:**
   instagram cache-TTL + not-found negative-cache reads.
 - **Serving-only (Redis):** `get_nearby_venues` and the handler's read-set —
   on the serving_dao, untouched.
+- **Re-scan the surface at execute time** (it drifts as pipelines land). Delta
+  since written: **PR #23** (google_places review-signal backfill, `cac4b24`)
+  added a core-venue **read-modify-write** (`get_venue` → mutate
+  `rating`/`reviews`/`price_level` → `upsert_venue`). Both methods are already in
+  the lists above, so it's **covered** by the design (read venue from RDS, write
+  RDS-only) — no new carve-out — but confirm it reads RDS, not stale Redis, when
+  the split lands.
 
 ### E. As-built gaps to fold in
 - `set_google_business_status`, `delete_live_forecast` are not RDS-aware on the
