@@ -162,3 +162,48 @@ def test_put_returns_502_when_mirror_fails():
     resp = client.put("/admin/config/scoring_weights", json={"a": 1})
     assert resp.status_code == 502
     assert store.get_admin_config("scoring_weights")["value"] == {"a": 1}  # RDS committed
+
+
+# ── legacy /venues/eligibility-config reconciled through AdminConfigService ──
+def _elig_client(container):
+    app = FastAPI()
+    app.include_router(router)
+    set_container(container)
+    return TestClient(app)
+
+
+def test_eligibility_endpoint_lands_in_rds_when_service_wired():
+    redis_client = fakeredis.FakeRedis(decode_responses=True)
+    store = InMemoryRdsVenueStore()
+    svc = AdminConfigService(redis_client, rds_store=store,
+                             validators={"venue_eligibility": _eligibility_validator})
+    client = _elig_client(SimpleNamespace(admin_config_service=svc, rds_store=store))
+    body = {"blocked_venue_types": ["DRUGSTORE"], "blocked_google_types": ["pharmacy"]}
+    resp = client.post("/admin/venues/eligibility-config", json=body)
+    assert resp.status_code == 200
+    assert store.get_admin_config("venue_eligibility")["value"] == body  # RDS = truth
+    # byte-compat: the reader parses the mirror back into the live config
+    assert "DRUGSTORE" in load_eligibility_config(redis_client).blocked_venue_types
+
+
+def test_eligibility_endpoint_falls_back_to_redis_without_service():
+    redis_client = fakeredis.FakeRedis(decode_responses=True)
+    store = InMemoryRdsVenueStore()  # only to assert it stays untouched
+    venue_dao = SimpleNamespace(client=redis_client)
+    client = _elig_client(SimpleNamespace(admin_config_service=None, venue_dao=venue_dao, rds_store=store))
+    resp = client.post("/admin/venues/eligibility-config", json={"blocked_venue_types": ["DRUGSTORE"]})
+    assert resp.status_code == 200
+    assert "DRUGSTORE" in load_eligibility_config(redis_client).blocked_venue_types  # Redis written
+    assert store.get_admin_config("venue_eligibility") is None  # guard fell back; RDS untouched
+
+
+def test_eligibility_endpoint_invalid_returns_400_persists_nothing():
+    redis_client = fakeredis.FakeRedis(decode_responses=True)
+    store = InMemoryRdsVenueStore()
+    svc = AdminConfigService(redis_client, rds_store=store,
+                             validators={"venue_eligibility": _eligibility_validator})
+    client = _elig_client(SimpleNamespace(admin_config_service=svc, rds_store=store))
+    resp = client.post("/admin/venues/eligibility-config", json={"blocked_venue_types": "not-a-list"})
+    assert resp.status_code == 400
+    assert store.get_admin_config("venue_eligibility") is None
+    assert redis_client.get("admin_config:venue_eligibility") is None

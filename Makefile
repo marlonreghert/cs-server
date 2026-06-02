@@ -31,6 +31,7 @@ test-unit:
 		tests/test_venue_eligibility.py \
 		tests/test_rds_repository.py \
 		tests/test_rds_store_contract.py \
+		tests/test_admin_config.py \
 		-v
 
 test-integration:
