@@ -175,3 +175,89 @@ live in `CLAUDE.md`.
 cs-server is built from source on EC2 via the `vibes_bot` CI/CD pipeline. A
 commit message containing `[FULL-RESTART]` triggers a rebuild. Use that marker
 only when a full service rebuild is intentional.
+
+## Connecting to RDS (DBeaver, no VPN)
+
+The RDS Postgres (system of record) has **no public endpoint** — it lives in a
+private subnet reachable only from the EC2's VPC. Engineers connect from their
+laptop by opening an **SSM port-forward** through the EC2, then pointing DBeaver
+at `localhost`. No VPN, no inbound DB rule, no IP allowlist. Full provisioning
+runbook: `infra/rds/README.md`.
+
+Prerequisites (one-time): AWS SSO profile configured (`aws sso login --profile
+<profile>`) and the `session-manager-plugin` installed locally.
+
+1. Get the endpoint and password (the password lives only in Secrets Manager —
+   never commit it):
+   ```bash
+   aws rds describe-db-instances --profile vibesense --region us-east-1 \
+     --query 'DBInstances[].Endpoint.Address' --output text          # RDS host
+   aws secretsmanager get-secret-value --profile vibesense --region us-east-1 \
+     --secret-id vibesense/rds/credentials --query SecretString --output text \
+     | python3 -c "import sys,json;d=json.load(sys.stdin);print('host=',d['host']);print('user=',d['user']);print('password=',d['password'])"
+   ```
+2. Open the tunnel on your laptop (leave this terminal running for the whole
+   session):
+   ```bash
+   # current values: --target i-0893fb6d283243480 (the "vibes-bot" instance)
+   #                 <rds-endpoint> = vibesense.cm1ie0s6iz4a.us-east-1.rds.amazonaws.com
+   aws ssm start-session --profile vibesense --region us-east-1 \
+     --target i-0893fb6d283243480 \
+     --document-name AWS-StartPortForwardingSessionToRemoteHost \
+     --parameters '{"host":["vibesense.cm1ie0s6iz4a.us-east-1.rds.amazonaws.com"],"portNumber":["5432"],"localPortNumber":["5432"]}'
+   ```
+   (The cs-server EC2 is the `vibes-bot` instance. If `localhost:5432` is taken,
+   use `"localPortNumber":["15432"]` and point DBeaver at `15432`.)
+3. DBeaver → new PostgreSQL connection: Host `localhost`, Port `5432`, Database
+   `vibesense`, Username `vibesense_admin`, Password (from step 1), **SSL tab →
+   Use SSL, mode `require`**. Test Connection routes laptop → EC2 → RDS.
+
+> Note: serving reads Redis, not RDS, so a hand-edit to a venue's `payload`
+> JSONB only reaches the app after a Redis projection — see the projection jobs
+> and `plans/redis_projection_decoupling_01_06_26.md`.
+
+## Operating cs-server on the EC2 (SSM shell)
+
+cs-server runs in a Docker container on the `vibes-bot` EC2. Get an interactive
+shell on the box with SSM (no SSH key needed; same prerequisites as above —
+`aws sso login` + `session-manager-plugin`):
+
+```bash
+# find the instance id (it's the "vibes-bot" instance):
+aws ec2 describe-instances --profile vibesense --region us-east-1 \
+  --filters "Name=tag:Name,Values=vibes-bot" "Name=instance-state-name,Values=running" \
+  --query 'Reservations[].Instances[].InstanceId' --output text
+# then open a shell (current instance: i-0893fb6d283243480 — re-check above if the box was replaced):
+aws ssm start-session --profile vibesense --region us-east-1 --target i-0893fb6d283243480
+```
+
+You land as `ssm-user`; `sudo docker ...` works. Container names:
+`vibes_bot-cs-server-1`, `vibes_bot-redis-1`, `vibes_bot-vibesbot-1`.
+
+Common commands:
+```bash
+# logs / health / env
+sudo docker logs --tail 100 vibes_bot-cs-server-1
+sudo docker inspect --format '{{.State.Health.Status}}' vibes_bot-cs-server-1
+sudo docker exec vibes_bot-cs-server-1 printenv | grep '^RDS_'
+
+# redis sanity (active venue count)
+sudo docker exec vibes_bot-redis-1 redis-cli ZCARD venues_geo_v1
+
+# admin jobs that are async-safe can use the HTTP trigger:
+sudo docker exec vibes_bot-cs-server-1 python -c \
+  "import urllib.request as u;print(u.urlopen(u.Request('http://localhost:8080/admin/trigger/<job>',method='POST'),timeout=10).read())"
+```
+
+> ⚠️ Do NOT run `backfill_rds` or `rebuild_redis` via the HTTP trigger. They are
+> **synchronous and block cs-server's event loop**, stalling `GET /v1/venues/nearby`
+> and `/health` for the whole run. Run them as a one-off process instead, which
+> doesn't touch the live server's loop:
+> ```bash
+> sudo docker exec -d vibes_bot-cs-server-1 sh -c \
+>   "python -c 'from app.config import Settings; from app.container import Container; print(Container(Settings()).redis_projection_service.rebuild_redis_from_rds())' > /tmp/rebuild.out 2>&1"
+> sudo docker exec vibes_bot-cs-server-1 cat /tmp/rebuild.out   # check when it finishes
+> ```
+> (Swap `rebuild_redis_from_rds()` for `backfill_rds_from_redis()` as needed.)
+> A scheduled, off-loop projector is planned in
+> `plans/redis_projection_decoupling_01_06_26.md`.

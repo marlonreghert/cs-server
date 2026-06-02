@@ -1,0 +1,68 @@
+%%{init: {'theme':'base','themeVariables':{'fontSize':'15px','primaryColor':'#1e293b','primaryTextColor':'#e2e8f0','lineColor':'#94a3b8','clusterBkg':'#111c30','clusterBorder':'#334155'},'flowchart':{'curve':'basis','nodeSpacing':38,'rankSpacing':75}}}%%
+flowchart LR
+  classDef src fill:#3b1f29,stroke:#fb7185,color:#fde2e7,stroke-width:1.5px;
+  classDef act fill:#0c2a33,stroke:#22d3ee,color:#cffafe,stroke-width:1.5px;
+  classDef art fill:#14241d,stroke:#34d399,color:#d1fae5,stroke-width:1.5px;
+  classDef filt fill:#3a1620,stroke:#f43f5e,color:#ffe4e6,stroke-width:2px;
+  classDef store fill:#2a2410,stroke:#fbbf24,color:#fef3c7,stroke-width:2px;
+
+  subgraph ING["1 · Ingest (BestTime is the source of truth)"]
+    BTF["BestTime<br/>/venues/filter"]:::src
+    BTI["BestTime<br/>/api/v1/venues<br/>(inventory · free)"]:::src
+    DED{{"F: de-dupe<br/>by id, then name"}}:::filt
+    CAP{{"F: monthly cap<br/>500 / reserve 10"}}:::filt
+    VEN["Venue<br/>id · name · address<br/>lat · lng · type · rating · price"]:::art
+    BORN{{"F: born-deprecate<br/>(eligibility HIGH)"}}:::filt
+  end
+
+  BTF -->|"raw venues"| DED -->|"unique"| CAP -->|"within budget"| VEN
+  BTI -->|"account venues"| VEN
+  VEN -->|"name + besttime_type"| BORN
+  BORN -->|"eligible"| R1[("Redis #1<br/>venues + geo index")]:::store
+  BORN -->|"junk"| DEP[("deprecated set<br/>(soft-deleted)")]:::filt
+
+  subgraph FC["2 · Forecasts (keyed by BestTime venue_id)"]
+    BTL["BestTime /forecasts/live<br/>every 5 min"]:::src
+    BTW["BestTime /forecasts/week/raw<br/>Sun 00:00"]:::src
+  end
+  R1 -->|"venue_id"| BTL
+  R1 -->|"venue_id"| BTW
+  BTL -->|"status OK + available"| LF[("LiveForecast")]:::art
+  BTL -.->|"not OK / unavailable"| DROPL{{"F: prune stale cache"}}:::filt
+  BTW -->|"day_raw x7"| WK[("WeekRaw / day")]:::art
+
+  subgraph GG["3 · Google Places enrichment (daily) — the search chain"]
+    GS["Google places:searchText<br/>query = name + address<br/>500m location bias"]:::act
+    GD["Google place details<br/>(VIBE_FIELDS_MASK)"]:::act
+  end
+  R1 -->|"name + address + coords"| GS
+  GS -->|"best match -> place_id"| GD
+  GD -->|"primaryType + ~20 booleans<br/>summary -> lgbtq keyword scan"| VA[("VibeAttributes<br/>google_primary_type")]:::art
+  GD -->|"weekdayDescriptions · openNow"| OH[("OpeningHours")]:::art
+  GD -->|"reviews (top 5)"| RV[("Reviews")]:::art
+  GD -->|"websiteUri = instagram.com/x<br/>(HEAD 200 check)"| IG[("VenueInstagram<br/>handle · conf 1.0")]:::art
+  GD -->|"businessStatus = CLOSED_PERMANENTLY"| CLP{{"F: soft-delete<br/>permanently closed"}}:::filt
+  CLP --> DEP
+
+  subgraph ELG["4 · Eligibility decision (google_primary_type cuts both ways)"]
+    EL{{"Eligibility<br/>block-list"}}:::filt
+  end
+  VA -->|"type IN blocked_google_types"| EL
+  VA -->|"good category =&gt; RESCUE<br/>name-keyword false positive"| EL
+  EL -->|"HIGH ineligible"| SW{{"F: sweep<br/>soft-delete"}}:::filt
+  SW --> DEP
+
+  subgraph SV["5 · Serve  GET /v1/venues/nearby  (Redis only)"]
+    SF1{{"F: drop deprecated<br/>(lifecycle != active)"}}:::filt
+    SF2{{"F: eligibility hide<br/>(HIGH only, uses google type)"}}:::filt
+    MRG["merge live + weekly<br/>sort live-first · minify"]:::act
+  end
+  R1 --> SF1
+  SF1 --> SF2 --> MRG
+  LF --> MRG
+  WK --> MRG
+  VA --> MRG
+  OH --> MRG
+  IG --> MRG
+  MRG --> OUT["MinifiedVenue<br/>+ display label/emoji (from google type)<br/>photos[:2] · hours · vibe_profile"]:::art
+  OUT ==>|"HTTP verbose=false (no reviews/menu)"| VB(["to vibes_bot pipeline (chart 3)"]):::src
