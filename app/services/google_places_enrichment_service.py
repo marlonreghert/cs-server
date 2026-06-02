@@ -37,6 +37,24 @@ logger = logging.getLogger(__name__)
 REQUESTS_PER_SECOND = 5
 REQUEST_DELAY = 1.0 / REQUESTS_PER_SECOND
 
+# Google Places API v1 returns priceLevel as an enum string. We persist it as
+# the 1-4 int the rest of the system (mobile PriceIndicator, scoring, etc.)
+# expects. PRICE_LEVEL_FREE / _UNSPECIFIED resolve to None — neither maps to
+# the 1-4 scale, and we'd rather leave the field empty than misrepresent.
+_PRICE_LEVEL_ENUM_TO_INT = {
+    "PRICE_LEVEL_INEXPENSIVE": 1,
+    "PRICE_LEVEL_MODERATE": 2,
+    "PRICE_LEVEL_EXPENSIVE": 3,
+    "PRICE_LEVEL_VERY_EXPENSIVE": 4,
+}
+
+
+def _price_level_to_int(value: Optional[str]) -> Optional[int]:
+    """Map Google's priceLevel enum string to our 1-4 int scale."""
+    if not value:
+        return None
+    return _PRICE_LEVEL_ENUM_TO_INT.get(value)
+
 
 class GooglePlacesEnrichmentService:
     """Service for enriching venues with Google Places API data.
@@ -65,6 +83,56 @@ class GooglePlacesEnrichmentService:
         # Counters for tracking closures during enrichment runs
         self._permanently_closed_in_run = 0
         self._temporarily_closed_in_run = 0
+
+    def _backfill_venue_review_signal(self, venue_id: str, details) -> None:
+        """Write Google's rating/userRatingCount/priceLevel onto the Venue.
+
+        The Venue model's `rating`, `reviews`, and `price_level` fields are
+        what the venue card UI reads. The BestTime venue_filter discovery
+        path populates them at ingestion; the inventory-sync path (added in
+        #18) does not. Without this backfill, ~720 inventory-synced venues
+        in prod (Praça Laura Nigro, Jockey Club, Barchef, …) stay null
+        forever even though Google has the data.
+
+        Reads only — no Google call here. Skips persistence when every
+        Google value is None (no-op upsert would still rewrite the venue).
+        Preserves any pre-existing non-null Venue value when Google returns
+        None for that specific field (don't blank out BestTime-sourced
+        data).
+        """
+        google_rating = details.rating
+        google_review_count = details.user_rating_count
+        google_price_int = _price_level_to_int(details.price_level)
+
+        if google_rating is None and google_review_count is None and google_price_int is None:
+            return
+
+        venue = self.venue_dao.get_venue(venue_id)
+        if venue is None:
+            logger.warning(
+                f"[GooglePlacesEnrichment] Cannot backfill review signal: "
+                f"venue {venue_id} not found"
+            )
+            return
+
+        changed = False
+        if google_rating is not None and venue.rating != google_rating:
+            venue.rating = google_rating
+            changed = True
+        if google_review_count is not None and venue.reviews != google_review_count:
+            venue.reviews = google_review_count
+            changed = True
+        if google_price_int is not None and venue.price_level != google_price_int:
+            venue.price_level = google_price_int
+            changed = True
+
+        if changed:
+            self.venue_dao.upsert_venue(venue)
+            logger.info(
+                f"[GooglePlacesEnrichment] Backfilled review signal for {venue_id}: "
+                f"rating={google_rating} reviews={google_review_count} "
+                f"price_level={google_price_int}"
+            )
 
     async def enrich_venue(
         self,
@@ -192,6 +260,13 @@ class GooglePlacesEnrichmentService:
                 logger.debug(
                     f"[GooglePlacesEnrichment] Stored {len(venue_reviews.reviews)} reviews for {venue_id}"
                 )
+
+            # Backfill Venue.rating / Venue.reviews / Venue.price_level from
+            # Google. The inventory-sync ingestion path (added in #18) creates
+            # venues with these fields null; without this step they stay null
+            # forever and the mobile card has no stars or price indicator
+            # even though Google has the data.
+            self._backfill_venue_review_signal(venue_id, details)
 
             # Extract Instagram handle from website URL if it's an Instagram link
             # This provides a free, high-confidence source before Apify fallback

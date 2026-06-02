@@ -145,6 +145,16 @@ class GooglePlacesDetailsResponse(BaseModel):
     # Reviews (raw dicts from Google Places API)
     reviews: Optional[list[dict]] = None
 
+    # Aggregate review signal — needed for the venue-card stars/count UI.
+    # These are written to Venue.rating / Venue.reviews / Venue.price_level
+    # by the enrichment service so inventory-synced venues (which never go
+    # through BestTime's venue_filter) still get review data populated.
+    rating: Optional[float] = None         # 0.0–5.0
+    user_rating_count: Optional[int] = None
+    # Google returns an enum string: PRICE_LEVEL_FREE / _INEXPENSIVE /
+    # _MODERATE / _EXPENSIVE / _VERY_EXPENSIVE. Mapped to 0-4 at write time.
+    price_level: Optional[str] = None
+
     def is_permanently_closed(self) -> bool:
         """Check if the place is permanently closed."""
         return self.business_status == "CLOSED_PERMANENTLY"
