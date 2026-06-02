@@ -127,19 +127,43 @@ is lost, all admin config is gone (no durable copy).
      byte-compatibility" pytest below guards this).
    - Reconcile the existing `/venues/eligibility-config` GET/POST to delegate to
      this service (so eligibility lands in RDS too) without dropping its validation.
-4. **Backfill** — `admin_config_backfill` admin job + `redis_projection_service`
-   (or a small dedicated function): scan `admin_config:*` in Redis, upsert each
-   into `admin.admin_config`. Idempotent. Wire into the admin jobs registry.
-5. **Budget config** — point `VenueBudgetService.get_quota_settings()`'s source
-   at the same mirror key (unchanged read path); the quota/reserve are set via the
-   generic config API now. Counter stays in Redis (DAO unchanged).
+4. **Backfill** — `admin_config_backfill` admin job: **generic `SCAN
+   admin_config:*`** in Redis → upsert each into `admin.admin_config`. Because it
+   scans by prefix, it **covers every key automatically** (no hardcoded list).
+   Idempotent; run as an **off-loop one-off** (`docker exec` building a `Container`,
+   like the venue backfill) so it never blocks serving. Wire into the admin jobs
+   registry too. Known keys it will pick up (cs-server + vibes_bot, enumerated from
+   `vibes_bot/app/admin/config_dao.py`): `venue_eligibility`, `discovery_points`,
+   `venue_monthly_budget`, `venue_photos_cache_ttl_days`, `feature_flags`,
+   `busyness_labels`, `vibe_translations`, `venue_blacklist`, `scoring_weights`,
+   `insights_thresholds`, `venue_types`, `similar_venues`, `hot_likes`, `weather`,
+   `busyness_prediction`, `vibe_modes`, `onboarding_timing`. (Whatever exists under
+   the prefix at run time is what migrates — self-adjusting.)
+   - **Backfill execution — who does what:**
+     - *Me (cs-server code):* implement `AdminConfigService` + endpoints + the
+       generic backfill, drive BDD/pytest green, and run the off-loop backfill via
+       `docker exec` (no serving impact); verify `count(admin.admin_config)` vs the
+       `admin_config:*` key count.
+     - *You (ops):* deploy the new cs-server code (it's a new SHA on
+       `marlonreghert/cs-server` main → a vibes_bot `[FULL-RESTART]` deploy picks
+       it up, same path as the cutover); then I trigger/run the backfill.
+     - *vibes_bot (companion, later):* repoint the admin panel to write config
+       through `/admin/config` so vibes_bot-owned keys become authoritative. Until
+       then those keys are a point-in-time snapshot (accepted — see Resolved #2).
+5. **Budget config → RDS + Redis sync (Resolved #1).** The budget *config*
+   (`monthly_quota`/`manual_reserve`, key `venue_monthly_budget`) is written
+   through the config API → RDS truth + Redis mirror, like every other key;
+   `VenueBudgetService.get_quota_settings()` keeps reading the Redis mirror
+   unchanged. The budget **counter** (atomic monthly INCR/DECR token-bucket) stays
+   in Redis — it is an operational concurrency primitive, not config, and self-heals
+   monthly.
 6. **Metrics/observability** — `admin_config_writes_total{key,result}`, reuse
    `rds_writes_total`; log RDS-write and mirror-write failures with key context
    (never log secret-ish values verbatim if any are added later).
-7. **Decoupling-plan reconciliation** — edit
-   `plans/redis_projection_decoupling_01_06_26.md` §C to state "config = synchronous
-   RDS-write-then-mirror carve-out (like engagement), not the projector" (the
-   projector iterates venues and cannot surface global config keys).
+7. **Decoupling-plan reconciliation — ✅ DONE** (PR #25):
+   `plans/redis_projection_decoupling_01_06_26.md` §C now states "config = synchronous
+   RDS-write-then-mirror carve-out (like engagement), owned by this plan, not the
+   projector"; `plans/rds_system_of_record_01_06_26.md` Phase 2 now points here.
 
 ## Data, Config, And API Impact
 - **DDL:** none — `admin.admin_config` already exists. (If delete should be
@@ -208,26 +232,21 @@ Manual / integration checks:
   counter is unaffected.
 
 ## Open Questions
-1. **Budget counter scope (recommend: keep in Redis).** Only the budget *config*
-   (quota/reserve) migrates here. The monthly *counter* is an atomic Redis
-   INCR/DECR token-bucket primitive on the manual-add hot path; moving it to RDS
-   changes concurrency semantics and adds a sync RDS call to that path. Recommend
-   leaving it in Redis (self-heals monthly; low durability value). Confirm, or
-   split it into its own follow-up.
-2. **vibes_bot-owned keys = snapshot until the companion.** Until the vibes_bot
-   admin panel writes through this API, vibes_bot still writes its keys (scoring,
-   busyness, flags, vibe modes, venue_types, blacklist, …) directly to Redis — so
-   the backfill of those keys is a **point-in-time snapshot** for durability/
-   visibility, not yet authoritative. Confirm the vibes_bot companion is planned
-   separately (it is, per the "full" scope decision) and that snapshotting them now
-   is acceptable.
-3. **Exact key inventory.** cs-server keys are known (eligibility,
-   discovery_points, venue_monthly_budget, venue_photos_cache_ttl_days). The
-   vibes_bot key list must be enumerated from `vibes_bot/app/admin/config_dao.py`
-   at execution time so the backfill covers them all.
-4. **Delete semantics.** Hard DELETE of a config row (assumed — config is
-   reproducible/admin-set) vs soft-delete with `deleted_at` (a DDL add). Default:
-   hard delete. Confirm. (Verified safe: the `venue_eligibility`,
-   `discovery_points`, `venue_photos_cache_ttl_days`, and `venue_monthly_budget`
-   readers all **default cleanly on a missing key**, so a delete surfaces as the
-   built-in default, not broken config.)
+**All resolved (2026-06-02, by user) — this plan is ready to `/execute-feature`.**
+1. **Budget — config to RDS, counter stays Redis.** The budget *config*
+   (quota/reserve, `venue_monthly_budget`) goes to RDS with Redis sync like every
+   other key (Impl §5). The monthly *counter* (atomic INCR/DECR token-bucket) stays
+   in Redis — operational concurrency primitive, not config, self-heals monthly.
+2. **Snapshot is acceptable.** vibes_bot-owned keys are backfilled as a
+   point-in-time snapshot (durability/visibility) and become authoritative only
+   when the vibes_bot companion repoints its panel through the API. A slightly
+   stale snapshot — and losing self-healing/minimal data (e.g. ephemeral cache
+   config that refills) — is explicitly OK.
+3. **Backfill is generic + autonomous.** It `SCAN admin_config:*` and upserts each
+   row, so it covers all keys automatically (full enumerated list in Impl §4 for
+   reference). I implement + run it off-loop; **you** deploy the new cs-server code
+   via a vibes_bot `[FULL-RESTART]`; the **vibes_bot** authoritative-write companion
+   is separate (Impl §4 "who does what").
+4. **Hard delete.** A config DELETE removes the RDS row + Redis mirror; verified
+   safe — `venue_eligibility`, `discovery_points`, `venue_photos_cache_ttl_days`,
+   and `venue_monthly_budget` readers all default cleanly on a missing key.
