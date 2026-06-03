@@ -125,32 +125,37 @@ class TestProjectionService:
 
 
 class TestPass2aReadParity:
-    """RDS-read path (rds_reads=True) must return models field-equal to the
-    Redis-read path. This is what catches reconstruction drift once pipelines
-    read RDS instead of the Redis projection."""
+    """The RDS-read path must return models field-equal to the Redis-read path.
+    This is what catches reconstruction drift now that pipelines read RDS instead
+    of the Redis projection."""
 
-    def _seed_full(self, repo):
-        # write-through populates BOTH RDS and Redis from the same objects
-        repo.upsert_venue(_venue())
-        repo.set_vibe_attributes(
-            VibeAttributes(venue_id="v1", google_place_id="p", google_primary_type="bar"))
-        repo.set_opening_hours(OpeningHours(venue_id="v1", weekday_descriptions=["Seg: 18-02"]))
-        repo.set_venue_reviews(VenueReviews(venue_id="v1", reviews=[
+    def _seed_full(self, *daos):
+        # Write the SAME object instances to every dao, so RDS and Redis hold
+        # byte-identical records (e.g. model-stamped `last_updated`). Writes are
+        # RDS-only now, so the two stores must be seeded explicitly.
+        def w(method, *args):
+            for d in daos:
+                getattr(d, method)(*args)
+        w("upsert_venue", _venue())
+        w("set_vibe_attributes",
+          VibeAttributes(venue_id="v1", google_place_id="p", google_primary_type="bar"))
+        w("set_opening_hours", OpeningHours(venue_id="v1", weekday_descriptions=["Seg: 18-02"]))
+        w("set_venue_reviews", VenueReviews(venue_id="v1", reviews=[
             VenueReview(author_name="A", rating=5, text="ok", relative_time="today")]))
-        repo.set_venue_instagram(VenueInstagram(
+        w("set_venue_instagram", VenueInstagram(
             venue_id="v1", instagram_handle="h", instagram_url="https://ig/h",
             status="found", confidence_score=1.0))
-        repo.set_venue_ig_posts(VenueInstagramPosts(
+        w("set_venue_ig_posts", VenueInstagramPosts(
             venue_id="v1", instagram_handle="h", posts=[InstagramPost(caption="hi")]))
-        repo.set_venue_menu_photos(VenueMenuPhotos(venue_id="v1", photos=[
+        w("set_venue_menu_photos", VenueMenuPhotos(venue_id="v1", photos=[
             MenuPhoto(photo_id="p1", s3_url="https://s3/m.jpg", s3_key="m.jpg")]))
-        repo.set_venue_menu_data(VenueMenuData(venue_id="v1", sections=[
+        w("set_venue_menu_data", VenueMenuData(venue_id="v1", sections=[
             MenuSection(name="Drinks", items=[MenuItem(name="Beer", prices=[{"price": 12}])])]))
-        repo.set_venue_vibe_profile(VenueVibeProfile(
+        w("set_venue_vibe_profile", VenueVibeProfile(
             venue_id="v1", top_vibes=["animado"], overall_confidence=0.9))
-        repo.set_venue_photos("v1", [{"url": "https://p/1.jpg", "author_name": "A"}])
-        repo.set_week_raw_forecast("v1", WeekRawDay(day_int=0, day_raw=[50] * 24))
-        repo.set_live_forecast(LiveForecastResponse(
+        w("set_venue_photos", "v1", [{"url": "https://p/1.jpg", "author_name": "A"}])
+        w("set_week_raw_forecast", "v1", WeekRawDay(day_int=0, day_raw=[50] * 24))
+        w("set_live_forecast", LiveForecastResponse(
             status="OK", venue_info=VenueInfo(venue_id="v1"),
             analysis=Analysis(venue_live_busyness=42, venue_live_busyness_available=True)))
 
@@ -158,9 +163,10 @@ class TestPass2aReadParity:
         store = InMemoryRdsVenueStore()
         geo = _geo()
         redis_only = RedisVenueDAO(geo)
-        write_through = VenueRepository(geo, rds_store=store, rds_reads=False)
-        self._seed_full(write_through)
-        rds_reader = VenueRepository(geo, rds_store=store, rds_reads=True)
+        rds_reader = VenueRepository(geo, rds_store=store)
+        # Seed Redis (projection) and RDS (truth) from identical objects, so the
+        # RDS-reconstructed reads must field-match the Redis reads.
+        self._seed_full(redis_only, rds_reader)
 
         def _eq(getter, *args):
             r = getattr(redis_only, getter)(*args)
@@ -183,21 +189,12 @@ class TestPass2aReadParity:
         assert set(rds_reader.list_active_venue_ids()) == set(redis_only.list_active_venue_ids()) == {"v1"}
         assert {v.venue_id for v in rds_reader.list_all_venues()} == {"v1"}
 
-    def test_flag_off_reads_redis(self):
-        # rds_reads=False must read Redis even when RDS holds a different value.
-        store = InMemoryRdsVenueStore()
-        geo = _geo()
-        repo = VenueRepository(geo, rds_store=store, rds_reads=False)
-        repo.upsert_venue(_venue(name="Redis Name"))
-        store.venues["v1"]["payload"]["venue_name"] = "RDS Only Name"  # diverge RDS
-        assert repo.get_venue("v1").venue_name == "Redis Name"  # read Redis, not RDS
-
     def test_write_guard_holds_when_reads_are_rds(self):
-        # With rds_reads=True the write path's internal self.get_venue reads RDS;
-        # an active re-add of a deprecated venue must still not resurrect it.
+        # The write path's internal self.get_venue reads RDS; an active re-add of
+        # a deprecated venue must still not resurrect it.
         store = InMemoryRdsVenueStore()
         geo = _geo()
-        repo = VenueRepository(geo, rds_store=store, rds_reads=True)
+        repo = VenueRepository(geo, rds_store=store)
         repo.upsert_venue(_venue())
         repo.soft_delete_venue("v1", "ineligible_google_type", "eligibility_filter")
         repo.upsert_venue(_venue(name="Re-added Active"))  # active re-add
@@ -205,20 +202,20 @@ class TestPass2aReadParity:
         assert "v1" not in store.list_active_venue_ids()
 
     def test_serving_dao_never_reads_rds(self):
-        # A plain RedisVenueDAO (serving_dao) is unaffected by RDS — reads Redis.
-        store = InMemoryRdsVenueStore()
+        # The serving DAO is a plain RedisVenueDAO — reads/writes Redis, no RDS.
         geo = _geo()
         serving = RedisVenueDAO(geo)
-        VenueRepository(geo, rds_store=store).upsert_venue(_venue())
+        serving.upsert_venue(_venue())
         assert serving.get_venue("v1") is not None
         assert not hasattr(serving, "rds_store")
 
 
 class TestPass2bWritesOnly:
-    """rds_writes_only: writes persist ONLY to RDS (projector is sole Redis writer)."""
+    """With RDS enabled, writes persist ONLY to RDS (the projector is the sole
+    Redis writer)."""
 
     def _repo(self, geo, store):
-        return VenueRepository(geo, rds_store=store, rds_reads=True, rds_writes_only=True)
+        return VenueRepository(geo, rds_store=store)
 
     def test_upsert_writes_rds_not_redis(self):
         store, geo, redis_only = InMemoryRdsVenueStore(), _geo(), None
@@ -263,13 +260,6 @@ class TestPass2bWritesOnly:
         repo.delete_live_forecast("v1")
         assert store.get_live_forecast("v1") is None  # section-E gap closed
 
-    def test_flag_off_still_write_through(self):
-        store, geo = InMemoryRdsVenueStore(), _geo()
-        redis_only = RedisVenueDAO(geo)
-        repo = VenueRepository(geo, rds_store=store, rds_reads=False, rds_writes_only=False)
-        repo.upsert_venue(_venue())
-        assert store.get_venue("v1") is not None and redis_only.get_venue("v1") is not None
-
     def test_set_google_business_status_routes_to_rds(self):
         # Section E: set_google_business_status routes through the overridden
         # get_venue + upsert_venue, so it persists to RDS and (writes-only) never
@@ -284,10 +274,10 @@ class TestPass2bWritesOnly:
 
 
 class TestPass2bGating:
-    """rds_writes_only: cache-freshness gating reads RDS (status-aware staleness)."""
+    """With RDS enabled, cache-freshness gating reads RDS (status-aware staleness)."""
 
     def _repo(self, geo, store):
-        return VenueRepository(geo, rds_store=store, rds_reads=True, rds_writes_only=True)
+        return VenueRepository(geo, rds_store=store)
 
     def _age(self, store, table, vid, days):
         store.enrichment[table][vid]["updated_at"] = (
@@ -326,24 +316,6 @@ class TestPass2bGating:
         fresh = set(repo.list_cached_instagram_venue_ids())
         assert "v1" in fresh       # found: fresh within 30d
         assert "v2" not in fresh   # not_found: stale past 7d
-
-    def test_flag_off_gating_reads_redis(self):
-        store, geo = InMemoryRdsVenueStore(), _geo()
-        repo = VenueRepository(geo, rds_store=store, rds_reads=True, rds_writes_only=False)
-        repo.set_venue_photos("v1", [{"url": "u"}])  # write-through projects Redis
-        assert "v1" in set(repo.list_cached_venue_photos_ids())  # from Redis SCAN
-
-    def test_instagram_fresh_set_flag_off_matches_redis_presence(self):
-        # The dual-purpose split must be behavior-identical flag-off: a venue with
-        # a non-expired Redis instagram key is exactly the get_venue_instagram set.
-        store, geo = InMemoryRdsVenueStore(), _geo()
-        repo = VenueRepository(geo, rds_store=store, rds_writes_only=False)
-        repo.upsert_venue(_venue())
-        repo.set_venue_instagram(VenueInstagram(
-            venue_id="v1", instagram_handle="h", status="found", confidence_score=1.0))
-        fresh = set(repo.list_cached_instagram_venue_ids())
-        present_as_data = repo.get_venue_instagram("v1") is not None
-        assert ("v1" in fresh) and present_as_data
 
 
 class TestEngagementPseudonymization:

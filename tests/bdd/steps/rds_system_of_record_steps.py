@@ -1,8 +1,10 @@
 """Behave steps for tests/bdd/persistence/rds_system_of_record.feature.
 
 Runs against the in-memory fake RdsVenueStore wired by environment.py
-(context.repository = write-through, context.rds_store = fake truth,
-context.redis_only_dao = Redis-only projection reader/writer).
+(context.repository = RDS-only repository, context.rds_store = fake truth,
+context.redis_only_dao = Redis-only projection reader/writer). Writes land in
+RDS; "the Redis projector runs" projects them to Redis (no synchronous
+write-through).
 """
 from __future__ import annotations
 
@@ -16,7 +18,6 @@ from app.models.opening_hours import OpeningHours
 from app.models.venue_review import VenueReview, VenueReviews
 from app.models.vibe_attributes import VibeAttributes
 from app.models.vibe_profile import VenueVibeProfile
-from app.dao.redis_venue_dao import VENUE_PHOTOS_KEY_FORMAT
 
 _LAT, _LNG, _R = -8.05, -34.88, 1.0
 _VA = "google_places.vibe_attributes"
@@ -99,7 +100,8 @@ def step_nearby_includes(context, vid):
 
 @given('a venue "{vid}" exists in RDS and Redis')
 def step_seed_venue(context, vid):
-    context.repository.upsert_venue(_venue(vid))
+    context.repository.upsert_venue(_venue(vid))       # RDS truth (RDS-only write)
+    context.redis_only_dao.upsert_venue(_venue(vid))   # Redis projection
     context.vid = vid
 
 
@@ -354,36 +356,3 @@ def step_history_appends(context, vid):
     before = context.rds_store.history_count(_VA, vid)
     context.repository.set_vibe_attributes(_vibe(vid, "pub"))
     assert context.rds_store.history_count(_VA, vid) > before
-
-
-# ── photos non-regression ─────────────────────────────────────────────────────
-@given('a venue "{vid}" whose photos are persisted in RDS and projected to Redis with a TTL')
-def step_photos_persisted(context, vid):
-    context.repository.upsert_venue(_venue(vid))
-    context.repository.set_venue_photos(vid, [{"url": "https://old/1.jpg", "author_name": "A"}])
-    context.vid = vid
-
-
-@when('the venue photos TTL expires in Redis')
-def step_photos_ttl_expire(context):
-    # TTL expiry == Redis key gone. RDS copy is retained.
-    context.fake_redis.delete(VENUE_PHOTOS_KEY_FORMAT.format(context.vid))
-
-
-@then('the photo refetch trigger sees "{vid}" as missing photos using Redis only')
-def step_refetch_trigger_redis(context, vid):
-    assert vid not in set(context.redis_only_dao.list_cached_venue_photos_ids())
-
-
-@then('the photo enrichment job refetches fresh Google photo URLs for "{vid}"')
-def step_refetch_fresh(context, vid):
-    context.repository.set_venue_photos(vid, [{"url": "https://fresh/1.jpg", "author_name": "A"}])
-    photos = context.redis_only_dao.get_venue_photos(vid)
-    assert photos and photos[0]["url"] == "https://fresh/1.jpg"
-
-
-@then('RDS is never consulted to decide whether photos need refetching')
-def step_rds_not_consulted(context):
-    # The refetch trigger uses Redis (list_cached_venue_photos_ids); RDS still
-    # holds photos, proving RDS presence does not suppress refetch.
-    assert context.rds_store.get_enrichment("google_places.photos", context.vid) is not None

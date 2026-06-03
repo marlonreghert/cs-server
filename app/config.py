@@ -108,27 +108,12 @@ class Settings(BaseSettings):
     engagement_pseudonymization_key: str = ""
 
     # Redis projection decoupling (plans/redis_projection_decoupling_01_06_26.md).
-    # When enabled, a scheduled off-loop projector re-asserts the Redis serving
-    # projection from RDS (incl. removing venues deprecated in RDS and counting
-    # the photo cache TTL down). Default off = today's synchronous write-through
-    # is the only Redis writer. Pass 1 runs the projector ALONGSIDE write-through;
-    # the pipelines-RDS-only flip is Pass 2.
-    redis_projection_enabled: bool = False
+    # With RDS enabled, a scheduled off-loop projector is the sole Redis writer for
+    # pipeline data: it re-asserts the Redis serving projection from RDS (removing
+    # venues deprecated in RDS and counting the photo cache TTL down). Pipelines
+    # write RDS-only and read their inputs/gating from RDS. This is the interval
+    # the projector runs on (a cadence knob, not a transitional flag).
     redis_projection_minutes: int = 2
-    # Pass 2a: pipelines READ their data inputs from RDS (truth) instead of the
-    # Redis projection, so a later pipeline stage sees an earlier stage's output
-    # without waiting for the projector. Write-through stays ON and cache-freshness
-    # gating stays Redis at this stage (the RDS-only write flip + gating move is
-    # Pass 2b). Default off = today's Redis reads. Serving always reads Redis.
-    rds_pipeline_reads: bool = False
-    # Pass 2b: pipelines write ONLY RDS (the synchronous Redis projection is
-    # dropped from the write path) and read their cache-freshness gating from RDS,
-    # so the scheduled projector becomes the sole Redis writer for pipeline data
-    # (the REFRAME end-state). Default off = today's write-through (rollback path).
-    # ORDERING: this REQUIRES rds_pipeline_reads — writing RDS-only while reading a
-    # Redis no longer fed by pipelines (only projector-lagged) breaks cross-stage
-    # read-after-write. The container forces reads on whenever this is on.
-    rds_pipeline_writes_only: bool = False
 
     @property
     def rds_sqlalchemy_url(self) -> str:

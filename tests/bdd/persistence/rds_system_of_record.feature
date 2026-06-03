@@ -16,6 +16,7 @@ Feature: RDS as the system of record with Redis serving projection
   # ── Write-through: RDS is truth, Redis is the projection ──────────────────
   Scenario: A pipeline venue upsert lands in RDS and projects to Redis
     When a pipeline upserts a venue "v1" named "Bar do Zé"
+    And the Redis projector runs
     Then RDS holds venue "v1" as the system of record
     And Redis holds the serving projection for venue "v1"
     And the venue "v1" is returned by nearby serving
@@ -23,6 +24,7 @@ Feature: RDS as the system of record with Redis serving projection
   Scenario: Enrichment outputs are persisted to RDS and projected to Redis
     Given a venue "v1" exists in RDS and Redis
     When the pipelines persist google places, instagram, photos, reviews, opening hours, menu, vibe profile, and weekly forecast for "v1"
+    And the Redis projector runs
     Then RDS holds each of those records for "v1"
     And the Redis serving projection for "v1" includes every field the nearby response reads
 
@@ -30,6 +32,7 @@ Feature: RDS as the system of record with Redis serving projection
   Scenario: Live busyness is written to RDS and projected to Redis
     Given a venue "v1" exists in RDS and Redis
     When the live forecast refresh stores live busyness for "v1"
+    And the Redis projector runs
     Then RDS holds the current live busyness for "v1"
     And Redis holds the live busyness for "v1" for serving
 
@@ -37,6 +40,7 @@ Feature: RDS as the system of record with Redis serving projection
   Scenario: Eligibility soft-delete persists the rejection reason in RDS
     Given a venue "v1" exists in RDS and Redis
     When the eligibility sweep soft-deletes "v1" with reason "ineligible_google_type"
+    And the Redis projector runs
     Then RDS records "v1" as deprecated with reason "ineligible_google_type" and source "eligibility_filter"
     And the venue "v1" is excluded from nearby serving
 
@@ -98,11 +102,3 @@ Feature: RDS as the system of record with Redis serving projection
     Then RDS still holds the label record marked soft-deleted with a timestamp
     And the prior label values are recoverable from the enrichment history
     And re-enriching "v1" appends a new history entry without losing the old one
-
-  # ── Google photos freshness survives migration (non-regression) ───────────
-  Scenario: Stale Google photo URLs still refresh on the cache TTL after migration
-    Given a venue "v1" whose photos are persisted in RDS and projected to Redis with a TTL
-    When the venue photos TTL expires in Redis
-    Then the photo refetch trigger sees "v1" as missing photos using Redis only
-    And the photo enrichment job refetches fresh Google photo URLs for "v1"
-    And RDS is never consulted to decide whether photos need refetching
