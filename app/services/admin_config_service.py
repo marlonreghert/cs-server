@@ -58,7 +58,7 @@ class AdminConfigService:
         """Return the live value from the Redis mirror (kept in sync with RDS for
         owned keys, and the fresh authoritative value for keys still written
         directly to Redis until the vibes_bot companion). Falls back to the
-        durable RDS value if the mirror is absent (e.g. pre-backfill)."""
+        durable RDS value if the mirror is absent (e.g. if it was evicted)."""
         raw = self.redis.get(self._redis_key(key))
         if raw is not None:
             try:
@@ -86,28 +86,3 @@ class AdminConfigService:
             for k in self.redis.scan_iter(match=f"{ADMIN_CONFIG_PREFIX}*")
         ]
 
-    def backfill_from_redis(self) -> dict:
-        """One-time import: every Redis `admin_config:*` key -> `admin.admin_config`.
-
-        Generic prefix scan, so it covers all keys (cs-server + vibes_bot)
-        automatically. Idempotent (upsert). Tiny (~tens of keys), so it is safe to
-        run in-process unlike the venue backfill.
-        """
-        if self.rds_store is None:
-            raise ValueError("RDS not enabled (set rds_enabled=true)")
-        summary = {"keys": 0, "errors": 0}
-        for redis_key in self.redis.scan_iter(match=f"{ADMIN_CONFIG_PREFIX}*"):
-            key = redis_key[len(ADMIN_CONFIG_PREFIX):]
-            raw = self.redis.get(redis_key)
-            try:
-                value = json.loads(raw)
-            except (TypeError, ValueError):
-                value = raw
-            try:
-                self.rds_store.upsert_admin_config(key, value, "backfill")
-                summary["keys"] += 1
-            except Exception as e:
-                summary["errors"] += 1
-                logger.warning(f"[AdminConfigBackfill] key '{key}' failed: {e}")
-        logger.info(f"[AdminConfigBackfill] {summary}")
-        return summary

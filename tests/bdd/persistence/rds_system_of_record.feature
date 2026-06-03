@@ -44,15 +44,7 @@ Feature: RDS as the system of record with Redis serving projection
     Then RDS records "v1" as deprecated with reason "ineligible_google_type" and source "eligibility_filter"
     And the venue "v1" is excluded from nearby serving
 
-  # ── Admin config resolves from RDS, mirrored to Redis ─────────────────────
-  @wip
-  Scenario: Admin configuration is stored in RDS and mirrored to Redis
-    When an admin updates the venue eligibility configuration
-    Then RDS holds the updated eligibility configuration as the system of record
-    And the configuration is mirrored to Redis for the existing config readers
-    And the running eligibility filter reflects the updated configuration
-
-  # ── Redis is reconstructable from RDS (backfill / disaster recovery) ───────
+  # ── Redis is reconstructable from RDS (disaster recovery) ──────────────────
   Scenario: Rebuilding Redis from RDS restores serving including the geo index
     Given RDS holds venues, enrichment records, and admin config
     And Redis has been flushed
@@ -69,15 +61,6 @@ Feature: RDS as the system of record with Redis serving projection
     Then the venue "v1" is still returned from Redis
     When a pipeline attempts to persist an update for "v1"
     Then the write fails and is logged without corrupting the Redis projection
-
-  # ── Backfill the existing Redis dataset into RDS ──────────────────────────
-  Scenario: The one-time backfill imports the existing Redis dataset into RDS
-    Given Redis already contains venues and enrichment records from before RDS
-    And RDS is empty
-    When the one-time Redis-to-RDS backfill runs
-    Then RDS holds every venue and enrichment record that Redis contained
-    And venue rows are inserted before their enrichment rows
-    And serving behavior is unchanged for those venues
 
   # ── User engagement: write through API, read from Redis ───────────────────
   Scenario: A favorite written through the API lands in RDS pseudonymized and projects to Redis

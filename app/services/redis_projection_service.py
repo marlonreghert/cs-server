@@ -1,12 +1,10 @@
-"""Rebuild Redis from RDS, and one-time backfill RDS from Redis.
+"""Rebuild the Redis serving projection from RDS.
 
-- rebuild_redis_from_rds(): RDS -> Redis projection for every active venue,
-  INCLUDING the geo index (via redis_only_dao.upsert_venue -> GEOADD) and live
-  busyness. This is disaster recovery + Redis warm. Photos are projected with
-  their remaining TTL so expired Google URLs refetch instead of serving stale.
-- backfill_rds_from_redis(): one-time import of the existing Redis dataset into
-  RDS by re-running each record through the RDS repository (venues first,
-  satisfying the FK order). Idempotent.
+rebuild_redis_from_rds(): RDS -> Redis projection for every active venue,
+INCLUDING the geo index (via redis_only_dao.upsert_venue -> GEOADD) and live
+busyness. This is the scheduled projector body (and manual disaster recovery /
+Redis warm). Photos are projected with their remaining TTL so expired Google
+URLs refetch instead of serving stale.
 """
 from __future__ import annotations
 
@@ -50,19 +48,6 @@ def _age_seconds(updated_at) -> Optional[float]:
     return (datetime.now(timezone.utc) - ts).total_seconds()
 
 
-# Redis getter <-> repository setter pairs for the "model in / model out" types
-# used by backfill. (venue, photos, weekly, live are handled specially.)
-_MODEL_PAIRS = [
-    ("get_vibe_attributes", "set_vibe_attributes"),
-    ("get_opening_hours", "set_opening_hours"),
-    ("get_venue_reviews", "set_venue_reviews"),
-    ("get_venue_instagram", "set_venue_instagram"),
-    ("get_venue_ig_posts", "set_venue_ig_posts"),
-    ("get_venue_menu_photos", "set_venue_menu_photos"),
-    ("get_venue_menu_data", "set_venue_menu_data"),
-    ("get_venue_vibe_profile", "set_venue_vibe_profile"),
-]
-
 # RDS enrichment table_key -> (model class, redis-only setter name) for rebuild.
 _REBUILD_MODELS = {
     "google_places.vibe_attributes": (VibeAttributes, "set_vibe_attributes"),
@@ -77,43 +62,9 @@ _REBUILD_MODELS = {
 
 
 class RedisProjectionService:
-    def __init__(self, repository, redis_only_dao, rds_store):
-        self.repository = repository          # RDS-only writer (Redis via projector)
+    def __init__(self, redis_only_dao, rds_store):
         self.redis_only_dao = redis_only_dao  # Redis-only projection writer
         self.rds_store = rds_store
-
-    # ── backfill: Redis -> RDS (one-time) ─────────────────────────────────────
-    def backfill_rds_from_redis(self) -> dict:
-        summary = {"venues": 0, "enrichment": 0, "errors": 0}
-        venues = self.redis_only_dao.list_all_venues()
-        for venue in venues:  # venues first -> FK order satisfied
-            try:
-                self.repository.upsert_venue(venue)
-                summary["venues"] += 1
-            except Exception as e:
-                summary["errors"] += 1
-                logger.warning(f"[Backfill] venue {venue.venue_id} failed: {e}")
-                continue
-            vid = venue.venue_id
-            for getter, setter in _MODEL_PAIRS:
-                obj = getattr(self.redis_only_dao, getter)(vid)
-                if obj is not None:
-                    getattr(self.repository, setter)(obj)
-                    summary["enrichment"] += 1
-            photos = self.redis_only_dao.get_venue_photos(vid)
-            if photos:
-                self.repository.set_venue_photos(vid, photos)
-                summary["enrichment"] += 1
-            for day_int in range(7):
-                day = self.redis_only_dao.get_week_raw_forecast(vid, day_int)
-                if day is not None:
-                    self.repository.set_week_raw_forecast(vid, day)
-                    summary["enrichment"] += 1
-            live = self.redis_only_dao.get_live_forecast(vid)
-            if live is not None:
-                self.repository.set_live_forecast(live)
-        logger.info(f"[Backfill] {summary}")
-        return summary
 
     # ── rebuild: RDS -> Redis (incl. geo index + live busyness) ───────────────
     def rebuild_redis_from_rds(self) -> dict:

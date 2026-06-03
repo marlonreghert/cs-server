@@ -124,44 +124,6 @@ def step_reader_default(context):
     assert context.admin_config_service.get(context.cfg_key) is None
 
 
-# ── backfill ────────────────────────────────────────────────────────────────
-@given("Redis already contains admin_config keys written before RDS ownership")
-def step_seed_redis_only_config(context):
-    # Written straight to Redis (pre-RDS state) — NOT through the service.
-    context.preexisting = {
-        "scoring_weights": {"distance": 0.5, "vibe": 0.5},
-        "feature_flags": {"hot_likes": True},
-        "venue_photos_cache_ttl_days": 5,
-    }
-    for key, value in context.preexisting.items():
-        context.fake_redis.set(f"{ADMIN_CONFIG_PREFIX}{key}", json.dumps(value))
-
-
-@given("RDS holds no admin configuration")
-def step_rds_no_admin_config(context):
-    assert context.rds_store.list_admin_config() == []
-
-
-@when("the one-time admin-config backfill runs")
-def step_run_config_backfill(context):
-    context.backfill_summary = context.admin_config_service.backfill_from_redis()
-
-
-@then("RDS holds every admin_config key that Redis contained")
-def step_rds_has_all(context):
-    for key, value in context.preexisting.items():
-        row = context.rds_store.get_admin_config(key)
-        assert row is not None, f"RDS missing backfilled {key}"
-        assert row["value"] == value
-
-
-@then("the Redis mirror values are unchanged for the existing readers")
-def step_mirror_unchanged_backfill(context):
-    for key, value in context.preexisting.items():
-        raw = context.fake_redis.get(f"{ADMIN_CONFIG_PREFIX}{key}")
-        assert raw is not None and json.loads(raw) == value
-
-
 # ── partial-failure (mirror fails after RDS commit) ─────────────────────────
 @given("RDS is writable and the Redis mirror write will fail")
 def step_mirror_will_fail(context):

@@ -235,44 +235,6 @@ def step_write_failed_clean(context):
     assert context.redis_only_dao.get_venue(context.vid).venue_name == "Bar X"
 
 
-# ── backfill ──────────────────────────────────────────────────────────────────
-@given("Redis already contains venues and enrichment records from before RDS")
-def step_redis_only_seed(context):
-    # Write via the Redis-only DAO so RDS stays empty (pre-RDS state).
-    context.redis_only_dao.upsert_venue(_venue("v1"))
-    context.redis_only_dao.set_vibe_attributes(_vibe("v1"))
-    context.redis_only_dao.set_live_forecast(_live("v1"))
-    context.vid = "v1"
-
-
-@given("RDS is empty")
-def step_rds_empty(context):
-    assert context.rds_store.get_venue("v1") is None
-
-
-@when("the one-time Redis-to-RDS backfill runs")
-def step_backfill(context):
-    context.redis_projection_service.backfill_rds_from_redis()
-
-
-@then('RDS holds every venue and enrichment record that Redis contained')
-def step_backfilled(context):
-    assert context.rds_store.get_venue("v1") is not None
-    assert context.rds_store.get_enrichment(_VA, "v1") is not None
-
-
-@then("venue rows are inserted before their enrichment rows")
-def step_fk_order(context):
-    # Enrichment present implies its venue row exists (FK satisfied by ordering).
-    assert context.rds_store.get_venue("v1") is not None
-    assert context.rds_store.get_enrichment(_VA, "v1") is not None
-
-
-@then("serving behavior is unchanged for those venues")
-def step_serving_unchanged(context):
-    assert "v1" in _nearby_ids(context)
-
-
 # ── engagement ────────────────────────────────────────────────────────────────
 @when('user "{uid}" favorites venue "{vid}" through the engagement API')
 def step_favorite(context, uid, vid):

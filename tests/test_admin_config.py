@@ -96,7 +96,7 @@ def test_eligibility_value_is_byte_compatible_with_reader():
     assert "pharmacy" in cfg.blocked_google_types
 
 
-# ── service: delete + backfill ───────────────────────────────────────────────
+# ── service: delete ──────────────────────────────────────────────────────────
 def test_delete_removes_rds_and_mirror():
     svc, r, store = _svc()
     svc.set("k", {"v": 1})
@@ -104,26 +104,6 @@ def test_delete_removes_rds_and_mirror():
     assert store.get_admin_config("k") is None
     assert r.get("admin_config:k") is None
     assert svc.get("k") is None
-
-
-def test_backfill_imports_all_keys_and_is_idempotent():
-    svc, r, store = _svc()
-    r.set("admin_config:scoring_weights", json.dumps({"a": 1}))
-    r.set("admin_config:feature_flags", json.dumps({"x": True}))
-    r.set("admin_config:venue_photos_cache_ttl_days", "5")
-    summary = svc.backfill_from_redis()
-    assert summary == {"keys": 3, "errors": 0}
-    assert store.get_admin_config("scoring_weights")["value"] == {"a": 1}
-    assert store.get_admin_config("venue_photos_cache_ttl_days")["value"] == 5
-    # idempotent re-run; mirror unchanged
-    assert svc.backfill_from_redis() == {"keys": 3, "errors": 0}
-    assert json.loads(r.get("admin_config:feature_flags")) == {"x": True}
-
-
-def test_backfill_requires_rds():
-    svc, _, _ = _svc(rds=False)
-    with pytest.raises(ValueError):
-        svc.backfill_from_redis()
 
 
 # ── HTTP endpoint mapping ────────────────────────────────────────────────────

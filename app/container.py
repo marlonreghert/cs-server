@@ -321,14 +321,13 @@ class Container:
         self.venue_handler = VenueHandler(self.redis_only_dao)
 
         # Engagement (favorites/hot_likes) write-through API service, and the
-        # Redis<->RDS projection service (rebuild from RDS / one-time backfill).
+        # projection service that rebuilds the Redis serving projection from RDS.
         self.engagement_service = EngagementService(
             redis_client=self.redis_client.client,
             rds_store=self.rds_store,
             pseudonymization_key=settings.engagement_pseudonymization_key,
         )
         self.redis_projection_service = RedisProjectionService(
-            repository=self.redis_venue_dao,
             redis_only_dao=self.redis_only_dao,
             rds_store=self.rds_store,
         )

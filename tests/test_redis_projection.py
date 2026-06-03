@@ -14,7 +14,6 @@ import fakeredis
 from app.config import settings
 from app.db.geo_redis_client import GeoRedisClient
 from app.dao.redis_venue_dao import RedisVenueDAO, VENUE_PHOTOS_KEY_FORMAT
-from app.dao.venue_repository import VenueRepository
 from app.models import Venue
 from app.services.redis_projection_service import RedisProjectionService, _age_seconds
 from tests.rds_fake import InMemoryRdsVenueStore
@@ -33,8 +32,7 @@ def _setup():
     geo = GeoRedisClient(fake)
     redis_only = RedisVenueDAO(geo)
     store = InMemoryRdsVenueStore()
-    repo = VenueRepository(geo, rds_store=store)
-    svc = RedisProjectionService(repo, redis_only, store)
+    svc = RedisProjectionService(redis_only, store)
     return fake, redis_only, store, svc
 
 
