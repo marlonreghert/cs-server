@@ -153,13 +153,13 @@ class RdsVenueStore:
 
     def list_all_venue_payloads(self) -> list[dict]:
         """Every venue payload (active + deprecated) — backs the pipeline
-        list_all_venues RDS read (Pass 2a)."""
+        list_all_venues RDS read."""
         with self.engine.connect() as conn:
             return [r[0] for r in conn.execute(text(
                 "SELECT payload FROM venues.venue"
             ))]
 
-    # ── pipeline cache-freshness gating from RDS (Pass 2b) ─────────────────────
+    # ── pipeline cache-freshness gating from RDS ───────────────────────────────
     def list_fresh_enrichment_venue_ids(self, table_key, max_age_seconds=None) -> list[str]:
         """Venue ids whose enrichment of `table_key` is present (not soft-deleted)
         and, if max_age_seconds is given, newer than that age — the RDS equivalent

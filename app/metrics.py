@@ -384,7 +384,7 @@ BACKGROUND_JOB_LAST_RUN_TIMESTAMP = Gauge(
     ["job_name"],
 )
 
-# Redis projection (RDS -> Redis off-loop projector; decoupling Pass 1).
+# Redis projection (RDS -> Redis off-loop projector).
 # Run counts/duration use BACKGROUND_JOB_* with job_name="redis_projection";
 # these add projection-specific observability.
 REDIS_PROJECTION_VENUES = Gauge(

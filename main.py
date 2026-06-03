@@ -304,7 +304,7 @@ async def run_redis_projection_job():
     B0 — runs OFF the serving event loop via run_in_executor. The projection body
     is synchronous + blocking (SQLAlchemy + Redis); running it inline on the
     AsyncIOScheduler loop would stall GET /v1/venues/nearby and /health for the
-    whole run (observed when the cutover backfill blocked serving). The projector
+    whole run (observed when a blocking projection stalled serving). The projector
     removes venues deprecated in RDS (B1) and counts the photo cache TTL down
     (B2). Runs whenever RDS is enabled (it is the sole Redis writer for pipeline
     data).

@@ -92,20 +92,6 @@ class TestNeverDelete:
 
 
 class TestProjectionService:
-    def test_backfill_is_idempotent_and_venue_first(self):
-        store = InMemoryRdsVenueStore()
-        geo = _geo()
-        redis_only = RedisVenueDAO(geo)
-        repo = VenueRepository(geo, rds_store=store)
-        # pre-RDS Redis-only state
-        redis_only.upsert_venue(_venue())
-        redis_only.set_vibe_attributes(VibeAttributes(venue_id="v1", google_primary_type="bar"))
-        svc = RedisProjectionService(repo, redis_only, store)
-        svc.backfill_rds_from_redis()
-        svc.backfill_rds_from_redis()  # idempotent re-run
-        assert store.get_venue("v1") is not None
-        assert store.get_enrichment(_VA, "v1") is not None
-
     def test_rebuild_restores_geo_and_live(self):
         store = InMemoryRdsVenueStore()
         geo = _geo()
@@ -117,7 +103,7 @@ class TestProjectionService:
             analysis=Analysis(venue_live_busyness=42, venue_live_busyness_available=True)))
         geo.client.flushall()  # lose Redis
         assert redis_only.get_venue("v1") is None
-        RedisProjectionService(repo, redis_only, store).rebuild_redis_from_rds()
+        RedisProjectionService(redis_only, store).rebuild_redis_from_rds()
         # geo index + json restored, nearby finds it, live restored
         assert redis_only.get_venue("v1") is not None
         assert {v.venue_id for v in redis_only.get_nearby_venues(-8.05, -34.88, 1.0)} == {"v1"}

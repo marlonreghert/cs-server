@@ -168,7 +168,6 @@ def _build_rds_layer(context) -> None:
     context.repository = VenueRepository(context.geo_redis, rds_store=context.rds_store)
     context.redis_only_dao = RedisVenueDAO(context.geo_redis)
     context.redis_projection_service = RedisProjectionService(
-        repository=context.repository,
         redis_only_dao=context.redis_only_dao,
         rds_store=context.rds_store,
     )

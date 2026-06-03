@@ -225,8 +225,9 @@ class InstagramEnrichmentService:
         # Freshness gate, split from the data read (get_venue_instagram returns the
         # handle as DATA and — once reads come from RDS — no longer goes None on
         # staleness). The fresh set is status-aware: found ~30d, not_found ~7d.
-        # Flag-off this is a Redis SCAN of non-expired keys (identical to the old
-        # `get_venue_instagram(...) is not None` gate); flag-on it is RDS-backed.
+        # With RDS enabled this is an RDS status-aware staleness query; without it,
+        # a Redis SCAN of non-expired keys (identical to the old
+        # `get_venue_instagram(...) is not None` gate).
         fresh_ids = (
             set() if force_refresh
             else set(self.venue_dao.list_cached_instagram_venue_ids())

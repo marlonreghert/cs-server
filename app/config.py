@@ -112,7 +112,7 @@ class Settings(BaseSettings):
     # pipeline data: it re-asserts the Redis serving projection from RDS (removing
     # venues deprecated in RDS and counting the photo cache TTL down). Pipelines
     # write RDS-only and read their inputs/gating from RDS. This is the interval
-    # the projector runs on (a cadence knob, not a transitional flag).
+    # the projector runs on (a cadence knob).
     redis_projection_minutes: int = 2
 
     @property

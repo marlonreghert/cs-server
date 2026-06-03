@@ -37,14 +37,6 @@ Feature: Admin configuration is the system of record in RDS, mirrored to Redis
     And the Redis "admin_config:discovery_points" mirror is removed
     And the reader falls back to its built-in default
 
-  # ── One-time backfill of existing Redis config into RDS ─────────────────────
-  Scenario: The one-time config backfill imports existing Redis admin_config keys into RDS
-    Given Redis already contains admin_config keys written before RDS ownership
-    And RDS holds no admin configuration
-    When the one-time admin-config backfill runs
-    Then RDS holds every admin_config key that Redis contained
-    And the Redis mirror values are unchanged for the existing readers
-
   # ── Partial-failure: mirror fails after the durable write ───────────────────
   Scenario: A failed Redis mirror after the RDS commit returns a retryable error
     Given RDS is writable and the Redis mirror write will fail
