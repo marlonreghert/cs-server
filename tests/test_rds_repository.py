@@ -5,8 +5,13 @@ import pytest
 from app.db.geo_redis_client import GeoRedisClient
 from app.dao.redis_venue_dao import RedisVenueDAO
 from app.dao.venue_repository import VenueRepository
-from app.models import Analysis, LiveForecastResponse, Venue, VenueInfo
+from app.models import Analysis, LiveForecastResponse, Venue, VenueInfo, WeekRawDay
 from app.models.vibe_attributes import VibeAttributes
+from app.models.opening_hours import OpeningHours
+from app.models.instagram import InstagramPost, VenueInstagram, VenueInstagramPosts
+from app.models.menu import MenuItem, MenuPhoto, MenuSection, VenueMenuData, VenueMenuPhotos
+from app.models.venue_review import VenueReview, VenueReviews
+from app.models.vibe_profile import VenueVibeProfile
 from app.services.redis_projection_service import RedisProjectionService
 from app.services.engagement_service import EngagementService
 from tests.rds_fake import InMemoryRdsVenueStore, RdsUnavailable
@@ -113,6 +118,96 @@ class TestProjectionService:
         assert redis_only.get_venue("v1") is not None
         assert {v.venue_id for v in redis_only.get_nearby_venues(-8.05, -34.88, 1.0)} == {"v1"}
         assert redis_only.get_live_forecast("v1") is not None
+
+
+class TestPass2aReadParity:
+    """RDS-read path (rds_reads=True) must return models field-equal to the
+    Redis-read path. This is what catches reconstruction drift once pipelines
+    read RDS instead of the Redis projection."""
+
+    def _seed_full(self, repo):
+        # write-through populates BOTH RDS and Redis from the same objects
+        repo.upsert_venue(_venue())
+        repo.set_vibe_attributes(
+            VibeAttributes(venue_id="v1", google_place_id="p", google_primary_type="bar"))
+        repo.set_opening_hours(OpeningHours(venue_id="v1", weekday_descriptions=["Seg: 18-02"]))
+        repo.set_venue_reviews(VenueReviews(venue_id="v1", reviews=[
+            VenueReview(author_name="A", rating=5, text="ok", relative_time="today")]))
+        repo.set_venue_instagram(VenueInstagram(
+            venue_id="v1", instagram_handle="h", instagram_url="https://ig/h",
+            status="found", confidence_score=1.0))
+        repo.set_venue_ig_posts(VenueInstagramPosts(
+            venue_id="v1", instagram_handle="h", posts=[InstagramPost(caption="hi")]))
+        repo.set_venue_menu_photos(VenueMenuPhotos(venue_id="v1", photos=[
+            MenuPhoto(photo_id="p1", s3_url="https://s3/m.jpg", s3_key="m.jpg")]))
+        repo.set_venue_menu_data(VenueMenuData(venue_id="v1", sections=[
+            MenuSection(name="Drinks", items=[MenuItem(name="Beer", prices=[{"price": 12}])])]))
+        repo.set_venue_vibe_profile(VenueVibeProfile(
+            venue_id="v1", top_vibes=["animado"], overall_confidence=0.9))
+        repo.set_venue_photos("v1", [{"url": "https://p/1.jpg", "author_name": "A"}])
+        repo.set_week_raw_forecast("v1", WeekRawDay(day_int=0, day_raw=[50] * 24))
+        repo.set_live_forecast(LiveForecastResponse(
+            status="OK", venue_info=VenueInfo(venue_id="v1"),
+            analysis=Analysis(venue_live_busyness=42, venue_live_busyness_available=True)))
+
+    def test_rds_reads_match_redis_reads(self):
+        store = InMemoryRdsVenueStore()
+        geo = _geo()
+        redis_only = RedisVenueDAO(geo)
+        write_through = VenueRepository(geo, rds_store=store, rds_reads=False)
+        self._seed_full(write_through)
+        rds_reader = VenueRepository(geo, rds_store=store, rds_reads=True)
+
+        def _eq(getter, *args):
+            r = getattr(redis_only, getter)(*args)
+            d = getattr(rds_reader, getter)(*args)
+            assert r is not None and d is not None, f"{getter} returned None"
+            assert (d.model_dump(by_alias=True, mode="json")
+                    == r.model_dump(by_alias=True, mode="json")), getter
+
+        for getter in (
+            "get_venue", "get_vibe_attributes", "get_opening_hours", "get_venue_reviews",
+            "get_venue_instagram", "get_venue_ig_posts", "get_venue_menu_photos",
+            "get_venue_menu_data", "get_venue_vibe_profile", "get_live_forecast",
+        ):
+            _eq(getter, "v1")
+        _eq("get_week_raw_forecast", "v1", 0)
+
+        # photos are plain dicts (no model)
+        assert rds_reader.get_venue_photos("v1") == redis_only.get_venue_photos("v1")
+        # collection reads
+        assert set(rds_reader.list_active_venue_ids()) == set(redis_only.list_active_venue_ids()) == {"v1"}
+        assert {v.venue_id for v in rds_reader.list_all_venues()} == {"v1"}
+
+    def test_flag_off_reads_redis(self):
+        # rds_reads=False must read Redis even when RDS holds a different value.
+        store = InMemoryRdsVenueStore()
+        geo = _geo()
+        repo = VenueRepository(geo, rds_store=store, rds_reads=False)
+        repo.upsert_venue(_venue(name="Redis Name"))
+        store.venues["v1"]["payload"]["venue_name"] = "RDS Only Name"  # diverge RDS
+        assert repo.get_venue("v1").venue_name == "Redis Name"  # read Redis, not RDS
+
+    def test_write_guard_holds_when_reads_are_rds(self):
+        # With rds_reads=True the write path's internal self.get_venue reads RDS;
+        # an active re-add of a deprecated venue must still not resurrect it.
+        store = InMemoryRdsVenueStore()
+        geo = _geo()
+        repo = VenueRepository(geo, rds_store=store, rds_reads=True)
+        repo.upsert_venue(_venue())
+        repo.soft_delete_venue("v1", "ineligible_google_type", "eligibility_filter")
+        repo.upsert_venue(_venue(name="Re-added Active"))  # active re-add
+        assert store.get_venue("v1")["lifecycle_status"] == "deprecated"
+        assert "v1" not in store.list_active_venue_ids()
+
+    def test_serving_dao_never_reads_rds(self):
+        # A plain RedisVenueDAO (serving_dao) is unaffected by RDS — reads Redis.
+        store = InMemoryRdsVenueStore()
+        geo = _geo()
+        serving = RedisVenueDAO(geo)
+        VenueRepository(geo, rds_store=store).upsert_venue(_venue())
+        assert serving.get_venue("v1") is not None
+        assert not hasattr(serving, "rds_store")
 
 
 class TestEngagementPseudonymization:

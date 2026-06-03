@@ -151,6 +151,14 @@ class RdsVenueStore:
                 "SELECT venue_id FROM venues.venue WHERE lifecycle_status='deprecated'"
             ))]
 
+    def list_all_venue_payloads(self) -> list[dict]:
+        """Every venue payload (active + deprecated) — backs the pipeline
+        list_all_venues RDS read (Pass 2a)."""
+        with self.engine.connect() as conn:
+            return [r[0] for r in conn.execute(text(
+                "SELECT payload FROM venues.venue"
+            ))]
+
     # ── generic enrichment ────────────────────────────────────────────────────
     def upsert_enrichment(self, table_key, venue_id, payload, *, history, promoted=None) -> None:
         if table_key == _WEEKLY:

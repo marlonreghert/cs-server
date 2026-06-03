@@ -46,8 +46,7 @@ Feature: Redis projection decoupled from the pipelines
     Then RDS holds each of those records for "v1"
     And after the projector runs, the Redis serving projection for "v1" includes every field the nearby response reads
 
-  # ── PASS 2 (@wip): pipelines read their inputs from RDS, not from a stale Redis ─
-  @wip
+  # ── PASS 2a: pipelines read their inputs from RDS, not from a stale Redis ─────
   Scenario: A later pipeline stage reads a prior stage's output from RDS within the same cycle
     Given the photo pipeline has written photos for "v1" to RDS only
     And the projector has not yet run
