@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 
+from app.config import settings
 from app.dao.redis_venue_dao import RedisVenueDAO
 from app.models import LiveForecastResponse, Venue, WeekRawDay
 from app.models.instagram import VenueInstagram, VenueInstagramPosts
@@ -35,15 +36,19 @@ def _json(model) -> dict:
 
 
 class VenueRepository(RedisVenueDAO):
-    def __init__(self, client, rds_store=None, rds_reads=False):
+    def __init__(self, client, rds_store=None, rds_reads=False, rds_writes_only=False):
         super().__init__(client)
         self.rds_store = rds_store
         # Pass 2a: when True (and RDS wired), pipeline DATA reads come from RDS
         # (truth) instead of the inherited Redis projection, so a later pipeline
         # stage sees an earlier stage's output without waiting for projection.
-        # Geo reads (get_nearby_venues), cache-freshness gating (list_cached_*),
-        # and count_* stay on Redis at this stage. Default False = today's reads.
+        # Geo reads (get_nearby_venues) stay on Redis. Default False = today's reads.
         self.rds_reads = rds_reads
+        # Pass 2b: when True (and RDS wired), writes persist ONLY to RDS (the
+        # synchronous Redis projection is dropped) and cache-freshness gating
+        # (list_cached_*) reads RDS, so the projector is the sole Redis writer for
+        # pipeline data. Requires rds_reads. Default False = today's write-through.
+        self.rds_writes_only = rds_writes_only
 
     # ── pipeline data reads from RDS (Pass 2a, flag-gated) ──────────────────────
     def _reads_rds(self) -> bool:
@@ -143,16 +148,32 @@ class VenueRepository(RedisVenueDAO):
             return out
         return super().list_all_venues()
 
+    # ── writes: RDS truth, Redis projection (dropped when rds_writes_only) ──────
+    def _project_redis(self) -> bool:
+        """Whether a write also projects into Redis. False only in 2b writes-only
+        mode (RDS wired + rds_writes_only) — then the scheduled projector is the
+        sole Redis writer. True with no RDS store (today's Redis-only) or under
+        write-through (2a / default), preserving the rollback path."""
+        return not (self.rds_store is not None and self.rds_writes_only)
+
+    def _rds_gating(self) -> bool:
+        """Whether pipeline cache-freshness gating reads come from RDS (2b). When
+        off, gating reads Redis exactly as today (rollback path)."""
+        return self.rds_writes_only and self.rds_store is not None
+
     # ── core venue ────────────────────────────────────────────────────────────
     def upsert_venue(self, venue) -> None:
         if self.rds_store is not None:
             self.rds_store.upsert_venue(venue)  # truth first; raises on failure
-        super().upsert_venue(venue)  # projection (incl. GEOADD geo index)
+        if self._project_redis():
+            super().upsert_venue(venue)  # projection (incl. GEOADD geo index)
 
     def soft_delete_venue(self, venue_id, reason, source, google_business_status=None) -> bool:
         if self.rds_store is not None:
             self.rds_store.soft_delete_venue(venue_id, reason, source, google_business_status)
-        return super().soft_delete_venue(venue_id, reason, source, google_business_status)
+        if self._project_redis():
+            return super().soft_delete_venue(venue_id, reason, source, google_business_status)
+        return True
 
     # ── besttime ──────────────────────────────────────────────────────────────
     def set_week_raw_forecast(self, venue_id, day) -> None:
@@ -161,14 +182,25 @@ class VenueRepository(RedisVenueDAO):
                 "besttime.weekly_forecast", f"{venue_id}#{day.day_int}",
                 _json(day), history=_HISTORY,
             )
-        super().set_week_raw_forecast(venue_id, day)
+        if self._project_redis():
+            super().set_week_raw_forecast(venue_id, day)
 
     def set_live_forecast(self, forecast) -> None:
         if self.rds_store is not None:
             self.rds_store.upsert_live_forecast(
                 forecast.venue_info.venue_id, _json(forecast)
             )
-        super().set_live_forecast(forecast)
+        if self._project_redis():
+            super().set_live_forecast(forecast)
+
+    def delete_live_forecast(self, venue_id):
+        # Section E gap: route the live-forecast delete to RDS so no write escapes
+        # to Redis-only under writes-only mode; project the deletion when allowed.
+        if self.rds_store is not None:
+            self.rds_store.delete_live_forecast(venue_id)
+        if self._project_redis():
+            return super().delete_live_forecast(venue_id)
+        return None
 
     # ── google_places ───────────────────────────────────────────────────────────
     def set_vibe_attributes(self, vibe_attrs) -> None:
@@ -181,7 +213,8 @@ class VenueRepository(RedisVenueDAO):
                     "google_place_id": vibe_attrs.google_place_id,
                 },
             )
-        super().set_vibe_attributes(vibe_attrs)
+        if self._project_redis():
+            super().set_vibe_attributes(vibe_attrs)
 
     def set_opening_hours(self, opening_hours) -> None:
         if self.rds_store is not None:
@@ -189,7 +222,8 @@ class VenueRepository(RedisVenueDAO):
                 "google_places.opening_hours", opening_hours.venue_id,
                 _json(opening_hours), history=_HISTORY,
             )
-        super().set_opening_hours(opening_hours)
+        if self._project_redis():
+            super().set_opening_hours(opening_hours)
 
     def set_venue_photos(self, venue_id, photos, ttl_seconds=None) -> None:
         # Photos excluded from append-only history (Google URLs expire).
@@ -197,15 +231,17 @@ class VenueRepository(RedisVenueDAO):
             self.rds_store.upsert_enrichment(
                 "google_places.photos", venue_id, {"photos": photos}, history=_NO_HISTORY,
             )
-        # super() keeps the setex TTL — the freshness-refetch deliverable.
-        super().set_venue_photos(venue_id, photos, ttl_seconds=ttl_seconds)
+        # super() keeps the setex TTL; the projector re-applies remaining TTL (B2).
+        if self._project_redis():
+            super().set_venue_photos(venue_id, photos, ttl_seconds=ttl_seconds)
 
     def set_venue_reviews(self, reviews) -> None:
         if self.rds_store is not None:
             self.rds_store.upsert_enrichment(
                 "google_places.reviews", reviews.venue_id, _json(reviews), history=_HISTORY,
             )
-        super().set_venue_reviews(reviews)
+        if self._project_redis():
+            super().set_venue_reviews(reviews)
 
     # ── instagram ───────────────────────────────────────────────────────────────
     def set_venue_instagram(self, instagram) -> None:
@@ -214,14 +250,16 @@ class VenueRepository(RedisVenueDAO):
                 "instagram.handle", instagram.venue_id, _json(instagram), history=_HISTORY,
                 promoted={"instagram_handle": getattr(instagram, "instagram_handle", None)},
             )
-        super().set_venue_instagram(instagram)
+        if self._project_redis():
+            super().set_venue_instagram(instagram)
 
     def set_venue_ig_posts(self, posts) -> None:
         if self.rds_store is not None:
             self.rds_store.upsert_enrichment(
                 "instagram.posts", posts.venue_id, _json(posts), history=_HISTORY,
             )
-        super().set_venue_ig_posts(posts)
+        if self._project_redis():
+            super().set_venue_ig_posts(posts)
 
     # ── venues (derived / menu / vibe profile) ──────────────────────────────────
     def set_venue_menu_photos(self, menu_photos) -> None:
@@ -229,21 +267,58 @@ class VenueRepository(RedisVenueDAO):
             self.rds_store.upsert_enrichment(
                 "venues.menu_photos", menu_photos.venue_id, _json(menu_photos), history=_HISTORY,
             )
-        super().set_venue_menu_photos(menu_photos)
+        if self._project_redis():
+            super().set_venue_menu_photos(menu_photos)
 
     def set_venue_menu_data(self, menu_data) -> None:
         if self.rds_store is not None:
             self.rds_store.upsert_enrichment(
                 "venues.menu_data", menu_data.venue_id, _json(menu_data), history=_HISTORY,
             )
-        super().set_venue_menu_data(menu_data)
+        if self._project_redis():
+            super().set_venue_menu_data(menu_data)
 
     def set_venue_vibe_profile(self, profile) -> None:
         if self.rds_store is not None:
             self.rds_store.upsert_enrichment(
                 "venues.vibe_profile", profile.venue_id, _json(profile), history=_HISTORY,
             )
-        super().set_venue_vibe_profile(profile)
+        if self._project_redis():
+            super().set_venue_vibe_profile(profile)
+
+    # ── cache-freshness gating: RDS when writes-only (2b), else Redis ───────────
+    def list_cached_venue_photos_ids(self):
+        if self._rds_gating():
+            return self.rds_store.list_fresh_enrichment_venue_ids(
+                "google_places.photos",
+                max_age_seconds=self._resolve_photos_cache_ttl_seconds(),
+            )
+        return super().list_cached_venue_photos_ids()
+
+    def list_cached_vibe_profile_venue_ids(self):
+        if self._rds_gating():
+            return self.rds_store.list_fresh_enrichment_venue_ids("venues.vibe_profile")
+        return super().list_cached_vibe_profile_venue_ids()
+
+    def list_cached_menu_photos_venue_ids(self):
+        if self._rds_gating():
+            return self.rds_store.list_fresh_enrichment_venue_ids("venues.menu_photos")
+        return super().list_cached_menu_photos_venue_ids()
+
+    def list_cached_ig_posts_venue_ids(self):
+        if self._rds_gating():
+            return self.rds_store.list_fresh_enrichment_venue_ids(
+                "instagram.posts", max_age_seconds=settings.ig_posts_cache_ttl_days * 86400,
+            )
+        return super().list_cached_ig_posts_venue_ids()
+
+    def list_cached_instagram_venue_ids(self):
+        if self._rds_gating():
+            return self.rds_store.list_fresh_instagram_venue_ids(
+                found_max_age_seconds=settings.instagram_cache_ttl_days * 86400,
+                not_found_max_age_seconds=settings.instagram_not_found_cache_ttl_days * 86400,
+            )
+        return super().list_cached_instagram_venue_ids()
 
     # ── deletes become RDS soft-deletes (never hard-delete labels) ───────────────
     _DELETE_TABLE = {
@@ -262,7 +337,9 @@ class VenueRepository(RedisVenueDAO):
         history = table_key != "google_places.photos"
         if self.rds_store is not None:
             self.rds_store.soft_delete_enrichment(table_key, venue_id, history=history)
-        return getattr(super(), name)(venue_id)
+        if self._project_redis():
+            return getattr(super(), name)(venue_id)
+        return None
 
     def delete_vibe_attributes(self, venue_id):
         return self._soft_delete_then_super("delete_vibe_attributes", venue_id)

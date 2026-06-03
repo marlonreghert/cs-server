@@ -222,15 +222,24 @@ class InstagramEnrichmentService:
         errors = 0
         apify_exhausted = False
 
+        # Freshness gate, split from the data read (get_venue_instagram returns the
+        # handle as DATA and — once reads come from RDS — no longer goes None on
+        # staleness). The fresh set is status-aware: found ~30d, not_found ~7d.
+        # Flag-off this is a Redis SCAN of non-expired keys (identical to the old
+        # `get_venue_instagram(...) is not None` gate); flag-on it is RDS-backed.
+        fresh_ids = (
+            set() if force_refresh
+            else set(self.venue_dao.list_cached_instagram_venue_ids())
+        )
+
         for venue_id in all_venue_ids:
-            # Check if already cached (catches Google Places results + previous runs)
-            if not force_refresh:
+            # Skip venues whose instagram is still fresh (cached or previously searched)
+            if venue_id in fresh_ids:
                 existing = self.venue_dao.get_venue_instagram(venue_id)
-                if existing is not None:
-                    if existing.has_instagram():
-                        found_count += 1
-                    skipped += 1
-                    continue
+                if existing is not None and existing.has_instagram():
+                    found_count += 1
+                skipped += 1
+                continue
 
             # If Apify budget is exhausted, skip remaining uncached venues
             if apify_exhausted:

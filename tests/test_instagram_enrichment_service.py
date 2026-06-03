@@ -36,6 +36,9 @@ def mock_venue_dao():
     dao.set_venue_instagram = Mock()
     dao.list_all_venue_ids.return_value = ["v1", "v2"]
     dao.list_active_venue_ids.return_value = ["v1", "v2"]
+    # Fresh-set gate (the dual-purpose split): default = nothing fresh, so every
+    # venue is processed. Tests that exercise "already cached" set this explicitly.
+    dao.list_cached_instagram_venue_ids.return_value = []
     dao.count_venues_with_instagram.return_value = 0
     return dao
 
@@ -242,7 +245,8 @@ class TestEnrichAllVenues:
 
     @pytest.mark.asyncio
     async def test_skips_cached_venues(self, service, mock_venue_dao, mock_apify_client):
-        """Already-cached venues are skipped."""
+        """Already-cached (fresh) venues are skipped."""
+        mock_venue_dao.list_cached_instagram_venue_ids.return_value = ["v1", "v2"]
         mock_venue_dao.get_venue_instagram.return_value = VenueInstagram(
             venue_id="v1", status="found", confidence_score=0.85
         )

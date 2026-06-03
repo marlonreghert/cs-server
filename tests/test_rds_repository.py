@@ -1,6 +1,10 @@
 """Unit tests for the RDS write-through repository + projection (via fake store)."""
+from datetime import datetime, timedelta, timezone
+
 import fakeredis
 import pytest
+
+from app.config import settings
 
 from app.db.geo_redis_client import GeoRedisClient
 from app.dao.redis_venue_dao import RedisVenueDAO
@@ -208,6 +212,138 @@ class TestPass2aReadParity:
         VenueRepository(geo, rds_store=store).upsert_venue(_venue())
         assert serving.get_venue("v1") is not None
         assert not hasattr(serving, "rds_store")
+
+
+class TestPass2bWritesOnly:
+    """rds_writes_only: writes persist ONLY to RDS (projector is sole Redis writer)."""
+
+    def _repo(self, geo, store):
+        return VenueRepository(geo, rds_store=store, rds_reads=True, rds_writes_only=True)
+
+    def test_upsert_writes_rds_not_redis(self):
+        store, geo, redis_only = InMemoryRdsVenueStore(), _geo(), None
+        redis_only = RedisVenueDAO(geo)
+        repo = self._repo(geo, store)
+        repo.upsert_venue(_venue())
+        assert store.get_venue("v1") is not None       # RDS truth written
+        assert redis_only.get_venue("v1") is None       # Redis NOT written
+        assert repo.get_venue("v1") is not None          # reads come from RDS
+
+    def test_enrichment_writes_rds_not_redis(self):
+        store, geo = InMemoryRdsVenueStore(), _geo()
+        redis_only = RedisVenueDAO(geo)
+        repo = self._repo(geo, store)
+        repo.upsert_venue(_venue())
+        repo.set_vibe_attributes(VibeAttributes(venue_id="v1", google_primary_type="bar"))
+        repo.set_venue_photos("v1", [{"url": "u", "author_name": "a"}])
+        assert store.get_enrichment(_VA, "v1") is not None
+        assert redis_only.get_vibe_attributes("v1") is None
+        assert redis_only.get_venue_photos("v1") is None
+
+    def test_soft_delete_enrichment_no_redis_write(self):
+        store, geo = InMemoryRdsVenueStore(), _geo()
+        redis_only = RedisVenueDAO(geo)
+        # seed the Redis copy so we can prove the delete does NOT touch it
+        redis_only.set_vibe_attributes(VibeAttributes(venue_id="v1", google_primary_type="bar"))
+        repo = self._repo(geo, store)
+        repo.upsert_venue(_venue())
+        repo.set_vibe_attributes(VibeAttributes(venue_id="v1", google_primary_type="bar"))
+        repo.delete_vibe_attributes("v1")
+        assert store.get_enrichment(_VA, "v1")["deleted_at"] is not None  # RDS soft-delete
+        assert redis_only.get_vibe_attributes("v1") is not None           # Redis untouched
+
+    def test_delete_live_forecast_routes_to_rds(self):
+        store, geo = InMemoryRdsVenueStore(), _geo()
+        repo = self._repo(geo, store)
+        repo.upsert_venue(_venue())
+        repo.set_live_forecast(LiveForecastResponse(
+            status="OK", venue_info=VenueInfo(venue_id="v1"),
+            analysis=Analysis(venue_live_busyness=1, venue_live_busyness_available=True)))
+        assert store.get_live_forecast("v1") is not None
+        repo.delete_live_forecast("v1")
+        assert store.get_live_forecast("v1") is None  # section-E gap closed
+
+    def test_flag_off_still_write_through(self):
+        store, geo = InMemoryRdsVenueStore(), _geo()
+        redis_only = RedisVenueDAO(geo)
+        repo = VenueRepository(geo, rds_store=store, rds_reads=False, rds_writes_only=False)
+        repo.upsert_venue(_venue())
+        assert store.get_venue("v1") is not None and redis_only.get_venue("v1") is not None
+
+    def test_set_google_business_status_routes_to_rds(self):
+        # Section E: set_google_business_status routes through the overridden
+        # get_venue + upsert_venue, so it persists to RDS and (writes-only) never
+        # escapes to Redis.
+        store, geo = InMemoryRdsVenueStore(), _geo()
+        redis_only = RedisVenueDAO(geo)
+        repo = self._repo(geo, store)
+        repo.upsert_venue(_venue())
+        repo.set_google_business_status("v1", "CLOSED_TEMPORARILY")
+        assert store.get_venue("v1")["payload"]["google_business_status"] == "CLOSED_TEMPORARILY"
+        assert redis_only.get_venue("v1") is None
+
+
+class TestPass2bGating:
+    """rds_writes_only: cache-freshness gating reads RDS (status-aware staleness)."""
+
+    def _repo(self, geo, store):
+        return VenueRepository(geo, rds_store=store, rds_reads=True, rds_writes_only=True)
+
+    def _age(self, store, table, vid, days):
+        store.enrichment[table][vid]["updated_at"] = (
+            datetime.now(timezone.utc) - timedelta(days=days)
+        )
+
+    def test_photo_gating_uses_rds_freshness(self):
+        store, geo = InMemoryRdsVenueStore(), _geo()
+        repo = self._repo(geo, store)
+        for vid in ("v1", "v2"):
+            store.upsert_venue(_venue(vid))
+            store.upsert_enrichment("google_places.photos", vid,
+                                    {"photos": [{"url": "u"}]}, history=False)
+        self._age(store, "google_places.photos", "v1", 0)                          # fresh
+        self._age(store, "google_places.photos", "v2", settings.photo_cache_ttl_days + 1)  # aged
+        fresh = set(repo.list_cached_venue_photos_ids())
+        assert "v1" in fresh and "v2" not in fresh
+
+    def test_vibe_profile_gating_is_presence(self):
+        store, geo = InMemoryRdsVenueStore(), _geo()
+        repo = self._repo(geo, store)
+        store.upsert_venue(_venue())
+        store.upsert_enrichment("venues.vibe_profile", "v1",
+                                {"venue_id": "v1", "top_vibes": [], "overall_confidence": 0.5},
+                                history=False)
+        assert "v1" in set(repo.list_cached_vibe_profile_venue_ids())
+
+    def test_instagram_gating_status_aware(self):
+        store, geo = InMemoryRdsVenueStore(), _geo()
+        repo = self._repo(geo, store)
+        for vid, status in (("v1", "found"), ("v2", "not_found")):
+            store.upsert_venue(_venue(vid))
+            store.upsert_enrichment("instagram.handle", vid,
+                                    {"venue_id": vid, "status": status}, history=False)
+            self._age(store, "instagram.handle", vid, 10)  # both 10 days old
+        fresh = set(repo.list_cached_instagram_venue_ids())
+        assert "v1" in fresh       # found: fresh within 30d
+        assert "v2" not in fresh   # not_found: stale past 7d
+
+    def test_flag_off_gating_reads_redis(self):
+        store, geo = InMemoryRdsVenueStore(), _geo()
+        repo = VenueRepository(geo, rds_store=store, rds_reads=True, rds_writes_only=False)
+        repo.set_venue_photos("v1", [{"url": "u"}])  # write-through projects Redis
+        assert "v1" in set(repo.list_cached_venue_photos_ids())  # from Redis SCAN
+
+    def test_instagram_fresh_set_flag_off_matches_redis_presence(self):
+        # The dual-purpose split must be behavior-identical flag-off: a venue with
+        # a non-expired Redis instagram key is exactly the get_venue_instagram set.
+        store, geo = InMemoryRdsVenueStore(), _geo()
+        repo = VenueRepository(geo, rds_store=store, rds_writes_only=False)
+        repo.upsert_venue(_venue())
+        repo.set_venue_instagram(VenueInstagram(
+            venue_id="v1", instagram_handle="h", status="found", confidence_score=1.0))
+        fresh = set(repo.list_cached_instagram_venue_ids())
+        present_as_data = repo.get_venue_instagram("v1") is not None
+        assert ("v1" in fresh) and present_as_data
 
 
 class TestEngagementPseudonymization:

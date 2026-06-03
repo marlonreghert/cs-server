@@ -180,6 +180,133 @@ def step_classifier_proceeds(context):
     assert context.fake_redis.get(VENUE_PHOTOS_KEY_FORMAT.format(context.vid)) is None
 
 
+# ── Pass 2b: pipelines write only RDS + gating reads RDS ──────────────────────
+@given("the pipeline is decoupled to RDS-only")
+def step_pipeline_decoupled(context):
+    # rds_writes_only requires rds_reads (the container forces this); set both.
+    context.repository.rds_reads = True
+    context.repository.rds_writes_only = True
+
+
+@then('Redis has no serving projection for venue "{vid}" yet')
+def step_redis_no_projection_yet(context, vid):
+    assert context.redis_only_dao.get_venue(vid) is None, (
+        f"venue {vid} was projected to Redis — write-through was not dropped"
+    )
+
+
+@then('the venue "{vid}" is not yet returned by nearby serving')
+def step_not_yet_served(context, vid):
+    assert vid not in _nearby_ids(context)
+
+
+# photo refetch gating (RDS freshness, not Redis presence)
+@given('a venue "{vid}" has fresh photos in RDS but none projected to Redis')
+def step_fresh_photos_rds_only(context, vid):
+    context.rds_store.upsert_venue(_venue(vid))
+    context.rds_store.upsert_enrichment(
+        _PHOTOS_TABLE, vid, {"photos": [{"url": "https://rds/1.jpg", "author_name": "A"}]},
+        history=False,
+    )
+    _backdate_photo_updated_at(context, vid, days=0)  # fresh
+    context.fake_redis.delete(VENUE_PHOTOS_KEY_FORMAT.format(vid))
+
+
+@given('a venue "{vid}" has photos in RDS aged past their TTL')
+def step_aged_photos_rds_only(context, vid):
+    context.rds_store.upsert_venue(_venue(vid))
+    context.rds_store.upsert_enrichment(
+        _PHOTOS_TABLE, vid, {"photos": [{"url": "https://rds/old.jpg", "author_name": "A"}]},
+        history=False,
+    )
+    _backdate_photo_updated_at(context, vid, days=settings.photo_cache_ttl_days + 1)
+    context.fake_redis.delete(VENUE_PHOTOS_KEY_FORMAT.format(vid))
+
+
+@when("the photo enrichment job lists which venues have fresh photos")
+def step_list_fresh_photos(context):
+    context.fresh_photo_ids = set(context.repository.list_cached_venue_photos_ids())
+
+
+@then('"{vid}" counts as fresh from RDS even though Redis has no photo key')
+def step_photo_fresh_from_rds(context, vid):
+    assert vid in context.fresh_photo_ids, (
+        f"{vid} not counted fresh — gating read empty Redis, not RDS freshness"
+    )
+
+
+@then('"{vid}" is excluded because its RDS photos aged past the TTL')
+def step_photo_excluded_aged(context, vid):
+    assert vid not in context.fresh_photo_ids
+
+
+# skip-done gating (RDS presence)
+@given('a venue "{vid}" has a vibe profile in RDS but none projected to Redis')
+def step_vibe_profile_rds_only(context, vid):
+    context.rds_store.upsert_venue(_venue(vid))
+    context.rds_store.upsert_enrichment(
+        "venues.vibe_profile", vid,
+        {"venue_id": vid, "top_vibes": ["animado"], "overall_confidence": 0.9},
+        history=False,
+    )
+
+
+@when("an enrichment pipeline lists which venues already have a vibe profile")
+def step_list_done_vibe(context):
+    context.done_vibe_ids = set(context.repository.list_cached_vibe_profile_venue_ids())
+
+
+@then('"{vid}" counts as done from RDS even though Redis has no vibe-profile key')
+def step_vibe_done_from_rds(context, vid):
+    assert vid in context.done_vibe_ids, (
+        f"{vid} not counted done — gating read empty Redis, not RDS presence"
+    )
+
+
+# instagram status-aware staleness gating
+def _seed_instagram(context, vid, status, days_ago):
+    context.rds_store.upsert_venue(_venue(vid))
+    context.rds_store.upsert_enrichment(
+        "instagram.handle", vid,
+        {"venue_id": vid, "instagram_handle": ("h" if status != "not_found" else None),
+         "status": status, "confidence_score": (1.0 if status == "found" else 0.0)},
+        history=False,
+    )
+    from datetime import datetime, timedelta, timezone
+    context.rds_store.enrichment["instagram.handle"][vid]["updated_at"] = (
+        datetime.now(timezone.utc) - timedelta(days=days_ago)
+    )
+
+
+@given('a venue "{vid}" was found on instagram in RDS {days:d} days ago')
+def step_ig_found(context, vid, days):
+    _seed_instagram(context, vid, "found", days)
+
+
+@given('a venue "{vid}" was marked not_found on instagram in RDS {days:d} days ago')
+def step_ig_not_found(context, vid, days):
+    _seed_instagram(context, vid, "not_found", days)
+
+
+@when("the instagram enrichment lists which venues have fresh instagram")
+def step_list_fresh_instagram(context):
+    context.fresh_ig_ids = set(context.repository.list_cached_instagram_venue_ids())
+
+
+@then('"{vid}" counts as fresh because found results live 30 days')
+def step_ig_fresh_found(context, vid):
+    assert vid in context.fresh_ig_ids, (
+        f"{vid} (found, 10d old) should be fresh under the 30d window"
+    )
+
+
+@then('"{vid}" is stale because not_found results expire after 7 days')
+def step_ig_stale_not_found(context, vid):
+    assert vid not in context.fresh_ig_ids, (
+        f"{vid} (not_found, 10d old) should be stale under the 7d window"
+    )
+
+
 # ── B1: projector removes venues deprecated in RDS ────────────────────────────
 @when('the eligibility sweep deprecates "{vid}" in RDS only')
 def step_deprecate_rds_only(context, vid):

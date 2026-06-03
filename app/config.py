@@ -121,6 +121,14 @@ class Settings(BaseSettings):
     # gating stays Redis at this stage (the RDS-only write flip + gating move is
     # Pass 2b). Default off = today's Redis reads. Serving always reads Redis.
     rds_pipeline_reads: bool = False
+    # Pass 2b: pipelines write ONLY RDS (the synchronous Redis projection is
+    # dropped from the write path) and read their cache-freshness gating from RDS,
+    # so the scheduled projector becomes the sole Redis writer for pipeline data
+    # (the REFRAME end-state). Default off = today's write-through (rollback path).
+    # ORDERING: this REQUIRES rds_pipeline_reads — writing RDS-only while reading a
+    # Redis no longer fed by pipelines (only projector-lagged) breaks cross-stage
+    # read-after-write. The container forces reads on whenever this is on.
+    rds_pipeline_writes_only: bool = False
 
     @property
     def rds_sqlalchemy_url(self) -> str:

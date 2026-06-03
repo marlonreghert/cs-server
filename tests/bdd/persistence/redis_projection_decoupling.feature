@@ -24,9 +24,9 @@ Feature: Redis projection decoupled from the pipelines
     And the Redis projector is wired
     And an empty RDS and an empty Redis
 
-  # ── PASS 2 (@wip): pipelines write only RDS; Redis untouched until projection ──
-  @wip
+  # ── PASS 2b: pipelines write only RDS; Redis untouched until the projector ────
   Scenario: A pipeline venue upsert writes RDS only and does not write Redis directly
+    Given the pipeline is decoupled to RDS-only
     When a pipeline upserts a venue "v1" named "Bar do Zé"
     Then RDS holds venue "v1" as the system of record
     And Redis has no serving projection for venue "v1" yet
@@ -54,19 +54,28 @@ Feature: Redis projection decoupled from the pipelines
     Then it reads the photos from RDS, not from the unprojected Redis cache
     And the classifier can proceed without waiting for projection
 
-  # ── PASS 2 (@wip): refetch / skip-done gating moves to RDS (the REFRAME) ──────
-  @wip
-  Scenario: The Google photos refetch trigger reads RDS staleness after decoupling
-    Given a venue "v1" whose photos in RDS have aged past their TTL
-    When the photo enrichment job lists which venues need photos
-    Then it sees "v1" as needing a refetch using the RDS updated_at, not Redis
+  # ── PASS 2b: refetch / skip-done gating moves to RDS (the REFRAME) ────────────
+  Scenario: The Google photos refetch trigger reads RDS freshness, not Redis
+    Given the pipeline is decoupled to RDS-only
+    And a venue "v1" has fresh photos in RDS but none projected to Redis
+    And a venue "v2" has photos in RDS aged past their TTL
+    When the photo enrichment job lists which venues have fresh photos
+    Then "v1" counts as fresh from RDS even though Redis has no photo key
+    And "v2" is excluded because its RDS photos aged past the TTL
 
-  @wip
-  Scenario: Skip-already-done gating derives from RDS, not a pipeline Redis write
-    Given the pipeline has persisted "v1" enrichment to RDS
-    When an enrichment pipeline lists which venues still need processing
-    Then it derives the gating set from RDS presence
-    And the pipeline does not write a gating set to Redis itself
+  Scenario: Skip-already-done gating derives from RDS presence, not a Redis cache key
+    Given the pipeline is decoupled to RDS-only
+    And a venue "v1" has a vibe profile in RDS but none projected to Redis
+    When an enrichment pipeline lists which venues already have a vibe profile
+    Then "v1" counts as done from RDS even though Redis has no vibe-profile key
+
+  Scenario: Instagram re-search gating uses status-aware RDS staleness, not Redis TTL
+    Given the pipeline is decoupled to RDS-only
+    And a venue "v1" was found on instagram in RDS 10 days ago
+    And a venue "v2" was marked not_found on instagram in RDS 10 days ago
+    When the instagram enrichment lists which venues have fresh instagram
+    Then "v1" counts as fresh because found results live 30 days
+    But "v2" is stale because not_found results expire after 7 days
 
   # ── PASS 1 (B2): the projector counts the photo TTL down; aged photos drop ────
   Scenario: Repeated projector runs project photos with the remaining TTL, not a fresh full TTL
