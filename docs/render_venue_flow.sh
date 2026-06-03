@@ -20,10 +20,9 @@ render() {
   echo "rendered ${name} (.png + .svg)"
 }
 
-# Wide left-to-right charts: force a large canvas so glyphs are crisp.
-render 1_cs_server_ingest     -w 5000 --scale 2
-render 2_cs_server_enrichment -w 5000 --scale 2
-# Tall top-down pipeline: width is not the constraint, push DPI instead.
-render 3_vibes_bot_pipeline   -w 1600 --scale 3
+# Macro overview: whole-system shape in one screen.
+render 0_overview  -w 3600 --scale 2
+# The big everything-graph: very wide, meant to be zoomed + scrolled.
+render 1_full_flow -w 7000 --scale 2
 
 echo "done — output in docs/"

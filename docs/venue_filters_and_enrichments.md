@@ -6,63 +6,104 @@ through **cs-server**, across the HTTP boundary, through the **vibes_bot**
 pipeline, and out to the user.
 
 **Scope notes**
-- Reflects the **`main`** behavior of cs-server. The in-progress
-  `feature/rds-system-of-record` branch (Alembic / RDS / Terraform) is a storage
-  migration only — it does **not** change any filter or enrichment logic — so it
-  is out of scope for this "current flow" document.
+- **DB cutover (RDS).** cs-server now has an **RDS Postgres system of record**;
+  Redis becomes a **projection / read model**. This is **write-through** and
+  gated by the `rds_enabled` flag (default `false` ⇒ Redis-only, today's
+  behavior). The flag was not set in the env/compose I could see, so treat RDS as
+  "implemented, cutover-gated," not necessarily live in prod. Crucially, this
+  changes *where data is persisted*, **not** the filter/enrichment logic — and
+  **serving is still Redis-only**. See [§1b](#1b-rds-system-of-record-the-db-cutover).
 - **Co-location:** cs-server runs *only* on the vibes_bot EC2 host. vibes_bot
   reaches it over the internal Docker network at `http://cs-server:8080`
   (`Settings.CS_SERVER_URL`). They are never deployed apart.
-- **Two separate Redis instances.** cs-server has its own Redis (the venue
-  "system of record"); vibes_bot has its own Redis (auth tokens, favorites, hot
-  likes, admin config). They are not shared.
+- **Three datastores now.** cs-server **RDS** (truth) + cs-server **Redis #1**
+  (venue projection + geo index); vibes_bot **Redis #2** (auth tokens, short-lived
+  caches, and the favorites/hot-likes *read* projection). vibes_bot now **writes**
+  favorites/hot-likes through cs-server's engagement API (no longer straight to
+  Redis); it still **reads** them from Redis #2.
 
 ## Visual overview
 
-Three **labeled-edge dataflow diagrams** — the verbs and join keys are written on
-the arrows, so you can trace exactly how one component feeds the next.
-**Red = filter (removes/hides venues), green = stored artifact/enrichment,
-cyan = API call / processing step, amber = Redis.** Open the SVGs to zoom
-without blur.
+Two diagrams. **Colors:** 🟥 red = filter (removes/hides venues), 🟩 green =
+stored artifact/enrichment, cyan = API call / processing, 🟣 violet = **RDS
+(system of record)**, 🟡 amber = **Redis (projection)**, indigo = vibes_bot.
+Verbs and join keys are written **on the arrows**.
 
-### 1 · cs-server — ingest, forecasts, Google search & the eligibility filter
+### A · Macro overview — the whole shape on one screen
 
-![cs-server ingest dataflow](1_cs_server_ingest.png)
+![Macro overview](0_overview.png)
 
-This chart answers the two relations to trace:
-- **BestTime → Google search:** a venue's `name + address + coords` (from
-  BestTime) feed `places:searchText` (with a 500 m bias) → `place_id` →
-  `place details`.
-- **Google search → blocking a venue from users:** the returned
-  `google_primary_type` lands in `VibeAttributes`; if it is in
-  `blocked_google_types` the eligibility filter soft-deletes it (sweep) **and**
-  hides it at serve time. The same type can also **rescue** a name-keyword false
-  positive ("Academia da Cachaça") when it resolves to a good category.
+The new spine: external sources → cs-server **write-through** (RDS truth, then
+project to Redis) → **serve from Redis only** → HTTP → vibes_bot pipeline →
+user. Favorites/hot-likes and admin-config **write back** through cs-server APIs
+(RDS truth → Redis mirror); vibes_bot keeps **reading** them from Redis. It also
+surfaces, at a glance, the cs-server internals (ingest · enrichment family ·
+eligibility gate · write-through · serve · engagement) and the **three places
+venues get filtered** — the eligibility gate (ingest + serve) and the pipeline's
+two major drops (no-busyness, open-now). Grouped stages only; the join keys and
+individual artifacts live in the full-flow diagram below.
 
-### 2 · cs-server — enrichment fan-out (photos, Instagram, menu, vibe AI)
+### B · The full flow — one big zoom-and-scroll diagram
 
-![cs-server enrichment dataflow](2_cs_server_enrichment.png)
+![Full venue flow](1_full_flow.png)
 
-Photo enrichment runs its **own** Google search (it does not reuse the place_id
-from chart 1); the vibe classifier **fuses 4 inputs** — photos + Instagram bio +
-IG-post captions + Google reviews. Menu data and full reviews are **stored but
-not served** on the nearby path.
+Everything in one canvas (≈14000px wide — **zoom in / scroll** to read it, or
+open the SVG). Ingestion, filtering and enrichment are intentionally **not split
+apart** — they share inputs and all converge on the single write-through gateway.
+What to trace:
+- **BestTime → Google:** a venue's `name + address + coords` feed
+  `places:searchText` (500 m bias) → `place_id` → `place details`.
+- **Google → blocking a venue:** `google_primary_type` → `blocked_google_types`
+  → eligibility soft-deletes (sweep) **and** hides at serve; the same type can
+  **rescue** a name-keyword false positive when it resolves to a good category.
+- **Write-through:** every writer (ingest, all enrichers, soft-deletes) goes
+  through `VenueRepository` → **RDS first (raises on failure), then Redis**.
+- **vibes_bot pipeline:** the two red hexagons (**no-busyness**, **open-now →
+  unknowns dropped**) are where most venues disappear; pricing **overwrites
+  `price_level` only when Google returns one**.
 
-### 3 · vibes_bot — the `get_venues` pipeline (over HTTP, verbose=false)
+> Both PNGs are high-resolution (the full flow is ~14000px wide) — zoom to read
+> the edge labels, or open the **SVG** for lossless zoom:
+> [macro](0_overview.svg) · [full flow](1_full_flow.svg). Mermaid sources are in
+> [diagrams/](diagrams/); regenerate with `docs/render_venue_flow.sh`
+> (uses `npx mermaid-cli`; needs Node).
 
-![vibes_bot pipeline dataflow](3_vibes_bot_pipeline.png)
+## 1b. RDS system of record (the DB cutover)
 
-20 steps; the two red hexagons (**5 no-busyness**, **8 open-now → unknowns
-dropped**) are where most venues disappear. Pricing **overwrites `price_level`
-only when Google returns one** (otherwise it keeps the BestTime value).
+When `rds_enabled=true`, `VenueRepository` (a subclass of the Redis DAO) makes
+every write **write-through**: persist to **RDS Postgres first** (the truth —
+raises on failure), then **project to Redis** (the same DAO call that keeps the
+`GEOADD` geo index). Reads/serving are **unchanged — Redis only**; RDS is never
+on the read path.
 
-> The PNGs are high-resolution (chart 1 is ~10000px wide) — zoom in to read the
-> edge labels, or open the **SVG** for lossless zoom:
-> [1](1_cs_server_ingest.svg) · [2](2_cs_server_enrichment.svg) ·
-> [3](3_vibes_bot_pipeline.svg).
->
-> Mermaid sources live in [diagrams/](diagrams/) (`*.mmd`). Regenerate all three
-> (PNG + SVG) with `docs/render_venue_flow.sh` (uses `npx mermaid-cli`; needs Node).
+- **RDS schemas:** `venues`, `besttime` (weekly + live), `google_places`
+  (vibe_attributes with *promoted, indexed* `google_primary_type`/`google_place_id`,
+  opening_hours, photos, reviews), `instagram`, `admin` (config + rejection_reason),
+  `engagement` (favorites/hot-likes), `audit.enrichment_history`.
+- **Never hard-deletes labels:** `delete_*`/soft-delete map to RDS
+  `deleted_at`, and expensive derived labels get an **append-only**
+  `audit.enrichment_history` row per write.
+- **Projection service:** `rebuild_redis_from_rds()` reconstructs Redis (incl.
+  geo index + live) for disaster recovery / warm-up; `backfill_rds_from_redis()`
+  is the one-time import of the existing Redis dataset.
+- **Engagement (carve-out):** vibes_bot writes favorites/hot-likes via
+  `POST/DELETE /v1/favorites` and `/v1/hot-likes`; `EngagementService`
+  **HMAC-pseudonymizes** the user id → RDS truth → Redis projection in the exact
+  keys vibes_bot reads (`user_favorites:{id}`, `hot_likes:v1:{venue}`). Raw user
+  ids never reach RDS.
+- **Admin config (carve-out):** `AdminConfigService` validates → writes RDS
+  (`admin.admin_config`) → **mirrors Redis** synchronously, so every runtime
+  reader (eligibility/budget/etc.) keeps reading the Redis mirror unchanged.
+
+> **"RDS is the truth" has three deliberate Redis-only edges** (a rebuild does
+> **not** restore these):
+> 1. **Monthly new-venue counter** (`venue_add_counter_v1:YYYY-MM`) lives in
+>    Redis only — only the *limits* are admin-config (RDS+mirror).
+> 2. **Live-forecast prune** — when the 5-min job drops a closed/unavailable
+>    venue it deletes **Redis only**; the RDS `live_forecast` row lingers, so a
+>    `rebuild_redis_from_rds()` can re-project a since-pruned snapshot.
+> 3. **Photos** — current-value only (Google URLs expire): no history, no RDS
+>    delete path; Redis keeps the refetch TTL.
 
 **Legend** — used throughout:
 
@@ -71,9 +112,9 @@ only when Google returns one** (otherwise it keeps the BestTime value).
 | 🟥 **F** | **Filter** — removes or hides venues (row count goes down) |
 | 🟩 **E** | **Enrichment** — adds/derives fields (row count unchanged) |
 | ♻️ | Reversible (serve-time hide; data not destroyed) |
-| 🗑️ | Irreversible-ish (soft-delete: `lifecycle_status=deprecated` in Redis) |
+| 🗑️ | Irreversible-ish soft-delete: `lifecycle_status=deprecated` (RDS `deleted_at` + Redis) |
 | 🔑 | Requires an optional API key; **no-ops** (degrades gracefully) if missing |
-| ⚙️ | Admin-tunable live via a Redis config key (no redeploy) |
+| ⚙️ | Admin-tunable live (RDS `admin.admin_config` → Redis mirror; no redeploy) |
 
 ---
 
@@ -91,13 +132,16 @@ flowchart LR
 
     subgraph EC2["vibes_bot EC2 host (single box, Docker Compose)"]
         direction LR
-        subgraph CS["cs-server :8080  (venue system of record)"]
-            CSJOBS["APScheduler jobs\n(ingest + enrich)"]
+        subgraph CS["cs-server :8080  (RDS = system of record, Redis = projection)"]
+            CSJOBS["APScheduler jobs\n(ingest + enrich + filters)"]
+            CSWT["VenueRepository\n(write-through)"]
+            CSDB[("RDS Postgres\nSYSTEM OF RECORD\nvenues/besttime/google/instagram\nadmin/engagement/audit")]
+            CSRED[("Redis #1 (projection)\nserving keys + geo index")]
             CSSERVE["GET /v1/venues/nearby\n(serve from Redis only)"]
-            CSRED[("Redis #1\nvenues, forecasts,\nattrs, photos, IG, menu,\nadmin_config:*")]
+            CSENG["Engagement +\nadmin-config APIs"]
         end
         subgraph VB["vibes_bot :8000  (product API + LLM)"]
-            VBPIPE["VenuePipeline.get_venues\n(19-step filter+enrich)"]
+            VBPIPE["VenuePipeline.get_venues\n(20-step filter+enrich)"]
             VBAPI["POST /venues  (mobile)\nPOST /ask  (LLM bot)"]
             VBRED[("Redis #2\ntokens, favorites,\nhot likes, admin_config")]
         end
@@ -110,24 +154,32 @@ flowchart LR
     GP --> CSJOBS
     APIFY --> CSJOBS
     OAI --> CSJOBS
-    CSJOBS --> CSRED
     S3 <--> CSJOBS
+    CSJOBS --> CSWT
+    CSWT -->|"1 · truth"| CSDB
+    CSWT -->|"2 · project (geo)"| CSRED
+    CSDB -. "rebuild" .-> CSRED
     CSRED --> CSSERVE
     CSSERVE -->|"HTTP verbose=false (minified)"| VBPIPE
     VBPIPE --> VBAPI
     VBRED <--> VBPIPE
+    VBPIPE -. "fav / hot-like writes" .-> CSENG
+    CSENG --> CSDB
+    CSENG --> CSRED
     GP -. "live pricing" .-> VBPIPE
     VBAPI --> CADDY --> USER
 ```
 
-**Data ownership at a glance**
+**Data ownership at a glance** (with `rds_enabled=true`)
 
-| Concern | Owner | Where stored |
-|---|---|---|
-| Venue catalog, forecasts, attributes, photos, IG, menu | cs-server | Redis #1 |
-| Eligibility block-lists, discovery points, monthly budget | cs-server | Redis #1 (`admin_config:*`) |
-| Scoring weights, name blacklist, venue-type/vibe label maps, vibe modes | vibes_bot | Redis #2 (`admin_config`) |
-| Auth tokens, favorites, hot likes | vibes_bot | Redis #2 |
+| Concern | Owner | Truth | Projection / read |
+|---|---|---|---|
+| Venue catalog, forecasts, attributes, photos, IG, menu, vibe profile | cs-server | **RDS** | Redis #1 (+ geo index) |
+| Eligibility block-lists & other admin config | cs-server | **RDS** (`admin.admin_config`) | Redis #1 (`admin_config:*` mirror) |
+| Discovery points; monthly **new-venue counter** | cs-server | **Redis #1 only** (counter not in RDS) | — |
+| Favorites, hot-likes | cs-server (written via API) | **RDS** (`engagement.*`, pseudonymized) | Redis #2 (`user_favorites:*`, `hot_likes:*`) |
+| Scoring weights, name blacklist, venue-type/vibe label maps, vibe modes | vibes_bot | Redis #2 (`admin_config`) | — |
+| Auth tokens, short-lived caches (weather, pricing) | vibes_bot | Redis #2 | — |
 
 ---
 
@@ -436,7 +488,7 @@ Every place a venue can be removed or hidden, in flow order:
 5. On a user request, **cs-server** serves it from Redis only — after dropping
    deprecated/ineligible venues and merging today's forecast — as a **minified**
    record (no reviews/menu; ≤2 photos).
-6. **vibes_bot** runs it through the 19-step pipeline: it survives only if it has
+6. **vibes_bot** runs it through the 20-step pipeline: it survives only if it has
    **busyness** (step 5) *and* is **open now** (step 8) *and* isn't
    **blacklisted** (step 14); then it's priced, scored, labeled, tagged, and
    given vibe-mode eligibility.

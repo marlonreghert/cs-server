@@ -658,3 +658,45 @@ decoupling itself, on your go:
 5. Drive the BDD feature red→green + the unit tests; metrics + lag alert.
 6. *(On request)* hand you the exact cutover commands, and/or add a
    `POST /admin/venues/{id}/reproject` single-venue projection helper.
+
+## Pass 3 — flag + dead-code cleanup (EXECUTED 2026-06-03)
+
+The §G cutover was validated stable in prod (all 3 flags flipped + B1 proven via
+the controlled deprecation probe + B2 proven via the photo probe). The flags were
+transitional cutover gates, not permanent config, so they were removed and the
+decoupled design is now unconditional (no env vars). Supersedes the deferred-scope
+note captured in PR #34. Done as a proper `/execute-feature` (full suite green
+afterwards: 263 unit, 73 BDD scenarios + 5 @wip skipped).
+
+**Deleted (cs-server):**
+- `app/config.py`: `redis_projection_enabled`, `rds_pipeline_reads`,
+  `rds_pipeline_writes_only`. **Kept `redis_projection_minutes`** (cadence knob).
+- `app/container.py`: the `_rds_reads` force-logic + flag-passing; now constructs
+  `VenueRepository(redis_client, rds_store=rds_store)` unconditionally.
+- `main.py`: the `if settings.redis_projection_enabled` guard on the
+  `redis_projection` job — it now schedules whenever RDS is enabled (still
+  off-loop, still `redis_projection_minutes`).
+- `app/dao/venue_repository.py`: the `rds_reads`/`rds_writes_only` params +
+  `_reads_rds`/`_project_redis`/`_rds_gating` helpers. Every method collapsed to
+  its decoupled form: reads → RDS reconstruct, writes → RDS-only, `list_cached_*`
+  → RDS, `delete_live_forecast` → RDS, when `rds_store` is wired; the `rds_store
+  is None` branch (rds_enabled=false) stays as the pre-RDS Redis-only path.
+- Tests: the flag-off unit cases (`test_flag_off_reads_redis`,
+  `test_flag_off_still_write_through`, `test_flag_off_gating_reads_redis`,
+  `test_instagram_fresh_set_flag_off_matches_redis_presence`); reworked the
+  read-parity + serving-dao tests to seed both stores explicitly (no more
+  write-through).
+- BDD: dropped the runtime flag toggles in the decoupling steps; reconciled the
+  older `rds_system_of_record.feature` to the decoupled reality (write→project
+  scenarios now run the projector explicitly; deleted the now-contradictory
+  "RDS is never consulted for photo refetch" Redis-only gating scenario, since
+  gating moved to RDS in Pass 2b).
+
+**Deleted (vibes_bot, companion PR):** the 3 boolean cs-server env lines from
+`docker-compose.yml` + the `.github/workflows/main.yml` `.env` heredoc (kept
+`REDIS_PROJECTION_MINUTES`). The Pass-3 deploy needs `[FULL-RESTART]` to recreate
+the container.
+
+**NOT touched (deferred, separate sweep):** `RDS_ENABLED`,
+`ENGAGEMENT_WRITE_THROUGH`, `ADMIN_CONFIG_WRITE_THROUGH` — these gate whether RDS
+is used at all; bundling them adds real blast radius.

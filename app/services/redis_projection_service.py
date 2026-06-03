@@ -5,8 +5,8 @@
   busyness. This is disaster recovery + Redis warm. Photos are projected with
   their remaining TTL so expired Google URLs refetch instead of serving stale.
 - backfill_rds_from_redis(): one-time import of the existing Redis dataset into
-  RDS by re-running each record through the write-through repository (venues
-  first, satisfying the FK order). Idempotent.
+  RDS by re-running each record through the RDS repository (venues first,
+  satisfying the FK order). Idempotent.
 """
 from __future__ import annotations
 
@@ -78,7 +78,7 @@ _REBUILD_MODELS = {
 
 class RedisProjectionService:
     def __init__(self, repository, redis_only_dao, rds_store):
-        self.repository = repository          # write-through (RDS + Redis)
+        self.repository = repository          # RDS-only writer (Redis via projector)
         self.redis_only_dao = redis_only_dao  # Redis-only projection writer
         self.rds_store = rds_store
 

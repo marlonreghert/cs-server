@@ -153,7 +153,7 @@ def before_scenario(context, scenario):
 
 
 def _build_rds_layer(context) -> None:
-    """Attach the RDS write-through layer with an in-memory fake store.
+    """Attach the RDS repository layer with an in-memory fake store.
 
     Added alongside the plain context.venue_dao so existing features are
     unaffected; the RDS feature uses context.repository / context.rds_store.

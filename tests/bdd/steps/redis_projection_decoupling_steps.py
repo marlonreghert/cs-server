@@ -1,15 +1,16 @@
 """Behave steps for tests/bdd/persistence/redis_projection_decoupling.feature.
 
-PASS 1 only: the scheduled projector running alongside the existing write-through,
-covering the two correctness fixes B1 (remove venues deprecated in RDS) and B2
-(project photos with the remaining TTL / drop aged photos), plus the engagement
-carve-out guards (engagement is immediate, never via the projector).
+The decoupled architecture: pipelines/admin write RDS-only and the scheduled
+projector is the sole Redis writer. Covers B1 (remove venues deprecated in RDS),
+B2 (project photos with the remaining TTL / drop aged photos), pipelines
+reading/gating from RDS, and the engagement carve-out guards (engagement is
+immediate, never via the projector).
 
-Reuses the harness wired by environment.py (context.repository = write-through,
-context.rds_store = fake truth, context.redis_only_dao = Redis-only projection
-reader/writer, context.redis_projection_service = the projector). Step phrasings
-already defined in rds_system_of_record_steps.py are reused via behave's global
-registry; only new phrasings are defined here.
+Reuses the harness wired by environment.py (context.repository = RDS-only
+repository, context.rds_store = fake truth, context.redis_only_dao = Redis-only
+projection reader/writer, context.redis_projection_service = the projector). Step
+phrasings already defined in rds_system_of_record_steps.py are reused via behave's
+global registry; only new phrasings are defined here.
 """
 from __future__ import annotations
 
@@ -111,7 +112,8 @@ def step_aged_photos_absent(context):
 @given('a venue "{vid}" exists in RDS and is projected to Redis')
 @given('a venue "{vid}" is active in RDS and projected to Redis')
 def step_active_venue_seeded(context, vid):
-    context.repository.upsert_venue(_venue(vid))  # write-through: RDS + Redis
+    context.repository.upsert_venue(_venue(vid))       # RDS truth (RDS-only write)
+    context.redis_only_dao.upsert_venue(_venue(vid))   # the projector's Redis projection
     context.vid = vid
 
 
@@ -160,9 +162,8 @@ def step_projector_not_run(context):
 
 @when('the vibe classifier reads the photos for "{vid}"')
 def step_classifier_reads_photos(context, vid):
-    # The pipeline repository, with RDS reads enabled, must read photo DATA from
-    # RDS (cross-stage read-after-write within one cycle, before any projection).
-    context.repository.rds_reads = True
+    # The pipeline repository reads photo DATA from RDS (cross-stage
+    # read-after-write within one cycle, before any projection).
     context.read_photos = context.repository.get_venue_photos(vid)
 
 
@@ -183,9 +184,9 @@ def step_classifier_proceeds(context):
 # ── Pass 2b: pipelines write only RDS + gating reads RDS ──────────────────────
 @given("the pipeline is decoupled to RDS-only")
 def step_pipeline_decoupled(context):
-    # rds_writes_only requires rds_reads (the container forces this); set both.
-    context.repository.rds_reads = True
-    context.repository.rds_writes_only = True
+    # Decoupling is now unconditional: with RDS wired, the repository reads RDS
+    # and writes RDS-only (the projector is the sole Redis writer).
+    assert context.repository.rds_store is not None
 
 
 @then('Redis has no serving projection for venue "{vid}" yet')
@@ -337,7 +338,8 @@ def step_orphan_in_redis(context, vid):
 
 @given('a venue "{vid}" is deprecated in RDS after being projected to Redis')
 def step_projected_then_deprecated(context, vid):
-    context.repository.upsert_venue(_venue(vid))  # RDS active + Redis projection
+    context.repository.upsert_venue(_venue(vid))       # RDS active (truth)
+    context.redis_only_dao.upsert_venue(_venue(vid))   # prior Redis projection
     context.rds_store.soft_delete_venue(vid, "ineligible_google_type", "eligibility_filter")
 
 

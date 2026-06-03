@@ -90,9 +90,9 @@ class Container:
         # never RDS) so a rebuild does not re-write the system of record.
         self.redis_only_dao = RedisVenueDAO(self.redis_client)
 
-        # RDS system-of-record store + write-through repository (flag-gated).
-        # When rds_enabled is false, rds_store is None and VenueRepository
-        # behaves exactly like RedisVenueDAO (today's Redis-only behavior).
+        # RDS system-of-record store + repository. When rds_enabled is false,
+        # rds_store is None and VenueRepository behaves exactly like RedisVenueDAO
+        # (the pre-RDS Redis-only path).
         self.rds_store = None
         if settings.rds_enabled:
             try:
@@ -103,25 +103,13 @@ class Container:
             except Exception as e:
                 logger.error(f"[Container] Failed to init RDS store: {e}")
                 raise
-        # Pipelines receive this as their venue DAO, so every write is
-        # write-through (RDS truth -> Redis projection) automatically. With
-        # rds_pipeline_reads on (Pass 2a), its DATA reads come from RDS so a later
-        # pipeline stage sees an earlier stage's output without waiting for the
-        # projector; geo/gating reads stay on Redis. Serving uses redis_only_dao.
-        # 2b (writes-only) REQUIRES 2a (reads): writing RDS-only while reading a
-        # Redis no longer fed by pipelines (only projector-lagged) breaks
-        # cross-stage read-after-write. Force reads on whenever writes-only is on.
-        _rds_reads = settings.rds_pipeline_reads or settings.rds_pipeline_writes_only
-        if settings.rds_pipeline_writes_only and not settings.rds_pipeline_reads:
-            logger.warning(
-                "[Container] rds_pipeline_writes_only=true forces rds_pipeline_reads "
-                "on (§G ordering: pipelines must read RDS when they write RDS-only)"
-            )
+        # Pipelines receive this as their venue DAO. With RDS enabled it reads its
+        # data inputs and cache-freshness gating from RDS (truth) and writes
+        # RDS-only — the scheduled projector is the sole Redis writer for pipeline
+        # data. Geo reads stay on Redis. Serving uses redis_only_dao.
         self.redis_venue_dao = VenueRepository(
             self.redis_client,
             rds_store=self.rds_store,
-            rds_reads=_rds_reads,
-            rds_writes_only=settings.rds_pipeline_writes_only,
         )
 
         # Initialize BestTime API client

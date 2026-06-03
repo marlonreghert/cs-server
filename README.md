@@ -230,7 +230,7 @@ aws ec2 describe-instances --profile vibesense --region us-east-1 \
 # then open a shell (current instance: i-0893fb6d283243480 — re-check above if the box was replaced):
 aws ssm start-session --profile vibesense --region us-east-1 --target i-0893fb6d283243480
 ```
-
+(Optional: `sudo su - ubuntu`)
 You land as `ssm-user`; `sudo docker ...` works. Container names:
 `vibes_bot-cs-server-1`, `vibes_bot-redis-1`, `vibes_bot-vibesbot-1`.
 

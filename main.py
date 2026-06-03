@@ -306,7 +306,8 @@ async def run_redis_projection_job():
     AsyncIOScheduler loop would stall GET /v1/venues/nearby and /health for the
     whole run (observed when the cutover backfill blocked serving). The projector
     removes venues deprecated in RDS (B1) and counts the photo cache TTL down
-    (B2). Gated by redis_projection_enabled (default off).
+    (B2). Runs whenever RDS is enabled (it is the sole Redis writer for pipeline
+    data).
     """
     job_name = "redis_projection"
     if container is None or getattr(container, "rds_store", None) is None:
@@ -510,12 +511,11 @@ def start_background_jobs(settings: Settings):
             "(VIBE_CLASSIFIER_ENABLED=false or missing dependencies)"
         )
 
-    # Job 11: Redis projection (decoupling Pass 1) — off-loop projector that
-    # re-asserts the Redis serving projection from RDS, removes venues deprecated
-    # in RDS (B1), and counts the photo cache TTL down (B2). Off by default; runs
-    # ALONGSIDE the synchronous write-through (the pipelines-RDS-only flip is
-    # Pass 2). Requires RDS to be enabled.
-    if settings.redis_projection_enabled and getattr(container, "rds_store", None) is not None:
+    # Job 11: Redis projection (decoupling) — off-loop projector that re-asserts
+    # the Redis serving projection from RDS, removes venues deprecated in RDS (B1),
+    # and counts the photo cache TTL down (B2). It is the sole Redis writer for
+    # pipeline data. Runs whenever RDS is enabled.
+    if getattr(container, "rds_store", None) is not None:
         scheduler.add_job(
             run_redis_projection_job,
             trigger=IntervalTrigger(minutes=settings.redis_projection_minutes),
@@ -528,10 +528,7 @@ def start_background_jobs(settings: Settings):
             f"{settings.redis_projection_minutes} minutes (off-loop)"
         )
     else:
-        logger.info(
-            "[Scheduler] Redis projection disabled "
-            "(REDIS_PROJECTION_ENABLED=false or RDS not enabled)"
-        )
+        logger.info("[Scheduler] Redis projection disabled (RDS not enabled)")
 
     # Start scheduler
     scheduler.start()
