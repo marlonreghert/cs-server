@@ -709,6 +709,19 @@ class RedisVenueDAO:
         self.client.del_(key)
         logger.info(f"[RedisVenueDAO] Deleted Instagram cache for {venue_id}")
 
+    def list_cached_instagram_venue_ids(self) -> list[str]:
+        """Return venue IDs with a non-expired Instagram cache entry.
+
+        Because the Redis key carries a status-dependent TTL (found ~30d /
+        not_found ~7d), an expired entry has already been evicted, so the SCANned
+        set is exactly the "instagram is still fresh — skip re-search" gate used by
+        the enrichment loop (equivalent to get_venue_instagram(...) is not None).
+        """
+        pattern = "venue_instagram_v1:*"
+        keys = self.client.keys(pattern)
+        prefix = "venue_instagram_v1:"
+        return [key.replace(prefix, "", 1) for key in keys]
+
     # =========================================================================
     # VENUE REVIEWS METHODS
     # =========================================================================

@@ -104,6 +104,43 @@ def test_weekly_composite_key(store):
     assert rec is not None and rec["payload"]["day_int"] == 0
 
 
+def test_fresh_enrichment_gating(store):
+    # Executes the real list_fresh_enrichment_venue_ids SQL (incl. make_interval).
+    vid = _vid()
+    store.upsert_venue(_venue(vid))
+    store.upsert_enrichment("venues.vibe_profile", vid,
+                            {"venue_id": vid, "top_vibes": []}, history=False)
+    assert vid in store.list_fresh_enrichment_venue_ids("venues.vibe_profile")  # presence
+    assert vid in store.list_fresh_enrichment_venue_ids(
+        "venues.vibe_profile", max_age_seconds=10 ** 9)                          # within window
+    store.soft_delete_enrichment("venues.vibe_profile", vid, history=False)
+    assert vid not in store.list_fresh_enrichment_venue_ids("venues.vibe_profile")  # excluded
+
+
+def test_fresh_instagram_status_aware_gating(store):
+    # Executes list_fresh_instagram_venue_ids (payload->>'status' + COALESCE).
+    found, nf = _vid(), _vid()
+    store.upsert_venue(_venue(found))
+    store.upsert_venue(_venue(nf))
+    store.upsert_enrichment("instagram.handle", found,
+                            {"venue_id": found, "status": "found"}, history=False)
+    store.upsert_enrichment("instagram.handle", nf,
+                            {"venue_id": nf, "status": "not_found"}, history=False)
+    # found window wide, not_found window zero -> only the found row is fresh
+    fresh = set(store.list_fresh_instagram_venue_ids(
+        found_max_age_seconds=10 ** 9, not_found_max_age_seconds=0))
+    assert found in fresh and nf not in fresh
+
+
+def test_delete_live_forecast_round_trip(store):
+    vid = _vid()
+    store.upsert_venue(_venue(vid))
+    store.upsert_live_forecast(vid, {"status": "OK"})
+    assert store.get_live_forecast(vid) is not None
+    store.delete_live_forecast(vid)
+    assert store.get_live_forecast(vid) is None
+
+
 def test_live_forecast_current_state(store):
     vid = _vid()
     store.upsert_venue(_venue(vid))

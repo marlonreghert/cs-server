@@ -122,6 +122,42 @@ class InMemoryRdsVenueStore:
     def list_all_venue_payloads(self) -> list[dict]:
         return [row["payload"] for row in self.venues.values()]
 
+    # ── pipeline cache-freshness gating from RDS (Pass 2b) ─────────────────────
+    def _age_seconds(self, row) -> float:
+        ts = _coerce_dt(row.get("updated_at"))
+        if ts is None:
+            return 0.0
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        return (datetime.now(timezone.utc) - ts).total_seconds()
+
+    def list_fresh_enrichment_venue_ids(self, table_key, max_age_seconds=None) -> list[str]:
+        out = []
+        for vid, row in self.enrichment.get(table_key, {}).items():
+            if row.get("deleted_at") is not None:
+                continue
+            if max_age_seconds is not None and self._age_seconds(row) > max_age_seconds:
+                continue
+            out.append(vid)
+        return out
+
+    def list_fresh_instagram_venue_ids(
+        self, found_max_age_seconds, not_found_max_age_seconds
+    ) -> list[str]:
+        out = []
+        for vid, row in self.enrichment.get("instagram.handle", {}).items():
+            if row.get("deleted_at") is not None:
+                continue
+            status = (row.get("payload") or {}).get("status")
+            limit = not_found_max_age_seconds if status == "not_found" else found_max_age_seconds
+            if self._age_seconds(row) <= limit:
+                out.append(vid)
+        return out
+
+    def delete_live_forecast(self, venue_id) -> None:
+        self._guard()
+        self.live_forecast.pop(venue_id, None)
+
     # ── generic enrichment (JSONB payload + optional append-only history) ─────
     def upsert_enrichment(self, table_key, venue_id, payload, *, history, promoted=None) -> None:
         self._guard()

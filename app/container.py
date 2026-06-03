@@ -108,10 +108,20 @@ class Container:
         # rds_pipeline_reads on (Pass 2a), its DATA reads come from RDS so a later
         # pipeline stage sees an earlier stage's output without waiting for the
         # projector; geo/gating reads stay on Redis. Serving uses redis_only_dao.
+        # 2b (writes-only) REQUIRES 2a (reads): writing RDS-only while reading a
+        # Redis no longer fed by pipelines (only projector-lagged) breaks
+        # cross-stage read-after-write. Force reads on whenever writes-only is on.
+        _rds_reads = settings.rds_pipeline_reads or settings.rds_pipeline_writes_only
+        if settings.rds_pipeline_writes_only and not settings.rds_pipeline_reads:
+            logger.warning(
+                "[Container] rds_pipeline_writes_only=true forces rds_pipeline_reads "
+                "on (§G ordering: pipelines must read RDS when they write RDS-only)"
+            )
         self.redis_venue_dao = VenueRepository(
             self.redis_client,
             rds_store=self.rds_store,
-            rds_reads=settings.rds_pipeline_reads,
+            rds_reads=_rds_reads,
+            rds_writes_only=settings.rds_pipeline_writes_only,
         )
 
         # Initialize BestTime API client

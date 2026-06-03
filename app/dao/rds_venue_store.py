@@ -159,6 +159,44 @@ class RdsVenueStore:
                 "SELECT payload FROM venues.venue"
             ))]
 
+    # ── pipeline cache-freshness gating from RDS (Pass 2b) ─────────────────────
+    def list_fresh_enrichment_venue_ids(self, table_key, max_age_seconds=None) -> list[str]:
+        """Venue ids whose enrichment of `table_key` is present (not soft-deleted)
+        and, if max_age_seconds is given, newer than that age — the RDS equivalent
+        of the Redis `list_cached_*` "done/fresh" gate. max_age_seconds=None =
+        presence-only (no-TTL enrichments)."""
+        schema, table, _ = _ENRICHMENT[table_key]
+        sql = f"SELECT venue_id FROM {schema}.{table} WHERE deleted_at IS NULL"
+        params = {}
+        if max_age_seconds is not None:
+            sql += " AND updated_at >= now() - make_interval(secs => :age)"
+            params["age"] = float(max_age_seconds)
+        with self.engine.connect() as conn:
+            return [r[0] for r in conn.execute(text(sql), params)]
+
+    def list_fresh_instagram_venue_ids(
+        self, found_max_age_seconds, not_found_max_age_seconds
+    ) -> list[str]:
+        """Status-aware instagram freshness gate: a `not_found` row is fresh only
+        within not_found_max_age_seconds; any other status (found/low_confidence)
+        within found_max_age_seconds. Mirrors the Redis status-dependent TTL."""
+        with self.engine.connect() as conn:
+            return [r[0] for r in conn.execute(text(
+                "SELECT venue_id FROM instagram.handle WHERE deleted_at IS NULL AND ("
+                "(payload->>'status' = 'not_found' "
+                "  AND updated_at >= now() - make_interval(secs => :nf)) "
+                "OR (COALESCE(payload->>'status', '') <> 'not_found' "
+                "  AND updated_at >= now() - make_interval(secs => :f)))"
+            ), {"nf": float(not_found_max_age_seconds), "f": float(found_max_age_seconds)})]
+
+    def delete_live_forecast(self, venue_id) -> None:
+        """Delete the current-state live busyness row (section E gap: keep live
+        deletes in RDS so no write escapes to Redis-only under writes-only mode)."""
+        with self.engine.begin() as conn:
+            conn.execute(text(
+                "DELETE FROM besttime.live_forecast WHERE venue_id=:v"
+            ), {"v": venue_id})
+
     # ── generic enrichment ────────────────────────────────────────────────────
     def upsert_enrichment(self, table_key, venue_id, payload, *, history, promoted=None) -> None:
         if table_key == _WEEKLY:
