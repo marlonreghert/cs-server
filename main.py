@@ -26,6 +26,8 @@ from app.metrics import (
     BACKGROUND_JOB_RUNS_TOTAL,
     BACKGROUND_JOB_DURATION_SECONDS,
     BACKGROUND_JOB_LAST_RUN_TIMESTAMP,
+    REDIS_PROJECTION_VENUES,
+    REDIS_PROJECTION_DEPRECATED_REMOVED_TOTAL,
 )
 
 # Configure logging
@@ -296,6 +298,41 @@ async def run_vibe_classifier_job():
         logger.error(f"[Scheduler] VibeClassifierJob failed: {e}")
 
 
+async def run_redis_projection_job():
+    """Background job: re-assert the Redis serving projection from RDS.
+
+    B0 — runs OFF the serving event loop via run_in_executor. The projection body
+    is synchronous + blocking (SQLAlchemy + Redis); running it inline on the
+    AsyncIOScheduler loop would stall GET /v1/venues/nearby and /health for the
+    whole run (observed when the cutover backfill blocked serving). The projector
+    removes venues deprecated in RDS (B1) and counts the photo cache TTL down
+    (B2). Gated by redis_projection_enabled (default off).
+    """
+    job_name = "redis_projection"
+    if container is None or getattr(container, "rds_store", None) is None:
+        return
+    logger.info("[Scheduler] Running RedisProjectionJob (off-loop)")
+    start_time = time.perf_counter()
+    try:
+        loop = asyncio.get_event_loop()
+        summary = await loop.run_in_executor(
+            None, container.redis_projection_service.rebuild_redis_from_rds
+        )
+        duration = time.perf_counter() - start_time
+        BACKGROUND_JOB_DURATION_SECONDS.labels(job_name=job_name).observe(duration)
+        BACKGROUND_JOB_RUNS_TOTAL.labels(job_name=job_name, status="success").inc()
+        BACKGROUND_JOB_LAST_RUN_TIMESTAMP.labels(job_name=job_name).set_to_current_time()
+        REDIS_PROJECTION_VENUES.set(summary.get("venues", 0))
+        if summary.get("removed"):
+            REDIS_PROJECTION_DEPRECATED_REMOVED_TOTAL.inc(summary["removed"])
+        logger.info(f"[Scheduler] RedisProjectionJob completed: {summary}")
+    except Exception as e:
+        duration = time.perf_counter() - start_time
+        BACKGROUND_JOB_DURATION_SECONDS.labels(job_name=job_name).observe(duration)
+        BACKGROUND_JOB_RUNS_TOTAL.labels(job_name=job_name, status="error").inc()
+        logger.error(f"[Scheduler] RedisProjectionJob failed: {e}")
+
+
 def start_background_jobs(settings: Settings):
     """Start all background jobs using APScheduler."""
     global scheduler
@@ -471,6 +508,29 @@ def start_background_jobs(settings: Settings):
         logger.info(
             "[Scheduler] Vibe classifier disabled "
             "(VIBE_CLASSIFIER_ENABLED=false or missing dependencies)"
+        )
+
+    # Job 11: Redis projection (decoupling Pass 1) — off-loop projector that
+    # re-asserts the Redis serving projection from RDS, removes venues deprecated
+    # in RDS (B1), and counts the photo cache TTL down (B2). Off by default; runs
+    # ALONGSIDE the synchronous write-through (the pipelines-RDS-only flip is
+    # Pass 2). Requires RDS to be enabled.
+    if settings.redis_projection_enabled and getattr(container, "rds_store", None) is not None:
+        scheduler.add_job(
+            run_redis_projection_job,
+            trigger=IntervalTrigger(minutes=settings.redis_projection_minutes),
+            id="redis_projection",
+            name="Redis Projection (RDS -> Redis, off-loop)",
+            replace_existing=True,
+        )
+        logger.info(
+            f"[Scheduler] Scheduled Redis projection every "
+            f"{settings.redis_projection_minutes} minutes (off-loop)"
+        )
+    else:
+        logger.info(
+            "[Scheduler] Redis projection disabled "
+            "(REDIS_PROJECTION_ENABLED=false or RDS not enabled)"
         )
 
     # Start scheduler

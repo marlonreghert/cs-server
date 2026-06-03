@@ -63,6 +63,23 @@ def test_venue_upsert_and_soft_delete(store):
     assert vid not in store.list_active_venue_ids()
 
 
+def test_active_readd_does_not_resurrect_deprecated(store):
+    # Once serving reads RDS via the projector, an active re-add (catalog refresh
+    # re-finding a deprecated venue) must NOT resurrect it. The guard lives in the
+    # RDS write path; this asserts both stores honour it identically.
+    vid = _vid()
+    store.upsert_venue(_venue(vid))
+    store.soft_delete_venue(vid, "ineligible_google_type", "eligibility_filter")
+    assert store.get_venue(vid)["lifecycle_status"] == "deprecated"
+
+    store.upsert_venue(_venue(vid, "Re-added Active"))  # incoming lifecycle=active
+    row = store.get_venue(vid)
+    assert row["lifecycle_status"] == "deprecated"          # stayed deprecated
+    assert row["deprecated_reason"] == "ineligible_google_type"
+    assert vid not in store.list_active_venue_ids()
+    assert vid in store.list_deprecated_venue_ids()
+
+
 def test_enrichment_upsert_history_and_soft_delete(store):
     vid = _vid()
     store.upsert_venue(_venue(vid))  # FK parent

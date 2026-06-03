@@ -1,0 +1,196 @@
+"""Behave steps for tests/bdd/persistence/redis_projection_decoupling.feature.
+
+PASS 1 only: the scheduled projector running alongside the existing write-through,
+covering the two correctness fixes B1 (remove venues deprecated in RDS) and B2
+(project photos with the remaining TTL / drop aged photos), plus the engagement
+carve-out guards (engagement is immediate, never via the projector).
+
+Reuses the harness wired by environment.py (context.repository = write-through,
+context.rds_store = fake truth, context.redis_only_dao = Redis-only projection
+reader/writer, context.redis_projection_service = the projector). Step phrasings
+already defined in rds_system_of_record_steps.py are reused via behave's global
+registry; only new phrasings are defined here.
+"""
+from __future__ import annotations
+
+from datetime import datetime, timedelta, timezone
+
+from behave import given, when, then  # type: ignore[import-untyped]
+
+from app.config import settings
+from app.dao.redis_venue_dao import VENUE_PHOTOS_KEY_FORMAT
+from app.handlers.venue_handler import VenueHandler
+from app.models import Venue
+
+_LAT, _LNG, _R = -8.05, -34.88, 1.0
+_PHOTOS_TABLE = "google_places.photos"
+
+
+def _venue(vid: str, name: str = "Bar X") -> Venue:
+    return Venue(
+        forecast=True, processed=True, venue_id=vid, venue_name=name,
+        venue_address=f"{vid} address", venue_lat=_LAT, venue_lng=_LNG,
+        venue_type="BAR",
+    )
+
+
+def _nearby_ids(context) -> set[str]:
+    handler = VenueHandler(context.redis_only_dao)
+    return {v.venue_id for v in handler.get_venues_nearby(_LAT, _LNG, _R, verbose=False)}
+
+
+def _run_projector(context) -> None:
+    context.redis_projection_service.rebuild_redis_from_rds()
+
+
+def _full_photo_ttl_seconds() -> int:
+    return settings.photo_cache_ttl_days * 24 * 3600
+
+
+def _backdate_photo_updated_at(context, vid: str, days: float) -> None:
+    """Age the RDS photo row by rewriting its updated_at to `days` ago.
+
+    Uses a tz-aware datetime (the type the real Postgres SELECT yields) so the
+    projector's remaining-TTL math is exercised against the production type, not
+    only the fake's ISO-string default.
+    """
+    row = context.rds_store.enrichment[_PHOTOS_TABLE][vid]
+    row["updated_at"] = datetime.now(timezone.utc) - timedelta(days=days)
+
+
+# ── Background ────────────────────────────────────────────────────────────────
+@given("the Redis projector is wired")
+def step_projector_wired(context):
+    assert context.redis_projection_service is not None
+
+
+# ── B2: photo remaining-TTL / drop aged ───────────────────────────────────────
+@given('a venue "{vid}" whose photos were written to RDS some time ago')
+def step_photos_aged_in_rds(context, vid):
+    context.rds_store.upsert_venue(_venue(vid))
+    context.rds_store.upsert_enrichment(
+        _PHOTOS_TABLE, vid, {"photos": [{"url": "https://old/1.jpg", "author_name": "A"}]},
+        history=False,
+    )
+    _backdate_photo_updated_at(context, vid, days=1)  # 1d old, within the 5d TTL
+    context.vid = vid
+
+
+@when("the Redis projector runs")
+def step_projector_runs(context):
+    _run_projector(context)
+
+
+@then("the projected photo key carries the remaining TTL, not a fresh full TTL")
+def step_photo_remaining_ttl(context):
+    full = _full_photo_ttl_seconds()
+    ttl = context.fake_redis.ttl(VENUE_PHOTOS_KEY_FORMAT.format(context.vid))
+    assert ttl and ttl > 0, f"expected a positive TTL on the projected photo key, got {ttl}"
+    # 1-day-old photo against a 5-day TTL must read ~4 days, clearly counted down
+    # from the full TTL (the as-built projector re-stamps the full TTL → fails).
+    assert ttl <= full - 12 * 3600, (
+        f"photo TTL {ttl}s was not counted down from the full TTL {full}s "
+        f"(projector re-stamped a fresh full TTL)"
+    )
+
+
+@when("the venue photos age past their TTL in RDS")
+def step_photos_age_past_ttl(context):
+    _backdate_photo_updated_at(context, context.vid, days=settings.photo_cache_ttl_days + 1)
+
+
+@then("the projector projects the aged photos as absent from serving")
+def step_aged_photos_absent(context):
+    assert context.redis_only_dao.get_venue_photos(context.vid) is None, (
+        "photos aged past their TTL must be projected as absent so stale Google "
+        "URLs drop from serving and a refetch is triggered"
+    )
+
+
+# ── shared seeding for engagement + B1 scenarios ──────────────────────────────
+@given('a venue "{vid}" exists in RDS and is projected to Redis')
+@given('a venue "{vid}" is active in RDS and projected to Redis')
+def step_active_venue_seeded(context, vid):
+    context.repository.upsert_venue(_venue(vid))  # write-through: RDS + Redis
+    context.vid = vid
+
+
+# ── engagement carve-out: immediate, never via the projector ──────────────────
+@then("RDS records the hot-like event first")
+def step_rds_hotlike_first(context):
+    assert context.rds_store.hot_like_event_count(context.vid) >= 1
+
+
+@then("Redis reflects the hot-like immediately in the same request, without a projector run")
+def step_redis_hotlike_immediate(context):
+    # No projector run between the API call and this assertion.
+    assert context.fake_redis.sismember(f"hot_likes:v1:{context.vid}", context.uid)
+
+
+@then("RDS holds the favorite as the system of record")
+def step_rds_favorite_sor(context):
+    pseudo = context.engagement_service.pseudonymize(context.uid)
+    row = context.rds_store.get_favorite(pseudo, context.vid)
+    assert row is not None and row["deleted_at"] is None
+
+
+@then("Redis holds the favorite immediately for the user's next read without a projector run")
+def step_redis_favorite_immediate(context):
+    assert context.fake_redis.sismember(f"user_favorites:{context.uid}", context.vid)
+
+
+# ── B1: projector removes venues deprecated in RDS ────────────────────────────
+@when('the eligibility sweep deprecates "{vid}" in RDS only')
+def step_deprecate_rds_only(context, vid):
+    # RDS-only deprecation (NOT through the write-through repository), so Redis
+    # still serves the stale active venue until the projector reconciles it.
+    context.rds_store.soft_delete_venue(vid, "ineligible_google_type", "eligibility_filter")
+    context.vid = vid
+
+
+@then('the projector removes "{vid}" from the Redis serving set and geo index')
+def step_projector_removed(context, vid):
+    assert context.redis_only_dao.get_venue(vid) is None, (
+        f"venue {vid} deprecated in RDS must be removed from the Redis serving key"
+    )
+    assert vid not in _nearby_ids(context), f"venue {vid} still present in the geo index"
+
+
+@then('the venue "{vid}" is no longer returned by nearby serving')
+def step_no_longer_served(context, vid):
+    assert vid not in _nearby_ids(context)
+
+
+# ── B1: idempotency + orphan-safety ───────────────────────────────────────────
+@given('a venue "{vid}" is present in Redis with no RDS row at all')
+def step_orphan_in_redis(context, vid):
+    context.redis_only_dao.upsert_venue(_venue(vid))  # Redis only; no RDS row
+
+
+@given('a venue "{vid}" is deprecated in RDS after being projected to Redis')
+def step_projected_then_deprecated(context, vid):
+    context.repository.upsert_venue(_venue(vid))  # RDS active + Redis projection
+    context.rds_store.soft_delete_venue(vid, "ineligible_google_type", "eligibility_filter")
+
+
+@when("the Redis projector runs twice")
+def step_projector_runs_twice(context):
+    _run_projector(context)
+    _run_projector(context)
+
+
+@then('the active venue "{vid}" is still returned by nearby serving after the second run')
+def step_active_still_served(context, vid):
+    assert vid in _nearby_ids(context)
+
+
+@then('the venue "{vid}" with no RDS row is left untouched in Redis')
+def step_orphan_untouched(context, vid):
+    assert context.redis_only_dao.get_venue(vid) is not None, (
+        f"orphan {vid} with no RDS row must NOT be pruned by the projector"
+    )
+
+
+@then('the venue "{vid}" deprecated in RDS is removed from Redis')
+def step_deprecated_removed(context, vid):
+    assert context.redis_only_dao.get_venue(vid) is None

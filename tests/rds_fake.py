@@ -21,6 +21,17 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _coerce_dt(value):
+    """Coerce an ISO string / datetime to a datetime (matches the real store's
+    _coerce_dt so the un-deprecate guard behaves identically)."""
+    if isinstance(value, str):
+        try:
+            return datetime.fromisoformat(value)
+        except ValueError:
+            return None
+    return value
+
+
 class InMemoryRdsVenueStore:
     def __init__(self) -> None:
         self.venues: dict[str, dict] = {}
@@ -42,8 +53,28 @@ class InMemoryRdsVenueStore:
             raise RdsUnavailable("RDS is unavailable (fake outage)")
 
     # ── venue (system of record) ──────────────────────────────────────────────
+    def _preserve_deprecation(self, venue) -> None:
+        """Mirror RdsVenueStore._preserve_deprecation / RedisVenueDAO.upsert_venue:
+        an active re-add must NOT resurrect a venue deprecated in RDS. Behaviour
+        parity is asserted by tests/test_rds_store_contract.py."""
+        if not venue.venue_id:
+            return
+        row = self.venues.get(venue.venue_id)
+        if row is None:
+            return
+        gbs = (row.get("payload") or {}).get("google_business_status")
+        if row.get("lifecycle_status") == "deprecated" and venue.is_active():
+            venue.lifecycle_status = "deprecated"
+            venue.deprecated_reason = row.get("deprecated_reason")
+            venue.deprecated_source = row.get("deprecated_source")
+            venue.deprecated_at = _coerce_dt(row.get("deprecated_at"))
+            venue.google_business_status = gbs
+        elif gbs and not venue.google_business_status:
+            venue.google_business_status = gbs
+
     def upsert_venue(self, venue) -> None:
         self._guard()
+        self._preserve_deprecation(venue)
         existing = self.venues.get(venue.venue_id, {})
         self.venues[venue.venue_id] = {
             "venue_id": venue.venue_id,
@@ -80,6 +111,12 @@ class InMemoryRdsVenueStore:
         return [
             vid for vid, row in self.venues.items()
             if row.get("lifecycle_status", "active") == "active"
+        ]
+
+    def list_deprecated_venue_ids(self) -> list[str]:
+        return [
+            vid for vid, row in self.venues.items()
+            if row.get("lifecycle_status", "active") == "deprecated"
         ]
 
     # ── generic enrichment (JSONB payload + optional append-only history) ─────

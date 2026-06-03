@@ -80,14 +80,14 @@ class VenueRepository(RedisVenueDAO):
             )
         super().set_opening_hours(opening_hours)
 
-    def set_venue_photos(self, venue_id, photos) -> None:
+    def set_venue_photos(self, venue_id, photos, ttl_seconds=None) -> None:
         # Photos excluded from append-only history (Google URLs expire).
         if self.rds_store is not None:
             self.rds_store.upsert_enrichment(
                 "google_places.photos", venue_id, {"photos": photos}, history=_NO_HISTORY,
             )
         # super() keeps the setex TTL — the freshness-refetch deliverable.
-        super().set_venue_photos(venue_id, photos)
+        super().set_venue_photos(venue_id, photos, ttl_seconds=ttl_seconds)
 
     def set_venue_reviews(self, reviews) -> None:
         if self.rds_store is not None:

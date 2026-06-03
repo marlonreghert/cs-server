@@ -523,7 +523,9 @@ class RedisVenueDAO:
 
         return override_days * 24 * 3600
 
-    def set_venue_photos(self, venue_id: str, photos: list[dict]) -> None:
+    def set_venue_photos(
+        self, venue_id: str, photos: list[dict], ttl_seconds: Optional[int] = None
+    ) -> None:
         """Cache photo data for a venue with eviction TTL.
 
         Google rotates photo `name` tokens periodically; once rotated, the
@@ -534,15 +536,29 @@ class RedisVenueDAO:
         Args:
             venue_id: Venue identifier
             photos: List of photo dicts: [{url: str, author_name: str | None}, ...]
+            ttl_seconds: Explicit TTL in seconds. Defaults to the configured
+                (admin-tunable) full TTL. The projector passes the *remaining*
+                TTL (full − age) so re-projection counts the TTL down instead of
+                re-stamping a fresh full TTL (B2).
         """
         key = VENUE_PHOTOS_KEY_FORMAT.format(venue_id)
         json_data = json.dumps(photos)
-        ttl_seconds = self._resolve_photos_cache_ttl_seconds()
+        if ttl_seconds is None:
+            ttl_seconds = self._resolve_photos_cache_ttl_seconds()
         self.client.setex(key, ttl_seconds, json_data)
         logger.debug(
             f"[RedisVenueDAO] Cached {len(photos)} photos for {venue_id} "
             f"(TTL {ttl_seconds}s)"
         )
+
+    def delete_venue_photos(self, venue_id: str) -> None:
+        """Remove the cached photos for a venue.
+
+        Used by the projector to drop photos whose RDS age has passed the TTL, so
+        stale Google URLs leave serving and the refetch trigger fires (B2).
+        """
+        key = VENUE_PHOTOS_KEY_FORMAT.format(venue_id)
+        self.client.del_(key)
 
     def get_venue_photos(self, venue_id: str) -> Optional[list[dict]]:
         """Retrieve cached photo data for a venue.

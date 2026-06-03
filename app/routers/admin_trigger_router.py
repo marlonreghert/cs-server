@@ -133,7 +133,12 @@ async def _run_job(job_name: str, config: Optional[dict] = None):
     elif job_name == "backfill_rds":
         if getattr(c, "rds_store", None) is None:
             raise ValueError("RDS not enabled (set rds_enabled=true)")
-        c.redis_projection_service.backfill_rds_from_redis()
+        # Off-loop (B0): synchronous + blocking; running inline would stall
+        # /v1/venues/nearby and /health (observed when the cutover backfill blocked
+        # serving and timed out the trigger). Run in a thread executor.
+        await asyncio.get_event_loop().run_in_executor(
+            None, c.redis_projection_service.backfill_rds_from_redis
+        )
     elif job_name == "admin_config_backfill":
         if getattr(c, "rds_store", None) is None:
             raise ValueError("RDS not enabled (set rds_enabled=true)")
@@ -141,7 +146,10 @@ async def _run_job(job_name: str, config: Optional[dict] = None):
     elif job_name == "rebuild_redis":
         if getattr(c, "rds_store", None) is None:
             raise ValueError("RDS not enabled (set rds_enabled=true)")
-        c.redis_projection_service.rebuild_redis_from_rds()
+        # Off-loop (B0): same blocking-on-the-serving-loop hazard as backfill_rds.
+        await asyncio.get_event_loop().run_in_executor(
+            None, c.redis_projection_service.rebuild_redis_from_rds
+        )
     elif job_name == "live_forecast":
         await c.venues_refresher_service.refresh_live_forecasts_for_all_venues()
     elif job_name == "weekly_forecast":

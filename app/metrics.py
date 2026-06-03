@@ -384,6 +384,20 @@ BACKGROUND_JOB_LAST_RUN_TIMESTAMP = Gauge(
     ["job_name"],
 )
 
+# Redis projection (RDS -> Redis off-loop projector; decoupling Pass 1).
+# Run counts/duration use BACKGROUND_JOB_* with job_name="redis_projection";
+# these add projection-specific observability.
+REDIS_PROJECTION_VENUES = Gauge(
+    "redis_projection_venues",
+    "Number of active venues projected to Redis on the last projector run",
+)
+
+REDIS_PROJECTION_DEPRECATED_REMOVED_TOTAL = Counter(
+    "redis_projection_deprecated_removed_total",
+    "Total venues removed from the Redis serving set by the projector because "
+    "they are deprecated in RDS (B1)",
+)
+
 # =============================================================================
 # VENUE DATA QUALITY METRICS
 # =============================================================================

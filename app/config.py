@@ -107,6 +107,15 @@ class Settings(BaseSettings):
     # to RDS (favorites/hot_likes). Never store raw user ids in RDS.
     engagement_pseudonymization_key: str = ""
 
+    # Redis projection decoupling (plans/redis_projection_decoupling_01_06_26.md).
+    # When enabled, a scheduled off-loop projector re-asserts the Redis serving
+    # projection from RDS (incl. removing venues deprecated in RDS and counting
+    # the photo cache TTL down). Default off = today's synchronous write-through
+    # is the only Redis writer. Pass 1 runs the projector ALONGSIDE write-through;
+    # the pipelines-RDS-only flip is Pass 2.
+    redis_projection_enabled: bool = False
+    redis_projection_minutes: int = 2
+
     @property
     def rds_sqlalchemy_url(self) -> str:
         """SQLAlchemy URL for the RDS Postgres connection (psycopg v3 driver)."""
