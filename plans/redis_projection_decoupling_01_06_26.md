@@ -658,3 +658,56 @@ decoupling itself, on your go:
 5. Drive the BDD feature red→green + the unit tests; metrics + lag alert.
 6. *(On request)* hand you the exact cutover commands, and/or add a
    `POST /admin/venues/{id}/reproject` single-venue projection helper.
+
+## Pass 3 — flag + dead-code cleanup (DEFERRED; scope captured 2026-06-03)
+
+The cutover is live in prod (all 3 flags flipped + validated 2026-06-03). The
+flags are **transitional cutover gates**, not permanent config. Once the decoupled
+state has **baked stably** AND **B1 has demonstrably fired in prod at least once**
+(it never has — every projector run shows `removed: 0` because write-through
+handled deprecations until the writes-only flip; the controlled probe or a real
+eligibility sweep is the proof), run this cleanup so the architecture is
+unconditional with no env vars.
+
+**GATE (do NOT execute until both):** (a) B1 proven in prod; (b) ~days of clean
+bake (projector errors:0, serving healthy, projector-liveness panel green).
+
+**This is a real BDD-lifecycle change** (deletes the flag-OFF branches *and* their
+tests) — run it as a proper `/execute-feature`, not a quick delete.
+
+### Deletion checklist
+- **cs-server `app/config.py`:** delete `redis_projection_enabled`,
+  `rds_pipeline_reads`, `rds_pipeline_writes_only`. **KEEP `redis_projection_minutes`**
+  (a legitimate cadence knob, not a transitional flag).
+- **cs-server `app/container.py`:** drop the `_rds_reads = … or …` force-logic +
+  the flag-passing; construct `VenueRepository(redis_client, rds_store=rds_store)`
+  unconditionally. Keep the serving_dao split (VenueHandler/VenueService →
+  `redis_only_dao`).
+- **cs-server `main.py`:** remove the `if settings.redis_projection_enabled:` guard
+  on the `redis_projection` job — schedule it unconditionally (still off-loop, still
+  `redis_projection_minutes`). Keep the executor-wrapped admin triggers.
+- **cs-server `app/dao/venue_repository.py`:** remove `rds_reads`/`rds_writes_only`
+  params + `_reads_rds`/`_project_redis`/`_rds_gating` helpers. Collapse each
+  method to its decoupled-only form: data getters → always RDS reconstruct (drop
+  the `super()` Redis fallback); writes → always RDS-only (drop the `super().set_*()`
+  projection); `list_cached_*` → always RDS; `delete_live_forecast` → always RDS.
+  (It still holds the Redis client for the geo-dedup reads — `get_nearby_venues`
+  for AddVenue/`recount_discovery_points` — which stay Redis.)
+- **vibes_bot `docker-compose.yml`:** remove the 3 boolean cs-server env lines
+  (keep `REDIS_PROJECTION_MINUTES` if config.py keeps it). **vibes_bot
+  `.github/workflows/main.yml`:** remove `REDIS_PROJECTION_ENABLED`,
+  `RDS_PIPELINE_READS`, `RDS_PIPELINE_WRITES_ONLY` from the `.env` heredoc.
+  (The Pass-3 deploy needs `[FULL-RESTART]` to recreate cs-server.)
+- **Tests:** drop the flag-OFF cases — `test_rds_repository.py::TestPass2bWritesOnly::test_flag_off_still_write_through`,
+  `TestPass2bGating::test_flag_off_gating_reads_redis`, the flag-off halves of
+  `TestPass2aReadParity` (`test_flag_off_reads_redis`; keep the RDS-read assertions),
+  and any write-through projection assertions that only hold flag-off. Keep B1/B2,
+  engagement-immediacy, RDS-read parity (now unconditional), the un-deprecate guard,
+  and the contract tests. Re-scan for `rds_reads`/`rds_writes_only`/`_project_redis`
+  references before deleting.
+- **Optional same-sweep:** retire the older migration flags now that they're
+  permanent — `RDS_ENABLED`, `ENGAGEMENT_WRITE_THROUGH`, `ADMIN_CONFIG_WRITE_THROUGH`
+  (each is "on" forever; the off-paths are dead). Bigger blast radius — separate call.
+
+Engagement carve-out (§F), B1, B2, and the RDS gating are the architecture now —
+they stay.
