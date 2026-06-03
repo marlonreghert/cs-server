@@ -115,6 +115,12 @@ class Settings(BaseSettings):
     # the pipelines-RDS-only flip is Pass 2.
     redis_projection_enabled: bool = False
     redis_projection_minutes: int = 2
+    # Pass 2a: pipelines READ their data inputs from RDS (truth) instead of the
+    # Redis projection, so a later pipeline stage sees an earlier stage's output
+    # without waiting for the projector. Write-through stays ON and cache-freshness
+    # gating stays Redis at this stage (the RDS-only write flip + gating move is
+    # Pass 2b). Default off = today's Redis reads. Serving always reads Redis.
+    rds_pipeline_reads: bool = False
 
     @property
     def rds_sqlalchemy_url(self) -> str:

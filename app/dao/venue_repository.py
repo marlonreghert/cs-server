@@ -15,6 +15,13 @@ from __future__ import annotations
 import logging
 
 from app.dao.redis_venue_dao import RedisVenueDAO
+from app.models import LiveForecastResponse, Venue, WeekRawDay
+from app.models.instagram import VenueInstagram, VenueInstagramPosts
+from app.models.menu import VenueMenuData, VenueMenuPhotos
+from app.models.opening_hours import OpeningHours
+from app.models.venue_review import VenueReviews
+from app.models.vibe_attributes import VibeAttributes
+from app.models.vibe_profile import VenueVibeProfile
 
 logger = logging.getLogger(__name__)
 
@@ -28,9 +35,113 @@ def _json(model) -> dict:
 
 
 class VenueRepository(RedisVenueDAO):
-    def __init__(self, client, rds_store=None):
+    def __init__(self, client, rds_store=None, rds_reads=False):
         super().__init__(client)
         self.rds_store = rds_store
+        # Pass 2a: when True (and RDS wired), pipeline DATA reads come from RDS
+        # (truth) instead of the inherited Redis projection, so a later pipeline
+        # stage sees an earlier stage's output without waiting for projection.
+        # Geo reads (get_nearby_venues), cache-freshness gating (list_cached_*),
+        # and count_* stay on Redis at this stage. Default False = today's reads.
+        self.rds_reads = rds_reads
+
+    # ── pipeline data reads from RDS (Pass 2a, flag-gated) ──────────────────────
+    def _reads_rds(self) -> bool:
+        return self.rds_reads and self.rds_store is not None
+
+    def _rds_enrichment(self, table_key, model_cls, venue_id):
+        """Reconstruct a typed enrichment model from the RDS payload (None if
+        absent or soft-deleted). Single reconstruction path for every getter."""
+        rec = self.rds_store.get_enrichment(table_key, venue_id)
+        if not rec or rec.get("deleted_at") is not None:
+            return None
+        return model_cls.model_validate(rec["payload"])
+
+    def get_venue(self, venue_id):
+        if self._reads_rds():
+            row = self.rds_store.get_venue(venue_id)
+            return Venue.model_validate(row["payload"]) if row else None
+        return super().get_venue(venue_id)
+
+    def get_vibe_attributes(self, venue_id):
+        if self._reads_rds():
+            return self._rds_enrichment("google_places.vibe_attributes", VibeAttributes, venue_id)
+        return super().get_vibe_attributes(venue_id)
+
+    def get_opening_hours(self, venue_id):
+        if self._reads_rds():
+            return self._rds_enrichment("google_places.opening_hours", OpeningHours, venue_id)
+        return super().get_opening_hours(venue_id)
+
+    def get_venue_reviews(self, venue_id):
+        if self._reads_rds():
+            return self._rds_enrichment("google_places.reviews", VenueReviews, venue_id)
+        return super().get_venue_reviews(venue_id)
+
+    def get_venue_instagram(self, venue_id):
+        if self._reads_rds():
+            return self._rds_enrichment("instagram.handle", VenueInstagram, venue_id)
+        return super().get_venue_instagram(venue_id)
+
+    def get_venue_ig_posts(self, venue_id):
+        if self._reads_rds():
+            return self._rds_enrichment("instagram.posts", VenueInstagramPosts, venue_id)
+        return super().get_venue_ig_posts(venue_id)
+
+    def get_venue_menu_photos(self, venue_id):
+        if self._reads_rds():
+            return self._rds_enrichment("venues.menu_photos", VenueMenuPhotos, venue_id)
+        return super().get_venue_menu_photos(venue_id)
+
+    def get_venue_menu_data(self, venue_id):
+        if self._reads_rds():
+            return self._rds_enrichment("venues.menu_data", VenueMenuData, venue_id)
+        return super().get_venue_menu_data(venue_id)
+
+    def get_venue_vibe_profile(self, venue_id):
+        if self._reads_rds():
+            return self._rds_enrichment("venues.vibe_profile", VenueVibeProfile, venue_id)
+        return super().get_venue_vibe_profile(venue_id)
+
+    def get_venue_photos(self, venue_id):
+        if self._reads_rds():
+            rec = self.rds_store.get_enrichment("google_places.photos", venue_id)
+            if not rec or rec.get("deleted_at") is not None:
+                return None
+            return rec["payload"].get("photos") or None
+        return super().get_venue_photos(venue_id)
+
+    def get_week_raw_forecast(self, venue_id, day_int):
+        if self._reads_rds():
+            rec = self.rds_store.get_enrichment(
+                "besttime.weekly_forecast", f"{venue_id}#{day_int}"
+            )
+            if not rec or rec.get("deleted_at") is not None:
+                return None
+            return WeekRawDay.model_validate(rec["payload"])
+        return super().get_week_raw_forecast(venue_id, day_int)
+
+    def get_live_forecast(self, venue_id):
+        if self._reads_rds():
+            rec = self.rds_store.get_live_forecast(venue_id)
+            return LiveForecastResponse.model_validate(rec["payload"]) if rec else None
+        return super().get_live_forecast(venue_id)
+
+    def list_active_venue_ids(self):
+        if self._reads_rds():
+            return self.rds_store.list_active_venue_ids()
+        return super().list_active_venue_ids()
+
+    def list_all_venues(self):
+        if self._reads_rds():
+            out = []
+            for payload in self.rds_store.list_all_venue_payloads():
+                try:
+                    out.append(Venue.model_validate(payload))
+                except Exception as e:
+                    logger.warning(f"[VenueRepository] RDS list_all_venues skip: {e}")
+            return out
+        return super().list_all_venues()
 
     # ── core venue ────────────────────────────────────────────────────────────
     def upsert_venue(self, venue) -> None:

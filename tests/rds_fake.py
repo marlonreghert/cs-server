@@ -119,6 +119,9 @@ class InMemoryRdsVenueStore:
             if row.get("lifecycle_status", "active") == "deprecated"
         ]
 
+    def list_all_venue_payloads(self) -> list[dict]:
+        return [row["payload"] for row in self.venues.values()]
+
     # ── generic enrichment (JSONB payload + optional append-only history) ─────
     def upsert_enrichment(self, table_key, venue_id, payload, *, history, promoted=None) -> None:
         self._guard()

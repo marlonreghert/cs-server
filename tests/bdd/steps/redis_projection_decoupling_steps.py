@@ -139,6 +139,47 @@ def step_redis_favorite_immediate(context):
     assert context.fake_redis.sismember(f"user_favorites:{context.uid}", context.vid)
 
 
+# ── Pass 2a: pipelines read data inputs from RDS ──────────────────────────────
+@given('the photo pipeline has written photos for "{vid}" to RDS only')
+def step_photos_rds_only(context, vid):
+    # Write to RDS only (NOT via the write-through repository) so Redis has no
+    # photo cache for v1 — proving the later stage's read comes from RDS.
+    context.rds_store.upsert_venue(_venue(vid))  # FK parent
+    context.rds_store.upsert_enrichment(
+        _PHOTOS_TABLE, vid, {"photos": [{"url": "https://rds/1.jpg", "author_name": "A"}]},
+        history=False,
+    )
+    context.fake_redis.delete(VENUE_PHOTOS_KEY_FORMAT.format(vid))
+    context.vid = vid
+
+
+@given("the projector has not yet run")
+def step_projector_not_run(context):
+    pass  # no-op: the scenario simply never runs the projector
+
+
+@when('the vibe classifier reads the photos for "{vid}"')
+def step_classifier_reads_photos(context, vid):
+    # The pipeline repository, with RDS reads enabled, must read photo DATA from
+    # RDS (cross-stage read-after-write within one cycle, before any projection).
+    context.repository.rds_reads = True
+    context.read_photos = context.repository.get_venue_photos(vid)
+
+
+@then("it reads the photos from RDS, not from the unprojected Redis cache")
+def step_reads_from_rds(context):
+    assert context.read_photos is not None, (
+        "pipeline read returned None — it read the empty Redis cache, not RDS"
+    )
+    assert context.read_photos[0]["url"] == "https://rds/1.jpg"
+
+
+@then("the classifier can proceed without waiting for projection")
+def step_classifier_proceeds(context):
+    # Redis was never populated for this venue; the read came from RDS alone.
+    assert context.fake_redis.get(VENUE_PHOTOS_KEY_FORMAT.format(context.vid)) is None
+
+
 # ── B1: projector removes venues deprecated in RDS ────────────────────────────
 @when('the eligibility sweep deprecates "{vid}" in RDS only')
 def step_deprecate_rds_only(context, vid):

@@ -103,9 +103,16 @@ class Container:
             except Exception as e:
                 logger.error(f"[Container] Failed to init RDS store: {e}")
                 raise
-        # All pipelines/handlers receive this as their venue DAO, so every write
-        # is write-through (RDS truth -> Redis projection) automatically.
-        self.redis_venue_dao = VenueRepository(self.redis_client, rds_store=self.rds_store)
+        # Pipelines receive this as their venue DAO, so every write is
+        # write-through (RDS truth -> Redis projection) automatically. With
+        # rds_pipeline_reads on (Pass 2a), its DATA reads come from RDS so a later
+        # pipeline stage sees an earlier stage's output without waiting for the
+        # projector; geo/gating reads stay on Redis. Serving uses redis_only_dao.
+        self.redis_venue_dao = VenueRepository(
+            self.redis_client,
+            rds_store=self.rds_store,
+            rds_reads=settings.rds_pipeline_reads,
+        )
 
         # Initialize BestTime API client
         self.besttime_api = BestTimeAPIClient(
@@ -296,8 +303,10 @@ class Container:
                 "(missing OpenAI API key)"
             )
 
-        # Initialize services
-        self.venue_service = VenueService(self.redis_venue_dao, self.besttime_api)
+        # Initialize services. Serving reads the Redis-only DAO (serving_dao) so
+        # public serving is independent of RDS at request time (an RDS outage
+        # cannot break nearby serving) and unaffected by the pipeline RDS reads.
+        self.venue_service = VenueService(self.redis_only_dao, self.besttime_api)
         self.venues_refresher_service = VenuesRefresherService(
             self.redis_venue_dao,
             self.besttime_api,
@@ -310,8 +319,8 @@ class Container:
             dev_radius=settings.dev_radius,
         )
 
-        # Initialize handlers
-        self.venue_handler = VenueHandler(self.redis_venue_dao)
+        # Initialize handlers (serving reads the Redis-only DAO — see above).
+        self.venue_handler = VenueHandler(self.redis_only_dao)
 
         # Engagement (favorites/hot_likes) write-through API service, and the
         # Redis<->RDS projection service (rebuild from RDS / one-time backfill).
