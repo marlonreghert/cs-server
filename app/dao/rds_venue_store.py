@@ -13,11 +13,23 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import datetime
 from typing import Optional
 
 from sqlalchemy import create_engine, text
 
 logger = logging.getLogger(__name__)
+
+
+def _coerce_dt(value):
+    """Coerce a timestamp to a datetime (Postgres yields datetime; the fake/JSON
+    yields an ISO string). Returns None on a missing/unparseable value."""
+    if isinstance(value, str):
+        try:
+            return datetime.fromisoformat(value)
+        except ValueError:
+            return None
+    return value
 
 # table_key -> (schema, table, [promoted column names])
 _ENRICHMENT = {
@@ -48,7 +60,29 @@ class RdsVenueStore:
         ), {"s": schema, "t": table, "v": venue_id, "p": json.dumps(payload), "op": op})
 
     # ── venue (system of record) ──────────────────────────────────────────────
+    def _preserve_deprecation(self, venue) -> None:
+        """Mirror RedisVenueDAO.upsert_venue: an active re-add of a venue that is
+        deprecated in RDS must NOT resurrect it (a catalog refresh re-finding a
+        deprecated drugstore would otherwise flip it active). Protects PR #21
+        eligibility once serving reads RDS via the projector. Also preserves
+        google_business_status. Reads the lifecycle from the COLUMN (soft_delete
+        updates columns, not the payload JSONB)."""
+        if not venue.venue_id:
+            return
+        row = self.get_venue(venue.venue_id)
+        if row is None:
+            return
+        if row.get("lifecycle_status") == "deprecated" and venue.is_active():
+            venue.lifecycle_status = "deprecated"
+            venue.deprecated_reason = row.get("deprecated_reason")
+            venue.deprecated_source = row.get("deprecated_source")
+            venue.deprecated_at = _coerce_dt(row.get("deprecated_at"))
+            venue.google_business_status = row.get("google_business_status")
+        elif row.get("google_business_status") and not venue.google_business_status:
+            venue.google_business_status = row.get("google_business_status")
+
     def upsert_venue(self, venue) -> None:
+        self._preserve_deprecation(venue)
         p = venue.model_dump(by_alias=True, mode="json")
         with self.engine.begin() as conn:
             conn.execute(text(
@@ -96,7 +130,8 @@ class RdsVenueStore:
         with self.engine.connect() as conn:
             row = conn.execute(text(
                 "SELECT venue_id, lifecycle_status, deprecated_reason, deprecated_source, "
-                "payload FROM venues.venue WHERE venue_id=:v"
+                "deprecated_at, google_business_status, payload "
+                "FROM venues.venue WHERE venue_id=:v"
             ), {"v": venue_id}).mappings().first()
             return dict(row) if row else None
 
@@ -104,6 +139,16 @@ class RdsVenueStore:
         with self.engine.connect() as conn:
             return [r[0] for r in conn.execute(text(
                 "SELECT venue_id FROM venues.venue WHERE lifecycle_status='active'"
+            ))]
+
+    def list_deprecated_venue_ids(self) -> list[str]:
+        """Venue ids deprecated in RDS — a positive removal signal for the
+        projector (remove from the Redis serving set + geo index). Distinct from
+        a venue having no RDS row at all, which is absence-of-signal (not pruned).
+        """
+        with self.engine.connect() as conn:
+            return [r[0] for r in conn.execute(text(
+                "SELECT venue_id FROM venues.venue WHERE lifecycle_status='deprecated'"
             ))]
 
     # ── generic enrichment ────────────────────────────────────────────────────
@@ -153,14 +198,16 @@ class RdsVenueStore:
             vid, _, day = venue_id.partition("#")
             with self.engine.connect() as conn:
                 row = conn.execute(text(
-                    "SELECT payload, deleted_at FROM besttime.weekly_forecast "
+                    "SELECT payload, deleted_at, updated_at FROM besttime.weekly_forecast "
                     "WHERE venue_id=:v AND day_int=:d"
                 ), {"v": vid, "d": int(day)}).mappings().first()
                 return dict(row) if row else None
         schema, table, _ = _ENRICHMENT[table_key]
         with self.engine.connect() as conn:
+            # updated_at is returned for the projector's photo remaining-TTL math
+            # (B2). Postgres yields a tz-aware datetime here; the projector coerces.
             row = conn.execute(text(
-                f"SELECT payload, deleted_at FROM {schema}.{table} WHERE venue_id=:v"
+                f"SELECT payload, deleted_at, updated_at FROM {schema}.{table} WHERE venue_id=:v"
             ), {"v": venue_id}).mappings().first()
             return dict(row) if row else None
 

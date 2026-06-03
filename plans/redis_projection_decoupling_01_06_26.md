@@ -25,12 +25,14 @@ step* with an asynchronous, RDS-fed projector and moves pipeline reads to RDS.
 ## Non-goals
 - Do not change the public serving contract. `GET /v1/venues/nearby` and
   vibes_bot's `CrowdSenseClient` keep reading Redis.
-- Do not move **cache-freshness bookkeeping** out of Redis. The TTL-based
-  "is-this-fresh / already-done" gating (photos refetch trigger, instagram cache
-  TTL + not-found negative cache, the `list_cached_*` "done" sets) is a cache
-  concern and **stays Redis-only** (decision: "pipes read *data* from DB;
-  freshness bookkeeping stays in Redis"). Pipelines still touch Redis for these
-  specific gating reads only — never for data writes.
+- ~~Do not move **cache-freshness bookkeeping** out of Redis.~~ **SUPERSEDED by
+  the REFRAME (see Open Questions → "pipelines are RDS-only; Redis is user-only").**
+  All pipeline-private freshness gating (photo refetch trigger, instagram TTL +
+  not-found negative cache, `list_cached_*` "done" sets) **moves to RDS** via
+  `deleted_at`/`updated_at` queries. Pipelines no longer touch Redis at all. The
+  only Redis reads that remain in pipeline code are the **geo-index** reads
+  (`_geo_lookup`, `recount_discovery_points`), which read the *user-facing serving
+  projection*, not pipeline cache.
 - Do not adopt PostGIS serving. The geo nearest-neighbour query stays in Redis;
   the projector rebuilds the Redis geo index from RDS lat/lng (as today).
 - Do not require a Redis flush/rename/key-format migration. Existing Redis key
@@ -211,7 +213,15 @@ details:**
     projector still does NOT prune it. Additive for orphans; pruning only on the
     explicit deprecate signal.
 
-- **B2 — Photo TTL must count down, not reset.** `redis_projection_service.py:113-118`
+- **B2 — Photo TTL (RESHAPED by the REFRAME).** The *refetch trigger* is no longer
+  the Redis TTL — it moves to the RDS `updated_at` staleness query (pipeline reads
+  RDS). The projector's photo-staleness handling is retained for a **different job**:
+  bounding rotated-URL serving — **skip projecting photos whose RDS age ≥ ttl**, and
+  project fresh ones with a Redis TTL ≥ projector cadence. New invariant: *refetch
+  cadence (≈5d) bounds rotated-URL serving*. The original text below stands only for
+  the `updated_at` plumbing + the skip rule; the "keep the Redis-eviction refetch
+  trigger alive" motivation is obsolete. Original:
+  `redis_projection_service.py:113-118`
   is commented "remaining TTL" but actually calls `set_venue_photos(...)`, which
   applies the **full configured setex TTL**. Acceptable for a rare manual rebuild;
   run every 1–2 min it **re-stamps a fresh full TTL on every photo every run →
@@ -245,6 +255,15 @@ details:**
   companion under vibes_bot's lifecycle.
 
 ### D. Pipeline read carve-out wiring (explicit per-call disposition)
+> **SUPERSEDED by the REFRAME (Open Questions → "pipelines are RDS-only; Redis is
+> user-only").** The "Stay Redis-only (cache-freshness gating)" list below now
+> **moves to RDS** (`deleted_at` presence + `updated_at` staleness, instagram
+> not-found via `payload->>'status'`). The "Read from RDS (data)" list is unchanged.
+> The ONLY pipeline Redis reads that remain are the **geo-index** reads
+> (`get_nearby_venues` for `_geo_lookup`, `count_venues_in_radius` for
+> `recount_discovery_points`) — they read the user-facing serving projection. The
+> per-call list below is kept for the data/geo dispositions; treat every former
+> "freshness gating" entry as RDS now.
 - **Read from RDS (data):** `get_venue`, `get_vibe_attributes`,
   `get_venue_instagram`, `get_venue_ig_posts`, `get_venue_photos` (content),
   `get_venue_reviews`, `get_opening_hours`, `get_venue_menu_photos`,
@@ -329,12 +348,13 @@ projector in sync, then decouple. Ordered transition (all reversible):
   `redis_projection_runs_total{result="skipped"}`); it never flushes Redis, so
   serving keeps running on the last good projection. Pipeline writes fail loudly
   during the outage; nothing corrupts Redis.
-- **Duplicate-paid-fetch guard:** because the carve-out gating sets are produced
-  by the projector, emit `redis_projection_lag_seconds` (now − oldest
-  unprojected `updated_at`) and **alert if lag approaches enrichment cadence**;
-  document that `redis_projection_minutes` ≪ enrichment job cadence is an
-  invariant. (Stage-internal candidate lists are iterated once per run, so a
-  single run never double-fetches.)
+- ~~**Duplicate-paid-fetch guard** / lag alert / `redis_projection_minutes` ≪
+  enrichment cadence invariant.~~ **REMOVED by the REFRAME.** Gating now reads RDS,
+  written synchronously by the pipeline's own enrichment write, so the signal is
+  **strongly consistent** (zero lag) and projector cadence no longer has any
+  *correctness* coupling — it affects serving freshness only. `redis_projection_lag_seconds`
+  may still be emitted as an *observability* gauge (serving staleness), but it is no
+  longer a duplicate-paid-fetch guard and needs no alert against enrichment cadence.
 - **Metrics:** `redis_projection_runs_total{result}`,
   `redis_projection_duration_seconds`, `redis_projection_venues`,
   `redis_projection_lag_seconds`; reuse `rds_writes_total` /
@@ -442,28 +462,123 @@ Manual or integration checks:
   1–2 min cadence; only *user interactions* require immediacy (handled by §F, not
   the projector).
 
-### Status: DEFERRED by user (2026-06-02) — decisions captured below; ready to `/execute-feature` when prioritized. (Data plane + admin config + engagement are done/in-flight; decoupling is the optional architectural finish.)
+### Status: EXECUTING (2026-06-02) — data plane + admin config + engagement done; user gave the go for `/execute-feature` on the decoupling. Pre-execute alignment (advisor-vetted, code re-scanned against `main`) captured below.
 
 ### Resolved (2026-06-02, by user)
 - **Projector cadence = ~2 minutes** (`redis_projection_minutes=2`). Still
   **measure** the ~16-RDS-reads × ~1k-venues cost at this cadence on
   `db.t4g.small` at execute time; if uncomfortable, move to incremental
   dirty-tracking (v1 remains scheduled full reprojection).
-- **`count_*` analytics reads → move to RDS** (DB-queryable, consistent with
-  RDS-as-truth). Fold into the execute.
+- **`count_*` analytics reads → SPLIT (not a blanket move).** Enrichment-presence
+  counts (`count_venues_with_photos / _vibe_attributes / _instagram /
+  _menu_photos / _vibe_profile`) → RDS (DB-queryable, consistent with
+  RDS-as-truth). **Geo counts STAY Redis:** `count_venues_in_radius` and
+  `recount_discovery_points` run GEORADIUS on the geo index (no PostGIS) and read
+  the geo set *raw* (no `is_active` filter) — see the B1 alignment item.
 - **Off-loop mechanism = `run_in_executor` thread executor** (B0 default —
   simplest; revisit only if the executor proves insufficient).
 
-### Remaining (decide/measure at execution)
-1. Confirm the ~2-min read cost is acceptable on `db.t4g.small` (measure); else
-   go incremental.
-3. **Off-loop execution mechanism (per B0).** Choose: thread executor
-   (`run_in_executor`, simplest), a worker thread, or a sidecar process/cron.
-   Also note the DBeaver-smoke step (`rebuild_redis`) and any manual admin trigger
-   stall serving until they're executor-wrapped — tolerable as a rare one-off, but
-   wrap them as part of this work so an operator can't accidentally take serving
-   down. (Discovered live: the cutover backfill, run via the HTTP trigger, blocked
-   `/v1/venues/nearby` and timed out the trigger call.)
+### Resolved (2026-06-02, pre-execute alignment — advisor-vetted against live code)
+- **DAO-split injection map (container.py) is fully classified.** serving_dao
+  (Redis-only): `VenueHandler` (:314), `VenueService` (:300, read-only nearby).
+  pipeline_repo (RDS read+write): the 7 enrichment services + `VenuesRefresher`
+  (:301). **Two hybrids** write venues to RDS *and* read the Redis geo index for
+  dedup → pipeline_repo must delegate `get_nearby_venues`/geo reads to Redis (same
+  shape as the cache-gating carve-out): `AddVenueHandler` (:353,
+  `_geo_lookup`→`get_nearby_venues`) and `VenuesRefresher`
+  (`recount_discovery_points`→`count_venues_in_radius`).
+- **B1 = REMOVE deprecated from Redis (geo+JSON); do NOT "re-project with
+  status".** In this DAO the venue JSON and the geo member are the **same key**
+  (`add_location_with_json`; `delete_venue` does `zrem`+`del` together) — there is
+  no way to keep a deprecated venue's JSON for admin visibility without also
+  keeping it in the geo set. And the geo set is read **raw** by
+  `count_venues_in_radius` → `recount_discovery_points` (no `is_active` filter), so
+  retaining deprecated members would inflate discovery coverage and make discovery
+  under-fire. Therefore: add `list_deprecated_venue_ids()` to **RdsVenueStore**
+  (today it has only `list_active_venue_ids()`); the projector removes those from
+  the Redis serving key + geo index (reuse the `delete_venue` removal path). **No
+  RDS row at all = still NOT pruned** (orphan-safe). Admin inventory/eligibility
+  reads move to **RDS** so deprecated venues stay visible in the system of record.
+- **Port the un-deprecate guard into the RDS write path (write-side regression,
+  independent of B1).** `RedisVenueDAO.upsert_venue` (lines 56–64) keeps a
+  venue **deprecated** when an active re-add arrives (and preserves
+  `google_business_status`); `RdsVenueStore.upsert_venue` has **no** such guard
+  (`ON CONFLICT DO UPDATE SET lifecycle_status=excluded…` takes whatever is
+  passed). Today this is masked because serving reads the guarded Redis copy; once
+  serving comes from RDS-via-projector, an active re-add (discovery re-finding a
+  deprecated drugstore) flips it back to active → regresses PR #21 eligibility from
+  the write side. Port the guard (read current lifecycle from RDS, keep deprecated
+  + preserve `google_business_status`) into the RDS write path as part of the split.
+- **B2 is a 1-line column add, not a schema change.** `get_enrichment` already
+  `SELECT payload, deleted_at` from tables that **have** an `updated_at` column
+  (written `=now()` on every upsert); just add `updated_at` to the two SELECTs
+  (generic + weekly) and compute `remaining = ttl − age(updated_at)` in the
+  projector; skip-project when `age ≥ ttl`.
+- **Flag semantics = TWO controls (a single bool can't express §G).**
+  `redis_projection_enabled` starts the projector job (§G-step-2: projector runs
+  *alongside* write-through, Redis fed by both, never empty); a **separate**
+  pipelines-RDS-only switch removes the synchronous `super().set_*()` projection
+  from the write path (§G-step-3). They must sequence + roll back independently so
+  the "never empty Redis" guarantee is a real, verifiable stage.
+- **Precondition clarified — what the user verified ≠ the cutover gate.** The user
+  confirmed *admin config* persisting to RDS (`admin_config_backfill` + config
+  write-through). The venue/enrichment `backfill_rds` + `count(*)` vs Redis
+  `dbsize` verify gates the §G **production flip**, NOT writing the code:
+  red→green runs on fakes (`InMemoryRdsVenueStore` + fakeredis) regardless. Run the
+  count-verify (SSM port-forward already up) before the live flip, not before coding.
+- **Stale-geo-dedup (AddVenue / discovery) = accepted eventual consistency.** A
+  ≤cadence-stale geo set in `_geo_lookup` is bounded; the address-hash cache +
+  idempotent BestTime `venue_id` catch the common re-add. No extra
+  immediate-projection carve-out for venue creation. Documented, not engineered around.
+
+### REFRAME (2026-06-02, by user) — pipelines are RDS-only; Redis is user-only
+**This supersedes the §D cache-freshness carve-out and reshapes B2 / Error Handling.**
+Principle: pipelines read **and** write **only** RDS; Redis is **written** only by
+the projector + engagement, and **read** only by serving (end users). No pipeline
+touches Redis for cache/freshness state.
+- **All pipeline-private gating moves to RDS** — the `list_cached_*` "skip-done"
+  sets, the photo / instagram / ig_posts refetch triggers, and the instagram
+  not-found negative cache. RDS already supports it: presence via
+  `deleted_at IS NULL`; staleness via `updated_at < now() - :ttl`; instagram
+  not-found via `payload->>'status'='not_found' AND updated_at < now() - :not_found_ttl`
+  (verified — `set_venue_instagram(status="not_found")` persists a row, so the
+  `updated_at` exists). Live defaults: `photo_cache_ttl_days=5`,
+  `instagram_cache_ttl_days=30`, `instagram_not_found_cache_ttl_days=7`,
+  `ig_posts_cache_ttl_days=30`; enrichment cron daily (`0 3 * * *`).
+- **Big win — gating becomes strongly consistent.** The gating signal is now the
+  pipeline's own synchronous RDS write, read back by the next run with **zero lag**.
+  This **deletes** the "projector cadence ≪ enrichment cadence" invariant *and* the
+  `redis_projection_lag_seconds` duplicate-paid-fetch alert (Error Handling §), and
+  removes the only *correctness* coupling on projector cadence — cadence now affects
+  **serving freshness only** (already accepted as eventual). It also fixes a latent
+  double-process bug where projection lag made gating read "not done".
+- **B2 changes purpose, it does not vanish.** The photo *refetch trigger* moves to
+  the RDS `updated_at` staleness query (above). The projector's photo-staleness
+  handling is retained for a *different* job — bounding how long a rotated/expired
+  Google URL is served: the projector **skips projecting photos whose RDS age ≥ ttl**
+  (so they drop from serving) and projects fresh ones with a Redis TTL ≥ projector
+  cadence. New invariant: **refetch cadence (≈5d) bounds rotated-URL serving** (was:
+  "Redis TTL bounds it"). `get_enrichment` still needs the 1-line `updated_at` SELECT
+  add for this skip decision.
+- **Geo reads are the ONE piece NOT moved** (user-facing projection, not pipeline
+  cache). `_geo_lookup` (AddVenue dedup) and `recount_discovery_points` /
+  `count_venues_in_radius` read the Redis **geo index** — the *same serving
+  projection users read* — so they stay on Redis, consistent with "Redis = user
+  data," and avoid net-new haversine/bounding-box SQL the plan explicitly disclaimed
+  (no PostGIS). The bounded ≤cadence stale-dedup window is the accepted eventual
+  consistency above. *(Default = keep on Redis; if the user later wants strongly
+  consistent dedup, add a bounding-box+haversine RDS query then.)*
+
+### Remaining (decide/measure at the §G production flip — NOT a code gate)
+1. Confirm the ~2-min full-reprojection read cost is acceptable on `db.t4g.small`
+   (measure against prod RDS at flip time); else go incremental dirty-tracking.
+   This is a deploy/flip-time measurement; the code lands behind the two flags
+   (default off) regardless.
+2. Off-loop mechanism is **resolved** (`run_in_executor` thread executor, B0).
+   As part of this work also executor-wrap the manual admin `rebuild_redis` /
+   `backfill_rds` triggers so an operator can't stall `/v1/venues/nearby`
+   (discovered live: the cutover backfill via the HTTP trigger blocked serving and
+   timed out the trigger call).
 
 ## vibes_bot companion — what's needed on their side
 The cs-server engagement contract is already implemented and the vibes_bot
