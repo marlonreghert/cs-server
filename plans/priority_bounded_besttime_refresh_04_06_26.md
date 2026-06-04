@@ -207,10 +207,13 @@ free this month — no harm). "Has a live value this month" = a
 also require the payload's `venue_live_busyness_available` if a row can exist
 without an actual value.
 
-**Dependency to confirm before ranking:** `X = monthly_quota − manual_reserve`
-must be ≥ P0+P1 minimums (≥100 + ≥200 = **≥300**). With reserve=10, X≈490 ✓.
-Also the SELECT must return **≥300 active Pernambuco venues** for the minimums to
-be satisfiable — report the row count.
+**Sizing input before ranking:** there are **no fixed per-tier counts**. I size
+each tier subjectively from the actual relevance distribution in the SELECT
+output, keeping the refreshed set (P0–P3 plus the Step 0 P4 currently-live
+venues) within `X = monthly_quota − manual_reserve` (≈490 at reserve=10). Report
+the row count so I can calibrate the cut points: fewer relevant venues than `X`
+just leaves budget headroom; more than `X` means the least-relevant fall to P4/P5
+and may not all fit.
 
 **Step 1 — run this SELECT and paste the full result back** (I rank one-by-one;
 I do not run it). `google_primary_type` is expected to be sparse, so ranking
@@ -246,14 +249,18 @@ Fallback if address filtering is unreliable: bound by lat/lng box (approx
 Pernambuco: lat −7.0…−10.0, lng −34.5…−41.5) — documented, not preferred.
 
 **Step 2 — ranking rubric (relevance to a nightlife/going-out app):**
-- P0/P1 = high relevance going-out venues: bars, pubs, nightclubs, live-music,
-  breweries, lively restaurants/lounges; **squares & parks acceptable** (people
-  gather there for fun). Existing live busyness is a positive signal (BestTime
-  has data and we were refreshing it) — but does **not** override irrelevance.
+- Higher tiers (P0 → P2) = going-out venues by descending relevance: bars, pubs,
+  nightclubs, live-music, breweries, lively restaurants/lounges; **squares &
+  parks acceptable** (people gather there for fun). Existing live busyness is a
+  positive signal (BestTime has data and we were refreshing it) — but does **not**
+  override irrelevance.
 - Lower (P3–P5): **non-relevant types even if they have live data** — churches,
   supermarkets, drugstores, gyms, schools, offices, transit, generic shops.
 - Missing live busyness is **neutral** (likely just capped), not a penalty.
-- Minimums: ≥100 P0 and ≥200 P1.
+- **No fixed per-tier counts.** I assign tiers by genuine relevance and calibrate
+  the cut points to the observed data distribution, keeping the refreshed set
+  (P0–P3 + the Step 0 P4 venues) within `X`. P0 is reserved for the clearly
+  must-have venues; tiers widen as relevance softens.
 
 **Step 3 — UPDATE (template; exact ids filled after ranking):**
 ```sql
@@ -283,13 +290,13 @@ live/weekly rows for non-prioritized venues.
 
 ## Open Questions
 - **Confirm `manual_reserve` for prod** (reset from the temporary 500 to a small
-  value so `X = quota − reserve` is sensible, e.g. 10 → X≈490). Drives whether
-  P0/P1 minimums fit.
+  value so `X = quota − reserve` is sensible, e.g. 10 → X≈490). Sets the refresh
+  budget the tiering is calibrated against.
 - **"Set forecast/live busyness as agreed"**: for non-prioritized venues, should
   the one-time UPDATE also clear/stop their live + weekly rows (so we don't serve
   stale busyness), or priority-only (leave existing data, just stop refreshing)?
-- **Pernambuco row count** from the SELECT must be ≥300 (else revise the P0/P1
-  minimums).
+- **Pernambuco row count** from the SELECT — informs tier sizing (no hard minimum;
+  calibrated to the distribution and bounded by `X`).
 - **Verify with BestTime** that touching the same venue_id via both live and
   weekly endpoints counts as **1** unique, not 2 (load-bearing: if 2, X halves).
 - Geo-fallback: restrict matching to owned/in-set venues only (closes the
