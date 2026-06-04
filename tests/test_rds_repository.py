@@ -32,16 +32,6 @@ def _venue(vid="v1", name="Bar X"):
                  venue_lat=-8.05, venue_lng=-34.88, venue_type="BAR")
 
 
-class TestFlagOffParity:
-    def test_repository_without_store_behaves_as_dao(self):
-        repo = VenueRepository(_geo(), rds_store=None)  # rds_enabled=false
-        repo.upsert_venue(_venue())
-        repo.set_vibe_attributes(VibeAttributes(venue_id="v1", google_primary_type="bar"))
-        # Reads (inherited) work; no exception, no RDS dependency.
-        assert repo.get_venue("v1") is not None
-        assert repo.get_vibe_attributes("v1").google_primary_type == "bar"
-
-
 class TestWriteThrough:
     def test_writes_rds_then_redis(self):
         store = InMemoryRdsVenueStore()

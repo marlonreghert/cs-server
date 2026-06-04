@@ -7,8 +7,7 @@ readers) keeps reading the Redis mirror unchanged.
 
 This is a synchronous RDS-write-then-Redis-mirror carve-out (the same shape as
 EngagementService), NOT the venue projector: config keys are global (not
-venue-keyed), need immediate read-back, and are single-row writes. When no RDS
-store is wired (rds_enabled=false) it degrades to Redis-only (today's behavior).
+venue-keyed), need immediate read-back, and are single-row writes.
 """
 from __future__ import annotations
 
@@ -25,7 +24,7 @@ class AdminConfigService:
     def __init__(
         self,
         redis_client,
-        rds_store=None,
+        rds_store,
         validators: Optional[dict[str, Callable[[Any], Any]]] = None,
     ) -> None:
         # raw redis client (supports get/set/delete/scan_iter)
@@ -49,40 +48,31 @@ class AdminConfigService:
         """
         validator = self.validators.get(key)
         to_store = validator(value) if validator is not None else value
-        if self.rds_store is not None:
-            self.rds_store.upsert_admin_config(key, to_store, updated_by)  # truth first
+        self.rds_store.upsert_admin_config(key, to_store, updated_by)  # truth first
         self.redis.set(self._redis_key(key), json.dumps(to_store))  # mirror
         return to_store
 
     def get(self, key: str) -> Any:
-        """Return the live value from the Redis mirror (kept in sync with RDS for
-        owned keys, and the fresh authoritative value for keys still written
-        directly to Redis until the vibes_bot companion). Falls back to the
-        durable RDS value if the mirror is absent (e.g. if it was evicted)."""
+        """Return the live value from the Redis mirror (kept in sync with RDS).
+        Falls back to the durable RDS value if the mirror is absent (e.g. if it
+        was evicted)."""
         raw = self.redis.get(self._redis_key(key))
         if raw is not None:
             try:
                 return json.loads(raw)
             except (TypeError, ValueError):
                 return raw
-        if self.rds_store is not None:
-            row = self.rds_store.get_admin_config(key)
-            if row is not None:
-                return row["value"]
+        row = self.rds_store.get_admin_config(key)
+        if row is not None:
+            return row["value"]
         return None
 
     def delete(self, key: str) -> None:
         """Hard-delete the config: remove the RDS row and the Redis mirror.
         Readers fall back to their built-in defaults on a missing key."""
-        if self.rds_store is not None:
-            self.rds_store.delete_admin_config(key)
+        self.rds_store.delete_admin_config(key)
         self.redis.delete(self._redis_key(key))
 
     def list_keys(self) -> list[str]:
-        if self.rds_store is not None:
-            return [row["key"] for row in self.rds_store.list_admin_config()]
-        return [
-            k[len(ADMIN_CONFIG_PREFIX):]
-            for k in self.redis.scan_iter(match=f"{ADMIN_CONFIG_PREFIX}*")
-        ]
+        return [row["key"] for row in self.rds_store.list_admin_config()]
 

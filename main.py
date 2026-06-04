@@ -310,7 +310,7 @@ async def run_redis_projection_job():
     data).
     """
     job_name = "redis_projection"
-    if container is None or getattr(container, "rds_store", None) is None:
+    if container is None:
         return
     logger.info("[Scheduler] Running RedisProjectionJob (off-loop)")
     start_time = time.perf_counter()
@@ -514,21 +514,18 @@ def start_background_jobs(settings: Settings):
     # Job 11: Redis projection (decoupling) — off-loop projector that re-asserts
     # the Redis serving projection from RDS, removes venues deprecated in RDS (B1),
     # and counts the photo cache TTL down (B2). It is the sole Redis writer for
-    # pipeline data. Runs whenever RDS is enabled.
-    if getattr(container, "rds_store", None) is not None:
-        scheduler.add_job(
-            run_redis_projection_job,
-            trigger=IntervalTrigger(minutes=settings.redis_projection_minutes),
-            id="redis_projection",
-            name="Redis Projection (RDS -> Redis, off-loop)",
-            replace_existing=True,
-        )
-        logger.info(
-            f"[Scheduler] Scheduled Redis projection every "
-            f"{settings.redis_projection_minutes} minutes (off-loop)"
-        )
-    else:
-        logger.info("[Scheduler] Redis projection disabled (RDS not enabled)")
+    # pipeline data.
+    scheduler.add_job(
+        run_redis_projection_job,
+        trigger=IntervalTrigger(minutes=settings.redis_projection_minutes),
+        id="redis_projection",
+        name="Redis Projection (RDS -> Redis, off-loop)",
+        replace_existing=True,
+    )
+    logger.info(
+        f"[Scheduler] Scheduled Redis projection every "
+        f"{settings.redis_projection_minutes} minutes (off-loop)"
+    )
 
     # Start scheduler
     scheduler.start()

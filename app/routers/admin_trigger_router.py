@@ -123,8 +123,6 @@ async def _run_job(job_name: str, config: Optional[dict] = None):
     elif job_name == "venue_eligibility":
         await c.venues_refresher_service.run_eligibility_sweep()
     elif job_name == "rebuild_redis":
-        if getattr(c, "rds_store", None) is None:
-            raise ValueError("RDS not enabled (set rds_enabled=true)")
         # Off-loop (B0): the projection body is synchronous + blocking; running it
         # inline would stall /v1/venues/nearby and /health for the whole run.
         await asyncio.get_event_loop().run_in_executor(
