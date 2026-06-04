@@ -174,11 +174,38 @@ Manual or integration checks:
   scheduled, 50m radius, metrics — all without requiring BestTime to accept.
 
 ## One-Time Pernambuco Prioritization (mitigation — separate deliverable)
-Code lands first; data is set by a one-time UPDATE. **Sequence (must hold):**
-migrate (priority default 5) → run the prioritization UPDATE → only then enable
+Code lands first; data is set by one-time UPDATEs. **Sequence (must hold):**
+migrate (priority default 5) → **Step 0: seed P4 for currently-live venues** →
+run the relevance prioritization UPDATE (Steps 1–3) → only then enable
 discovery-off + bounded refresh. Enabling bounding on the all-default-5 state
 would tie-break by reviews and refresh high-review **supermarkets/churches** —
 exactly the venues to exclude.
+
+**Step 0 — keep currently-served venues for free this month.** Before the
+relevance ranking, set P4 for every active venue that already has a live busyness
+value **this calendar month**. Those venues are already counted against this
+month's 500-unique allowance, so re-refreshing them costs **no new unique slot** —
+P4 (above the default P5) keeps bounded refresh serving their busyness until the
+month resets or priorities change. This is intentionally **not** limited to
+Pernambuco — any currently-live venue is kept. The relevance ranking (Steps 1–3)
+then overrides: relevant venues move up to P0–P3, irrelevant ones
+(supermarkets/churches) down to P5.
+
+```sql
+UPDATE venues.venue
+SET priority = 4
+WHERE lifecycle_status = 'active'
+  AND venue_id IN (
+    SELECT venue_id FROM besttime.live_forecast
+    WHERE updated_at >= date_trunc('month', now())   -- "has a live value this month"
+  );
+```
+Interaction: if `count(P0–P3) + count(P4) > X`, only the top-X by priority
+refresh; the lowest P4 venues that don't fit simply go stale (they were already
+free this month — no harm). "Has a live value this month" = a
+`besttime.live_forecast` row updated in the current calendar month; optionally
+also require the payload's `venue_live_busyness_available` if a row can exist
+without an actual value.
 
 **Dependency to confirm before ranking:** `X = monthly_quota − manual_reserve`
 must be ≥ P0+P1 minimums (≥100 + ≥200 = **≥300**). With reserve=10, X≈490 ✓.
@@ -241,6 +268,9 @@ live/weekly rows for non-prioritized venues.
 ## Acceptance Criteria
 - `priority` column exists (default 5) with the partial index; `Venue` and RDS
   upsert persist it.
+- Before bounding is enabled (Step 0), every active venue with a live value this
+  calendar month is seeded to priority 4 — so already-unlocked venues keep
+  refreshing for free until the reset or re-prioritization.
 - Live and weekly refresh request the **same** ≤ `refresh_budget` venue set,
   ordered by priority; no venue outside the set is requested.
 - Discovery job is not scheduled and the manual trigger is rejected when disabled.
