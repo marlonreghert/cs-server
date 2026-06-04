@@ -93,10 +93,8 @@ class Settings(BaseSettings):
     redis_password: str = ""
     redis_db: int = 0
 
-    # RDS (Postgres) system-of-record. Disabled by default: when off, all
-    # persistence stays Redis-only (today's behavior). See
+    # RDS (Postgres) system-of-record connection. See
     # plans/rds_system_of_record_01_06_26.md.
-    rds_enabled: bool = False
     rds_host: str = ""
     rds_port: int = 5432
     rds_db: str = "vibesense"

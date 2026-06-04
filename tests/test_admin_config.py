@@ -22,27 +22,20 @@ def _eligibility_validator(value):
     return value
 
 
-def _svc(rds=True, validators=None):
+def _svc(validators=None):
     redis_client = fakeredis.FakeRedis(decode_responses=True)
-    store = InMemoryRdsVenueStore() if rds else None
+    store = InMemoryRdsVenueStore()
     svc = AdminConfigService(redis_client, rds_store=store, validators=validators or {})
     return svc, redis_client, store
 
 
-# ── service: write-through ordering + degradation ───────────────────────────
+# ── service: write-through ordering ─────────────────────────────────────────
 def test_set_writes_rds_then_mirror():
     svc, r, store = _svc()
     svc.set("scoring_weights", {"a": 1})
     assert store.get_admin_config("scoring_weights")["value"] == {"a": 1}
     assert json.loads(r.get("admin_config:scoring_weights")) == {"a": 1}
     assert svc.get("scoring_weights") == {"a": 1}
-
-
-def test_rds_disabled_degrades_to_redis_only():
-    svc, r, _ = _svc(rds=False)
-    svc.set("feature_flags", {"x": True})
-    assert json.loads(r.get("admin_config:feature_flags")) == {"x": True}
-    assert svc.get("feature_flags") == {"x": True}
 
 
 def test_get_falls_back_to_rds_when_mirror_absent():

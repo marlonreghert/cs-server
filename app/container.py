@@ -90,23 +90,20 @@ class Container:
         # never RDS) so a rebuild does not re-write the system of record.
         self.redis_only_dao = RedisVenueDAO(self.redis_client)
 
-        # RDS system-of-record store + repository. When rds_enabled is false,
-        # rds_store is None and VenueRepository behaves exactly like RedisVenueDAO
-        # (the pre-RDS Redis-only path).
-        self.rds_store = None
-        if settings.rds_enabled:
-            try:
-                from app.dao.rds_venue_store import RdsVenueStore
+        # RDS system-of-record store. RDS is the durable truth for all venue +
+        # admin data; Redis is the serving/geo projection.
+        from app.dao.rds_venue_store import RdsVenueStore
 
-                self.rds_store = RdsVenueStore(settings.rds_sqlalchemy_url)
-                logger.info("[Container] RDS system-of-record enabled")
-            except Exception as e:
-                logger.error(f"[Container] Failed to init RDS store: {e}")
-                raise
-        # Pipelines receive this as their venue DAO. With RDS enabled it reads its
-        # data inputs and cache-freshness gating from RDS (truth) and writes
-        # RDS-only — the scheduled projector is the sole Redis writer for pipeline
-        # data. Geo reads stay on Redis. Serving uses redis_only_dao.
+        try:
+            self.rds_store = RdsVenueStore(settings.rds_sqlalchemy_url)
+            logger.info("[Container] RDS system-of-record initialized")
+        except Exception as e:
+            logger.error(f"[Container] Failed to init RDS store: {e}")
+            raise
+        # Pipelines receive this as their venue DAO: it reads its data inputs and
+        # cache-freshness gating from RDS (truth) and writes RDS-only — the
+        # scheduled projector is the sole Redis writer for pipeline data. Geo reads
+        # stay on Redis. Serving uses redis_only_dao.
         self.redis_venue_dao = VenueRepository(
             self.redis_client,
             rds_store=self.rds_store,

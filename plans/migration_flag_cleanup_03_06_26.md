@@ -1,6 +1,14 @@
 # Migration flag + scaffolding cleanup (staged)
 
-Status: IN PROGRESS (bucket 1). Owner-approved 2026-06-03 via scoping Q&A.
+Status: DONE — all 4 buckets executed (2026-06-03/04). Owner-approved via scoping Q&A.
+- Bucket 1: cs-server PR #36 (merged).
+- Bucket 2: vibes_bot ENGAGEMENT_WRITE_THROUGH — PR #60 (merged + deployed).
+- Bucket 3: vibes_bot ADMIN_CONFIG_WRITE_THROUGH — PR #61 (merged + deployed).
+- Bucket 4: RDS_ENABLED removed (cs-server hardcodes RDS-on + vibes_bot env). The
+  `rds_store is None` Redis-only fallback is gone; VenueRepository is now
+  "RDS for data, Redis for geo (by design)". EngagementService / AdminConfigService
+  require rds_store. Engagement+admin stay synchronous RDS+Redis carve-outs.
+  Merge cs-server BEFORE the vibes_bot env removal (kill-switch ordering).
 
 The RDS-as-system-of-record + Redis-projection-decoupling migration is shipped and
 live in prod (step 6 / Pass 1–3 merged + deployed). This plan removes the remaining
