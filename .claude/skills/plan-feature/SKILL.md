@@ -93,6 +93,11 @@ Preflight:
   proceed — the plan is committed on `main`.
 - `git status --short` must have no uncommitted tracked changes. If it does, stop
   and ask the user to commit or stash first. Untracked files are fine.
+- Sync `main` with origin before writing: `git fetch origin`, then
+  `git merge --ff-only origin/main` (or `git pull --ff-only`). If it cannot
+  fast-forward (local `main` has diverged from origin), stop and ask the user how
+  to reconcile — never rebase, force, or create a merge commit silently. Do not
+  plan or branch from a stale `main`.
 
 Then:
 
