@@ -18,7 +18,8 @@ import logging
 
 from app.config import settings
 from app.dao.redis_venue_dao import RedisVenueDAO
-from app.models import LiveForecastResponse, Venue, WeekRawDay
+from app.dao.venue_row import venue_from_row
+from app.models import LiveForecastResponse, WeekRawDay
 from app.models.instagram import VenueInstagram, VenueInstagramPosts
 from app.models.menu import VenueMenuData, VenueMenuPhotos
 from app.models.opening_hours import OpeningHours
@@ -53,7 +54,7 @@ class VenueRepository(RedisVenueDAO):
 
     def get_venue(self, venue_id):
         row = self.rds_store.get_venue(venue_id)
-        return Venue.model_validate(row["payload"]) if row else None
+        return venue_from_row(row) if row else None
 
     def get_vibe_attributes(self, venue_id):
         return self._rds_enrichment("google_places.vibe_attributes", VibeAttributes, venue_id)
@@ -105,9 +106,9 @@ class VenueRepository(RedisVenueDAO):
 
     def list_all_venues(self):
         out = []
-        for payload in self.rds_store.list_all_venue_payloads():
+        for row in self.rds_store.list_all_venue_rows():
             try:
-                out.append(Venue.model_validate(payload))
+                out.append(venue_from_row(row))
             except Exception as e:
                 logger.warning(f"[VenueRepository] RDS list_all_venues skip: {e}")
         return out

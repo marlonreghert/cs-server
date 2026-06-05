@@ -1,20 +1,16 @@
-Feature: RDS schema normalization preserves serving behavior
+Feature: RDS schema normalization — Ex1 drop venue payload duplication
   As the VibeSense platform
-  Three persistence design-smell fixes on the live RDS system-of-record — a
-  structured `venues.address` table (Ex3), normalized admin configuration with
-  one-row eligibility rules (Ex2), and removal of scalar duplication on
-  `venues.venue` in favour of relational columns plus a slim residual JSON (Ex1) —
-  must each preserve externally observable serving behavior exactly. The whole
-  risk is silent data drift, so every scenario asserts equivalence before/after.
+  The first step of the RDS schema-normalization umbrella removes scalar
+  duplication on `venues.venue`: relational columns become the source of truth and
+  only a slim residual JSON holds the genuinely-nested fields. A venue must
+  reconstruct identically (columns + residual) and project to Redis identically.
+  The whole risk is silent data drift, so a full-dataset equivalence harness
+  guards every transformation in RDS and in the Redis serving projection.
 
-  # Umbrella plan: plans/260605_rds-schema-normalization.md. One branch, three
-  # sequenced steps (Ex1 -> Ex3 -> Ex2). Ex1 leads so venue reconstruction is
-  # column-based before Ex3 swaps the address source (no payload overlay). Each
-  # step is an expand -> backfill -> verify -> cutover -> contract migration on a
-  # populated database, gated by a full-dataset equivalence harness that diffs the
-  # old (v1) and new (v2) shapes in RDS and in a Redis shadow projection.
-  # vibes_bot's migration off the Redis eligibility mirror is a separate
-  # coordinated change; the mirror is retained here until then.
+  # Umbrella plan: plans/260605_rds-schema-normalization.md. Sequenced steps
+  # Ex1 -> Ex3 -> Ex2; THIS branch/PR implements Ex1 + the shared equivalence
+  # harness only. The Ex3 (address table) and Ex2 (admin config) scenarios land in
+  # their own later PRs, so main never carries a scenario without its code.
   #
   # bdd-exempt: the pre-execution local-dump rollback gate and the migration
   # mechanics (pg_dump/SSM/restore, expand/contract DDL ordering) are operator
@@ -27,42 +23,6 @@ Feature: RDS schema normalization preserves serving behavior
   Background:
     Given the RDS system-of-record is enabled
     And an empty RDS and an empty Redis
-
-  # ── Ex3: structured address table ──────────────────────────────────────────
-  Scenario: A venue's address and coordinates reconstruct identically from the address table
-    Given a venue "v1" with address "Rua X, 100" at latitude -8.05 and longitude -34.88
-    When the venue's address is migrated into the structured address table
-    Then reconstructing venue "v1" yields address "Rua X, 100" at latitude -8.05 and longitude -34.88
-    And venue "v1" remains in the Redis geo index at latitude -8.05 and longitude -34.88
-
-  Scenario: Structured address components stay absent until enrichment provides them
-    Given a venue "v2" backfilled into the address table from free text only
-    Then reconstructing venue "v2" produces the same serving output as before the migration
-    And the structured components street, neighborhood, city, and postal code are absent
-
-  # ── Ex2: normalized admin configuration ────────────────────────────────────
-  Scenario: Adding a single eligibility rule is a one-row change that takes effect
-    Given the eligibility rules are stored as normalized rows
-    And a venue "v3" named "Bar do Centro" that is eligible
-    When an operator adds the blocked name keyword "centro" as a single rule row
-    Then venue "v3" becomes ineligible by name keyword
-    And no other eligibility rule is modified
-
-  Scenario: The effective config assembled from rows equals the previous JSON blob
-    Given an existing "venue_eligibility" JSON configuration
-    When that configuration is backfilled into normalized eligibility rule rows
-    Then the effective eligibility config assembled from the rows equals the config the JSON blob produced
-
-  Scenario: Empty eligibility rules fall back to the hardcoded defaults
-    Given the normalized eligibility rule table is empty
-    When a venue is evaluated for eligibility
-    Then the evaluation uses the hardcoded default block-lists
-    And eligibility filtering does not break
-
-  Scenario: The Redis eligibility mirror is still written for vibes_bot compatibility
-    When an operator changes the eligibility configuration through the admin API
-    Then the Redis "admin_config:venue_eligibility" mirror is written in the same JSON shape as before
-    And cs-server runtime readers read eligibility from the normalized rows
 
   # ── Ex1: drop venue payload duplication ────────────────────────────────────
   Scenario: A venue reconstructs identically from columns plus residual JSON

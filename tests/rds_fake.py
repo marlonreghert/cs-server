@@ -12,6 +12,8 @@ import copy
 from datetime import datetime, timezone
 from typing import Optional
 
+from app.dao.venue_row import split_venue_for_storage
+
 
 class RdsUnavailable(RuntimeError):
     """Raised by the fake when the outage toggle is on (RDS-outage scenario)."""
@@ -62,7 +64,7 @@ class InMemoryRdsVenueStore:
         row = self.venues.get(venue.venue_id)
         if row is None:
             return
-        gbs = (row.get("payload") or {}).get("google_business_status")
+        gbs = row.get("google_business_status")
         if row.get("lifecycle_status") == "deprecated" and venue.is_active():
             venue.lifecycle_status = "deprecated"
             venue.deprecated_reason = row.get("deprecated_reason")
@@ -80,21 +82,17 @@ class InMemoryRdsVenueStore:
         self._guard()
         self._preserve_deprecation(venue)
         existing = self.venues.get(venue.venue_id, {})
-        self.venues[venue.venue_id] = {
-            "venue_id": venue.venue_id,
-            "venue_name": venue.venue_name,
-            "venue_lat": venue.venue_lat,
-            "venue_lng": venue.venue_lng,
-            "venue_type": venue.venue_type,
-            "priority": venue.priority,
-            "lifecycle_status": venue.lifecycle_status,
-            "deprecated_reason": venue.deprecated_reason,
-            "deprecated_source": venue.deprecated_source,
-            "deprecated_at": venue.deprecated_at.isoformat() if venue.deprecated_at else None,
-            "payload": venue.model_dump(by_alias=True, mode="json"),
-            "created_at": existing.get("created_at", _now()),
-            "updated_at": _now(),
-        }
+        # Ex1: scalars in columns (source of truth), nested fields in `extra`. The
+        # full payload stays as the retained v1 golden baseline (dual-write during
+        # expand). Mirrors RdsVenueStore.upsert_venue so the offline contract is
+        # column-based reconstruction, not a payload round-trip.
+        columns, residual = split_venue_for_storage(venue)
+        row = dict(columns)
+        row["extra"] = residual
+        row["payload"] = venue.model_dump(by_alias=True, mode="json")
+        row["created_at"] = existing.get("created_at", _now())
+        row["updated_at"] = _now()
+        self.venues[venue.venue_id] = row
 
     def soft_delete_venue(self, venue_id, reason, source, google_business_status=None) -> None:
         self._guard()
@@ -128,10 +126,9 @@ class InMemoryRdsVenueStore:
 
         def _key(item):
             vid, row = item
-            payload = row.get("payload") or {}
-            priority = payload.get("priority", 5)
-            reviews = payload.get("reviews")
-            rating = payload.get("rating")
+            priority = row.get("priority", 5)
+            reviews = row.get("reviews")
+            rating = row.get("rating")
             reviews_key = -(reviews if reviews is not None else float("-inf"))
             rating_key = -(rating if rating is not None else float("-inf"))
             return (priority, reviews_key, rating_key, vid)
@@ -151,6 +148,9 @@ class InMemoryRdsVenueStore:
 
     def list_all_venue_payloads(self) -> list[dict]:
         return [row["payload"] for row in self.venues.values()]
+
+    def list_all_venue_rows(self) -> list[dict]:
+        return [copy.deepcopy(row) for row in self.venues.values()]
 
     # ── pipeline cache-freshness gating from RDS (Pass 2b) ─────────────────────
     def _age_seconds(self, row) -> float:
