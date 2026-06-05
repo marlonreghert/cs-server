@@ -80,6 +80,11 @@ class RdsVenueStore:
             venue.google_business_status = row.get("google_business_status")
         elif row.get("google_business_status") and not venue.google_business_status:
             venue.google_business_status = row.get("google_business_status")
+        # Refresh priority is managed only by direct SQL (one-time tiering +
+        # manual edits); a default-constructed re-upsert (e.g. discovery
+        # re-finding a venue) must never reset it.
+        if row.get("priority") is not None:
+            venue.priority = row["priority"]
 
     def upsert_venue(self, venue) -> None:
         self._preserve_deprecation(venue)
@@ -132,7 +137,7 @@ class RdsVenueStore:
         with self.engine.connect() as conn:
             row = conn.execute(text(
                 "SELECT venue_id, lifecycle_status, deprecated_reason, deprecated_source, "
-                "deprecated_at, google_business_status, payload "
+                "deprecated_at, google_business_status, priority, payload "
                 "FROM venues.venue WHERE venue_id=:v"
             ), {"v": venue_id}).mappings().first()
             return dict(row) if row else None

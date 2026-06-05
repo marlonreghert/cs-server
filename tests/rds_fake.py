@@ -71,6 +71,10 @@ class InMemoryRdsVenueStore:
             venue.google_business_status = gbs
         elif gbs and not venue.google_business_status:
             venue.google_business_status = gbs
+        # Refresh priority is managed only by direct SQL (one-time tiering +
+        # manual edits); a default-constructed re-upsert must never reset it.
+        if row.get("priority") is not None:
+            venue.priority = row["priority"]
 
     def upsert_venue(self, venue) -> None:
         self._guard()
@@ -82,6 +86,7 @@ class InMemoryRdsVenueStore:
             "venue_lat": venue.venue_lat,
             "venue_lng": venue.venue_lng,
             "venue_type": venue.venue_type,
+            "priority": venue.priority,
             "lifecycle_status": venue.lifecycle_status,
             "deprecated_reason": venue.deprecated_reason,
             "deprecated_source": venue.deprecated_source,
