@@ -18,6 +18,8 @@ from typing import Optional
 
 from sqlalchemy import create_engine, text
 
+from app.dao.venue_row import split_venue_for_storage
+
 logger = logging.getLogger(__name__)
 
 
@@ -45,6 +47,16 @@ _ENRICHMENT = {
     "venues.vibe_profile": ("venues", "vibe_profile", []),
 }
 _WEEKLY = "besttime.weekly_forecast"
+
+# Columns a venue row exposes for reconstruction (venue_row.venue_from_row reads
+# the scalar columns + `extra`; `payload` is the retained v1 golden baseline used
+# only by the equivalence diff during expand).
+_VENUE_ROW_COLS = (
+    "venue_id, venue_name, venue_address, venue_lat, venue_lng, venue_type, "
+    "price_level, rating, reviews, forecast, processed, priority, lifecycle_status, "
+    "deprecated_at, deprecated_reason, deprecated_source, google_business_status, "
+    "extra, payload"
+)
 
 
 class RdsVenueStore:
@@ -88,17 +100,22 @@ class RdsVenueStore:
 
     def upsert_venue(self, venue) -> None:
         self._preserve_deprecation(venue)
+        # Ex1: scalars are the source of truth (columns); the residual JSON holds
+        # only the nested fields. The full payload is still written during the
+        # expand phase as the retained v1 golden baseline for the equivalence
+        # diff (dropped by the 0003b contract migration).
         p = venue.model_dump(by_alias=True, mode="json")
+        _, residual = split_venue_for_storage(venue)
         with self.engine.begin() as conn:
             conn.execute(text(
                 "INSERT INTO venues.venue (venue_id, venue_name, venue_address, "
                 "venue_lat, venue_lng, venue_type, price_level, rating, reviews, priority, "
                 "forecast, processed, lifecycle_status, deprecated_reason, "
-                "deprecated_source, deprecated_at, google_business_status, payload, updated_at) "
+                "deprecated_source, deprecated_at, google_business_status, extra, payload, updated_at) "
                 "VALUES (:venue_id, :venue_name, :venue_address, :venue_lat, :venue_lng, "
                 ":venue_type, :price_level, :rating, :reviews, :priority, :forecast, :processed, "
                 ":lifecycle_status, :deprecated_reason, :deprecated_source, :deprecated_at, "
-                ":google_business_status, CAST(:payload AS jsonb), now()) "
+                ":google_business_status, CAST(:extra AS jsonb), CAST(:payload AS jsonb), now()) "
                 "ON CONFLICT (venue_id) DO UPDATE SET "
                 "venue_name=excluded.venue_name, venue_address=excluded.venue_address, "
                 "venue_lat=excluded.venue_lat, venue_lng=excluded.venue_lng, "
@@ -108,7 +125,7 @@ class RdsVenueStore:
                 "processed=excluded.processed, lifecycle_status=excluded.lifecycle_status, "
                 "deprecated_reason=excluded.deprecated_reason, deprecated_source=excluded.deprecated_source, "
                 "deprecated_at=excluded.deprecated_at, google_business_status=excluded.google_business_status, "
-                "payload=excluded.payload, updated_at=now()"
+                "extra=excluded.extra, payload=excluded.payload, updated_at=now()"
             ), {
                 "venue_id": venue.venue_id, "venue_name": venue.venue_name,
                 "venue_address": venue.venue_address, "venue_lat": venue.venue_lat,
@@ -121,6 +138,7 @@ class RdsVenueStore:
                 "deprecated_source": venue.deprecated_source,
                 "deprecated_at": venue.deprecated_at,
                 "google_business_status": venue.google_business_status,
+                "extra": json.dumps(residual),
                 "payload": json.dumps(p),
             })
 
@@ -136,9 +154,7 @@ class RdsVenueStore:
     def get_venue(self, venue_id) -> Optional[dict]:
         with self.engine.connect() as conn:
             row = conn.execute(text(
-                "SELECT venue_id, lifecycle_status, deprecated_reason, deprecated_source, "
-                "deprecated_at, google_business_status, priority, payload "
-                "FROM venues.venue WHERE venue_id=:v"
+                f"SELECT {_VENUE_ROW_COLS} FROM venues.venue WHERE venue_id=:v"
             ), {"v": venue_id}).mappings().first()
             return dict(row) if row else None
 
@@ -173,12 +189,21 @@ class RdsVenueStore:
             ))]
 
     def list_all_venue_payloads(self) -> list[dict]:
-        """Every venue payload (active + deprecated) — backs the pipeline
-        list_all_venues RDS read."""
+        """Every venue payload (active + deprecated) — the retained v1 golden
+        baseline (dropped at the 0003b contract migration)."""
         with self.engine.connect() as conn:
             return [r[0] for r in conn.execute(text(
                 "SELECT payload FROM venues.venue"
             ))]
+
+    def list_all_venue_rows(self) -> list[dict]:
+        """Every venue row (active + deprecated) with scalar columns + residual
+        `extra` (+ retained `payload`) — backs the pipeline list_all_venues RDS
+        read (column-based reconstruction) and the equivalence golden diff."""
+        with self.engine.connect() as conn:
+            return [dict(r) for r in conn.execute(text(
+                f"SELECT {_VENUE_ROW_COLS} FROM venues.venue"
+            )).mappings()]
 
     # ── pipeline cache-freshness gating from RDS ───────────────────────────────
     def list_fresh_enrichment_venue_ids(self, table_key, max_age_seconds=None) -> list[str]:

@@ -34,6 +34,8 @@ test-unit:
 		tests/test_rds_store_contract.py \
 		tests/test_admin_config.py \
 		tests/test_redis_projection.py \
+		tests/test_venue_row.py \
+		tests/test_equivalence_verify.py \
 		-v
 
 test-integration:

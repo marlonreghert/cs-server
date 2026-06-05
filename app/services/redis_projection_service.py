@@ -12,9 +12,9 @@ import logging
 from datetime import datetime, timezone
 from typing import Optional
 
+from app.dao.venue_row import venue_from_row
 from app.models import (
     LiveForecastResponse,
-    Venue,
     WeekRawDay,
 )
 from app.models.vibe_attributes import VibeAttributes
@@ -72,7 +72,7 @@ class RedisProjectionService:
         for venue_id in self.rds_store.list_active_venue_ids():
             row = self.rds_store.get_venue(venue_id)
             try:
-                venue = Venue.model_validate(row["payload"])
+                venue = venue_from_row(row)  # Ex1: columns + residual, not payload
                 self.redis_only_dao.upsert_venue(venue)  # GEOADD + JSON
                 summary["venues"] += 1
             except Exception as e:
