@@ -97,6 +97,11 @@ class Venue(BaseModel):
     rating: Optional[float] = None
     reviews: Optional[int] = None
 
+    # Refresh-selection priority (0 = most important … 5 = least). Bounded
+    # live/weekly refresh selects the top-X active venues by priority ascending.
+    # Read from RDS only; intentionally NOT projected to Redis (serving ignores it).
+    priority: int = 5
+
     # Forecast data (optional)
     venue_foot_traffic_forecast: Optional[list[FootTrafficForecast]] = None
 

@@ -37,6 +37,9 @@ from app.metrics import (
     VENUES_DEPRECATED_TOTAL,
     VENUES_DEPRECATED_BY_REASON,
     VENUES_SOFT_DELETED_TOTAL,
+    REFRESH_SELECTED_TOTAL,
+    BESTTIME_READ_SKIPPED_TOTAL,
+    BESTTIME_UNIQUE_VENUES_TOUCHED,
 )
 
 logger = logging.getLogger(__name__)
@@ -140,6 +143,64 @@ class VenuesRefresherService:
     def set_budget_service(self, budget_service) -> None:
         """Wire the VenueBudgetService used to enforce the monthly cap."""
         self.budget_service = budget_service
+
+    # ── priority-bounded refresh selection + monthly ledger gate ─────────────
+    def _select_refresh_venue_ids(self, job: str) -> list[str]:
+        """The top-X active venues by priority for bounded refresh. Live and
+        weekly both call this so they touch the identical unique-venue set,
+        where X = monthly_quota − manual_reserve. Falls back to the full active
+        set only when no budget service is wired (keeps standalone use working)."""
+        if self.budget_service is not None:
+            limit = self.budget_service.get_refresh_budget()
+            ids = self.venue_dao.list_active_venue_ids_by_priority(limit)
+            logger.info(
+                f"[VenuesRefresherService] {job}: selected {len(ids)} venues "
+                f"by priority (refresh_budget={limit})"
+            )
+        else:
+            ids = self.venue_dao.list_active_venue_ids()
+            logger.warning(
+                f"[VenuesRefresherService] {job}: no budget service wired; "
+                f"refreshing all {len(ids)} active venues (unbounded)"
+            )
+        REFRESH_SELECTED_TOTAL.labels(job=job).inc(len(ids))
+        return ids
+
+    def _ledger_allows_read(self, venue_id: str, job: str) -> bool:
+        """Hard ceiling on BestTime reads. Refuses a not-yet-touched venue once
+        the calendar month hits monthly_quota distinct venues; already-touched
+        venues pass freely. Fails open on a ledger error so a Redis blip never
+        silently halts refresh (BestTime's own cap rejection is the backstop)."""
+        if self.budget_service is None:
+            return True
+        try:
+            allowed = self.budget_service.try_register_touch(venue_id)
+        except Exception as e:
+            logger.error(
+                f"[VenuesRefresherService] {job}: ledger gate error for "
+                f"{venue_id}: {e}; proceeding (fail-open)"
+            )
+            return True
+        if not allowed:
+            BESTTIME_READ_SKIPPED_TOTAL.labels(reason="monthly_cap").inc()
+            logger.warning(
+                f"[VenuesRefresherService] {job}: monthly unique-venue cap "
+                f"reached; skipping BestTime read for {venue_id}"
+            )
+        return allowed
+
+    def _update_touched_gauge(self) -> None:
+        if self.budget_service is None:
+            return
+        try:
+            ym = self.budget_service.current_year_month()
+            BESTTIME_UNIQUE_VENUES_TOUCHED.labels(year_month=ym).set(
+                self.budget_service.unique_touched_count()
+            )
+        except Exception as e:
+            logger.warning(
+                f"[VenuesRefresherService] failed to update touched gauge: {e}"
+            )
 
     # ── Eligibility filtering ────────────────────────────────────────────────
     def _eligibility_config(self) -> EligibilityConfig:
@@ -589,6 +650,8 @@ class VenuesRefresherService:
         )
 
         for vid in venue_ids:
+            if not self._ledger_allows_read(vid, "live_forecast"):
+                continue
             logger.debug(
                 f"[VenuesRefresherService] Fetching live forecast for venue_id={vid}"
             )
@@ -1021,16 +1084,18 @@ class VenuesRefresherService:
         Implements logic from Go (lines 305-315).
         """
         try:
-            ids = self.venue_dao.list_active_venue_ids()
+            ids = self._select_refresh_venue_ids("live_forecast")
         except Exception as e:
-            logger.error(f"[VenuesRefresherService] ListAllVenueIDs failed: {e}")
+            logger.error(f"[VenuesRefresherService] live refresh selection failed: {e}")
             raise
 
         logger.info(
-            f"[VenuesRefresherService] Found {len(ids)} venues in geo cache; "
+            f"[VenuesRefresherService] Selected {len(ids)} venues; "
             "refreshing live forecasts."
         )
         await self._fetch_and_cache_live_forecasts(ids)
+
+        self._update_touched_gauge()
 
         # Update data quality metrics after live refresh
         self.update_data_quality_metrics()
@@ -1041,19 +1106,21 @@ class VenuesRefresherService:
         Implements exact logic from Go (lines 538-581).
         """
         try:
-            ids = self.venue_dao.list_active_venue_ids()
+            ids = self._select_refresh_venue_ids("weekly_forecast")
         except Exception as e:
             logger.error(
-                f"[VenuesRefresherService] ListAllVenueIDs failed for weekly refresh: {e}"
+                f"[VenuesRefresherService] weekly refresh selection failed: {e}"
             )
             raise
 
         logger.info(
-            f"[VenuesRefresherService] Found {len(ids)} venues; refreshing weekly forecasts"
+            f"[VenuesRefresherService] Selected {len(ids)} venues; refreshing weekly forecasts"
         )
 
         total_cached = 0
         for vid in ids:
+            if not self._ledger_allows_read(vid, "weekly_forecast"):
+                continue
             logger.debug(
                 f"[VenuesRefresherService] Fetching weekly raw forecast for venue_id={vid}"
             )
@@ -1098,6 +1165,8 @@ class VenuesRefresherService:
 
         REFRESH_VENUES_UPSERTED.labels(operation="weekly_forecast").set(total_cached)
         logger.info("[VenuesRefresherService] Finished weekly raw forecast refresh.")
+
+        self._update_touched_gauge()
 
         # Update data quality metrics after weekly refresh
         self.update_data_quality_metrics()

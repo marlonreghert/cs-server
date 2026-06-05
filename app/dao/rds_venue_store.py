@@ -87,18 +87,19 @@ class RdsVenueStore:
         with self.engine.begin() as conn:
             conn.execute(text(
                 "INSERT INTO venues.venue (venue_id, venue_name, venue_address, "
-                "venue_lat, venue_lng, venue_type, price_level, rating, reviews, "
+                "venue_lat, venue_lng, venue_type, price_level, rating, reviews, priority, "
                 "forecast, processed, lifecycle_status, deprecated_reason, "
                 "deprecated_source, deprecated_at, google_business_status, payload, updated_at) "
                 "VALUES (:venue_id, :venue_name, :venue_address, :venue_lat, :venue_lng, "
-                ":venue_type, :price_level, :rating, :reviews, :forecast, :processed, "
+                ":venue_type, :price_level, :rating, :reviews, :priority, :forecast, :processed, "
                 ":lifecycle_status, :deprecated_reason, :deprecated_source, :deprecated_at, "
                 ":google_business_status, CAST(:payload AS jsonb), now()) "
                 "ON CONFLICT (venue_id) DO UPDATE SET "
                 "venue_name=excluded.venue_name, venue_address=excluded.venue_address, "
                 "venue_lat=excluded.venue_lat, venue_lng=excluded.venue_lng, "
                 "venue_type=excluded.venue_type, price_level=excluded.price_level, "
-                "rating=excluded.rating, reviews=excluded.reviews, forecast=excluded.forecast, "
+                "rating=excluded.rating, reviews=excluded.reviews, priority=excluded.priority, "
+                "forecast=excluded.forecast, "
                 "processed=excluded.processed, lifecycle_status=excluded.lifecycle_status, "
                 "deprecated_reason=excluded.deprecated_reason, deprecated_source=excluded.deprecated_source, "
                 "deprecated_at=excluded.deprecated_at, google_business_status=excluded.google_business_status, "
@@ -108,7 +109,8 @@ class RdsVenueStore:
                 "venue_address": venue.venue_address, "venue_lat": venue.venue_lat,
                 "venue_lng": venue.venue_lng, "venue_type": venue.venue_type,
                 "price_level": venue.price_level, "rating": venue.rating,
-                "reviews": venue.reviews, "forecast": venue.forecast,
+                "reviews": venue.reviews, "priority": venue.priority,
+                "forecast": venue.forecast,
                 "processed": venue.processed, "lifecycle_status": venue.lifecycle_status,
                 "deprecated_reason": venue.deprecated_reason,
                 "deprecated_source": venue.deprecated_source,
@@ -140,6 +142,20 @@ class RdsVenueStore:
             return [r[0] for r in conn.execute(text(
                 "SELECT venue_id FROM venues.venue WHERE lifecycle_status='active'"
             ))]
+
+    def list_active_venue_ids_by_priority(self, limit: int) -> list[str]:
+        """The top-`limit` active venues ordered by refresh priority ascending
+        (0 first), tie-broken by reviews desc, rating desc, then venue_id for a
+        stable, deterministic selection. Backs the bounded live/weekly refresh.
+        A non-positive limit selects nothing (strictly honours a zero budget)."""
+        if limit <= 0:
+            return []
+        with self.engine.connect() as conn:
+            return [r[0] for r in conn.execute(text(
+                "SELECT venue_id FROM venues.venue WHERE lifecycle_status='active' "
+                "ORDER BY priority ASC, reviews DESC NULLS LAST, rating DESC NULLS LAST, "
+                "venue_id ASC LIMIT :limit"
+            ), {"limit": limit})]
 
     def list_deprecated_venue_ids(self) -> list[str]:
         """Venue ids deprecated in RDS — a positive removal signal for the

@@ -28,8 +28,10 @@ logger = logging.getLogger(__name__)
 
 
 VENUE_LOOKUP_BY_ADDRESS_KEY_V1 = "venue_lookup_by_address_v1:{hash}"
-DEFAULT_FALLBACK_RADIUS_M = 200
-MAX_FALLBACK_RADIUS_M = 500
+# Geo fallback is a clutter-prone venue_filter; keep its blast radius tight (50m)
+# so a rejected add only matches a venue essentially at the requested point.
+DEFAULT_FALLBACK_RADIUS_M = 50
+MAX_FALLBACK_RADIUS_M = 50
 
 
 class AddVenueByAddressRequest(BaseModel):
@@ -133,13 +135,36 @@ class AddVenueHandler:
             )
 
         if not _response_ok(response):
-            # Recoverable failure: release the reservation and try the geo
-            # fallback before we give up.
+            # Release the reservation either way — BestTime did not add a venue.
             self.budget.release_manual_slot()
+            # A monthly-cap rejection is its own legible state: surface BestTime's
+            # status/message instead of laundering it through the geo fallback
+            # into a misleading "rejected the address" (the originating bug).
+            if _is_monthly_cap_rejection(response):
+                ADD_VENUE_BY_ADDRESS_TOTAL.labels(result="besttime_monthly_cap").inc()
+                snap = self.budget.get_snapshot()
+                logger.warning(
+                    "[AddVenueHandler] BestTime monthly venue cap reached: "
+                    f"{_field(response, 'message')!r}"
+                )
+                return AddVenueOutcome(
+                    status_code=429,
+                    body={
+                        "detail": "BestTime monthly venue cap reached",
+                        "besttime_status": _field(response, "status"),
+                        "besttime_message": _field(response, "message"),
+                        "year_month": snap.year_month,
+                        "quota": snap.quota,
+                    },
+                )
+            # Recoverable failure: try the geo fallback before we give up.
             return await self._geo_fallback(request, radius_m, response)
 
         # 5. Success: persist + cache + record + report.
         persisted_venue = _persist_new_venue(self.venue_dao, response)
+        # Record the unique BestTime interaction against the monthly ledger so
+        # the unique-venue count reflects manual adds, not just refresh.
+        self.budget.mark_touched(persisted_venue.venue_id)
 
         # Best-effort cache of week_raw days if BestTime included them.
         for day in response.analysis or []:
@@ -286,6 +311,8 @@ class AddVenueHandler:
             self.venue_dao.upsert_venue(venue)
             # Count toward monthly budget only when truly new.
             self.budget.record_new_venue_from_discovery()
+            # The venue_filter call interacted with this venue — record it.
+            self.budget.mark_touched(match.venue_id)
         VENUE_MONTHLY_NEW_COUNT.set(self.budget.get_snapshot().month_counter)
         self._save_address_cache(
             request.venue_name, request.venue_address, match.venue_id
@@ -339,6 +366,29 @@ class AddVenueHandler:
             "venue_lat": venue.venue_lat,
             "venue_lng": venue.venue_lng,
         }
+
+
+def _field(source, key):
+    """Read an attribute or dict key (BestTime responses come as either)."""
+    if source is None:
+        return None
+    if hasattr(source, key):
+        return getattr(source, key)
+    if isinstance(source, dict):
+        return source.get(key)
+    return None
+
+
+def _is_monthly_cap_rejection(response) -> bool:
+    """True when a non-OK /forecasts response is BestTime's monthly unique-venue
+    cap rejection (vs a geocoder failure). BestTime returns e.g. "Max amount of
+    monthly venues (500) reached. Venue counter will reset ...". Geocoder errors
+    ("Could not geocode address") do not match."""
+    message = _field(response, "message")
+    if not isinstance(message, str):
+        return False
+    low = message.lower()
+    return "monthly venues" in low or "venue counter will reset" in low
 
 
 def _response_ok(response) -> bool:

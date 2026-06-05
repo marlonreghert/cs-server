@@ -100,6 +100,9 @@ class VenueRepository(RedisVenueDAO):
     def list_active_venue_ids(self):
         return self.rds_store.list_active_venue_ids()
 
+    def list_active_venue_ids_by_priority(self, limit):
+        return self.rds_store.list_active_venue_ids_by_priority(limit)
+
     def list_all_venues(self):
         out = []
         for payload in self.rds_store.list_all_venue_payloads():

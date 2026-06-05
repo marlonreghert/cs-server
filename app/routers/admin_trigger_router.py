@@ -8,6 +8,7 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException, Body, Query, Response
 from pydantic import BaseModel
 
+from app.config import settings
 from app.handlers.add_venue_handler import (
     AddVenueHandler,
     AddVenueByAddressRequest,
@@ -230,6 +231,16 @@ async def trigger_job(job_name: str, config: Optional[dict] = None):
 
     if job_name not in JOB_REGISTRY:
         raise HTTPException(status_code=404, detail=f"Unknown job: {job_name}")
+
+    # Venue discovery is off by default — reject the manual catalog trigger so it
+    # cannot spend BestTime's monthly unique-venue cap. Read at call time so an
+    # admin-config flip takes effect without a restart.
+    if job_name == "venue_catalog" and not settings.discovery_enabled:
+        return TriggerResponse(
+            status="disabled",
+            job=job_name,
+            message="Venue catalog discovery is disabled (discovery_enabled=false)",
+        )
 
     # Check if already running
     existing = _running_jobs.get(job_name)

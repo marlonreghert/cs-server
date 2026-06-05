@@ -58,6 +58,42 @@ class TestVenueBudgetDao:
         assert dao.get_month_count("2026-05") == 0
 
 
+class TestVenueTouchLedgerDao:
+    def test_untouched_venue_is_not_touched(self, dao):
+        assert dao.is_touched("2026-05", "v1") is False
+        assert dao.touch_count("2026-05") == 0
+
+    def test_add_touch_is_new_then_idempotent(self, dao):
+        was_new, card = dao.add_touch("2026-05", "v1")
+        assert was_new is True
+        assert card == 1
+        assert dao.is_touched("2026-05", "v1") is True
+        # Re-adding the same venue is not new and does not grow the set.
+        was_new, card = dao.add_touch("2026-05", "v1")
+        assert was_new is False
+        assert card == 1
+
+    def test_distinct_touches_accumulate(self, dao):
+        dao.add_touch("2026-05", "v1")
+        dao.add_touch("2026-05", "v2")
+        assert dao.touch_count("2026-05") == 2
+
+    def test_remove_touch_rolls_back(self, dao):
+        dao.add_touch("2026-05", "v1")
+        dao.remove_touch("2026-05", "v1")
+        assert dao.is_touched("2026-05", "v1") is False
+        assert dao.touch_count("2026-05") == 0
+
+    def test_touch_ledger_is_per_month(self, dao):
+        dao.add_touch("2026-05", "v1")
+        assert dao.touch_count("2026-06") == 0
+        assert dao.is_touched("2026-06", "v1") is False
+
+    def test_add_touch_sets_ttl(self, dao, fake):
+        dao.add_touch("2026-05", "v1")
+        assert fake.ttl("besttime_touched_v1:2026-05") > 0
+
+
 class TestVenueBudgetService:
     def test_defaults_when_admin_config_missing(self, service):
         settings = service.get_quota_settings()
@@ -162,3 +198,69 @@ class TestVenueBudgetService:
         assert snap.month_counter == 100
         assert snap.discovery_effective_cap_remaining == 390
         assert snap.manual_add_available == 400
+
+
+class TestRefreshBudget:
+    def test_default_refresh_budget(self, service):
+        # 500 quota − 10 reserve.
+        assert service.get_refresh_budget() == 490
+
+    def test_refresh_budget_from_admin_config(self, service, fake):
+        fake.set(
+            "admin_config:venue_monthly_budget",
+            json.dumps({"monthly_quota": 500, "manual_reserve": 100}),
+        )
+        assert service.get_refresh_budget() == 400
+
+    def test_refresh_budget_clamped_when_reserve_exceeds_quota(self, service, fake):
+        # reserve clamps to quota → X = 0 (refresh nothing, never unbounded).
+        fake.set(
+            "admin_config:venue_monthly_budget",
+            json.dumps({"monthly_quota": 100, "manual_reserve": 200}),
+        )
+        assert service.get_refresh_budget() == 0
+
+
+class TestTouchLedgerGate:
+    def _set_quota(self, fake, quota, reserve=0):
+        fake.set(
+            "admin_config:venue_monthly_budget",
+            json.dumps({"monthly_quota": quota, "manual_reserve": reserve}),
+        )
+
+    def test_admits_until_cap_then_refuses_new(self, service, fake):
+        self._set_quota(fake, quota=3)
+        assert service.try_register_touch("v1") is True
+        assert service.try_register_touch("v2") is True
+        assert service.try_register_touch("v3") is True
+        # The 4th distinct venue would exceed the cap.
+        assert service.try_register_touch("v4") is False
+        # Refused venue must not be left counted.
+        assert service.unique_touched_count() == 3
+
+    def test_re_admits_already_touched_venue(self, service, fake):
+        self._set_quota(fake, quota=2)
+        assert service.try_register_touch("v1") is True
+        assert service.try_register_touch("v2") is True
+        # Re-reading a touched venue is free even at the cap.
+        assert service.try_register_touch("v1") is True
+        assert service.unique_touched_count() == 2
+
+    def test_cap_is_quota_not_refresh_budget(self, service, fake):
+        # Ledger ceiling is monthly_quota (5), independent of the reserve.
+        self._set_quota(fake, quota=5, reserve=3)
+        for vid in ("a", "b", "c", "d", "e"):
+            assert service.try_register_touch(vid) is True
+        assert service.try_register_touch("f") is False
+
+    def test_ledger_rolls_over_per_month(self, fake, dao):
+        month = ["2026-05"]
+        svc = VenueBudgetService(
+            redis_client=fake, budget_dao=dao, year_month_provider=lambda: month[0]
+        )
+        self._set_quota(fake, quota=1)
+        assert svc.try_register_touch("v1") is True
+        assert svc.try_register_touch("v2") is False  # cap reached in May
+        month[0] = "2026-06"
+        assert svc.try_register_touch("v2") is True  # fresh ledger in June
+        assert svc.unique_touched_count() == 1

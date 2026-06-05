@@ -206,6 +206,38 @@ async def test_quota_exhausted_returns_429(handler, besttime, fake):
 
 
 @pytest.mark.asyncio
+async def test_besttime_monthly_cap_surfaced_not_laundered(handler, besttime, fake):
+    # BestTime's real monthly-cap rejection must be surfaced clearly, not routed
+    # through the geo fallback into a misleading "rejected the address".
+    besttime.add_venue_to_account.return_value = NewVenueResponse.model_validate(
+        {
+            "status": "Error",
+            "message": "Max amount of monthly venues (500) reached. Venue counter "
+            "will reset at midnight on the first day of the month.",
+        }
+    )
+    outcome = await handler.add(_req())
+    assert outcome.status_code == 429
+    assert "cap" in outcome.body["detail"].lower()
+    assert "monthly venues" in outcome.body["besttime_message"].lower()
+    # Never attempts the geo fallback for a cap rejection.
+    assert besttime.venue_filter.await_count == 0
+    # Reservation released → local counter unchanged.
+    assert int(fake.get("venue_add_counter_v1:2026-05") or 0) == 0
+
+
+@pytest.mark.asyncio
+async def test_successful_add_marks_ledger(handler, besttime, budget, fake):
+    besttime.add_venue_to_account.return_value = _ok_response("ven_marked")
+    besttime.get_live_forecast.return_value = _live_unavailable("ven_marked")
+    await handler.add(_req())
+    # The new venue is recorded against the monthly unique-venue ledger so a
+    # later refresh re-read is free and the backstop counts it.
+    assert budget.unique_touched_count() == 1
+    assert fake.sismember("besttime_touched_v1:2026-05", "ven_marked")
+
+
+@pytest.mark.asyncio
 async def test_transport_error_releases_reservation(handler, besttime, fake):
     besttime.add_venue_to_account.side_effect = httpx.ConnectError("simulated")
     outcome = await handler.add(_req())

@@ -16,9 +16,16 @@ logger = logging.getLogger(__name__)
 
 VENUE_ADD_COUNTER_KEY_V1 = "venue_add_counter_v1:{year_month}"
 
+# Monthly ledger of distinct venue_ids touched against BestTime's unique-venue
+# cap (Redis set). The key naturally rolls over each calendar month; the TTL
+# (~40 days, past the rollover) lets the previous month's set self-evict.
+BESTTIME_TOUCH_LEDGER_KEY_V1 = "besttime_touched_v1:{year_month}"
+BESTTIME_TOUCH_LEDGER_TTL_SECONDS = 60 * 60 * 24 * 40
+
 
 class VenueBudgetDao:
-    """Atomic monthly counter for new BestTime account-inventory additions."""
+    """Atomic monthly counter for new BestTime account-inventory additions, plus
+    the monthly distinct-venue touch ledger backing the unique-venue cap."""
 
     def __init__(self, redis_client) -> None:
         self.redis = redis_client
@@ -94,3 +101,57 @@ class VenueBudgetDao:
             )
             return 0
         return new_value
+
+    # ----- monthly distinct-venue touch ledger ----------------------------
+
+    def _touch_key(self, year_month: str) -> str:
+        return BESTTIME_TOUCH_LEDGER_KEY_V1.format(year_month=year_month)
+
+    def is_touched(self, year_month: str, venue_id: str) -> bool:
+        """True if venue_id was already counted against this month's cap."""
+        try:
+            return bool(self.redis.sismember(self._touch_key(year_month), venue_id))
+        except Exception as e:
+            logger.error(
+                f"[VenueBudgetDao] is_touched({year_month}, {venue_id}) failed: {e}"
+            )
+            raise
+
+    def touch_count(self, year_month: str) -> int:
+        """Distinct venues touched this calendar month (set cardinality)."""
+        try:
+            return int(self.redis.scard(self._touch_key(year_month)))
+        except Exception as e:
+            logger.error(f"[VenueBudgetDao] touch_count({year_month}) failed: {e}")
+            raise
+
+    def add_touch(self, year_month: str, venue_id: str) -> tuple[bool, int]:
+        """Add venue_id to the month's touch set. Returns (was_new, cardinality).
+        Refreshes the TTL only when the set actually grew so a quiet month's set
+        still self-evicts after the rollover."""
+        key = self._touch_key(year_month)
+        try:
+            added = int(self.redis.sadd(key, venue_id))
+            if added:
+                try:
+                    self.redis.expire(key, BESTTIME_TOUCH_LEDGER_TTL_SECONDS)
+                except Exception as e:  # TTL is best-effort; never block the gate
+                    logger.warning(
+                        f"[VenueBudgetDao] expire on {key} failed: {e}"
+                    )
+            return bool(added), int(self.redis.scard(key))
+        except Exception as e:
+            logger.error(
+                f"[VenueBudgetDao] add_touch({year_month}, {venue_id}) failed: {e}"
+            )
+            raise
+
+    def remove_touch(self, year_month: str, venue_id: str) -> None:
+        """Roll back a just-added touch that overshot the cap."""
+        try:
+            self.redis.srem(self._touch_key(year_month), venue_id)
+        except Exception as e:
+            logger.error(
+                f"[VenueBudgetDao] remove_touch({year_month}, {venue_id}) failed: {e}"
+            )
+            raise

@@ -96,6 +96,54 @@ class VenueBudgetService:
             reserve = quota
         return QuotaSettings(quota, reserve)
 
+    def get_refresh_budget(self) -> int:
+        """The single source of truth for the bounded-refresh selection size:
+        `X = monthly_quota − manual_reserve`. This is the count of unique venues
+        refresh may touch, leaving the reserve for manual adds so the two
+        disjoint slices stay within the monthly cap. Clamped at zero — a budget
+        of 0 refreshes nothing (it never silently falls back to unbounded)."""
+        settings = self.get_quota_settings()
+        return max(0, settings.monthly_quota - settings.manual_reserve)
+
+    def current_year_month(self) -> str:
+        """The calendar month the ledger/counter key are scoped to."""
+        return self._year_month_provider()
+
+    # ----- monthly unique-venue ledger (hard ceiling) --------------------
+
+    def unique_touched_count(self) -> int:
+        return self.dao.touch_count(self._year_month_provider())
+
+    def mark_touched(self, venue_id: str) -> None:
+        """Record a definite BestTime interaction with venue_id (e.g. a
+        successful manual add) in this month's ledger. Unconditional — the add
+        already reserved a slot; this keeps the unique-venue count accurate so a
+        re-read of the new venue is free and the backstop counts it."""
+        self.dao.add_touch(self._year_month_provider(), venue_id)
+
+    def try_register_touch(self, venue_id: str) -> bool:
+        """Hard-ceiling gate on a BestTime read for `venue_id`.
+
+        Returns True when the read may proceed — either the venue was already
+        counted this month (a re-read costs no new unique), or registering it
+        keeps the month's distinct-venue count within `monthly_quota`. Returns
+        False when admitting this new venue would exceed the cap; the caller
+        must skip the read. Uses add-then-validate-then-rollback, mirroring the
+        manual-add reservation primitive.
+        """
+        settings = self.get_quota_settings()
+        year_month = self._year_month_provider()
+        if self.dao.is_touched(year_month, venue_id):
+            return True
+        added, count = self.dao.add_touch(year_month, venue_id)
+        if not added:
+            # Raced with another writer that just added it — already counted.
+            return True
+        if count > settings.monthly_quota:
+            self.dao.remove_touch(year_month, venue_id)
+            return False
+        return True
+
     # ----- snapshot for admin UI -----------------------------------------
 
     def get_snapshot(self) -> BudgetSnapshot:
