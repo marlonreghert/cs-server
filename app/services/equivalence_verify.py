@@ -18,7 +18,7 @@ from app.dao.redis_venue_dao import (
     VENUES_GEO_KEY_V1,
     VENUES_GEO_PLACE_MEMBER_FORMAT_V1,
 )
-from app.dao.venue_row import venue_from_row
+from app.dao.venue_row import COLUMN_AUTHORITATIVE_FIELDS, venue_from_row
 from app.models import Venue
 
 logger = logging.getLogger(__name__)
@@ -46,9 +46,16 @@ def canonical_venue(venue: Venue) -> dict:
 
 
 def venue_diff_fields(a: Venue, b: Venue) -> list[str]:
-    """The top-level field names where two venues differ (empty == equal)."""
+    """The top-level field names where two venues differ (empty == equal).
+
+    Excludes COLUMN_AUTHORITATIVE_FIELDS: those columns are managed out of band of
+    the payload (priority tiering, soft-delete), so a column-vs-payload difference
+    on them is expected and not data loss. Every other field must match."""
     ca, cb = canonical_venue(a), canonical_venue(b)
-    return sorted(f for f in set(ca) | set(cb) if ca.get(f) != cb.get(f))
+    return sorted(
+        f for f in set(ca) | set(cb)
+        if f not in COLUMN_AUTHORITATIVE_FIELDS and ca.get(f) != cb.get(f)
+    )
 
 
 # ── result ───────────────────────────────────────────────────────────────────

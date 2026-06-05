@@ -66,6 +66,18 @@ def test_golden_diff_detects_drift_and_leaks_no_values():
     assert "SECRET DRIFT" not in str(result.mismatches)
 
 
+def test_golden_diff_ignores_column_authoritative_drift():
+    # priority + lifecycle are column-managed; a stale payload value for them is
+    # expected (not data loss) and must NOT fail the gate. Confirmed against prod.
+    store = InMemoryRdsVenueStore()
+    store.upsert_venue(_full_venue("p"))
+    row = store.get_venue("p")
+    row["payload"]["priority"] = 0                 # column has 4; payload stale
+    row["payload"]["lifecycle_status"] = "active"  # column may say deprecated
+    row["payload"]["deprecated_reason"] = "stale"
+    assert rds_venue_golden_diff(store).passing
+
+
 def test_redis_vs_rds_serving_diff_passes_after_projection():
     store = InMemoryRdsVenueStore()
     store.upsert_venue(_full_venue("a"))
