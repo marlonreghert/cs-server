@@ -113,6 +113,38 @@ class TestPrioritySelection:
         assert first == store.list_active_venue_ids_by_priority(10)
 
 
+class TestPriorityPersistence:
+    """Manual RDS priority edits must survive a re-upsert. Priority is managed
+    only by direct SQL (one-time tiering + manual edits); a default-constructed
+    re-upsert (e.g. discovery re-finding a venue) must never reset it."""
+
+    def test_reupsert_preserves_existing_priority(self):
+        store = InMemoryRdsVenueStore()
+        store.upsert_venue(_venue("a", priority=0))
+        store.upsert_venue(_venue("b", priority=1))
+        # Re-find via discovery: a fresh Venue defaults priority to 5.
+        store.upsert_venue(_venue("a", priority=5))
+        # 'a' must still be P0 (would fall below 'b' if it were reset to P5).
+        assert store.list_active_venue_ids_by_priority(2) == ["a", "b"]
+        assert store.get_venue("a")["payload"]["priority"] == 0
+
+    def test_new_venue_keeps_its_priority(self):
+        store = InMemoryRdsVenueStore()
+        store.upsert_venue(_venue("new", priority=2))
+        assert store.get_venue("new")["payload"]["priority"] == 2
+
+    def test_repository_reupsert_preserves_priority(self):
+        store = InMemoryRdsVenueStore()
+        repo = VenueRepository(
+            GeoRedisClient(fakeredis.FakeRedis(decode_responses=True)),
+            rds_store=store,
+        )
+        repo.upsert_venue(_venue("a", priority=0))
+        repo.upsert_venue(_venue("b", priority=1))
+        repo.upsert_venue(_venue("a", priority=5))
+        assert repo.list_active_venue_ids_by_priority(2) == ["a", "b"]
+
+
 class _RecordingBesttime:
     def __init__(self):
         self.live_calls = []
