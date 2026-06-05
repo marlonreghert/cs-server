@@ -334,23 +334,33 @@ async def run_redis_projection_job():
         logger.error(f"[Scheduler] RedisProjectionJob failed: {e}")
 
 
-def start_background_jobs(settings: Settings):
-    """Start all background jobs using APScheduler."""
-    global scheduler
-    scheduler = AsyncIOScheduler()
+def register_refresh_jobs(scheduler, settings: Settings):
+    """Register the BestTime refresh jobs (catalog discovery, live, weekly).
 
-    # Job 1: Venue catalog refresh
-    scheduler.add_job(
-        run_venue_catalog_refresh_job,
-        trigger=IntervalTrigger(minutes=settings.venues_catalog_refresh_minutes),
-        id="venue_catalog_refresh",
-        name="Venue Catalog Refresh (Multi-Location VenueFilter)",
-        replace_existing=True,
-    )
-    logger.info(
-        f"[Scheduler] Scheduled venue catalog refresh every "
-        f"{settings.venues_catalog_refresh_minutes} minutes"
-    )
+    Extracted from start_background_jobs so the scheduling policy is testable in
+    isolation. Job 1 (catalog discovery) is scheduled only when discovery is
+    enabled; live and weekly refresh are always scheduled.
+    """
+    # Job 1: Venue catalog refresh (discovery) — only when discovery is enabled.
+    # Discovery spends BestTime's monthly unique-venue cap, so it is off by
+    # default (see settings.discovery_enabled).
+    if settings.discovery_enabled:
+        scheduler.add_job(
+            run_venue_catalog_refresh_job,
+            trigger=IntervalTrigger(minutes=settings.venues_catalog_refresh_minutes),
+            id="venue_catalog_refresh",
+            name="Venue Catalog Refresh (Multi-Location VenueFilter)",
+            replace_existing=True,
+        )
+        logger.info(
+            f"[Scheduler] Scheduled venue catalog refresh every "
+            f"{settings.venues_catalog_refresh_minutes} minutes"
+        )
+    else:
+        logger.info(
+            "[Scheduler] Venue catalog discovery disabled "
+            "(discovery_enabled=false); Job 1 not scheduled"
+        )
 
     # Job 2: Live forecast refresh
     scheduler.add_job(
@@ -377,6 +387,14 @@ def start_background_jobs(settings: Settings):
         f"[Scheduler] Scheduled weekly forecast refresh with cron: "
         f"{settings.weekly_forecast_cron}"
     )
+
+
+def start_background_jobs(settings: Settings):
+    """Start all background jobs using APScheduler."""
+    global scheduler
+    scheduler = AsyncIOScheduler()
+
+    register_refresh_jobs(scheduler, settings)
 
     # Job 4: Google Places enrichment (only if enabled and configured)
     if settings.google_places_enrichment_enabled and settings.google_places_api_key:

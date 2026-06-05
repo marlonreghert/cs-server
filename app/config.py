@@ -128,6 +128,13 @@ class Settings(BaseSettings):
     venues_live_refresh_minutes: int = 5
     weekly_forecast_cron: str = "0 0 * * 0"  # Sundays at 00:00
 
+    # Venue discovery (catalog refresh + venue-filter). Disabled by default so
+    # discovery does not spend BestTime's scarce monthly unique-venue cap; the
+    # bounded live/weekly refresh and the manual add-venue flow are the only
+    # intended consumers. When False, Job 1 is not scheduled and the manual
+    # `venue_catalog` trigger is rejected.
+    discovery_enabled: bool = False
+
     # BestTime API Configuration
     besttime_private_key: str = "pri_aff50a71a038456db88864b16d9d6800"
     besttime_public_key: str = "pub_4f4f184e1a5f4f50a48e945fde7ab2ea"

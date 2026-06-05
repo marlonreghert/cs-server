@@ -20,9 +20,11 @@ render() {
   echo "rendered ${name} (.png + .svg)"
 }
 
-# Macro overview: whole-system shape in one screen.
+# Macro overview: whole-system shape in one screen (fit-to-width readable).
 render 0_overview  -w 3600 --scale 2
-# The big everything-graph: very wide, meant to be zoomed + scrolled.
-render 1_full_flow -w 7000 --scale 2
+# cs-server internals (vibes_bot appears as a client). Wide -> zoom + scroll.
+render 1_cs_server -w 7200 --scale 2
+# vibes_bot pipeline (cs-server is just the API boundary). Wide spine.
+render 2_vibes_bot -w 4400 --scale 2
 
 echo "done — output in docs/"

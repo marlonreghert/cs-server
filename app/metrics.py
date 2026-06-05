@@ -480,6 +480,32 @@ WEEKLY_FORECAST_FETCH_RESULTS = Counter(
 )
 
 # =============================================================================
+# PRIORITY-BOUNDED REFRESH + MONTHLY UNIQUE-VENUE LEDGER METRICS
+# =============================================================================
+
+# Distinct venues touched against BestTime's monthly unique-venue cap, by month.
+BESTTIME_UNIQUE_VENUES_TOUCHED = Gauge(
+    "besttime_unique_venues_touched",
+    "Distinct venue_ids interacted with via BestTime this calendar month "
+    "(counts against BestTime's monthly unique-venue cap)",
+    ["year_month"],
+)
+
+# BestTime reads refused by the monthly ledger before the network call.
+BESTTIME_READ_SKIPPED_TOTAL = Counter(
+    "besttime_read_skipped_total",
+    "BestTime reads skipped before the network call",
+    ["reason"],  # reason: monthly_cap
+)
+
+# Venues selected for refresh per run (bounded by refresh_budget).
+REFRESH_SELECTED_TOTAL = Counter(
+    "refresh_selected_total",
+    "Total venues selected for priority-bounded refresh",
+    ["job"],  # job: live_forecast, weekly_forecast
+)
+
+# =============================================================================
 # DATA QUALITY STATS (SNAPSHOT GAUGES)
 # =============================================================================
 
@@ -510,8 +536,8 @@ ADD_VENUE_BY_ADDRESS_TOTAL = Counter(
     "add_venue_by_address_total",
     "Outcomes of POST /admin/venues/by-address",
     ["result"],  # created | already_exists | matched_via_geo_fallback |
-                 # quota_exhausted | besttime_error | besttime_rejected_no_geo_match |
-                 # validation_error
+                 # quota_exhausted | besttime_monthly_cap | besttime_error |
+                 # besttime_rejected_no_geo_match | validation_error
 )
 
 INVENTORY_SYNC_VENUES_TOTAL = Counter(

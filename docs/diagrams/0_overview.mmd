@@ -5,31 +5,26 @@ flowchart LR
   classDef filt fill:#3a1620,stroke:#f43f5e,color:#ffe4e6,stroke-width:2.2px;
   classDef rds fill:#241a3b,stroke:#a78bfa,color:#ede9fe,stroke-width:2.8px;
   classDef store fill:#2a2410,stroke:#fbbf24,color:#fef3c7,stroke-width:2.8px;
+  classDef proj fill:#0b3026,stroke:#10b981,color:#d1fae5,stroke-width:2.8px;
   classDef vb fill:#1f2937,stroke:#818cf8,color:#e0e7ff,stroke-width:1.6px;
   classDef out fill:#1e293b,stroke:#94a3b8,color:#e2e8f0,stroke-width:1.6px;
 
   BT["BestTime API<br/>discovery + forecasts<br/>(source of truth)"]:::src
   ENRSRC["Google · Apify · OpenAI · S3<br/>(enrichment sources)"]:::src
 
-  subgraph CS["cs-server  ·  RDS = system of record, Redis = projection"]
+  subgraph CS["cs-server  ·  pipelines write RDS-only; projector is the sole Redis writer"]
     direction TB
     ING["Discover + ingest<br/>de-dupe · budget · born-deprecate"]:::act
-    ENR["Enrichment family<br/>Google attrs/type · photos · IG · menu · vibe AI"]:::act
+    ENR["Enrichment family<br/>Google · photos · IG · menu · vibe AI"]:::act
     ELG{{"Eligibility gate<br/>admin-tunable"}}:::filt
-    WT["VenueRepository<br/>WRITE-THROUGH"]:::act
     RDS[("RDS Postgres<br/>SYSTEM OF RECORD")]:::rds
-    REDIS[("Redis<br/>projection + geo index")]:::store
+    PROJ["Redis projector<br/>off-loop · every 2 min"]:::proj
+    REDIS[("Redis<br/>serving projection + geo")]:::store
     SERVE["GET /v1/venues/nearby<br/>drop deprecated + eligibility hide -> minify"]:::act
-    ENG["Engagement + admin-config APIs<br/>RDS truth -> Redis mirror"]:::act
+    CARVE["Engagement + admin-config<br/>RDS truth + DIRECT Redis<br/>(accepted: low-latency)"]:::act
   end
 
-  subgraph VB["vibes_bot pipeline (over HTTP)"]
-    direction TB
-    VENR["enrich<br/>forecast · pricing · distance · labels"]:::vb
-    VFILT{{"F major drops<br/>no-busyness + open-now"}}:::filt
-    VMODE["score · blacklist · vibe tags<br/>insights · vibe modes"]:::vb
-  end
-
+  VB["vibes_bot (client)<br/>get_venues pipeline"]:::vb
   USER["mobile · web · LLM bot"]:::out
 
   BT -->|"discover + forecast"| ING
@@ -37,15 +32,14 @@ flowchart LR
   ING -->|"venues"| ENR
   ELG -.->|"gates ingest"| ING
   ELG -.->|"gates serve"| SERVE
-  ING -->|"writes"| WT
-  ENR -->|"writes"| WT
-  WT ==>|"1 · truth (raises)"| RDS
-  WT ==>|"2 · project (geo)"| REDIS
-  RDS -.->|"rebuild / recovery"| REDIS
+  ING -->|"writes RDS only"| RDS
+  ENR -->|"writes RDS only"| RDS
+  RDS ==>|"every 2 min"| PROJ
+  PROJ ==>|"sole serving-projection writer"| REDIS
   REDIS -->|"serves"| SERVE
-  SERVE ==>|"HTTP verbose=false"| VENR
-  VENR --> VFILT --> VMODE --> USER
-  USER -.->|"favorites / hot-likes writes"| ENG
-  ENG -->|"truth (pseudonymized)"| RDS
-  ENG -->|"mirror"| REDIS
-  REDIS -.->|"reads favorites / hot-likes"| VENR
+  SERVE ==>|"GET nearby"| VB
+  VB --> USER
+  VB ==>|"POST favorites / hot-likes"| CARVE
+  CARVE -->|"truth (pseudonymized)"| RDS
+  CARVE -.->|"direct"| REDIS
+  REDIS -.->|"reads favorites / hot-likes"| VB

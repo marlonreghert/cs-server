@@ -113,6 +113,31 @@ class InMemoryRdsVenueStore:
             if row.get("lifecycle_status", "active") == "active"
         ]
 
+    def list_active_venue_ids_by_priority(self, limit: int) -> list[str]:
+        """Mirror RdsVenueStore: top-`limit` active venues ordered by priority
+        asc, reviews desc, rating desc, venue_id asc. priority/reviews/rating are
+        read from the stored payload (priority defaults to 5; NULL reviews/rating
+        sort last). A non-positive limit selects nothing."""
+        if limit <= 0:
+            return []
+
+        def _key(item):
+            vid, row = item
+            payload = row.get("payload") or {}
+            priority = payload.get("priority", 5)
+            reviews = payload.get("reviews")
+            rating = payload.get("rating")
+            reviews_key = -(reviews if reviews is not None else float("-inf"))
+            rating_key = -(rating if rating is not None else float("-inf"))
+            return (priority, reviews_key, rating_key, vid)
+
+        active = [
+            (vid, row) for vid, row in self.venues.items()
+            if row.get("lifecycle_status", "active") == "active"
+        ]
+        active.sort(key=_key)
+        return [vid for vid, _ in active[:limit]]
+
     def list_deprecated_venue_ids(self) -> list[str]:
         return [
             vid for vid, row in self.venues.items()
