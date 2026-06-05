@@ -1,0 +1,125 @@
+%%{init: {'theme':'base','themeVariables':{'fontSize':'15px','primaryColor':'#1e293b','primaryTextColor':'#e2e8f0','lineColor':'#94a3b8','clusterBkg':'#111c30','clusterBorder':'#3a4a63'},'flowchart':{'curve':'basis','nodeSpacing':36,'rankSpacing':80}}}%%
+flowchart LR
+  classDef src fill:#3b1f29,stroke:#fb7185,color:#fde2e7,stroke-width:1.5px;
+  classDef act fill:#0c2a33,stroke:#22d3ee,color:#cffafe,stroke-width:1.5px;
+  classDef art fill:#14241d,stroke:#34d399,color:#d1fae5,stroke-width:1.5px;
+  classDef filt fill:#3a1620,stroke:#f43f5e,color:#ffe4e6,stroke-width:2px;
+  classDef rds fill:#241a3b,stroke:#a78bfa,color:#ede9fe,stroke-width:3px;
+  classDef store fill:#2a2410,stroke:#fbbf24,color:#fef3c7,stroke-width:3px;
+  classDef proj fill:#0b3026,stroke:#10b981,color:#d1fae5,stroke-width:3px;
+  classDef client fill:#1f2937,stroke:#818cf8,color:#e0e7ff,stroke-width:2.4px;
+
+  %% ===================== SOURCES =====================
+  subgraph SRC["External sources"]
+    direction TB
+    BT["BestTime API"]:::src
+    GG["Google Places"]:::src
+    AP["Apify actors"]:::src
+    OA["OpenAI GPT-4o"]:::src
+    S3SRC["AWS S3"]:::src
+  end
+
+  %% ===================== INGEST + WRITE FILTERS =====================
+  subgraph ING["Discover + ingest (BestTime = source of truth)"]
+    direction TB
+    DISC["/venues/filter"]:::act
+    INV["/api/v1/venues (inventory)"]:::act
+    DED{{"F de-dupe id -> name"}}:::filt
+    CAP{{"F monthly cap"}}:::filt
+    VEN["Venue<br/>name·addr·lat·lng·type·rating·price"]:::art
+    BORN{{"F born-deprecate (HIGH)"}}:::filt
+  end
+  BT --> DISC --> DED --> CAP --> VEN
+  BT --> INV --> VEN
+  VEN --> BORN
+
+  %% ===================== GOOGLE + ENRICHMENT =====================
+  subgraph ENRICH["Enrichment jobs (each key-gated)"]
+    direction TB
+    GS["Google searchText<br/>name+addr · 500m bias"]:::act
+    GD["Google place details"]:::act
+    VA["VibeAttributes (google_primary_type)"]:::art
+    OH["OpeningHours"]:::art
+    RV["Reviews"]:::art
+    CLP{{"F soft-delete CLOSED_PERMANENTLY"}}:::filt
+    PS["photo search (own place_id)"]:::act
+    PH["venue_photos"]:::art
+    AIG["Apify IG search + validator"]:::act
+    IGH["VenueInstagram handle"]:::art
+    POST["IG post captions"]:::art
+    MPH["IG highlights / GMaps -> S3"]:::act
+    MENU["menu_data (GPT-4o)"]:::art
+    VC["Vibe classifier (fuses photos+bio+captions+reviews)"]:::act
+    VP["VenueVibeProfile"]:::art
+  end
+  VEN -->|"name+address+coords"| GS
+  GG --> GS -->|"place_id"| GD
+  GD --> VA & OH & RV & CLP
+  GD -.->|"websiteUri (free)"| IGH
+  VEN -->|"own search"| PS
+  GG --> PS --> PH
+  AP --> AIG --> IGH
+  IGH --> POST
+  AP --> POST
+  IGH --> MPH
+  AP --> MPH
+  S3SRC --> MPH --> MENU
+  OA --> MENU
+  PH & IGH & POST & RV --> VC --> VP
+  FCAST["BestTime forecasts<br/>live (5 min) · weekly (Sun)"]:::act
+  BT --> FCAST
+
+  %% ===================== ELIGIBILITY (control) =====================
+  EL{{"Eligibility block-list<br/>admin-tunable"}}:::filt
+  VA -.->|"type IN blocked_google_types"| EL
+  VA -.->|"good category => RESCUE keyword"| EL
+  EL -.->|"HIGH"| BORN
+  EL -.->|"HIGH"| SWEEP{{"F eligibility sweep"}}:::filt
+
+  %% ===================== REPOSITORY: RDS-ONLY WRITES =====================
+  subgraph REPO["VenueRepository — reads RDS, writes RDS-ONLY"]
+    direction TB
+    WT["set_* / upsert / soft-delete"]:::act
+    RDS[("RDS Postgres — SYSTEM OF RECORD<br/>venues · besttime · google_places<br/>instagram · admin · engagement<br/>audit.enrichment_history (append-only)")]:::rds
+  end
+  VEN ==> WT
+  BORN & SWEEP & CLP -->|"soft-delete"| WT
+  VA & OH & RV & IGH & POST & PH & MENU & VP -->|"set_*"| WT
+  FCAST -->|"live / weekly"| WT
+  WT ==>|"writes RDS only (NO Redis)"| RDS
+  RDS -.->|"reads inputs + freshness"| WT
+
+  %% ===================== OFF-LOOP PROJECTOR =====================
+  PROJ["Redis projector (off-loop, every 2 min)<br/>rebuild from RDS · remove deprecated · re-apply photo TTL"]:::proj
+  RDS ==>|"read active venues"| PROJ
+  PROJ ==>|"SOLE writer of serving projection<br/>(venue JSON + GEO index + enrich + live)"| REDIS[("Redis — serving projection")]:::store
+
+  %% ===================== SERVE (Redis only) =====================
+  subgraph SV["serve  GET /v1/venues/nearby  (Redis only)"]
+    direction TB
+    SF1{{"F drop deprecated"}}:::filt
+    SF2{{"F eligibility hide (HIGH)"}}:::filt
+    MRG["merge live+weekly · sort · minify"]:::act
+    MIN["MinifiedVenue"]:::art
+  end
+  REDIS --> SF1 --> SF2 --> MRG --> MIN
+  EL -.->|"HIGH"| SF2
+
+  %% ===================== ENGAGEMENT + ADMIN (direct Redis carve-outs) =====================
+  subgraph CARVE["Accepted carve-outs — DIRECT Redis for low-latency user reads (disjoint keys)"]
+    direction TB
+    ENG["EngagementService<br/>pseudonymize (HMAC)"]:::act
+    ACFG["AdminConfigService"]:::act
+    OPS["operational Redis-only (by design)<br/>add counter · address lookup"]:::store
+  end
+  ENG -->|"engagement.* truth"| RDS
+  ENG -.->|"user_favorites:* · hot_likes:* (direct)"| REDIS
+  ACFG -->|"admin.admin_config truth"| RDS
+  ACFG -.->|"admin_config:* mirror (direct)"| REDIS
+
+  %% ===================== VIBES_BOT = CLIENT ONLY =====================
+  VB["vibes_bot<br/>(client)"]:::client
+  MIN ==>|"GET /v1/venues/nearby"| VB
+  VB ==>|"POST/DELETE /v1/favorites · /v1/hot-likes"| ENG
+  VB ==>|"GET/PUT/DELETE /admin/config"| ACFG
+  REDIS -.->|"reads favorites / hot-likes / admin mirror"| VB

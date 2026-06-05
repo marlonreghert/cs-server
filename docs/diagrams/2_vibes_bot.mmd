@@ -1,0 +1,36 @@
+%%{init: {'theme':'base','themeVariables':{'fontSize':'17px','primaryColor':'#1e293b','primaryTextColor':'#e2e8f0','lineColor':'#94a3b8','clusterBkg':'#111c30','clusterBorder':'#3a4a63'},'flowchart':{'curve':'basis','nodeSpacing':40,'rankSpacing':70}}}%%
+flowchart LR
+  classDef cs fill:#241a3b,stroke:#a78bfa,color:#ede9fe,stroke-width:2.6px;
+  classDef vb fill:#1f2937,stroke:#818cf8,color:#e0e7ff,stroke-width:1.7px;
+  classDef filt fill:#3a1620,stroke:#f43f5e,color:#ffe4e6,stroke-width:2.2px;
+  classDef score fill:#0c2a33,stroke:#22d3ee,color:#cffafe,stroke-width:1.7px;
+  classDef out fill:#1e293b,stroke:#94a3b8,color:#e2e8f0,stroke-width:1.7px;
+  classDef ext fill:#3b1f29,stroke:#fb7185,color:#fde2e7,stroke-width:1.4px;
+  classDef drop fill:#450a0a,stroke:#ef4444,color:#fecaca,stroke-width:1.6px;
+
+  %% ---------- main read pipeline: fetch -> enrich -> filter -> score -> return ----------
+  CS["cs-server API"]:::cs
+  CS ==>|"GET /v1/venues/nearby (verbose=false)"| F["Fetch venues"]:::vb
+  F --> EA["Enrich busyness<br/>forecast + live fallback"]:::vb
+  EA --> D1{{"drop: no busyness"}}:::filt
+  D1 ==>|"kept"| EB["Enrich<br/>pricing · open status"]:::vb
+  EB --> D2{{"drop: not open now<br/>(unknown = drop)"}}:::filt
+  D2 ==>|"open"| EC["Enrich<br/>distance · busyness label<br/>predictions · hot-likes"]:::vb
+  EC --> SC["Score + sort<br/>rating · reviews · distance · busyness · likes"]:::score
+  SC --> D3{{"drop: name blacklist"}}:::filt
+  D3 ==>|"kept"| ED["Final enrich<br/>venue type · vibe labels (PT-BR) + AI tags<br/>similar venues · insights · vibe modes"]:::vb
+  ED ==> OUT(["Response to user<br/>mobile / web  ·  LLM dataset"]):::out
+
+  %% ---------- the only lossy step: 3 filters -> one sink ----------
+  D1 -.->|"no live + no estimate"| DROP["dropped venues"]:::drop
+  D2 -.->|"closed / unknown"| DROP
+  D3 -.->|"blacklisted"| DROP
+
+  %% ---------- external side-inputs (dotted) ----------
+  GM["Google Maps"]:::ext -.->|"price (if returned)"| EB
+  WX["weather"]:::ext -.->|"rain overlay"| ED
+  CS -.->|"reads favorites / hot-likes"| EC
+
+  %% ---------- SEPARATE request: user engagement write (not get_venues) ----------
+  TAP["user taps favorite / hot-like<br/>(separate request)"]:::out
+  TAP ==>|"POST/DELETE /v1/favorites · /v1/hot-likes"| CS
