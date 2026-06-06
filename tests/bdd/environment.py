@@ -192,6 +192,12 @@ def _build_rds_layer(context) -> None:
         validators={"venue_eligibility": _validate_eligibility},
     )
 
+    from app.services.eligibility_rules import EligibilityRuleService
+
+    context.eligibility_rule_service = EligibilityRuleService(
+        context.rds_store, context.admin_config_service
+    )
+
 
 def after_scenario(context, scenario):
     try:

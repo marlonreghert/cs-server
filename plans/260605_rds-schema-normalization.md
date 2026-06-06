@@ -225,10 +225,18 @@ address portion — **no payload overlay, no hybrid window.**
   `venue_eligibility.py:186-213`).
 - New admin endpoints/store methods for single-rule add/remove and scalar
   get/set, plus an "assemble effective config" read used by runtime.
-- Cutover (cs-server read path): `load_eligibility_config` and the budget /
-  discovery / photo-TTL readers read the normalized representation (via
-  `rds_store` / an updated `AdminConfigService.get`) instead of parsing the
-  monolithic JSON mirror.
+- Read path (decided during execution): **rows are the source of truth; the Redis
+  mirror is demoted to a derived projection** — `AdminConfigService` reassembles
+  an equivalent `admin_config:venue_eligibility` JSON from the rows on every write
+  (same effective config; the block-lists are membership sets, so list element
+  order may normalize — parity is checked on the effective config, not bytes). Hot/runtime readers (serving `venue_handler`, the refresh sweep) keep
+  reading the fast mirror **unchanged** (no RDS round-trip per nearby request);
+  only the low-frequency **admin GET** reads the rows directly (durable truth +
+  per-rule metadata). This matches the RDS-truth/Redis-projection model used for
+  venues, is lower-risk (serving + mirror bytes unchanged), and the operability
+  win (one-row edits, queryable rules, the views) is fully delivered. Scope note:
+  this expand normalizes **eligibility only**; the scalar configs (budget,
+  photos-TTL, discovery_points) gain little and are deferred to a small follow-up.
 - **Mirror retained** for vibes_bot: `AdminConfigService` keeps writing the
   reassembled `admin_config:venue_eligibility` JSON to Redis (identical shape) so
   vibes_bot is untouched until its own coordinated migration. The contract step

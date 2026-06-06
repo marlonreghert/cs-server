@@ -381,3 +381,36 @@ class RdsVenueStore:
             return [dict(r) for r in conn.execute(text(
                 "SELECT key, value, updated_by, updated_at FROM admin.admin_config"
             )).mappings()]
+
+    # ── eligibility rules (Ex2: normalized admin.eligibility_rule) ─────────────
+    def list_eligibility_rules(self) -> list[tuple[str, str]]:
+        with self.engine.connect() as conn:
+            return [(r[0], r[1]) for r in conn.execute(text(
+                "SELECT rule_type, value FROM admin.eligibility_rule "
+                "ORDER BY rule_type, value"
+            ))]
+
+    def add_eligibility_rule(self, rule_type, value, updated_by=None) -> None:
+        with self.engine.begin() as conn:
+            conn.execute(text(
+                "INSERT INTO admin.eligibility_rule (rule_type, value, updated_by, updated_at) "
+                "VALUES (:t, :v, :u, now()) "
+                "ON CONFLICT (rule_type, value) DO UPDATE SET "
+                "updated_by=excluded.updated_by, updated_at=now()"
+            ), {"t": rule_type, "v": value, "u": updated_by})
+
+    def remove_eligibility_rule(self, rule_type, value) -> None:
+        with self.engine.begin() as conn:
+            conn.execute(text(
+                "DELETE FROM admin.eligibility_rule WHERE rule_type=:t AND value=:v"
+            ), {"t": rule_type, "v": value})
+
+    def replace_eligibility_rules(self, rules, updated_by=None) -> None:
+        """Replace the whole rule set in one transaction (full-blob set)."""
+        with self.engine.begin() as conn:
+            conn.execute(text("DELETE FROM admin.eligibility_rule"))
+            for rule_type, value in rules:
+                conn.execute(text(
+                    "INSERT INTO admin.eligibility_rule (rule_type, value, updated_by, updated_at) "
+                    "VALUES (:t, :v, :u, now()) ON CONFLICT (rule_type, value) DO NOTHING"
+                ), {"t": rule_type, "v": value, "u": updated_by})

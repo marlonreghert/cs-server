@@ -345,6 +345,14 @@ class Container:
             validators={"venue_eligibility": _validate_eligibility_config},
         )
 
+        # Ex2: single-rule eligibility editing over admin.eligibility_rule rows;
+        # rows are truth, the Redis mirror is reassembled from them on every write.
+        from app.services.eligibility_rules import EligibilityRuleService
+
+        self.eligibility_rule_service = EligibilityRuleService(
+            self.rds_store, self.admin_config_service
+        )
+
         # Monthly budget DAO + service (used by add-by-address + discovery).
         self.venue_budget_dao = VenueBudgetDao(redis_internal_client)
         self.venue_budget_service = VenueBudgetService(
