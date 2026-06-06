@@ -36,6 +36,7 @@ test-unit:
 		tests/test_redis_projection.py \
 		tests/test_venue_row.py \
 		tests/test_equivalence_verify.py \
+		tests/test_address_table.py \
 		-v
 
 test-integration:

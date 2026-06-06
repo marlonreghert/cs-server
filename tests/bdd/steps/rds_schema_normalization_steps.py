@@ -108,9 +108,9 @@ def step_residual_no_scalar(context, vid=None):
 @given('a venue whose v2 reconstruction differs from its retained v1 reconstruction')
 def step_drifted_venue(context):
     context.repository.upsert_venue(_full_venue("vd"))
-    # Corrupt the retained v1 payload so it diverges from the v2 columns. The fake
-    # returns the live row, so mutating here perturbs only the v1 baseline.
-    context.rds_store.get_venue("vd")["payload"]["venue_name"] = "DRIFTED NAME"
+    # Perturb only the retained v1 payload (reach into the fake's stored row) so it
+    # diverges from the v2 columns.
+    context.rds_store.venues["vd"]["payload"]["venue_name"] = "DRIFTED NAME"
 
 
 @given('venues whose v2 reconstruction equals their retained v1 reconstruction')

@@ -37,6 +37,9 @@ def _coerce_dt(value):
 class InMemoryRdsVenueStore:
     def __init__(self) -> None:
         self.venues: dict[str, dict] = {}
+        # Ex3: venues.address (1:1) — address raw text + structured components +
+        # lat/lng. Dual-written on every venue upsert; the source for reconstruction.
+        self.addresses: dict[str, dict] = {}
         # table_key ("schema.table") -> venue_id -> row dict
         self.enrichment: dict[str, dict[str, dict]] = {}
         self.live_forecast: dict[str, dict] = {}
@@ -93,6 +96,34 @@ class InMemoryRdsVenueStore:
         row["created_at"] = existing.get("created_at", _now())
         row["updated_at"] = _now()
         self.venues[venue.venue_id] = row
+        # Ex3 dual-write: the address table is the read source; structured
+        # components stay null until Google Places enrichment fills them.
+        existing_addr = self.addresses.get(venue.venue_id, {})
+        self.addresses[venue.venue_id] = {
+            "venue_id": venue.venue_id,
+            "raw_text": venue.venue_address,
+            "street": existing_addr.get("street"),
+            "neighborhood": existing_addr.get("neighborhood"),
+            "city": existing_addr.get("city"),
+            "postal_code": existing_addr.get("postal_code"),
+            "lat": venue.venue_lat,
+            "lng": venue.venue_lng,
+            "updated_at": _now(),
+        }
+
+    def _row_with_address(self, row: dict) -> dict:
+        """Source venue_address/lat/lng from venues.address (Ex3 read cutover),
+        falling back to the retained venue columns if no address row exists."""
+        out = copy.deepcopy(row)
+        addr = self.addresses.get(row["venue_id"])
+        if addr is not None:
+            out["venue_address"] = addr["raw_text"]
+            out["venue_lat"] = addr["lat"]
+            out["venue_lng"] = addr["lng"]
+        return out
+
+    def get_address(self, venue_id) -> Optional[dict]:
+        return self.addresses.get(venue_id)
 
     def soft_delete_venue(self, venue_id, reason, source, google_business_status=None) -> None:
         self._guard()
@@ -108,7 +139,8 @@ class InMemoryRdsVenueStore:
         })
 
     def get_venue(self, venue_id) -> Optional[dict]:
-        return self.venues.get(venue_id)
+        row = self.venues.get(venue_id)
+        return self._row_with_address(row) if row is not None else None
 
     def list_active_venue_ids(self) -> list[str]:
         return [
@@ -150,7 +182,7 @@ class InMemoryRdsVenueStore:
         return [row["payload"] for row in self.venues.values()]
 
     def list_all_venue_rows(self) -> list[dict]:
-        return [copy.deepcopy(row) for row in self.venues.values()]
+        return [self._row_with_address(row) for row in self.venues.values()]
 
     # ── pipeline cache-freshness gating from RDS (Pass 2b) ─────────────────────
     def _age_seconds(self, row) -> float:

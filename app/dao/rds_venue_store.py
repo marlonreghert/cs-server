@@ -48,14 +48,20 @@ _ENRICHMENT = {
 }
 _WEEKLY = "besttime.weekly_forecast"
 
-# Columns a venue row exposes for reconstruction (venue_row.venue_from_row reads
-# the scalar columns + `extra`; `payload` is the retained v1 golden baseline used
-# only by the equivalence diff during expand).
-_VENUE_ROW_COLS = (
-    "venue_id, venue_name, venue_address, venue_lat, venue_lng, venue_type, "
-    "price_level, rating, reviews, forecast, processed, priority, lifecycle_status, "
-    "deprecated_at, deprecated_reason, deprecated_source, google_business_status, "
-    "extra, payload"
+# The venue row exposed for reconstruction (venue_row.venue_from_row reads the
+# scalar columns + `extra`; `payload` is the retained v1 golden baseline used only
+# by the equivalence diff during expand). Ex3: address is sourced from
+# venues.address (LEFT JOIN), falling back to the retained venue columns until the
+# batched contract drops them.
+_VENUE_SELECT = (
+    "SELECT v.venue_id, v.venue_name, "
+    "COALESCE(a.raw_text, v.venue_address) AS venue_address, "
+    "COALESCE(a.lat, v.venue_lat) AS venue_lat, "
+    "COALESCE(a.lng, v.venue_lng) AS venue_lng, "
+    "v.venue_type, v.price_level, v.rating, v.reviews, v.forecast, v.processed, "
+    "v.priority, v.lifecycle_status, v.deprecated_at, v.deprecated_reason, "
+    "v.deprecated_source, v.google_business_status, v.extra, v.payload "
+    "FROM venues.venue v LEFT JOIN venues.address a ON a.venue_id = v.venue_id"
 )
 
 
@@ -141,6 +147,16 @@ class RdsVenueStore:
                 "extra": json.dumps(residual),
                 "payload": json.dumps(p),
             })
+            # Ex3 dual-write: venues.address is the read source. Structured
+            # components (street/neighborhood/city/postal_code) are left as-is —
+            # null until Google Places enrichment fills them, never clobbered here.
+            conn.execute(text(
+                "INSERT INTO venues.address (venue_id, raw_text, lat, lng, updated_at) "
+                "VALUES (:venue_id, :raw_text, :lat, :lng, now()) "
+                "ON CONFLICT (venue_id) DO UPDATE SET "
+                "raw_text=excluded.raw_text, lat=excluded.lat, lng=excluded.lng, updated_at=now()"
+            ), {"venue_id": venue.venue_id, "raw_text": venue.venue_address,
+                "lat": venue.venue_lat, "lng": venue.venue_lng})
 
     def soft_delete_venue(self, venue_id, reason, source, google_business_status=None) -> None:
         with self.engine.begin() as conn:
@@ -154,7 +170,7 @@ class RdsVenueStore:
     def get_venue(self, venue_id) -> Optional[dict]:
         with self.engine.connect() as conn:
             row = conn.execute(text(
-                f"SELECT {_VENUE_ROW_COLS} FROM venues.venue WHERE venue_id=:v"
+                _VENUE_SELECT + " WHERE v.venue_id=:v"
             ), {"v": venue_id}).mappings().first()
             return dict(row) if row else None
 
@@ -201,9 +217,7 @@ class RdsVenueStore:
         `extra` (+ retained `payload`) — backs the pipeline list_all_venues RDS
         read (column-based reconstruction) and the equivalence golden diff."""
         with self.engine.connect() as conn:
-            return [dict(r) for r in conn.execute(text(
-                f"SELECT {_VENUE_ROW_COLS} FROM venues.venue"
-            )).mappings()]
+            return [dict(r) for r in conn.execute(text(_VENUE_SELECT)).mappings()]
 
     # ── pipeline cache-freshness gating from RDS ───────────────────────────────
     def list_fresh_enrichment_venue_ids(self, table_key, max_age_seconds=None) -> list[str]:
