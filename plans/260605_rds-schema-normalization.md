@@ -212,10 +212,12 @@ address portion — **no payload overlay, no hybrid window.**
     PRIMARY KEY (rule_type, value))` where `rule_type ∈ {blocked_venue_type,
     blocked_google_type, hard_blocked_name_keyword, ambiguous_name_keyword}`. One
     rule = one row; add/remove = one-row insert/delete.
-  - Promote the scalar configs to typed storage (e.g. a small typed
-    `admin.setting` table or typed columns): `discovery_points`,
-    `venue_monthly_budget`, `venue_photos_cache_ttl_days` are scalars that gain
-    little from JSON.
+  - Promote the genuine scalar configs to typed storage (a small typed
+    `admin.setting` table or typed columns): `venue_monthly_budget` and
+    `venue_photos_cache_ttl_days` are ints that gain little from JSON.
+    `discovery_points` is a `list[dict]` (machine-managed via `recount`, not
+    hand-tuned), so it stays JSON (in `admin.setting`/a JSON column) unless
+    per-point editing is wanted — then a small `admin.discovery_point` rows table.
 - Backfill: expand the current `admin.admin_config` JSON values into rows. The
   effective eligibility config assembled from rows must equal
   `EligibilityConfig.from_dict(<old blob>)` field-for-field (an explicit parity
@@ -238,6 +240,40 @@ address portion — **no payload overlay, no hybrid window.**
   the runtime reader is preserved. Keep the hardcoded defaults as the fallback
   when no rows exist (a wiped table must not break filtering —
   `venue_eligibility.py:316-345` semantics preserved).
+- **Observability views** (created in the same migration; read-only, no write
+  path, freely drop/recreate so no rollback concern). They surface the *effect* of
+  the config — catalog impact, not just the stored rules:
+  - `admin.v_blocked_google_type_effect` — per blocked Google type: how many
+    venues carry that type and their lifecycle split, so a rule's blast radius and
+    any drift (still-`active` venues the rule should catch) are visible. Joins the
+    new rule rows to the promoted `google_primary_type` column:
+    ```sql
+    CREATE VIEW admin.v_blocked_google_type_effect AS
+    SELECT r.value AS google_type,
+           count(va.venue_id)                                       AS venues_with_type,
+           count(*) FILTER (WHERE v.lifecycle_status = 'active')    AS active,
+           count(*) FILTER (WHERE v.lifecycle_status = 'deprecated') AS deprecated
+    FROM admin.eligibility_rule r
+    LEFT JOIN google_places.vibe_attributes va
+           ON va.google_primary_type = r.value AND va.deleted_at IS NULL
+    LEFT JOIN venues.venue v ON v.venue_id = va.venue_id
+    WHERE r.rule_type = 'blocked_google_type'
+    GROUP BY r.value;
+    ```
+  - `admin.v_rejection_reason_effect` — per rejection reason: how many venues are
+    deprecated under it, with category/description and recency. Uses only existing
+    tables (`admin.rejection_reason` + `venues.venue.deprecated_reason`), so it can
+    ship independently of Ex2:
+    ```sql
+    CREATE VIEW admin.v_rejection_reason_effect AS
+    SELECT rr.code, rr.category, rr.description,
+           count(v.venue_id)    AS deprecated_venues,
+           max(v.deprecated_at) AS last_deprecated_at
+    FROM admin.rejection_reason rr
+    LEFT JOIN venues.venue v
+           ON v.deprecated_reason = rr.code AND v.lifecycle_status = 'deprecated'
+    GROUP BY rr.code, rr.category, rr.description;
+    ```
 
 ### Data integrity & equivalence verification (RDS + Redis)
 The cutover gate for every step is a concrete, durable, full-dataset comparison —
