@@ -58,7 +58,7 @@ def test_golden_diff_detects_drift_and_leaks_no_values():
     store = InMemoryRdsVenueStore()
     store.upsert_venue(_full_venue("vd"))
     # Perturb only the retained v1 payload so it diverges from the v2 columns.
-    store.get_venue("vd")["payload"]["venue_name"] = "SECRET DRIFT"
+    store.venues["vd"]["payload"]["venue_name"] = "SECRET DRIFT"
     result = rds_venue_golden_diff(store)
     assert not result.passing
     [mismatch] = result.mismatches
@@ -71,10 +71,10 @@ def test_golden_diff_ignores_column_authoritative_drift():
     # expected (not data loss) and must NOT fail the gate. Confirmed against prod.
     store = InMemoryRdsVenueStore()
     store.upsert_venue(_full_venue("p"))
-    row = store.get_venue("p")
-    row["payload"]["priority"] = 0                 # column has 4; payload stale
-    row["payload"]["lifecycle_status"] = "active"  # column may say deprecated
-    row["payload"]["deprecated_reason"] = "stale"
+    payload = store.venues["p"]["payload"]
+    payload["priority"] = 0                 # column has 4; payload stale
+    payload["lifecycle_status"] = "active"  # column may say deprecated
+    payload["deprecated_reason"] = "stale"
     assert rds_venue_golden_diff(store).passing
 
 
