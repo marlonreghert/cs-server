@@ -19,6 +19,7 @@ from app.services.venue_eligibility import (
     load_eligibility_config,
 )
 from app.services.admin_config_service import AdminConfigService
+from app.services.eligibility_rules import EligibilityRuleService
 
 logger = logging.getLogger(__name__)
 
@@ -323,13 +324,21 @@ def _get_venue_dao_from_container():
     return venue_dao
 
 
+def _eligibility_rule_service() -> Optional[EligibilityRuleService]:
+    svc = getattr(_container, "eligibility_rule_service", None) if _container is not None else None
+    return svc if isinstance(svc, EligibilityRuleService) else None
+
+
 @router.get("/venues/eligibility-config")
 async def get_eligibility_config():
     """Return the active venue-eligibility block-lists for the admin panel.
 
-    Reports whether the active config is the Redis admin override or the
-    built-in defaults so operators can see what is in effect.
+    Ex2: reads the normalized admin.eligibility_rule rows directly (the durable
+    truth). Falls back to the Redis mirror when the rule service is not wired.
     """
+    rule_svc = _eligibility_rule_service()
+    if rule_svc is not None:
+        return rule_svc.effective_config().to_public_dict()
     venue_dao = _get_venue_dao_from_container()
     config = load_eligibility_config(getattr(venue_dao, "client", None))
     return config.to_public_dict()
@@ -353,6 +362,17 @@ async def update_eligibility_config(config: dict = Body(...)):
         validated = EligibilityConfig.from_dict(config, from_admin_override=True)
     except (ValueError, TypeError) as e:
         raise HTTPException(status_code=400, detail=f"invalid eligibility config: {e}")
+
+    # Ex2: route the full-blob write through the rule service (decompose into
+    # rows = truth, then reassemble the mirror).
+    rule_svc = _eligibility_rule_service()
+    if rule_svc is not None:
+        try:
+            rule_svc.set_full_config(config, updated_by="admin")
+        except Exception as e:
+            logger.error(f"[AdminTrigger] Failed to persist eligibility rules to RDS: {e}")
+            raise HTTPException(status_code=502, detail="failed to persist eligibility config; retry")
+        return validated.to_public_dict()
 
     svc = getattr(_container, "admin_config_service", None) if _container is not None else None
     if isinstance(svc, AdminConfigService):
@@ -378,6 +398,46 @@ async def update_eligibility_config(config: dict = Body(...)):
             raise HTTPException(status_code=500, detail="failed to persist eligibility config")
 
     return validated.to_public_dict()
+
+
+# ── single eligibility rule edits (Ex2: one-row add/remove) ──────────────────
+def _require_eligibility_rule_service() -> EligibilityRuleService:
+    svc = _eligibility_rule_service()
+    if svc is None:
+        raise HTTPException(status_code=503, detail="eligibility rule service not configured")
+    return svc
+
+
+@router.post("/venues/eligibility-rule")
+async def add_eligibility_rule(body: dict = Body(...)):
+    """Add ONE eligibility rule (rule_type + value) as a single row, then
+    reassemble the Redis mirror. Returns the resulting active config."""
+    svc = _require_eligibility_rule_service()
+    try:
+        cfg = svc.add_rule(body.get("rule_type"), body.get("value"), updated_by="admin")
+    except (ValueError, TypeError) as e:
+        raise HTTPException(status_code=400, detail=f"invalid eligibility rule: {e}")
+    except Exception as e:
+        logger.error(f"[AdminTrigger] Failed to add eligibility rule: {e}")
+        raise HTTPException(status_code=502, detail="failed to persist eligibility rule; retry")
+    return cfg.to_public_dict()
+
+
+@router.delete("/venues/eligibility-rule")
+async def remove_eligibility_rule(
+    rule_type: str = Query(...), value: str = Query(...)
+):
+    """Remove ONE eligibility rule (rule_type + value), then reassemble the
+    mirror. Removing the last rule drops the override (readers use defaults)."""
+    svc = _require_eligibility_rule_service()
+    try:
+        cfg = svc.remove_rule(rule_type, value, updated_by="admin")
+    except (ValueError, TypeError) as e:
+        raise HTTPException(status_code=400, detail=f"invalid eligibility rule: {e}")
+    except Exception as e:
+        logger.error(f"[AdminTrigger] Failed to remove eligibility rule: {e}")
+        raise HTTPException(status_code=502, detail="failed to remove eligibility rule; retry")
+    return cfg.to_public_dict()
 
 
 # ── generic admin config (RDS system of record, Redis mirror) ────────────────

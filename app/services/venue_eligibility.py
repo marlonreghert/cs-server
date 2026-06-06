@@ -342,3 +342,74 @@ def load_eligibility_config(redis_like: Optional[_SupportsGet]) -> EligibilityCo
             f"({e}); using defaults"
         )
         return EligibilityConfig.defaults()
+
+
+# ── Ex2: normalized eligibility rules <-> the override blob ──────────────────
+# One admin.eligibility_rule row = (rule_type, value). rule_type maps to the
+# from_dict blob key and the normalization a value of that type receives.
+RULE_TYPE_TO_BLOB_KEY: dict[str, str] = {
+    "blocked_venue_type": "blocked_venue_types",
+    "blocked_google_type": "blocked_google_types",
+    "hard_blocked_name_keyword": "hard_blocked_name_keywords",
+    "ambiguous_name_keyword": "ambiguous_name_keywords",
+}
+RULE_TYPES: frozenset[str] = frozenset(RULE_TYPE_TO_BLOB_KEY)
+
+
+def normalize_rule_value(rule_type: str, value: str) -> str:
+    """Match EligibilityConfig.from_dict normalization: BestTime types upper,
+    Google types + name keywords lower."""
+    if rule_type not in RULE_TYPES:
+        raise ValueError(f"unknown eligibility rule_type: {rule_type!r}")
+    return value.upper() if rule_type == "blocked_venue_type" else value.lower()
+
+
+def assemble_eligibility_blob(rules) -> dict:
+    """Rows -> admin override blob. Only categories that HAVE rows appear, so a
+    category with no rows is omitted and EligibilityConfig.from_dict fills its
+    defaults (preserves per-category "absent == track defaults" semantics)."""
+    blob: dict[str, list] = {}
+    for rule_type, value in rules:
+        key = RULE_TYPE_TO_BLOB_KEY[rule_type]
+        bucket = blob.setdefault(key, [])
+        if value not in bucket:
+            bucket.append(value)
+    return blob
+
+
+def decompose_eligibility_blob(blob: dict) -> list[tuple[str, str]]:
+    """Admin override blob -> normalized rows whose assembled effective config
+    equals ``from_dict(blob)``.
+
+    A category emits rows only when the blob actually OVERRODE it (its key is
+    present — or, for hard keywords, the ``blocked_name_keywords`` alias is). For
+    those, we emit the *effective* list from ``from_dict`` (so the alias's
+    "defaults + extra" and all normalization are captured); categories the blob
+    left untouched emit nothing and fall back to defaults at assembly. Note: a
+    category set to an explicit empty list cannot be represented (it degrades to
+    defaults) — the post-migration parity check guards that edge.
+    """
+    cfg = EligibilityConfig.from_dict(blob, from_admin_override=True)
+    rows: set[tuple[str, str]] = set()
+    if "blocked_venue_types" in blob:
+        rows |= {("blocked_venue_type", v) for v in cfg.blocked_venue_types}
+    if "blocked_google_types" in blob:
+        rows |= {("blocked_google_type", v) for v in cfg.blocked_google_types}
+    if "ambiguous_name_keywords" in blob:
+        rows |= {("ambiguous_name_keyword", v) for v in cfg.ambiguous_name_keywords}
+    if ("hard_blocked_name_keywords" in blob) or ("blocked_name_keywords" in blob):
+        rows |= {("hard_blocked_name_keyword", v) for v in cfg.hard_blocked_name_keywords}
+    return sorted(rows)
+
+
+def eligibility_config_from_rules(
+    rules, *, from_admin_override: bool = True
+) -> EligibilityConfig:
+    """Effective config from rows: hardcoded defaults when there are no rows
+    (fail-safe), else from_dict over the assembled blob."""
+    rules = list(rules)
+    if not rules:
+        return EligibilityConfig.defaults()
+    return EligibilityConfig.from_dict(
+        assemble_eligibility_blob(rules), from_admin_override=from_admin_override
+    )

@@ -37,6 +37,7 @@ test-unit:
 		tests/test_venue_row.py \
 		tests/test_equivalence_verify.py \
 		tests/test_address_table.py \
+		tests/test_eligibility_rules.py \
 		-v
 
 test-integration:

@@ -47,6 +47,8 @@ class InMemoryRdsVenueStore:
         self.hot_like_events: list[dict] = []
         self.history: list[dict] = []
         self.admin_config: dict[str, dict] = {}
+        # Ex2: admin.eligibility_rule — (rule_type, value) -> metadata.
+        self.eligibility_rules: dict[tuple[str, str], dict] = {}
         self._down = False
 
     # ── test controls ────────────────────────────────────────────────────────
@@ -309,6 +311,27 @@ class InMemoryRdsVenueStore:
 
     def list_admin_config(self) -> list[dict]:
         return list(self.admin_config.values())
+
+    # ── eligibility rules (Ex2: normalized admin.eligibility_rule) ─────────────
+    def list_eligibility_rules(self) -> list[tuple[str, str]]:
+        return sorted(self.eligibility_rules.keys())
+
+    def add_eligibility_rule(self, rule_type, value, updated_by=None) -> None:
+        self._guard()
+        self.eligibility_rules[(rule_type, value)] = {
+            "updated_by": updated_by, "updated_at": _now(),
+        }
+
+    def remove_eligibility_rule(self, rule_type, value) -> None:
+        self._guard()
+        self.eligibility_rules.pop((rule_type, value), None)
+
+    def replace_eligibility_rules(self, rules, updated_by=None) -> None:
+        """Replace the whole rule set (full-blob set decomposed into rows)."""
+        self._guard()
+        self.eligibility_rules = {
+            (rt, v): {"updated_by": updated_by, "updated_at": _now()} for rt, v in rules
+        }
 
     def hot_like_event_count(self, venue_id) -> int:
         return sum(1 for e in self.hot_like_events if e["venue_id"] == venue_id)
