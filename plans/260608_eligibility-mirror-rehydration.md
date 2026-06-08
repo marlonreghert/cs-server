@@ -83,6 +83,12 @@ derived RDS `admin_config:venue_eligibility` blob.
   is the same projection `_remirror` performs, factored so both share it. Wrap the
   RDS read in defensive handling so an RDS outage at startup logs and returns
   without raising.
+- Self-heal at BOTH startup and on the periodic projector (resolved): call
+  `rehydrate_mirror()` from `startup_essential`, AND fold it into the off-loop
+  projector cycle (`redis_projection_service.rebuild_redis_from_rds`, ~2 min) so a
+  RUNTIME Redis flush (without a restart) also self-heals — symmetric with the
+  venue serving projection. The projector call must be equally degrade-safe (a
+  rehydration failure must not abort the venue projection, and vice versa).
 - Stop persisting the RDS blob: change `_remirror` (and `rehydrate_mirror`) to
   write the Redis mirror DIRECTLY rather than via `AdminConfigService.set` (which
   also writes the RDS admin_config row). The mirror write reuses the
@@ -92,9 +98,10 @@ derived RDS `admin_config:venue_eligibility` blob.
   re-validation is needed on the mirror path. `EligibilityRuleService` gains
   access to the Redis client (via the admin config service or injected) to write
   the key directly.
-- Remove the existing RDS `admin_config:venue_eligibility` row (one row, derived)
-  so RDS holds only the rows. Mechanism decided in Open Questions (migration vs
-  one-time delete-on-rehydrate).
+- Remove the existing RDS `admin_config:venue_eligibility` row via an alembic
+  `0008` migration (resolved) that deletes the `admin.admin_config` row keyed
+  `venue_eligibility`; the code also stops writing it. (Downgrade is a no-op —
+  the row is derived from the rows and is re-derivable, never serving truth.)
 - Hook rehydration into `startup_essential` (`main.py`) after the container is
   built, guarded so a failure logs and continues (never blocks serving).
 - Keep the unwired-state fallbacks behavior-compatible: they are not reached in
@@ -109,8 +116,11 @@ derived RDS `admin_config:venue_eligibility` blob.
   unchanged. The generic admin GET `/admin/config/venue_eligibility` now reflects
   the Redis mirror only (no RDS-row fallback); documented.
 - Config/flags: none.
-- Migration: possibly `0008` to delete the existing RDS blob row (see Open
-  Questions). Prod alembic head is currently `0007`.
+- Migration: `0008` deletes the existing RDS `admin_config` row keyed
+  `venue_eligibility`. Prod alembic head is currently `0007`. Per the deploy
+  model, the new code (stops writing + rehydrates from rows) and the `0008`
+  delete are both safe in either order — the row is not serving truth — but follow
+  the normal sequence (deploy code, then run `0008` via SSM).
 
 ## Error Handling And Observability
 - Rehydration must never crash startup: catch RDS/Redis errors, log a WARNING
@@ -132,6 +142,8 @@ Scenarios:
 - With configured rules, startup rehydration writes the
   `admin_config:venue_eligibility` mirror whose effective config equals the rows'
   effective config.
+- After the mirror is cleared at runtime, the next periodic projector cycle
+  rebuilds it from the rows (runtime self-heal without a restart).
 - With no eligibility rules, startup rehydration leaves no override mirror and
   filtering uses the hardcoded defaults.
 - When RDS is unavailable at startup, rehydration logs a warning and does not
@@ -165,11 +177,8 @@ Manual or integration checks:
   `make test-bdd` stays green.
 
 ## Open Questions
-- Self-heal scope: rehydrate only at startup (chosen), or also fold the
-  rehydration into the periodic projector (`rebuild_redis_from_rds`, ~2 min) so a
-  RUNTIME Redis flush (without a restart) also self-heals — matching the venue
-  projection's cadence? Startup-only leaves a runtime-flush-without-restart gap.
-- RDS blob removal mechanism: a `0008` migration that deletes the existing
-  `admin_config` row keyed `venue_eligibility`, or a one-time idempotent
-  delete-on-rehydrate in code (no migration). Migration is explicit + alembic-
-  tracked; code-delete is simpler but mixes data cleanup into the runtime path.
+None — both resolved (2026-06-08):
+- Self-heal scope: rehydrate at startup AND fold into the periodic projector
+  (~2 min) so runtime flushes also self-heal.
+- RDS blob removal: a `0008` migration deletes the existing `admin_config` row
+  keyed `venue_eligibility`; the code also stops writing it.
