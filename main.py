@@ -35,6 +35,11 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
+# Mask secrets (BestTime api_key_private, Google key=) that httpx + some clients
+# would otherwise log in full request URLs/params.
+from app.log_redaction import install_secret_redaction  # noqa: E402
+
+install_secret_redaction()
 logger = logging.getLogger(__name__)
 
 # Global container and scheduler
