@@ -1,6 +1,7 @@
 """Unit tests for Ex2: eligibility rows <-> blob + EligibilityRuleService."""
 import fakeredis
 
+from app.metrics import ELIGIBILITY_MIRROR_REHYDRATION_TOTAL
 from app.services.admin_config_service import AdminConfigService
 from app.services.eligibility_rules import EligibilityRuleService
 from app.services.venue_eligibility import (
@@ -11,6 +12,7 @@ from app.services.venue_eligibility import (
     decompose_eligibility_blob,
     eligibility_config_from_rules,
     evaluate,
+    load_eligibility_config,
 )
 from tests.rds_fake import InMemoryRdsVenueStore
 
@@ -97,3 +99,49 @@ def test_unknown_rule_type_rejected():
         assert False, "expected ValueError"
     except ValueError:
         pass
+
+
+# ── mirror rehydration from rows (startup + projector self-heal) ──────────────
+def _failure_count() -> float:
+    return ELIGIBILITY_MIRROR_REHYDRATION_TOTAL.labels(result="failure")._value.get()
+
+
+def test_writes_do_not_persist_rds_blob():
+    # Rows are the sole durable truth: the write path mirrors to Redis only, never
+    # to the RDS admin_config blob.
+    svc, store, redis = _service()
+    svc.add_rule("hard_blocked_name_keyword", "casino", updated_by="admin")
+    assert store.get_admin_config("venue_eligibility") is None
+    assert redis.get(ADMIN_CONFIG_ELIGIBILITY_KEY) is not None
+
+
+def test_rehydrate_mirror_rebuilds_from_rows_after_flush():
+    svc, store, redis = _service()
+    svc.add_rule("hard_blocked_name_keyword", "casino", updated_by="admin")
+    redis.delete(ADMIN_CONFIG_ELIGIBILITY_KEY)  # simulate a Redis flush
+    assert load_eligibility_config(redis).from_admin_override is False  # degraded to defaults
+
+    svc.rehydrate_mirror()
+
+    cfg = load_eligibility_config(redis)
+    assert cfg.from_admin_override is True
+    assert cfg.to_public_dict() == eligibility_config_from_rules(
+        store.list_eligibility_rules()
+    ).to_public_dict()
+    assert not evaluate("Casino Royale", config=cfg).eligible
+
+
+def test_rehydrate_mirror_clears_when_no_rows():
+    svc, store, redis = _service()
+    redis.set(ADMIN_CONFIG_ELIGIBILITY_KEY, '{"blocked_google_types": ["stale"]}')
+    svc.rehydrate_mirror()  # no rows -> clear the override mirror
+    assert redis.get(ADMIN_CONFIG_ELIGIBILITY_KEY) is None
+
+
+def test_rehydrate_mirror_degrades_safe_on_rds_outage():
+    svc, store, redis = _service()
+    svc.add_rule("hard_blocked_name_keyword", "casino", updated_by="admin")
+    before = _failure_count()
+    store.set_unavailable(True)
+    svc.rehydrate_mirror()  # must NOT raise
+    assert _failure_count() == before + 1

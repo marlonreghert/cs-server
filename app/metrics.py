@@ -115,6 +115,14 @@ VENUES_WITH_VIBE_ATTRIBUTES = Gauge(
     "Number of venues with cached vibe attributes",
 )
 
+# Eligibility Redis mirror rehydration (rebuild admin_config:venue_eligibility
+# from the admin.eligibility_rule rows on startup + the periodic projector cycle)
+ELIGIBILITY_MIRROR_REHYDRATION_TOTAL = Counter(
+    "eligibility_mirror_rehydration_total",
+    "Eligibility Redis mirror rehydrations from admin.eligibility_rule rows",
+    ["result"],  # success | failure
+)
+
 # =============================================================================
 # VENUE BUSINESS STATUS METRICS (from Google Places API)
 # =============================================================================

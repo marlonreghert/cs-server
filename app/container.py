@@ -352,6 +352,9 @@ class Container:
         self.eligibility_rule_service = EligibilityRuleService(
             self.rds_store, self.admin_config_service
         )
+        # Let the periodic projector self-heal the eligibility serving mirror from
+        # its rows each cycle (wired after both exist; the projector is built above).
+        self.redis_projection_service.eligibility_rule_service = self.eligibility_rule_service
 
         # Monthly budget DAO + service (used by add-by-address + discovery).
         self.venue_budget_dao = VenueBudgetDao(redis_internal_client)

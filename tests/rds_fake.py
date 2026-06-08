@@ -317,6 +317,7 @@ class InMemoryRdsVenueStore:
 
     # ── eligibility rules (Ex2: normalized admin.eligibility_rule) ─────────────
     def list_eligibility_rules(self) -> list[tuple[str, str]]:
+        self._guard()  # a real SELECT hits Postgres and fails on an RDS outage
         return sorted(self.eligibility_rules.keys())
 
     def add_eligibility_rule(self, rule_type, value, updated_by=None) -> None:

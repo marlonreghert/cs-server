@@ -62,9 +62,13 @@ _REBUILD_MODELS = {
 
 
 class RedisProjectionService:
-    def __init__(self, redis_only_dao, rds_store):
+    def __init__(self, redis_only_dao, rds_store, eligibility_rule_service=None):
         self.redis_only_dao = redis_only_dao  # Redis-only projection writer
         self.rds_store = rds_store
+        # Optional: the eligibility serving mirror (an admin carve-out) is
+        # re-asserted from its rows each cycle so a Redis flush self-heals,
+        # symmetric with the venue projection. Delegated + isolated.
+        self.eligibility_rule_service = eligibility_rule_service
 
     # ── rebuild: RDS -> Redis (incl. geo index + live busyness) ───────────────
     def rebuild_redis_from_rds(self) -> dict:
@@ -107,6 +111,14 @@ class RedisProjectionService:
         for venue_id in self.rds_store.list_deprecated_venue_ids():
             if self.redis_only_dao.delete_venue(venue_id):
                 summary["removed"] += 1
+        # Self-heal the eligibility serving mirror from its rows. Delegated to the
+        # carve-out owner and isolated — rehydrate_mirror is already degrade-safe,
+        # but guard anyway so it can never abort the venue projection.
+        if self.eligibility_rule_service is not None:
+            try:
+                self.eligibility_rule_service.rehydrate_mirror()
+            except Exception as e:  # pragma: no cover - defensive
+                logger.warning(f"[Rebuild] eligibility mirror rehydration error: {e}")
         logger.info(f"[Rebuild] {summary}")
         return summary
 

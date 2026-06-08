@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 
+from app.metrics import ELIGIBILITY_MIRROR_REHYDRATION_TOTAL
 from app.services.venue_eligibility import (
     EligibilityConfig,
     RULE_TYPES,
@@ -68,13 +69,37 @@ class EligibilityRuleService:
             raise ValueError("eligibility rule value must be non-empty")
         return rule_type, normalize_rule_value(rule_type, v)
 
-    def _remirror(self, updated_by=None) -> EligibilityConfig:
-        rules = self.rds_store.list_eligibility_rules()
+    def _project_mirror(self, rules) -> None:
+        """Write the Redis serving mirror directly from the rows (or clear it when
+        no rows remain). Redis-only: the rows are the sole durable truth, so no
+        redundant RDS admin_config blob is persisted."""
         if rules:
-            self.admin_config_service.set(
-                _ELIGIBILITY_KEY, assemble_eligibility_blob(rules), updated_by
+            self.admin_config_service.set_mirror(
+                _ELIGIBILITY_KEY, assemble_eligibility_blob(rules)
             )
         else:
             # No override left -> drop the key so readers fall back to defaults.
-            self.admin_config_service.delete(_ELIGIBILITY_KEY)
+            self.admin_config_service.delete_mirror(_ELIGIBILITY_KEY)
+
+    def _remirror(self, updated_by=None) -> EligibilityConfig:
+        # Admin write path: propagate errors so the caller surfaces a retryable
+        # failure (the router maps this to HTTP 502).
+        rules = self.rds_store.list_eligibility_rules()
+        self._project_mirror(rules)
         return eligibility_config_from_rules(rules)
+
+    def rehydrate_mirror(self) -> None:
+        """Rebuild the Redis eligibility mirror from the rows. Called at startup
+        and from the periodic projector cycle so a Redis flush self-heals instead
+        of silently degrading filtering to the hardcoded defaults. Degrade-safe:
+        an RDS/Redis error is logged + counted and never raised (must not block
+        startup or abort the projector)."""
+        try:
+            rules = self.rds_store.list_eligibility_rules()
+            self._project_mirror(rules)
+        except Exception as e:
+            logger.warning("[eligibility] mirror rehydration failed: %s", e)
+            ELIGIBILITY_MIRROR_REHYDRATION_TOTAL.labels(result="failure").inc()
+            return
+        logger.info("[eligibility] mirror rehydrated from %d eligibility rule rows", len(rules))
+        ELIGIBILITY_MIRROR_REHYDRATION_TOTAL.labels(result="success").inc()

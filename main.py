@@ -583,6 +583,14 @@ async def startup_essential(settings: Settings):
     # Inject engagement service (favorites/hot_likes write-through API)
     set_engagement_service(container.engagement_service)
 
+    # Rebuild the eligibility serving mirror from its rows so a Redis flush before
+    # this start does not leave filtering on the hardcoded defaults. Runs OFF the
+    # event loop (blocking SQLAlchemy read, same pattern as the projector) so it
+    # cannot stall the loop, and is degrade-safe; the periodic projector re-asserts
+    # it thereafter.
+    loop = asyncio.get_event_loop()
+    await loop.run_in_executor(None, container.eligibility_rule_service.rehydrate_mirror)
+
     logger.info("[Main] Essential startup completed — server is ready to serve")
 
 
