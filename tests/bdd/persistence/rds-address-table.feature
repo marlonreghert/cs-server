@@ -1,21 +1,19 @@
 Feature: RDS schema normalization — Ex3 structured address table
   As the VibeSense platform
-  The second umbrella step extracts a venue's address (`venue_address` + lat/lng)
-  into a referenced `venues.address` table with structured components
-  (street/neighborhood/city/postal_code), so address becomes queryable and
-  de-duplicated truth. This is the EXPAND phase: the address table is dual-written
-  and reads are sourced from it, while the original `venues.venue` address columns
-  stay as a rollback baseline (dropped only by the later batched contract). A venue
-  must reconstruct identically and project to Redis at the same coordinates.
+  A venue's address (`venue_address` + lat/lng) lives in a referenced
+  `venues.address` table with structured components
+  (street/neighborhood/city/postal_code), so address is queryable and
+  de-duplicated truth. The batched contract dropped the original `venues.venue`
+  address columns, so the table is the sole address source and feeds the geo
+  rebuild. A venue must reconstruct its address + coordinates from the table and
+  project to Redis at those coordinates.
 
   # Umbrella plan: plans/260605_rds-schema-normalization.md (Step Ex3). The Venue
   # model and API are unchanged — this only moves where the RDS layer stores and
-  # reads address. Equivalence is guarded by the shared golden diff + Redis
-  # shadow-projection harness.
+  # reads address.
   #
   # bdd-exempt: migration mechanics (DDL ordering, SSM, backfill) and the operator
-  # backup gate are infrastructure, covered by the plan + acceptance criteria, not
-  # Gherkin. Same posture as Ex1.
+  # backup gate are infrastructure, covered by the plan + runbook, not Gherkin.
 
   Background:
     Given the RDS system-of-record is enabled
@@ -37,13 +35,3 @@ Feature: RDS schema normalization — Ex3 structured address table
     Given a venue "a3" stored under the address-table schema from free text only
     Then the venues.address row for "a3" has null street, neighborhood, city, and postal code
     And reconstructing venue "a3" produces the same serving output as before the migration
-
-  Scenario: Reconstruction stays equivalent to the retained payload baseline
-    Given several venues stored under the address-table schema
-    When the step's RDS golden diff runs over all venues
-    Then the golden diff returns a passing result with zero mismatches
-
-  Scenario: The Redis shadow projection equals the pre-change serving snapshot
-    Given a pre-change snapshot of the Redis serving state and geo index
-    When the projector re-projects the v2 shape into a separate shadow keyspace
-    Then the shadow serving values and geo membership and coordinates equal the snapshot

@@ -49,18 +49,17 @@ _ENRICHMENT = {
 _WEEKLY = "besttime.weekly_forecast"
 
 # The venue row exposed for reconstruction (venue_row.venue_from_row reads the
-# scalar columns + `extra`; `payload` is the retained v1 golden baseline used only
-# by the equivalence diff during expand). Ex3: address is sourced from
-# venues.address (LEFT JOIN), falling back to the retained venue columns until the
-# batched contract drops them.
+# scalar columns + `extra`). Address is sourced solely from venues.address — the
+# Ex3 contract dropped the venues.venue address columns and the Ex1 contract
+# dropped `payload`. lat/lng feed the geo rebuild. Every venue has a 1:1 address
+# row (0004 backfill + same-transaction dual-write on upsert), so the LEFT JOIN
+# always matches.
 _VENUE_SELECT = (
     "SELECT v.venue_id, v.venue_name, "
-    "COALESCE(a.raw_text, v.venue_address) AS venue_address, "
-    "COALESCE(a.lat, v.venue_lat) AS venue_lat, "
-    "COALESCE(a.lng, v.venue_lng) AS venue_lng, "
+    "a.raw_text AS venue_address, a.lat AS venue_lat, a.lng AS venue_lng, "
     "v.venue_type, v.price_level, v.rating, v.reviews, v.forecast, v.processed, "
     "v.priority, v.lifecycle_status, v.deprecated_at, v.deprecated_reason, "
-    "v.deprecated_source, v.google_business_status, v.extra, v.payload "
+    "v.deprecated_source, v.google_business_status, v.extra "
     "FROM venues.venue v LEFT JOIN venues.address a ON a.venue_id = v.venue_id"
 )
 
@@ -84,7 +83,7 @@ class RdsVenueStore:
         deprecated drugstore would otherwise flip it active). Protects PR #21
         eligibility once serving reads RDS via the projector. Also preserves
         google_business_status. Reads the lifecycle from the COLUMN (soft_delete
-        updates columns, not the payload JSONB)."""
+        updates columns)."""
         if not venue.venue_id:
             return
         row = self.get_venue(venue.venue_id)
@@ -106,36 +105,35 @@ class RdsVenueStore:
 
     def upsert_venue(self, venue) -> None:
         self._preserve_deprecation(venue)
-        # Ex1: scalars are the source of truth (columns); the residual JSON holds
-        # only the nested fields. The full payload is still written during the
-        # expand phase as the retained v1 golden baseline for the equivalence
-        # diff (dropped by the 0003b contract migration).
-        p = venue.model_dump(by_alias=True, mode="json")
+        # Ex1/Ex3 contracted: scalars are the source of truth in columns, nested
+        # fields in the residual `extra`, and address lives only in venues.address.
+        # `payload` and the venues.venue address columns were dropped (0007), so
+        # they are no longer written — venue_address (NOT NULL DEFAULT '' during the
+        # pre-drop window) is omitted from the column list, never passed as NULL,
+        # so the relax→drop sequence stays clean.
         _, residual = split_venue_for_storage(venue)
         with self.engine.begin() as conn:
             conn.execute(text(
-                "INSERT INTO venues.venue (venue_id, venue_name, venue_address, "
-                "venue_lat, venue_lng, venue_type, price_level, rating, reviews, priority, "
+                "INSERT INTO venues.venue (venue_id, venue_name, "
+                "venue_type, price_level, rating, reviews, priority, "
                 "forecast, processed, lifecycle_status, deprecated_reason, "
-                "deprecated_source, deprecated_at, google_business_status, extra, payload, updated_at) "
-                "VALUES (:venue_id, :venue_name, :venue_address, :venue_lat, :venue_lng, "
+                "deprecated_source, deprecated_at, google_business_status, extra, updated_at) "
+                "VALUES (:venue_id, :venue_name, "
                 ":venue_type, :price_level, :rating, :reviews, :priority, :forecast, :processed, "
                 ":lifecycle_status, :deprecated_reason, :deprecated_source, :deprecated_at, "
-                ":google_business_status, CAST(:extra AS jsonb), CAST(:payload AS jsonb), now()) "
+                ":google_business_status, CAST(:extra AS jsonb), now()) "
                 "ON CONFLICT (venue_id) DO UPDATE SET "
-                "venue_name=excluded.venue_name, venue_address=excluded.venue_address, "
-                "venue_lat=excluded.venue_lat, venue_lng=excluded.venue_lng, "
+                "venue_name=excluded.venue_name, "
                 "venue_type=excluded.venue_type, price_level=excluded.price_level, "
                 "rating=excluded.rating, reviews=excluded.reviews, priority=excluded.priority, "
                 "forecast=excluded.forecast, "
                 "processed=excluded.processed, lifecycle_status=excluded.lifecycle_status, "
                 "deprecated_reason=excluded.deprecated_reason, deprecated_source=excluded.deprecated_source, "
                 "deprecated_at=excluded.deprecated_at, google_business_status=excluded.google_business_status, "
-                "extra=excluded.extra, payload=excluded.payload, updated_at=now()"
+                "extra=excluded.extra, updated_at=now()"
             ), {
                 "venue_id": venue.venue_id, "venue_name": venue.venue_name,
-                "venue_address": venue.venue_address, "venue_lat": venue.venue_lat,
-                "venue_lng": venue.venue_lng, "venue_type": venue.venue_type,
+                "venue_type": venue.venue_type,
                 "price_level": venue.price_level, "rating": venue.rating,
                 "reviews": venue.reviews, "priority": venue.priority,
                 "forecast": venue.forecast,
@@ -145,9 +143,8 @@ class RdsVenueStore:
                 "deprecated_at": venue.deprecated_at,
                 "google_business_status": venue.google_business_status,
                 "extra": json.dumps(residual),
-                "payload": json.dumps(p),
             })
-            # Ex3 dual-write: venues.address is the read source. Structured
+            # venues.address is the sole address source of truth. Structured
             # components (street/neighborhood/city/postal_code) are left as-is —
             # null until Google Places enrichment fills them, never clobbered here.
             conn.execute(text(
@@ -204,18 +201,11 @@ class RdsVenueStore:
                 "SELECT venue_id FROM venues.venue WHERE lifecycle_status='deprecated'"
             ))]
 
-    def list_all_venue_payloads(self) -> list[dict]:
-        """Every venue payload (active + deprecated) — the retained v1 golden
-        baseline (dropped at the 0003b contract migration)."""
-        with self.engine.connect() as conn:
-            return [r[0] for r in conn.execute(text(
-                "SELECT payload FROM venues.venue"
-            ))]
-
     def list_all_venue_rows(self) -> list[dict]:
         """Every venue row (active + deprecated) with scalar columns + residual
-        `extra` (+ retained `payload`) — backs the pipeline list_all_venues RDS
-        read (column-based reconstruction) and the equivalence golden diff."""
+        `extra` + address (from venues.address) — backs the pipeline
+        list_all_venues RDS read (column-based reconstruction) and the
+        redis↔rds serving diff."""
         with self.engine.connect() as conn:
             return [dict(r) for r in conn.execute(text(_VENUE_SELECT)).mappings()]
 

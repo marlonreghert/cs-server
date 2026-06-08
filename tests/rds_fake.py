@@ -14,6 +14,11 @@ from typing import Optional
 
 from app.dao.venue_row import split_venue_for_storage
 
+# venues.venue address columns dropped by the batched contract — address lives
+# only in venues.address (self.addresses). Kept out of the stored venue row so the
+# fake mirrors the contracted real store.
+_ADDRESS_COLUMNS = ("venue_address", "venue_lat", "venue_lng")
+
 
 class RdsUnavailable(RuntimeError):
     """Raised by the fake when the outage toggle is on (RDS-outage scenario)."""
@@ -87,19 +92,17 @@ class InMemoryRdsVenueStore:
         self._guard()
         self._preserve_deprecation(venue)
         existing = self.venues.get(venue.venue_id, {})
-        # Ex1: scalars in columns (source of truth), nested fields in `extra`. The
-        # full payload stays as the retained v1 golden baseline (dual-write during
-        # expand). Mirrors RdsVenueStore.upsert_venue so the offline contract is
-        # column-based reconstruction, not a payload round-trip.
+        # Contracted shape: scalars in columns (source of truth), nested fields in
+        # `extra`. No `payload` baseline and no venues.venue address columns —
+        # address lives only in self.addresses. Mirrors RdsVenueStore.upsert_venue.
         columns, residual = split_venue_for_storage(venue)
-        row = dict(columns)
+        row = {k: v for k, v in columns.items() if k not in _ADDRESS_COLUMNS}
         row["extra"] = residual
-        row["payload"] = venue.model_dump(by_alias=True, mode="json")
         row["created_at"] = existing.get("created_at", _now())
         row["updated_at"] = _now()
         self.venues[venue.venue_id] = row
-        # Ex3 dual-write: the address table is the read source; structured
-        # components stay null until Google Places enrichment fills them.
+        # venues.address is the sole address source; structured components stay
+        # null until Google Places enrichment fills them.
         existing_addr = self.addresses.get(venue.venue_id, {})
         self.addresses[venue.venue_id] = {
             "venue_id": venue.venue_id,
@@ -114,8 +117,11 @@ class InMemoryRdsVenueStore:
         }
 
     def _row_with_address(self, row: dict) -> dict:
-        """Source venue_address/lat/lng from venues.address (Ex3 read cutover),
-        falling back to the retained venue columns if no address row exists."""
+        """Source venue_address/lat/lng solely from venues.address — the
+        venues.venue address columns were dropped by the contract. Every venue has
+        a 1:1 address row written in the same upsert, so the lookup always
+        matches; a missing one yields a row without address (reconstruction
+        fails), mirroring the real LEFT JOIN."""
         out = copy.deepcopy(row)
         addr = self.addresses.get(row["venue_id"])
         if addr is not None:
@@ -153,7 +159,7 @@ class InMemoryRdsVenueStore:
     def list_active_venue_ids_by_priority(self, limit: int) -> list[str]:
         """Mirror RdsVenueStore: top-`limit` active venues ordered by priority
         asc, reviews desc, rating desc, venue_id asc. priority/reviews/rating are
-        read from the stored payload (priority defaults to 5; NULL reviews/rating
+        read from the stored columns (priority defaults to 5; NULL reviews/rating
         sort last). A non-positive limit selects nothing."""
         if limit <= 0:
             return []
@@ -179,9 +185,6 @@ class InMemoryRdsVenueStore:
             vid for vid, row in self.venues.items()
             if row.get("lifecycle_status", "active") == "deprecated"
         ]
-
-    def list_all_venue_payloads(self) -> list[dict]:
-        return [row["payload"] for row in self.venues.values()]
 
     def list_all_venue_rows(self) -> list[dict]:
         return [self._row_with_address(row) for row in self.venues.values()]

@@ -49,14 +49,13 @@ RESIDUAL_FIELDS: tuple[str, ...] = (
 # never silently drops a field. Guarded by tests/test_venue_row.py.
 ALL_VENUE_FIELDS: frozenset[str] = frozenset(COLUMN_FIELDS) | frozenset(RESIDUAL_FIELDS)
 
-# Columns the system manages OUT OF BAND of the venue payload: `priority` is set
-# by direct SQL (one-time tiering + manual edits); lifecycle/deprecation and
+# Columns the system manages OUT OF BAND of the venue serving projection:
+# `priority` is set by direct SQL (one-time tiering + manual edits) and is
+# intentionally NOT projected to Redis; lifecycle/deprecation and
 # `google_business_status` are set by soft_delete_venue / _preserve_deprecation.
-# For these the COLUMN is the source of truth and the retained `payload` is
-# intentionally allowed to be stale, so a column-vs-payload difference on them is
-# expected — not data loss. The equivalence diff excludes them (the columns
-# themselves are untouched by Ex1, so nothing is at risk). Confirmed against prod:
-# the only column↔payload drift in 1331 venues was exactly these fields.
+# The redis↔rds serving diff excludes them because the Redis-served venue does
+# not carry these out-of-band fields, so a difference there is expected — not
+# data loss.
 COLUMN_AUTHORITATIVE_FIELDS: frozenset[str] = frozenset({
     "priority",
     "lifecycle_status",
