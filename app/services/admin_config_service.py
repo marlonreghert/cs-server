@@ -73,6 +73,16 @@ class AdminConfigService:
         self.rds_store.delete_admin_config(key)
         self.redis.delete(self._redis_key(key))
 
+    def set_mirror(self, key: str, value: Any) -> None:
+        """Write ONLY the Redis serving mirror (no RDS row). For configs whose
+        durable truth lives elsewhere (e.g. eligibility = admin.eligibility_rule
+        rows), so RDS holds no redundant derived copy."""
+        self.redis.set(self._redis_key(key), json.dumps(value))
+
+    def delete_mirror(self, key: str) -> None:
+        """Delete ONLY the Redis serving mirror (no RDS row)."""
+        self.redis.delete(self._redis_key(key))
+
     def list_keys(self) -> list[str]:
         return [row["key"] for row in self.rds_store.list_admin_config()]
 

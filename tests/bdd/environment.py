@@ -197,6 +197,10 @@ def _build_rds_layer(context) -> None:
     context.eligibility_rule_service = EligibilityRuleService(
         context.rds_store, context.admin_config_service
     )
+    # Mirror the container wiring: the projector self-heals the eligibility mirror.
+    context.redis_projection_service.eligibility_rule_service = (
+        context.eligibility_rule_service
+    )
 
 
 def after_scenario(context, scenario):
