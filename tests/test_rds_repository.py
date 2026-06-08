@@ -245,7 +245,7 @@ class TestPass2bWritesOnly:
         repo = self._repo(geo, store)
         repo.upsert_venue(_venue())
         repo.set_google_business_status("v1", "CLOSED_TEMPORARILY")
-        assert store.get_venue("v1")["payload"]["google_business_status"] == "CLOSED_TEMPORARILY"
+        assert store.get_venue("v1")["google_business_status"] == "CLOSED_TEMPORARILY"
         assert redis_only.get_venue("v1") is None
 
 

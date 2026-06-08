@@ -52,7 +52,7 @@ def test_venue_upsert_and_soft_delete(store):
     vid = _vid()
     store.upsert_venue(_venue(vid, "Boteco"))
     row = store.get_venue(vid)
-    assert row is not None and row["payload"]["venue_name"] == "Boteco"
+    assert row is not None and row["venue_name"] == "Boteco"
     assert row["lifecycle_status"] == "active"
     assert vid in store.list_active_venue_ids()
 

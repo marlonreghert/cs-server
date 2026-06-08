@@ -126,12 +126,12 @@ class TestPriorityPersistence:
         store.upsert_venue(_venue("a", priority=5))
         # 'a' must still be P0 (would fall below 'b' if it were reset to P5).
         assert store.list_active_venue_ids_by_priority(2) == ["a", "b"]
-        assert store.get_venue("a")["payload"]["priority"] == 0
+        assert store.get_venue("a")["priority"] == 0
 
     def test_new_venue_keeps_its_priority(self):
         store = InMemoryRdsVenueStore()
         store.upsert_venue(_venue("new", priority=2))
-        assert store.get_venue("new")["payload"]["priority"] == 2
+        assert store.get_venue("new")["priority"] == 2
 
     def test_repository_reupsert_preserves_priority(self):
         store = InMemoryRdsVenueStore()

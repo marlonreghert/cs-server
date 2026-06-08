@@ -81,13 +81,3 @@ def step_reconstruct_unchanged(context, vid):
     assert v is not None
     assert v.venue_address == built.venue_address
     assert v.venue_lat == built.venue_lat and v.venue_lng == built.venue_lng
-
-
-@given('several venues stored under the address-table schema')
-def step_several_venues(context):
-    for vid, addr, lat, lng in [
-        ("s1", "Rua Um, 1", -8.05, -34.88),
-        ("s2", "Rua Dois, 2", -8.06, -34.89),
-        ("s3", "Rua Tres, 3", -8.07, -34.90),
-    ]:
-        context.repository.upsert_venue(_venue(vid, addr, lat, lng))

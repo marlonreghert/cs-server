@@ -7,7 +7,6 @@ from app.models import Venue
 from app.models.venue import FootTrafficForecast
 from app.services.equivalence_verify import (
     canonical_venue,
-    rds_venue_golden_diff,
     redis_vs_rds_serving_diff,
     venue_diff_fields,
 )
@@ -42,40 +41,6 @@ def test_venue_diff_fields_reports_changed_field_only():
     b.venue_name = "Different"
     assert venue_diff_fields(a, b) == ["venue_name"]
     assert venue_diff_fields(a, _full_venue()) == []
-
-
-def test_golden_diff_passes_when_columns_match_payload():
-    store = InMemoryRdsVenueStore()
-    store.upsert_venue(_full_venue("a"))
-    store.upsert_venue(_full_venue("b"))
-    result = rds_venue_golden_diff(store)
-    assert result.checked == 2
-    assert result.passing
-    assert result.mismatch_count == 0
-
-
-def test_golden_diff_detects_drift_and_leaks_no_values():
-    store = InMemoryRdsVenueStore()
-    store.upsert_venue(_full_venue("vd"))
-    # Perturb only the retained v1 payload so it diverges from the v2 columns.
-    store.venues["vd"]["payload"]["venue_name"] = "SECRET DRIFT"
-    result = rds_venue_golden_diff(store)
-    assert not result.passing
-    [mismatch] = result.mismatches
-    assert mismatch == {"venue_id": "vd", "fields": ["venue_name"]}
-    assert "SECRET DRIFT" not in str(result.mismatches)
-
-
-def test_golden_diff_ignores_column_authoritative_drift():
-    # priority + lifecycle are column-managed; a stale payload value for them is
-    # expected (not data loss) and must NOT fail the gate. Confirmed against prod.
-    store = InMemoryRdsVenueStore()
-    store.upsert_venue(_full_venue("p"))
-    payload = store.venues["p"]["payload"]
-    payload["priority"] = 0                 # column has 4; payload stale
-    payload["lifecycle_status"] = "active"  # column may say deprecated
-    payload["deprecated_reason"] = "stale"
-    assert rds_venue_golden_diff(store).passing
 
 
 def test_redis_vs_rds_serving_diff_passes_after_projection():
