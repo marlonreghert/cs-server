@@ -570,6 +570,11 @@ VENUE_MONTHLY_NEW_COUNT = Gauge(
     "Current month's running count of new venue additions to the BestTime account inventory",
 )
 
+LIVE_REFRESH_INTERVAL_MINUTES = Gauge(
+    "live_refresh_interval_minutes",
+    "Currently effective live_forecast_refresh interval in minutes (admin override or settings default)",
+)
+
 # =============================================================================
 # APPLICATION INFO
 # =============================================================================

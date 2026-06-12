@@ -6,8 +6,7 @@ Feature: Admin-tunable live forecast refresh interval
   back to the settings default and can never stall the refresh.
 
   Background:
-    Given the scheduler is running with live_forecast_refresh at the settings
-      default interval of 5 minutes
+    Given the scheduler is running with live_forecast_refresh at the settings default interval of 5 minutes
 
   Scenario: Setting the admin key reschedules the live refresh
     When the admin config key "live_refresh_minutes" is set to 15
