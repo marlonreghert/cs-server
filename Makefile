@@ -39,6 +39,7 @@ test-unit:
 		tests/test_address_table.py \
 		tests/test_eligibility_rules.py \
 		tests/test_log_redaction.py \
+		tests/test_refresh_interval_watch.py \
 		-v
 
 test-integration:

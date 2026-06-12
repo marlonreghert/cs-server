@@ -56,11 +56,15 @@ class RefreshIntervalWatcher:
         return self._applied
 
     def _parse_minutes(self, raw: str) -> Optional[int]:
-        """A valid value is a JSON integer within [MIN, MAX]; else None."""
+        """A valid value is a JSON integer within [MIN, MAX] — bare or
+        wrapped as {"minutes": N} (the shape the vibesadmin → cs-server
+        config proxy stores); else None."""
         try:
             value = json.loads(raw)
         except (ValueError, TypeError):
             return None
+        if isinstance(value, dict):
+            value = value.get("minutes")
         if isinstance(value, bool) or not isinstance(value, int):
             return None
         if not MIN_REFRESH_MINUTES <= value <= MAX_REFRESH_MINUTES:

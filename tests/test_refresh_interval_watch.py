@@ -52,6 +52,7 @@ def make_watcher(value=None, default=5):
         ("15", 15),
         ("1", 1),
         ("120", 120),
+        ('{"minutes": 15}', 15),
     ],
 )
 def test_valid_values_reschedule(raw, expected):
@@ -66,7 +67,10 @@ def test_valid_values_reschedule(raw, expected):
 
 @pytest.mark.parametrize(
     "raw",
-    ["0", "-5", "121", '"fast"', "true", "7.5", "[15]", "not json {"],
+    [
+        "0", "-5", "121", '"fast"', "true", "7.5", "[15]", "not json {",
+        '{"minutes": "fast"}', '{"minutes": 0}', "{}",
+    ],
 )
 def test_invalid_values_keep_current(raw):
     watcher, scheduler, _ = make_watcher(raw)
