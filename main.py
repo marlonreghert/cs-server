@@ -22,6 +22,10 @@ from app.config import Settings
 from app.container import Container
 from app.routers import venue_router, set_venue_handler, debug_router, set_debug_dependencies, admin_trigger_router, set_admin_container, engagement_router, set_engagement_service
 from app.middleware import PrometheusMiddleware
+from app.services.refresh_interval_watch import (
+    WATCH_INTERVAL_SECONDS,
+    RefreshIntervalWatcher,
+)
 from app.metrics import (
     BACKGROUND_JOB_RUNS_TOTAL,
     BACKGROUND_JOB_DURATION_SECONDS,
@@ -400,6 +404,26 @@ def start_background_jobs(settings: Settings):
     scheduler = AsyncIOScheduler()
 
     register_refresh_jobs(scheduler, settings)
+
+    # Interval watch: applies the admin-tunable live refresh interval
+    # (`admin_config:live_refresh_minutes`, written by vibesadmin) to the
+    # running scheduler without a restart.
+    refresh_interval_watcher = RefreshIntervalWatcher(
+        redis_client=container.redis_client,
+        scheduler=scheduler,
+        default_minutes=settings.venues_live_refresh_minutes,
+    )
+    scheduler.add_job(
+        refresh_interval_watcher.run,
+        trigger=IntervalTrigger(seconds=WATCH_INTERVAL_SECONDS),
+        id="refresh_interval_watch",
+        name="Live Refresh Interval Watch",
+        replace_existing=True,
+    )
+    logger.info(
+        f"[Scheduler] Scheduled live refresh interval watch every "
+        f"{WATCH_INTERVAL_SECONDS} seconds"
+    )
 
     # Job 4: Google Places enrichment (only if enabled and configured)
     if settings.google_places_enrichment_enabled and settings.google_places_api_key:
