@@ -1,3 +1,4 @@
+@refresh
 Feature: Priority-bounded BestTime refresh within the monthly unique-venue cap
   BestTime caps the account at a fixed number of unique venues interacted with
   per calendar month (currently 500), counting every live/forecast read. The

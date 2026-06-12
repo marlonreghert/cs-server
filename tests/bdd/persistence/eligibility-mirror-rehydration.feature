@@ -1,3 +1,4 @@
+@persistence
 Feature: Eligibility mirror rehydration from rows on startup
   As the VibeSense platform
   Eligibility rules live in admin.eligibility_rule (the durable truth) and serving

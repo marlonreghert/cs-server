@@ -6,6 +6,24 @@ The test suite has three layers:
 - Redis integration tests that require a local Redis instance.
 - BDD feature contracts written in Gherkin and executed with Behave.
 
+## Test Execution Policy (standard across the three VibeSense repos)
+
+- All tests run through make targets — never invoke pytest or behave directly.
+- Every test target writes its full verbose output to `tests/reports/`
+  (gitignored, overwritten per run):
+
+| Target | Report |
+|---|---|
+| `make test-unit` | `tests/reports/test-unit.txt` |
+| `make test-integration` | `tests/reports/test-integration.txt` |
+| `make test-bdd` | `tests/reports/test-bdd.txt` |
+| `make test-feature FEATURE=<path>` | `tests/reports/test-feature-<slug>.txt` |
+| `make test-tags TAGS=<expr>` | `tests/reports/test-tags-<slug>.txt` |
+| `make test` | runs `test-unit` + `test-bdd` (their two reports) |
+
+- When a run fails, read the report file instead of rerunning the suite — it
+  contains the full verbose output needed for diagnosis.
+
 ## Prerequisites
 
 Install runtime and development dependencies:
@@ -74,6 +92,25 @@ make test-feature FEATURE=tests/bdd/api/<slug>.feature
 ```
 
 When no `.feature` files exist yet, `make test-bdd` skips cleanly.
+
+### Tags
+
+Every `Feature:` carries one domain tag mirroring its directory (`@api`,
+`@persistence`, `@refresh`, and `@enrichment`/`@observability` when those
+domains gain features). Scenario-level tags (e.g. `@smoke`) may be added as
+needed.
+
+`@wip` marks Gherkin that landed ahead of its step definitions (in-flight
+features). `make test-bdd` excludes `@wip` so the suite gate stays green;
+run in-flight scenarios explicitly with `make test-feature FEATURE=<path>` or
+`make test-tags TAGS=@wip`, and remove the tag when the steps land.
+
+Run a tag-filtered slice (behave tag expression):
+
+```bash
+make test-tags TAGS=@persistence
+make test-tags TAGS=@api,@refresh   # OR across tags
+```
 
 ## Run The Default Suite
 
