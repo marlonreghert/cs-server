@@ -1,3 +1,4 @@
+@persistence
 Feature: Soft-delete permanently closed venues without losing Redis troubleshooting data
   Operators must retain every venue record that cs-server has learned about,
   even when Google Places reports the venue as permanently closed. Deprecated

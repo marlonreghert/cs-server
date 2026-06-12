@@ -1,3 +1,4 @@
+@persistence
 Feature: Redis projection decoupled from the pipelines
   As the VibeSense platform
   Pipelines and admin writes must persist only to RDS (the system of record),

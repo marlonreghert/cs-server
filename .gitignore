@@ -13,3 +13,6 @@ bounding_box_map.html
 awscliv2.zip
 terraform.zip
 
+
+# Test reports (every make test target writes here)
+tests/reports/

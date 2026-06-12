@@ -60,7 +60,12 @@ mechanical edits can skip the lifecycle.
 - Keep tests close to the behavior they protect. Prefer handler/service tests
   for business rules, DAO tests for persistence boundaries, and BDD for API and
   end-to-end functional contracts.
-- Use the Makefile targets documented in `tests/README.md`.
+- All tests run through the make targets documented in `tests/README.md` —
+  never invoke pytest or behave directly. Every target writes a detailed report
+  under `tests/reports/`; read the report to analyze failures instead of
+  rerunning the suite.
+- Every `Feature:` carries a domain tag mirroring its `tests/bdd/<domain>/`
+  directory; run slices with `make test-tags TAGS=@<tag>`.
 - Do not require live BestTime, Google Places, Apify, S3, OpenAI, or external
   network calls in BDD. Use deterministic fakes.
 

@@ -1,3 +1,4 @@
+@persistence
 Feature: RDS schema normalization — Ex2 admin eligibility config normalization
   As the VibeSense platform
   The third umbrella step makes admin eligibility config editable as data instead

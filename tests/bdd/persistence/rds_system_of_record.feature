@@ -1,3 +1,4 @@
+@persistence
 Feature: RDS as the system of record with Redis serving projection
   As the VibeSense platform
   We must persist every venue pipeline output to an AWS RDS Postgres database as

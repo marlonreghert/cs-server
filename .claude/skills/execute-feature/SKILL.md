@@ -15,6 +15,14 @@ points to this canonical workflow.
 Execute only an approved plan produced by `/plan-feature`. Read `CLAUDE.md`,
 the plan file, and the linked Gherkin feature file before touching code.
 
+**Test execution policy:** All tests run through make targets — never invoke
+pytest or behave directly. Use `make test-feature FEATURE=<path/to/.feature>`
+for a single feature, `make test-tags TAGS=<tag-expression>` for a slice, and
+`make test-unit` / `make test-bdd` / `make test` for suites. Every target
+writes a detailed report to `tests/reports/<target>.txt`; when a run fails,
+**read the report file instead of rerunning the suite** — it contains the full
+verbose output needed for diagnosis.
+
 ## Preconditions
 
 - The user explicitly approved the plan.
@@ -93,7 +101,9 @@ When tests are green, refactor only the files touched by this feature:
 
 ## Phase 6: Diagnose Failures
 
-If a test fails after implementation, diagnose before editing again:
+If a test fails after implementation, diagnose before editing again. Start from
+the report the failing target already wrote under `tests/reports/` — do not
+rerun the suite to re-see the output. Produce:
 
 - Expected behavior from the plan or scenario.
 - Observed failure.

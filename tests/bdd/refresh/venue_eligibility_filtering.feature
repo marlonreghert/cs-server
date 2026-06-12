@@ -1,3 +1,4 @@
+@refresh
 Feature: Venue eligibility filtering
   As the VibeSense platform
   We must keep ineligible venues (drugstores, markets, churches, empty-named

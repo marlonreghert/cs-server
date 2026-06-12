@@ -1,3 +1,4 @@
+@persistence
 Feature: RDS schema normalization — venue storage contract (columns + residual + address)
   As the VibeSense platform
   The RDS schema-normalization umbrella made the relational columns the source of

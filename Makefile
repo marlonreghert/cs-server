@@ -8,14 +8,25 @@ KUBERNETES_DEPLOYMENT=deployment/deployment.yaml
 KUBERNETES_CLUSTER=cs-server-cluster
 PYTHON ?= $(shell if [ -x .venv/bin/python ]; then echo .venv/bin/python; else echo python3; fi)
 
+# Test reporting convention (standard across the three VibeSense repos):
+# every test target writes its full verbose output to tests/reports/<target>.txt
+# (gitignored, overwritten per run) so failures are analyzed from the report
+# instead of rerunning the suite. pipefail keeps exit codes intact through tee.
+SHELL := /bin/bash
+REPORTS := tests/reports
+BEHAVE_FLAGS := -f plain --no-capture --no-capture-stderr --no-logcapture
+FEATURE_SLUG = $(basename $(notdir $(FEATURE)))
+TAGS_SLUG = $(shell echo '$(TAGS)' | tr -c 'A-Za-z0-9\n' '-' | sed -e 's/^-*//' -e 's/-*$$//')
+
 setup-root:
 	export PROJECT_ROOT=`pwd`
 
 # Phony targets to avoid conflicts with files of the same name
-.PHONY: build push network run-network run-docker-compose request clean test-unit test-integration test-bdd test-feature test
+.PHONY: build push network run-network run-docker-compose request clean test-unit test-integration test-bdd test-feature test-tags test
 
 test-unit:
-	$(PYTHON) -m pytest \
+	@mkdir -p $(REPORTS)
+	@set -o pipefail; $(PYTHON) -m pytest \
 		tests/test_models.py \
 		tests/test_redis_dao_unit.py \
 		tests/test_besttime_client.py \
@@ -39,10 +50,11 @@ test-unit:
 		tests/test_address_table.py \
 		tests/test_eligibility_rules.py \
 		tests/test_log_redaction.py \
-		-v
+		-v -ra 2>&1 | tee $(REPORTS)/test-unit.txt
 
 test-integration:
-	$(PYTHON) -m pytest tests/test_redis_dao.py -v
+	@mkdir -p $(REPORTS)
+	@set -o pipefail; $(PYTHON) -m pytest tests/test_redis_dao.py -v -ra 2>&1 | tee $(REPORTS)/test-integration.txt
 
 test-bdd:
 	@if ! find tests/bdd -name '*.feature' -print -quit | grep -q .; then \
@@ -52,7 +64,9 @@ test-bdd:
 			echo "behave is not installed. Run: .venv/bin/python -m pip install -r requirements-dev.txt"; \
 			exit 1; \
 		fi; \
-		$(PYTHON) -m behave; \
+		mkdir -p $(REPORTS); \
+		set -o pipefail; \
+		$(PYTHON) -m behave $(BEHAVE_FLAGS) --tags=-@wip 2>&1 | tee $(REPORTS)/test-bdd.txt; \
 	fi
 
 test-feature:
@@ -68,7 +82,23 @@ test-feature:
 		echo "behave is not installed. Run: .venv/bin/python -m pip install -r requirements-dev.txt"; \
 		exit 1; \
 	fi
-	$(PYTHON) -m behave "$(FEATURE)"
+	@mkdir -p $(REPORTS)
+	@set -o pipefail; $(PYTHON) -m behave $(BEHAVE_FLAGS) "$(FEATURE)" 2>&1 | tee "$(REPORTS)/test-feature-$(FEATURE_SLUG).txt"
+
+# Tag-filtered BDD run (behave tag expression), e.g.:
+#   make test-tags TAGS=@persistence
+#   make test-tags TAGS=@api,@refresh
+test-tags:
+	@if [ -z "$(TAGS)" ]; then \
+		echo "TAGS is required. Usage: make test-tags TAGS=@<tag>[,@<tag>]"; \
+		exit 2; \
+	fi
+	@if ! $(PYTHON) -c "import behave" >/dev/null 2>&1; then \
+		echo "behave is not installed. Run: .venv/bin/python -m pip install -r requirements-dev.txt"; \
+		exit 1; \
+	fi
+	@mkdir -p $(REPORTS)
+	@set -o pipefail; $(PYTHON) -m behave $(BEHAVE_FLAGS) --tags="$(TAGS)" 2>&1 | tee "$(REPORTS)/test-tags-$(TAGS_SLUG).txt"
 
 test: test-unit test-bdd
 

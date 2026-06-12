@@ -1,3 +1,4 @@
+@api
 Feature: Add venue to the BestTime account inventory by Brazilian address
   Operators must be able to add a specific venue to our BestTime account
   inventory by submitting its name and address. The system must protect a

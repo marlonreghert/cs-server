@@ -1,3 +1,4 @@
+@persistence
 Feature: RDS schema normalization — Ex3 structured address table
   As the VibeSense platform
   A venue's address (`venue_address` + lat/lng) lives in a referenced
