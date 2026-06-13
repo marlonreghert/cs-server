@@ -210,8 +210,10 @@ def step_rds_down(context):
     context.rds_store.set_unavailable(True)
 
 
-# NOTE: "a client requests nearby venues" is defined by the eligibility steps
-# (shared behave registry); it sets context.nearby_ids. We reuse it here.
+@when("a client requests nearby venues")
+def step_request_nearby(context):
+    # Nearby serving reads Redis only (geo index), so it survives an RDS outage.
+    context.nearby_ids = _nearby_ids(context)
 
 
 @then('the venue "{vid}" is still returned from Redis')

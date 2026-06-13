@@ -63,6 +63,25 @@ def test_venue_upsert_and_soft_delete(store):
     assert vid not in store.list_active_venue_ids()
 
 
+def test_servable_view_excludes_deprecated_and_ineligible(store):
+    # The serving view (serving.eligible_venue / fake mirror) = active AND eligible.
+    # Both store kinds must agree. The real store reads the SQL view, which requires
+    # the migration's seeded default rules; the fake derives defaults from empty rows.
+    bar = _vid()
+    store.upsert_venue(_venue(bar, "Boteco"))          # active + eligible
+    assert bar in store.list_servable_venue_ids()
+
+    store.soft_delete_venue(bar, "ineligible_google_type", "eligibility_filter")
+    assert bar not in store.list_servable_venue_ids()  # deprecated -> not served
+
+    church = _vid()                                     # active but blocked besttime type
+    store.upsert_venue(Venue(
+        venue_id=church, venue_name="Some Parish", venue_address="a",
+        venue_lat=-8.05, venue_lng=-34.88, venue_type="CHURCH",
+    ))
+    assert church not in store.list_servable_venue_ids()
+
+
 def test_active_readd_does_not_resurrect_deprecated(store):
     # Once serving reads RDS via the projector, an active re-add (catalog refresh
     # re-finding a deprecated venue) must NOT resurrect it. The guard lives in the

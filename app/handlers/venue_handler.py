@@ -6,7 +6,6 @@ from typing import Optional
 import pytz
 
 from app.dao import RedisVenueDAO
-from app.services.venue_eligibility import evaluate, load_eligibility_config
 from app.models.venue_category import resolve_venue_display
 
 # BestTime day_int → Portuguese weekday name (BestTime: 0=Mon, 6=Sun)
@@ -110,47 +109,17 @@ class VenueHandler:
             f"radius={radius:.2f}km, verbose={verbose}"
         )
 
-        # 1. Load nearby venues and filter out blocked types + name keywords
+        # 1. Load nearby venues. Eligibility is no longer applied here: the Redis
+        # serving set is pre-filtered to the eligibility view (active AND eligible)
+        # by the projector, so serving never re-evaluates the block-list. The
+        # is_active() guard is a cheap defensive lifecycle check (deprecated venues
+        # are already reconciled out of Redis).
         venues = self._load_nearby(lat, lon, radius)
         total = len(venues)
         venues = [v for v in venues if v.is_active()]
         deprecated = total - len(venues)
         if deprecated:
             logger.info(f"[VenueHandler] Filtered out {deprecated} deprecated venues")
-        total = len(venues)
-
-        # Pre-load Google types for filtering
-        google_type_cache = {}
-        for v in venues:
-            if v.venue_id:
-                try:
-                    va = self.venue_dao.get_vibe_attributes(v.venue_id)
-                    if va and va.google_primary_type:
-                        google_type_cache[v.venue_id] = va.google_primary_type
-                except Exception:
-                    pass
-
-        # Centralized eligibility: hide blocked types, blocked Google types,
-        # blocked name keywords, and empty-named venues. Uses the live,
-        # admin-tunable config (falls back to defaults).
-        eligibility_config = load_eligibility_config(
-            getattr(self.venue_dao, "client", None)
-        )
-
-        # Block-list policy: hide only HIGH-confidence ineligibility (empty name,
-        # blocked types, hard keywords). Ambiguous, unlabeled names ("Bar da
-        # Praça") stay visible until Google labeling resolves them — unknowns
-        # reach users by design.
-        def _is_blocked(v) -> bool:
-            gtype = google_type_cache.get(v.venue_id)
-            return evaluate(
-                v.venue_name, v.venue_type, gtype, eligibility_config
-            ).soft_deletable
-
-        venues = [v for v in venues if not _is_blocked(v)]
-        blocked = total - len(venues)
-        if blocked:
-            logger.info(f"[VenueHandler] Filtered out {blocked} venues with blocked types/names")
         logger.info(f"[VenueHandler] Found {len(venues)} nearby venues")
 
         # 2. Merge with live and weekly forecasts

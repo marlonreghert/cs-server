@@ -406,6 +406,29 @@ REDIS_PROJECTION_DEPRECATED_REMOVED_TOTAL = Counter(
     "they are deprecated in RDS (B1)",
 )
 
+# Eligibility-as-a-view serving layer. The projector reconciles Redis to exactly
+# the serving view's set (active AND eligible under the live block-list rules).
+SERVING_VIEW_VENUES = Gauge(
+    "serving_view_venues",
+    "Size of the eligibility serving view (active + eligible venues) on the last "
+    "projector run",
+)
+
+REDIS_PROJECTION_REMOVED_TOTAL = Counter(
+    "redis_projection_removed_total",
+    "Total venues reconciled out of the Redis serving set by the projector "
+    "because they are not in the serving view (deprecated OR active-but-ineligible)",
+)
+
+# Venues flipped active again (deprecated_* cleared). Emitted by the one-time
+# eligibility-serving-view migration that reactivates eligibility_filter-deprecated
+# venues so the view governs them; `source` is the prior deprecated_source.
+VENUES_REACTIVATED_TOTAL = Counter(
+    "venues_reactivated_total",
+    "Total venues reactivated (lifecycle flipped active, deprecated_* cleared)",
+    ["source"],
+)
+
 # =============================================================================
 # VENUE DATA QUALITY METRICS
 # =============================================================================

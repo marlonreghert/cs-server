@@ -36,6 +36,7 @@ def mock_venue_dao():
     dao.set_venue_instagram = Mock()
     dao.list_all_venue_ids.return_value = ["v1", "v2"]
     dao.list_active_venue_ids.return_value = ["v1", "v2"]
+    dao.list_servable_venue_ids.return_value = ["v1", "v2"]  # enrichment gates on the serving view
     # Fresh-set gate (the dual-purpose split): default = nothing fresh, so every
     # venue is processed. Tests that exercise "already cached" set this explicitly.
     dao.list_cached_instagram_venue_ids.return_value = []
@@ -274,6 +275,7 @@ class TestEnrichAllVenues:
         """No venues -> returns 0."""
         mock_venue_dao.list_all_venue_ids.return_value = []
         mock_venue_dao.list_active_venue_ids.return_value = []
+        mock_venue_dao.list_servable_venue_ids.return_value = []
 
         result = await service.enrich_all_venues()
 

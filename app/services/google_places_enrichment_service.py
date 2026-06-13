@@ -351,9 +351,10 @@ class GooglePlacesEnrichmentService:
         Returns:
             Number of venues successfully enriched
         """
-        # Get active venue IDs. Deprecated venues are retained only for admin
-        # troubleshooting and must not be reprocessed by enrichment.
-        all_venue_ids = self.venue_dao.list_active_venue_ids()
+        # Gate enrichment on the serving view (active AND eligible). Ineligible
+        # venues are excluded so known junk never burns Google budget; unlabeled
+        # venues stay in the view, so first-time enrichment still learns their type.
+        all_venue_ids = self.venue_dao.list_servable_venue_ids()
         logger.info(
             f"[GooglePlacesEnrichment] Found {len(all_venue_ids)} venues to process "
             f"(force_refresh={force_refresh})"

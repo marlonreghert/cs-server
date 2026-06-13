@@ -322,6 +322,13 @@ class RedisVenueDAO:
         """Return venue IDs that are not deprecated."""
         return [venue.venue_id for venue in self.list_active_venues()]
 
+    def list_servable_venue_ids(self) -> list[str]:
+        """The serving (active AND eligible) set used to gate enrichment. The
+        Redis serving projection is already reconciled to the eligibility view by
+        the projector, so for the Redis-only DAO this is just the active set;
+        VenueRepository overrides it to read the RDS serving view directly."""
+        return self.list_active_venue_ids()
+
     def list_deprecated_venue_ids(self) -> list[str]:
         """Return venue IDs marked as deprecated."""
         return [venue.venue_id for venue in self.list_deprecated_venues()]

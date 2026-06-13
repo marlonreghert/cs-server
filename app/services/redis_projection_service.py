@@ -13,6 +13,11 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from app.dao.venue_row import venue_from_row
+from app.metrics import (
+    REDIS_PROJECTION_REMOVED_TOTAL,
+    REDIS_PROJECTION_VENUES,
+    SERVING_VIEW_VENUES,
+)
 from app.models import (
     LiveForecastResponse,
     WeekRawDay,
@@ -73,7 +78,18 @@ class RedisProjectionService:
     # ── rebuild: RDS -> Redis (incl. geo index + live busyness) ───────────────
     def rebuild_redis_from_rds(self) -> dict:
         summary = {"venues": 0, "enrichment": 0, "live": 0, "removed": 0, "errors": 0}
-        for venue_id in self.rds_store.list_active_venue_ids():
+        # Serving source = the eligibility view (active AND eligible under the live
+        # block-list). A failed view read must NOT blanket-delete the serving set —
+        # abort the cycle and leave Redis intact (fail-safe).
+        try:
+            servable_ids = self.rds_store.list_servable_venue_ids()
+        except Exception as e:
+            logger.error(f"[Rebuild] serving view read failed; aborting cycle: {e}")
+            summary["errors"] += 1
+            return summary
+        servable_set = set(servable_ids)
+        SERVING_VIEW_VENUES.set(len(servable_set))
+        for venue_id in servable_ids:
             row = self.rds_store.get_venue(venue_id)
             try:
                 venue = venue_from_row(row)  # Ex1: columns + residual, not payload
@@ -105,12 +121,24 @@ class RedisProjectionService:
                     LiveForecastResponse.model_validate(live["payload"])
                 )
                 summary["live"] += 1
-        # B1: a venue deprecated in RDS is a positive removal signal — drop it
-        # from the Redis serving set + geo index. Orphans (no RDS row at all) are
-        # never in this list, so they are left untouched (partial-read safe).
-        for venue_id in self.rds_store.list_deprecated_venue_ids():
+        REDIS_PROJECTION_VENUES.set(summary["venues"])
+        # Reconcile: remove from Redis any venue that has an RDS row but is not in
+        # the serving view — deprecated OR active-but-ineligible. Editing the
+        # block-list thus removes/restores venues here, both directions, with no
+        # lifecycle change. Orphans (no RDS row at all) are absence-of-signal and
+        # left untouched (partial-read safe); a failed listing skips removal rather
+        # than risk a bad delete.
+        try:
+            rds_known = set(self.rds_store.list_active_venue_ids()) | set(
+                self.rds_store.list_deprecated_venue_ids()
+            )
+        except Exception as e:
+            logger.warning(f"[Rebuild] reconcile listing failed; skipping removal: {e}")
+            rds_known = set()
+        for venue_id in rds_known - servable_set:
             if self.redis_only_dao.delete_venue(venue_id):
                 summary["removed"] += 1
+                REDIS_PROJECTION_REMOVED_TOTAL.inc()
         # Self-heal the eligibility serving mirror from its rows. Delegated to the
         # carve-out owner and isolated — rehydrate_mirror is already degrade-safe,
         # but guard anyway so it can never abort the venue projection.

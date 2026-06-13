@@ -1,4 +1,3 @@
-@wip
 Feature: Eligibility as a gold-layer serving view
   Venue eligibility must be a dynamic SQL view that the Redis projection reads,
   not a destructive soft-delete. A venue is served only when it is active and
