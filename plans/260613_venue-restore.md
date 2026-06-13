@@ -1,5 +1,11 @@
 # Restore (reactivate) eligibility-deprecated venues
 
+> **SUPERSEDED (2026-06-13)** by `plans/260613_eligibility-serving-view.md`.
+> Eligibility becomes a dynamic gold-layer **SQL view** that the Redis projection
+> reads, so blocking/unblocking is reversible by design and no soft-delete is
+> involved — making per-venue restore/reactivation unnecessary. This plan is kept
+> for history only; do not execute it.
+
 ## Branch
 feature/venue-restore
 
