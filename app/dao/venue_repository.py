@@ -101,6 +101,12 @@ class VenueRepository(RedisVenueDAO):
     def list_active_venue_ids(self):
         return self.rds_store.list_active_venue_ids()
 
+    def list_servable_venue_ids(self):
+        """Active AND eligible venues (the serving view) — the projector's serving
+        source and the enrichment gate. Eligibility is applied here, in RDS, not by
+        a destructive soft-delete, so block-list edits are reversible by projection."""
+        return self.rds_store.list_servable_venue_ids()
+
     def list_active_venue_ids_by_priority(self, limit):
         return self.rds_store.list_active_venue_ids_by_priority(limit)
 

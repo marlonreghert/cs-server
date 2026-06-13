@@ -91,6 +91,57 @@ class TestB1DeprecationRemoval:
         assert {v.venue_id for v in redis_only.get_nearby_venues(_LAT, _LNG, 1.0)} == {"v1"}
 
 
+# ── serving-view reconcile: active-but-ineligible removed, both directions ─────
+class TestServingViewReconcile:
+    def test_active_but_ineligible_is_not_projected_and_removed(self):
+        # A blocked-google-type venue is active in RDS but NOT in the serving view;
+        # the projector must not project it and must remove a stale Redis copy.
+        fake, redis_only, store, svc = _setup()
+        store.upsert_venue(_venue("bar"))                  # eligible
+        store.upsert_venue(_venue("market", "Market"))     # active but ineligible
+        store.upsert_enrichment(
+            "google_places.vibe_attributes", "market",
+            {"venue_id": "market", "google_primary_type": "supermarket"},
+            history=False, promoted={"google_primary_type": "supermarket"},
+        )
+        redis_only.upsert_venue(_venue("market", "Market"))  # stale-active in Redis
+
+        svc.rebuild_redis_from_rds()
+
+        assert redis_only.get_venue("bar") is not None
+        assert redis_only.get_venue("market") is None       # reconciled out (no lifecycle change)
+        assert store.get_venue("market")["lifecycle_status"] == "active"  # still active in RDS
+
+    def test_blocklist_edit_is_reversible_across_runs(self):
+        fake, redis_only, store, svc = _setup()
+        store.upsert_venue(_venue("v1"))
+        store.upsert_enrichment(
+            "google_places.vibe_attributes", "v1",
+            {"venue_id": "v1", "google_primary_type": "arcade"},
+            history=False, promoted={"google_primary_type": "arcade"},
+        )
+        svc.rebuild_redis_from_rds()
+        assert redis_only.get_venue("v1") is not None       # arcade allowed by default
+
+        store.add_eligibility_rule("blocked_google_type", "arcade")
+        svc.rebuild_redis_from_rds()
+        assert redis_only.get_venue("v1") is None           # blocked -> left serving
+
+        store.remove_eligibility_rule("blocked_google_type", "arcade")
+        svc.rebuild_redis_from_rds()
+        assert redis_only.get_venue("v1") is not None       # unblocked -> back in serving
+
+    def test_failed_view_read_aborts_without_blanket_delete(self):
+        fake, redis_only, store, svc = _setup()
+        store.upsert_venue(_venue("v1"))
+        svc.rebuild_redis_from_rds()
+        assert redis_only.get_venue("v1") is not None
+        store.set_unavailable(True)                          # serving view read raises
+        summary = svc.rebuild_redis_from_rds()
+        assert summary["errors"] == 1
+        assert redis_only.get_venue("v1") is not None       # serving left intact
+
+
 # ── B2: photo remaining-TTL / drop aged ───────────────────────────────────────
 class TestB2PhotoTTL:
     def test_projects_remaining_ttl_not_full(self):

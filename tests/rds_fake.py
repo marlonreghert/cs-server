@@ -186,6 +186,38 @@ class InMemoryRdsVenueStore:
             if row.get("lifecycle_status", "active") == "deprecated"
         ]
 
+    def list_servable_venue_ids(self) -> list[str]:
+        """The eligibility serving view: venue ids that are active AND eligible
+        under the live block-list rules (from admin.eligibility_rule). Mirrors the
+        real serving.eligible_venue SQL view. Reuses evaluate() — the single
+        eligibility source of truth — so the fake is a faithful behaviour contract;
+        the real SQL view's equivalence to evaluate() is pinned by the parity test
+        (post-provisioning). A venue is servable iff its verdict is not
+        soft_deletable (high-confidence ineligible); unlabeled/ambiguous venues
+        stay in the view, matching the block-list policy."""
+        from app.services.venue_eligibility import (
+            evaluate as _evaluate,
+            eligibility_config_from_rules as _config_from_rules,
+        )
+
+        self._guard()
+        config = _config_from_rules(self.list_eligibility_rules())
+        out = []
+        for vid, row in self.venues.items():
+            if row.get("lifecycle_status", "active") != "active":
+                continue
+            gtype = None
+            va = self.enrichment.get("google_places.vibe_attributes", {}).get(vid)
+            if va is not None and va.get("deleted_at") is None:
+                gtype = va.get("google_primary_type") or (
+                    va.get("payload") or {}
+                ).get("google_primary_type")
+            if not _evaluate(
+                row.get("venue_name"), row.get("venue_type"), gtype, config
+            ).soft_deletable:
+                out.append(vid)
+        return out
+
     def list_all_venue_rows(self) -> list[dict]:
         return [self._row_with_address(row) for row in self.venues.values()]
 

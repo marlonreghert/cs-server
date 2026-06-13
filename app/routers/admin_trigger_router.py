@@ -97,10 +97,6 @@ JOB_REGISTRY = {
         "label": "BestTime Inventory Sync",
         "description": "Pull every venue in our BestTime account inventory into Redis. Free — does not spend the monthly new-venue budget.",
     },
-    "venue_eligibility": {
-        "label": "Venue Eligibility Sweep",
-        "description": "Soft-delete ineligible venues (drugstores, markets, churches, empty names, blocked Google types) with a rejection reason. Cache-first — makes no new Google calls.",
-    },
     "rebuild_redis": {
         "label": "Rebuild Redis from RDS",
         "description": "Reconstruct the Redis serving projection (incl. the geo index and live busyness) from RDS. Disaster recovery / Redis warm.",
@@ -122,8 +118,6 @@ async def _run_job(job_name: str, config: Optional[dict] = None):
         )
     elif job_name == "inventory_sync":
         await c.venues_refresher_service.sync_account_inventory_to_redis()
-    elif job_name == "venue_eligibility":
-        await c.venues_refresher_service.run_eligibility_sweep()
     elif job_name == "rebuild_redis":
         # Off-loop (B0): the projection body is synchronous + blocking; running it
         # inline would stall /v1/venues/nearby and /health for the whole run.

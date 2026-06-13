@@ -284,7 +284,7 @@ class MenuPhotoEnrichmentService:
         Returns:
             Number of venues successfully enriched with photos
         """
-        all_venue_ids = self.venue_dao.list_active_venue_ids()
+        all_venue_ids = self.venue_dao.list_servable_venue_ids()  # serving view: active AND eligible
         logger.info(
             f"[MenuPhotoEnrichment] Starting enrichment for "
             f"{len(all_venue_ids)} venues (limit={self.enrichment_limit})"
