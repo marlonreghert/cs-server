@@ -15,7 +15,8 @@ Plan only. Do not edit production code, test code, dependencies, generated
 artifacts, or runtime configuration while using this skill. The required outputs
 are: the plan file committed on `main`, a feature branch, and the Gherkin
 feature file committed on that branch (unless the plan is explicitly
-BDD-exempt). Do not push.
+BDD-exempt). Push the plan commit on `main` and the feature branch (its Gherkin
+tagged `@wip`) so neither is stranded locally; do not open a PR.
 
 Read `CLAUDE.md` first. It is the source of truth for this repository's agent
 rules.
@@ -117,7 +118,9 @@ Then:
    - Avoid code blocks unless they record a specific design decision (API schema,
      critical validation, monitoring labels, performance-sensitive algorithm).
 4. Stage only the plan file by explicit path and commit on `main` with
-   `docs: plan <slug>`. Never `git add .` or `git add -A`. Do not push.
+   `docs: plan <slug>`. Never `git add .` or `git add -A`. Then push `main`
+   (`git push origin main`) so the plan is durable on origin, not stranded
+   locally.
 
 ## Phase 4: Branch
 
@@ -144,9 +147,13 @@ Rules:
 - Include observable assertions: response fields, ordering, filtering, emitted
   status, metrics, logs, or persisted state.
 - Do not put code snippets in the feature file.
+- Tag the `Feature:` line `@wip`. The Gherkin is pushed ahead of its step
+  definitions, and `make test-bdd` excludes `-@wip`, so the stepless feature
+  never breaks the suite. `/execute-feature` removes the tag once its steps pass.
 
 Stage only the feature file by explicit path and commit on the branch with
-`test(bdd): <slug> scenarios`. Do not push.
+`test(bdd): <slug> scenarios`. Then push the branch
+(`git push -u origin <prefix>/<slug>`).
 
 ## Phase 6: Stop
 
@@ -158,4 +165,6 @@ Report:
 - Open questions, if any.
 - Next command (run on the branch): `/execute-feature plans/<YYMMDD>_<slug>.md`.
 
-Do not implement production code, run tests, push, or open a PR.
+Do not implement production code, run tests, or open a PR. (The plan on `main`
+and the `@wip` feature branch are already pushed in Phases 3 and 5; the PR is
+opened later by `/execute-feature`.)
