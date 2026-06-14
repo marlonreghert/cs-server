@@ -25,7 +25,7 @@ def _load():
 
 def test_revision_chain():
     m = _load()
-    assert m.revision == "0010_reactivate_eligibility_deprecated"
+    assert m.revision == "0010_reactivate_eligibility"
     assert m.down_revision == "0009_eligibility_serving_view"
 
 

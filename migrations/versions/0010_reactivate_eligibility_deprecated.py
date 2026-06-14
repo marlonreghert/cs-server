@@ -22,7 +22,7 @@ prior values cannot be reconstructed. Capture + verify a pre-migration pg_dump
 first (RDS rollback policy); roll back by restoring that snapshot, not by
 `alembic downgrade`. Idempotent: re-running matches 0 rows.
 
-Revision ID: 0010_reactivate_eligibility_deprecated
+Revision ID: 0010_reactivate_eligibility
 Revises: 0009_eligibility_serving_view
 Create Date: 2026-06-13
 """
@@ -31,7 +31,7 @@ import logging
 from alembic import op
 from sqlalchemy import text
 
-revision = "0010_reactivate_eligibility_deprecated"
+revision = "0010_reactivate_eligibility"
 down_revision = "0009_eligibility_serving_view"
 branch_labels = None
 depends_on = None
