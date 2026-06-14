@@ -1,8 +1,6 @@
 """Venues refresher service with background job orchestration."""
 import json
 import logging
-from datetime import datetime, timezone
-from typing import Optional
 from dataclasses import dataclass
 from collections import defaultdict
 
@@ -36,7 +34,6 @@ from app.metrics import (
     VENUES_ACTIVE_TOTAL,
     VENUES_DEPRECATED_TOTAL,
     VENUES_DEPRECATED_BY_REASON,
-    VENUES_SOFT_DELETED_TOTAL,
     REFRESH_SELECTED_TOTAL,
     BESTTIME_READ_SKIPPED_TOTAL,
     BESTTIME_UNIQUE_VENUES_TOUCHED,
@@ -90,10 +87,6 @@ from app.services.venue_eligibility import (  # noqa: E402,F401
     DEFAULT_BLOCKED_GOOGLE_TYPES as BLOCKED_GOOGLE_TYPES,
     BLOCKED_NAME_KEYWORDS,
     ALL_REASONS,
-    ELIGIBILITY_SOURCE,
-    EligibilityConfig,
-    evaluate as evaluate_eligibility,
-    load_eligibility_config,
 )
 
 
@@ -202,104 +195,10 @@ class VenuesRefresherService:
                 f"[VenuesRefresherService] failed to update touched gauge: {e}"
             )
 
-    # ── Eligibility filtering ────────────────────────────────────────────────
-    def _eligibility_config(self) -> EligibilityConfig:
-        """Load the live, admin-tunable eligibility block-lists (or defaults)."""
-        source = getattr(self.venue_dao, "client", None) or self.redis_client
-        return load_eligibility_config(source)
-
-    def _born_deprecate_if_ineligible(
-        self, venue: Venue, config: EligibilityConfig
-    ) -> Optional[str]:
-        """Mark a *new* venue deprecated at write time if it is high-confidence
-        ineligible by free signals (empty name, hard keyword, blocked type).
-
-        Only high-confidence reasons are applied here — ambiguous, low-confidence
-        signals never irreversibly soft-delete before Google labeling. Returns
-        the rejection reason when the venue was born-deprecated, else None.
-        """
-        result = evaluate_eligibility(
-            venue.venue_name, venue.venue_type, None, config
-        )
-        if not result.soft_deletable:
-            return None
-        venue.lifecycle_status = "deprecated"
-        venue.deprecated_reason = result.reason
-        venue.deprecated_source = ELIGIBILITY_SOURCE
-        venue.deprecated_at = datetime.now(timezone.utc)
-        VENUES_SOFT_DELETED_TOTAL.labels(
-            reason=result.reason, source=ELIGIBILITY_SOURCE
-        ).inc()
-        return result.reason
-
-    async def run_eligibility_sweep(self) -> dict:
-        """Soft-delete active venues that are ineligible under the block-list.
-
-        Cache-first: reads the Google type already cached by Google Places
-        enrichment, so it makes no new Google calls. Only high-confidence
-        ineligible venues are soft-deleted; unknown/unlabeled and ambiguous
-        venues stay active. Idempotent — deprecated venues are never re-touched
-        or reactivated.
-        """
-        config = self._eligibility_config()
-        summary = {
-            "seen": 0,
-            "soft_deleted": 0,
-            "kept": 0,
-            "errors": 0,
-            "by_reason": defaultdict(int),
-        }
-        try:
-            active_ids = self.venue_dao.list_active_venue_ids()
-        except Exception as e:
-            logger.error(f"[VenuesRefresherService] eligibility sweep list failed: {e}")
-            return summary
-
-        for venue_id in active_ids:
-            summary["seen"] += 1
-            try:
-                venue = self.venue_dao.get_venue(venue_id)
-                if venue is None or venue.is_deprecated():
-                    continue
-                gtype = None
-                vibe_attrs = self.venue_dao.get_vibe_attributes(venue_id)
-                if vibe_attrs and vibe_attrs.google_primary_type:
-                    gtype = vibe_attrs.google_primary_type
-                result = evaluate_eligibility(
-                    venue.venue_name, venue.venue_type, gtype, config
-                )
-                if not result.soft_deletable:
-                    summary["kept"] += 1
-                    continue
-                ok = self.venue_dao.soft_delete_venue(
-                    venue_id=venue_id,
-                    reason=result.reason,
-                    source=ELIGIBILITY_SOURCE,
-                )
-                if ok:
-                    summary["soft_deleted"] += 1
-                    summary["by_reason"][result.reason] += 1
-                    VENUES_SOFT_DELETED_TOTAL.labels(
-                        reason=result.reason, source=ELIGIBILITY_SOURCE
-                    ).inc()
-                else:
-                    summary["errors"] += 1
-            except Exception as e:
-                summary["errors"] += 1
-                logger.warning(
-                    f"[VenuesRefresherService] eligibility sweep failed for "
-                    f"{venue_id}: {e}"
-                )
-
-        self.update_data_quality_metrics()
-        logger.info(
-            f"[VenuesRefresherService] eligibility sweep: seen={summary['seen']} "
-            f"soft_deleted={summary['soft_deleted']} kept={summary['kept']} "
-            f"errors={summary['errors']} by_reason={dict(summary['by_reason'])}"
-        )
-        summary["by_reason"] = dict(summary["by_reason"])
-        return summary
-
+    # Eligibility is no longer applied destructively here. It is a non-destructive
+    # serving view (serving.eligible_venue) that the projector reconciles Redis to;
+    # block-list edits change serving in both directions with no lifecycle change.
+    # The retired eligibility sweep + born-deprecate path lived here.
     def update_data_quality_metrics(self) -> None:
         """Compute and update all data quality metrics from cached venues.
 
@@ -539,7 +438,6 @@ class VenuesRefresherService:
         seen_ids = set()
         seen_names = set()
         unique_ids = []
-        eligibility_config = self._eligibility_config()
 
         for vf in response.venues:
             # Skip venues with no ID and no name
@@ -568,12 +466,9 @@ class VenuesRefresherService:
                     REFRESH_DUPLICATES_SKIPPED.labels(reason="duplicate_name").inc()
                     continue
 
-            # Map and upsert
+            # Map and upsert. Ineligible venues are upserted active and simply
+            # excluded by the serving view (no born-deprecate / soft-delete).
             venue = self._map_venue_filter_venue_to_venue(vf)
-
-            # Born-deprecate high-confidence junk (discovery rows carry a
-            # BestTime type, so the blocked-type rule is effective here).
-            self._born_deprecate_if_ineligible(venue, eligibility_config)
 
             logger.info(
                 f"[VenuesRefresherService] Upserting venue id={venue.venue_id}, "
@@ -922,7 +817,6 @@ class VenuesRefresherService:
         Returns a summary dict with seen/upserted/skipped/errors counts.
         """
         summary = {"seen": 0, "upserted": 0, "skipped": 0, "errors": 0, "deprecated": 0}
-        config = self._eligibility_config()
         try:
             iterator = self.besttime_api.list_account_inventory()
         except Exception as e:
@@ -955,15 +849,11 @@ class VenuesRefresherService:
                         venue_lat=float(inv.venue_lat or 0.0),
                         venue_lng=float(inv.venue_lng or 0.0),
                     )
-                    # Born-deprecate high-confidence junk so it never enters the
-                    # active set or consumes downstream crawl credits.
-                    born_reason = self._born_deprecate_if_ineligible(venue, config)
+                    # Upserted active; ineligible venues are excluded by the
+                    # serving view, not soft-deleted at write time.
                     self.venue_dao.upsert_venue(venue)
                     summary["upserted"] += 1
                     INVENTORY_SYNC_VENUES_TOTAL.labels(result="upserted").inc()
-                    if born_reason:
-                        summary["deprecated"] += 1
-                        INVENTORY_SYNC_VENUES_TOTAL.labels(result="deprecated").inc()
                 except Exception as e:
                     summary["errors"] += 1
                     INVENTORY_SYNC_VENUES_TOTAL.labels(result="error").inc()

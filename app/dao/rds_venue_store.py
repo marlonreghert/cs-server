@@ -201,6 +201,18 @@ class RdsVenueStore:
                 "SELECT venue_id FROM venues.venue WHERE lifecycle_status='deprecated'"
             ))]
 
+    def list_servable_venue_ids(self) -> list[str]:
+        """The eligibility serving view (`serving.eligible_venue`): venue ids that
+        are active AND eligible under the live block-list rules, evaluated in SQL.
+        This is the projector's serving source and the enrichment gate. The view's
+        equivalence to evaluate() is pinned by the parity test against real Postgres
+        (there is no local Postgres in CI, so the SQL is validated post-provisioning).
+        """
+        with self.engine.connect() as conn:
+            return [r[0] for r in conn.execute(text(
+                "SELECT venue_id FROM serving.eligible_venue"
+            ))]
+
     def list_all_venue_rows(self) -> list[dict]:
         """Every venue row (active + deprecated) with scalar columns + residual
         `extra` + address (from venues.address) — backs the pipeline

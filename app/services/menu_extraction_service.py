@@ -172,9 +172,9 @@ class MenuExtractionService:
         Returns:
             Number of venues successfully extracted
         """
-        # Get active venue IDs with menu photos. Deprecated venues are retained
-        # for admin troubleshooting and should not receive enrichment work.
-        active_venue_ids = set(self.venue_dao.list_active_venue_ids())
+        # Gate on the serving view (active AND eligible): ineligible venues are
+        # excluded so junk never burns OpenAI budget; unlabeled venues stay in scope.
+        active_venue_ids = set(self.venue_dao.list_servable_venue_ids())
         photo_venue_ids = [
             venue_id
             for venue_id in self.venue_dao.list_cached_menu_photos_venue_ids()
