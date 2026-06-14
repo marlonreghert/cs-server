@@ -78,8 +78,7 @@ v AS (
   WHERE ve.lifecycle_status = 'active'
 ),
 g AS (
-  SELECT v.venue_id,
-         (EXISTS (SELECT 1 FROM admin.category_good_type c
+  SELECT (EXISTS (SELECT 1 FROM admin.category_good_type c
                    WHERE c.kind = 'google'   AND c.token = v.gtype)
           OR EXISTS (SELECT 1 FROM admin.category_good_type c
                    WHERE c.kind = 'besttime' AND c.token = v.btype)) AS good_category,
