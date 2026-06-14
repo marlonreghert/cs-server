@@ -36,6 +36,7 @@ test-unit:
 		tests/test_redis_projection.py \
 		tests/test_eligibility_serving_view_parity.py \
 		tests/test_reactivation_migration.py \
+		tests/test_widen_alembic_version.py \
 		tests/test_venue_row.py \
 		tests/test_equivalence_verify.py \
 		tests/test_address_table.py \
