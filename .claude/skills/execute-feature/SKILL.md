@@ -12,15 +12,47 @@ workflow.
 Codex mapping: `.agents/skills/execute-feature/SKILL.md` is a thin ref that
 points to this canonical workflow.
 
-Execute only an approved plan produced by `/plan-feature`. Read `CLAUDE.md`,
-the plan file, and the linked Gherkin feature file before touching code.
+Execute only an approved plan produced by `/plan-feature`. Read `CLAUDE.md`
+first. Then run **Sync** (below) before anything else — it checks out the plan's
+branch so the plan file and the linked Gherkin feature file are on disk; read
+both before touching code.
+
+## Sync to the plan's branch
+
+Run this **first** — before the preconditions and before reading the plan. The
+plan doc lives on `main` and the `@wip` feature file lives on the feature branch,
+both pushed by `/plan-feature`. A fresh `git clone --recurse-submodules` leaves
+this repo detached at the pinned commit with neither file on disk, so sync from
+origin and check the branch out rather than assume it is already current.
+
+1. `git fetch origin --prune`.
+2. Resolve the branch name from the plan's `## Branch` line. The invocation gives
+   `plans/<YYMMDD>_<slug>.md` (the slug, not the `fix/`|`feature/`|`chore/`
+   prefix). If the plan file is on disk, read it; otherwise read it from origin
+   without touching the tree: `git show origin/main:plans/<YYMMDD>_<slug>.md`. If
+   it exists in neither, stop and tell the user to run `/plan-feature`.
+3. Land on `<prefix>/<slug>`:
+   - If `git rev-parse --abbrev-ref HEAD` already equals it, this is a warm
+     re-run — the `@wip` file is already present. Proceed; **do not** pull over
+     local work.
+   - Otherwise require a clean tree (`git status --short` empty of tracked/staged
+     changes; if dirty, stop and ask the user to commit or stash), then
+     `git checkout <prefix>/<slug>`. When the branch exists only on origin this
+     creates a local tracking branch from `origin/<prefix>/<slug>`, materializing
+     the plan doc and the `@wip` feature file.
+   - If `git checkout` fails because the branch exists nowhere (not local, not on
+     origin), stop and tell the user to run `/plan-feature` — there is no `@wip`
+     feature file to execute against.
+
+Do not merge or rebase `origin/main` into the branch here, and never force — the
+feature branch already contains the plan commit.
 
 ## Preconditions
 
 - The user explicitly approved the plan.
-- The plan file exists under `plans/`.
+- The plan file exists under `plans/` (established by Sync).
 - The plan has no unresolved open questions.
-- The current branch matches the plan's branch.
+- HEAD is on the plan's branch (established by Sync).
 - `git status --short` has no unrelated tracked or staged changes.
 - The plan's test plan contains `Feature file:` or `# bdd-exempt: <reason>`.
 
