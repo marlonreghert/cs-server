@@ -43,6 +43,7 @@ test-unit:
 		tests/test_eligibility_rules.py \
 		tests/test_log_redaction.py \
 		tests/test_refresh_interval_watch.py \
+		tests/test_user_activity_tracking.py \
 		-v
 
 test-integration:

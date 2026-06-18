@@ -50,6 +50,9 @@ class InMemoryRdsVenueStore:
         self.live_forecast: dict[str, dict] = {}
         self.favorites: dict[tuple[str, str], dict] = {}
         self.hot_like_events: list[dict] = []
+        # engagement.app_session_day: one row per (user_pseudo, activity_date).
+        # Mirrors the real PK + ON CONFLICT DO NOTHING via a de-duplicating set.
+        self.app_sessions: set[tuple[str, object]] = set()
         self.history: list[dict] = []
         self.admin_config: dict[str, dict] = {}
         # Ex2: admin.eligibility_rule — (rule_type, value) -> metadata.
@@ -329,6 +332,20 @@ class InMemoryRdsVenueStore:
             "user_pseudo": user_pseudo, "venue_id": venue_id, "created_at": _now(),
         })
 
+    # ── app activity (one row per user per day; total + active-window counts) ──
+    def record_app_session(self, user_pseudo, activity_date) -> None:
+        self._guard()
+        self.app_sessions.add((user_pseudo, activity_date))  # PK dedup == ON CONFLICT DO NOTHING
+
+    def count_users(self, since_date=None) -> int:
+        self._guard()
+        if since_date is None:
+            return len({up for up, _ in self.app_sessions})
+        return len({up for up, d in self.app_sessions if d >= since_date})
+
+    def app_session_rows_for(self, activity_date) -> list[str]:
+        return [up for up, d in self.app_sessions if d == activity_date]
+
     # ── admin config (system of record; mirrored to Redis by AdminConfigService) ─
     def upsert_admin_config(self, key, value, updated_by=None) -> None:
         self._guard()
@@ -378,5 +395,6 @@ class InMemoryRdsVenueStore:
         blob = json.dumps({
             "fav": list(self.favorites.keys()),
             "hot": self.hot_like_events,
+            "act": [[up, str(d)] for up, d in self.app_sessions],
         })
         return raw in blob

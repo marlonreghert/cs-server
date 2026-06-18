@@ -11,6 +11,9 @@ from __future__ import annotations
 import hashlib
 import hmac
 import logging
+from datetime import timedelta
+
+from app.utils.recife_time import recife_today
 
 logger = logging.getLogger(__name__)
 
@@ -56,3 +59,20 @@ class EngagementService:
         # Removes the user from the trending set (Redis read path). The RDS
         # hot_like_event log is immutable history and is intentionally kept.
         self.redis.srem(self._hot_key(venue_id), user_id)
+
+    # App-activity system-of-record. Unlike favorites/hot_likes this is RDS-only
+    # (no Redis projection): the counts are read by the admin from RDS, never on
+    # the serve path. One pseudonymized row per user per Recife day.
+    def record_session(self, user_id: str) -> None:
+        self.rds_store.record_app_session(self.pseudonymize(user_id), recife_today())
+
+    def activity_counts(self) -> dict:
+        # "Active in the last N days" is inclusive of today, so the window starts
+        # N-1 days back (1d == today only; 7d == today and the prior 6; etc).
+        today = recife_today()
+        return {
+            "total_users": self.rds_store.count_users(None),
+            "active_1d": self.rds_store.count_users(today),
+            "active_7d": self.rds_store.count_users(today - timedelta(days=6)),
+            "active_30d": self.rds_store.count_users(today - timedelta(days=29)),
+        }

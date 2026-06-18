@@ -177,6 +177,32 @@ def test_favorite_and_hot_like_event(store):
     store.add_hot_like_event("pseudo-abc", vid)    # append-only, no error
 
 
+def test_app_session_idempotent_and_window_counts(store):
+    from datetime import date, timedelta
+
+    today = date.today()
+    d7 = today - timedelta(days=6)    # 7d window start (inclusive of today)
+    d30 = today - timedelta(days=29)  # 30d window start
+    # Unique pseudonyms so deltas hold even against a non-empty scratch DB.
+    u = uuid.uuid4().hex[:8]
+    pa, pb, pc = f"ps_a_{u}", f"ps_b_{u}", f"ps_c_{u}"
+
+    base_total = store.count_users()
+    base_1d = store.count_users(today)
+    base_7d = store.count_users(d7)
+    base_30d = store.count_users(d30)
+
+    store.record_app_session(pa, today)
+    store.record_app_session(pa, today)  # idempotent: ON CONFLICT DO NOTHING
+    store.record_app_session(pb, today)
+    store.record_app_session(pc, today - timedelta(days=10))  # only in the 30d window
+
+    assert store.count_users() - base_total == 3       # distinct users all-time
+    assert store.count_users(today) - base_1d == 2      # active today
+    assert store.count_users(d7) - base_7d == 2         # 10d-ago user excluded
+    assert store.count_users(d30) - base_30d == 3       # 10d-ago user included
+
+
 def test_admin_config_round_trip(store):
     # Test-only key so it never clobbers real config; cleaned up at the end.
     key = f"_contract_test_cfg_{uuid.uuid4().hex[:8]}"

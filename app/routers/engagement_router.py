@@ -10,6 +10,8 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
+from app.metrics import ENGAGEMENT_SESSION_TOTAL
+
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/v1", tags=["engagement"])
@@ -28,6 +30,12 @@ class EngagementRequest(BaseModel):
     # Only used by POST /v1/hot-likes (the trending TTL the client controls);
     # ignored by favorites and by DELETE. Wire field name is `ttl_seconds`.
     ttl_seconds: Optional[int] = None
+
+
+class SessionRequest(BaseModel):
+    # App-activity ping carries only the user; sessions have no venue (so the
+    # favorites/hot_likes EngagementRequest, which requires venue_id, won't do).
+    user_id: str
 
 
 def _svc():
@@ -69,6 +77,22 @@ async def add_hot_like(req: EngagementRequest):
     except Exception as e:
         logger.error(f"[Engagement] add_hot_like failed: {e}")
         raise HTTPException(status_code=502, detail="hot-like write failed; retry")
+    return {"status": "ok"}
+
+
+@router.post("/sessions")
+async def record_session(req: SessionRequest):
+    try:
+        _svc().record_session(req.user_id)
+    except HTTPException:
+        raise
+    except Exception as e:
+        # Best-effort for the client (vibes_bot does not surface it to users), but
+        # 502 so the ping can retry. Never log the raw user_id.
+        ENGAGEMENT_SESSION_TOTAL.labels(result="error").inc()
+        logger.error(f"[Engagement] record_session failed: {e}")
+        raise HTTPException(status_code=502, detail="session write failed; retry")
+    ENGAGEMENT_SESSION_TOTAL.labels(result="success").inc()
     return {"status": "ok"}
 
 
