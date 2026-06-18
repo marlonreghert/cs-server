@@ -139,22 +139,26 @@ class VenuesRefresherService:
 
     # ── priority-bounded refresh selection + monthly ledger gate ─────────────
     def _select_refresh_venue_ids(self, job: str) -> list[str]:
-        """The top-X active venues by priority for bounded refresh. Live and
-        weekly both call this so they touch the identical unique-venue set,
-        where X = monthly_quota − manual_reserve. Falls back to the full active
-        set only when no budget service is wired (keeps standalone use working)."""
+        """The top-X served venues by priority for bounded refresh — the
+        eligibility serving view (serving.eligible_venue), not all active venues,
+        so the scarce budget targets venues users actually see. Live and weekly
+        both call this so they touch the identical unique-venue set, where
+        X = monthly_quota − manual_reserve. A serving-view read failure propagates
+        and aborts the cycle (fail-safe) — it never falls back to an active-scoped
+        refresh. Falls back to the full servable set only when no budget service
+        is wired (keeps standalone use working)."""
         if self.budget_service is not None:
             limit = self.budget_service.get_refresh_budget()
-            ids = self.venue_dao.list_active_venue_ids_by_priority(limit)
+            ids = self.venue_dao.list_servable_venue_ids_by_priority(limit)
             logger.info(
                 f"[VenuesRefresherService] {job}: selected {len(ids)} venues "
-                f"by priority (refresh_budget={limit})"
+                f"servable by priority (refresh_budget={limit})"
             )
         else:
-            ids = self.venue_dao.list_active_venue_ids()
+            ids = self.venue_dao.list_servable_venue_ids()
             logger.warning(
                 f"[VenuesRefresherService] {job}: no budget service wired; "
-                f"refreshing all {len(ids)} active venues (unbounded)"
+                f"refreshing all {len(ids)} servable venues (unbounded)"
             )
         REFRESH_SELECTED_TOTAL.labels(job=job).inc(len(ids))
         return ids

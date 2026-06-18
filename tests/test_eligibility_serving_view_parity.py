@@ -99,6 +99,36 @@ def test_view_excludes_deprecated_regardless_of_eligibility(store):
     assert vid not in set(store.list_servable_venue_ids())
 
 
+def test_servable_by_priority_orders_filters_and_excludes(store):
+    """The bounded-refresh selection source: servable (serving-view) venues only,
+    ordered by priority asc then reviews desc. Against real Postgres (RDS_TEST_URL)
+    this is the only test that exercises the serving.eligible_venue ⋈ venues.venue
+    JOIN + ORDER BY; offline it pins the fake mirror to the same contract."""
+    p_hi, p_mid, p_lo, blocked, dead = (_vid() for _ in range(5))
+
+    def _bar(vid, priority, reviews):
+        store.upsert_venue(Venue(
+            venue_id=vid, venue_name=f"Bar {vid}", venue_address="a",
+            venue_lat=-8.05, venue_lng=-34.88, venue_type="BAR",
+            priority=priority, reviews=reviews,
+        ))
+
+    # Seed scrambled so insertion order != the required (priority asc, reviews desc).
+    _bar(p_lo, 1, 999)    # higher priority number -> sorts last despite most reviews
+    _bar(p_mid, 0, 100)
+    _bar(p_hi, 0, 500)    # same priority as p_mid, more reviews -> ahead of it
+    _seed(store, blocked, "Drogasil", None, "drugstore")  # active but ineligible
+    _bar(dead, 0, 999)
+    store.soft_delete_venue(dead, "google_places_closed_permanently", "google_places")
+
+    # Large limit so the global selection isn't truncated before our seeded ids
+    # (the real scratch DB may hold rows from other tests; assert on our slice).
+    ordered = store.list_servable_venue_ids_by_priority(10_000_000)
+    mine = [v for v in ordered if v in {p_hi, p_mid, p_lo, blocked, dead}]
+    assert mine == [p_hi, p_mid, p_lo], mine  # ineligible + deprecated excluded
+    assert store.list_servable_venue_ids_by_priority(0) == []
+
+
 # ── good-type table drift guard (the seed source == resolve_category non-OTHER) ──
 def test_good_type_seed_matches_resolve_category():
     """admin.category_good_type is seeded from the resolve_category map keys; assert

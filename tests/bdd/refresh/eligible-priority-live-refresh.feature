@@ -1,4 +1,3 @@
-@wip
 Feature: Bounded refresh targets served venues by priority
   As the refresh pipeline
   I want the bounded BestTime refresh to select served (eligible) venues by priority
