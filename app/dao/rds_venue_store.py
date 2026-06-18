@@ -213,6 +213,24 @@ class RdsVenueStore:
                 "SELECT venue_id FROM serving.eligible_venue"
             ))]
 
+    def list_servable_venue_ids_by_priority(self, limit: int) -> list[str]:
+        """The top-`limit` servable venues (the eligibility serving view) ordered
+        by refresh priority ascending, tie-broken by reviews desc, rating desc,
+        then venue_id — the served-scoped counterpart of
+        list_active_venue_ids_by_priority that backs the bounded live/weekly
+        refresh. serving.eligible_venue carries no priority column, so it is joined
+        to venues.venue for the ordering keys. A non-positive limit selects
+        nothing (mirrors the active variant)."""
+        if limit <= 0:
+            return []
+        with self.engine.connect() as conn:
+            return [r[0] for r in conn.execute(text(
+                "SELECT ev.venue_id FROM serving.eligible_venue ev "
+                "JOIN venues.venue v ON v.venue_id = ev.venue_id "
+                "ORDER BY v.priority ASC, v.reviews DESC NULLS LAST, "
+                "v.rating DESC NULLS LAST, v.venue_id ASC LIMIT :limit"
+            ), {"limit": limit})]
+
     def list_all_venue_rows(self) -> list[dict]:
         """Every venue row (active + deprecated) with scalar columns + residual
         `extra` + address (from venues.address) — backs the pipeline

@@ -110,6 +110,12 @@ class VenueRepository(RedisVenueDAO):
     def list_active_venue_ids_by_priority(self, limit):
         return self.rds_store.list_active_venue_ids_by_priority(limit)
 
+    def list_servable_venue_ids_by_priority(self, limit):
+        """The served (serving-view) venues ordered by priority — the bounded
+        refresh selection source. Served-scoped counterpart of
+        list_active_venue_ids_by_priority."""
+        return self.rds_store.list_servable_venue_ids_by_priority(limit)
+
     def list_all_venues(self):
         out = []
         for row in self.rds_store.list_all_venue_rows():

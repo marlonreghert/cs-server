@@ -221,6 +221,29 @@ class InMemoryRdsVenueStore:
                 out.append(vid)
         return out
 
+    def list_servable_venue_ids_by_priority(self, limit: int) -> list[str]:
+        """Mirror RdsVenueStore: the top-`limit` servable (active AND eligible)
+        venue ids ordered by priority asc, reviews desc, rating desc, venue_id asc.
+        Reuses list_servable_venue_ids() (the eligibility serving view, the single
+        source of truth) and applies the same ordering keys as
+        list_active_venue_ids_by_priority. A non-positive limit selects nothing."""
+        if limit <= 0:
+            return []
+        servable = set(self.list_servable_venue_ids())
+
+        def _key(item):
+            vid, row = item
+            priority = row.get("priority", 5)
+            reviews = row.get("reviews")
+            rating = row.get("rating")
+            reviews_key = -(reviews if reviews is not None else float("-inf"))
+            rating_key = -(rating if rating is not None else float("-inf"))
+            return (priority, reviews_key, rating_key, vid)
+
+        rows = [(vid, row) for vid, row in self.venues.items() if vid in servable]
+        rows.sort(key=_key)
+        return [vid for vid, _ in rows[:limit]]
+
     def list_all_venue_rows(self) -> list[dict]:
         return [self._row_with_address(row) for row in self.venues.values()]
 

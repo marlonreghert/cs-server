@@ -37,6 +37,17 @@ def _venue(vid, priority=5, reviews=None, rating=None):
     )
 
 
+def _block_google_type(store, vid, gtype="pharmacy"):
+    """Mark a venue high-confidence ineligible (a default blocked Google type) so
+    it drops out of the eligibility serving view while staying active."""
+    store.upsert_enrichment(
+        "google_places.vibe_attributes",
+        vid,
+        {"google_primary_type": gtype},
+        history=False,
+    )
+
+
 class TestPrioritySelection:
     def _store_with(self, venues):
         store = InMemoryRdsVenueStore()
@@ -111,6 +122,82 @@ class TestPrioritySelection:
         ])
         first = store.list_active_venue_ids_by_priority(10)
         assert first == store.list_active_venue_ids_by_priority(10)
+
+
+class TestServablePrioritySelection:
+    """list_servable_venue_ids_by_priority: the served-scoped (serving view)
+    counterpart that now backs the bounded refresh. Same ordering keys as the
+    active variant, but restricted to the eligibility serving view — active but
+    ineligible and deprecated venues never appear."""
+
+    def _store_with(self, venues):
+        store = InMemoryRdsVenueStore()
+        for v in venues:
+            store.upsert_venue(v)
+        return store
+
+    def test_orders_by_priority_then_reviews_then_rating(self):
+        store = self._store_with([
+            _venue("low_prio", priority=5, reviews=9999, rating=5.0),
+            _venue("p0_few", priority=0, reviews=10, rating=4.0),
+            _venue("p0_many", priority=0, reviews=900, rating=4.0),
+            _venue("p1", priority=1, reviews=500, rating=4.0),
+        ])
+        assert store.list_servable_venue_ids_by_priority(10) == [
+            "p0_many", "p0_few", "p1", "low_prio",
+        ]
+
+    def test_null_reviews_and_rating_sort_last(self):
+        store = self._store_with([
+            _venue("has_reviews", priority=0, reviews=1, rating=None),
+            _venue("no_signal", priority=0, reviews=None, rating=None),
+        ])
+        assert store.list_servable_venue_ids_by_priority(10) == [
+            "has_reviews", "no_signal",
+        ]
+
+    def test_limit_is_respected(self):
+        store = self._store_with([
+            _venue("a", priority=0, reviews=3),
+            _venue("b", priority=0, reviews=2),
+            _venue("c", priority=0, reviews=1),
+        ])
+        assert store.list_servable_venue_ids_by_priority(2) == ["a", "b"]
+
+    def test_non_positive_limit_selects_nothing(self):
+        store = self._store_with([_venue("a", priority=0)])
+        assert store.list_servable_venue_ids_by_priority(0) == []
+        assert store.list_servable_venue_ids_by_priority(-5) == []
+
+    def test_excludes_active_but_ineligible(self):
+        # 'blocked' would sort first by priority/reviews if it were active-scoped;
+        # being ineligible (blocked Google type) drops it from the served view.
+        store = self._store_with([
+            _venue("served", priority=0, reviews=1),
+            _venue("blocked", priority=0, reviews=999),
+        ])
+        _block_google_type(store, "blocked")
+        assert "blocked" not in store.list_servable_venue_ids()
+        assert store.list_servable_venue_ids_by_priority(10) == ["served"]
+
+    def test_excludes_deprecated(self):
+        store = self._store_with([
+            _venue("active", priority=0, reviews=1),
+            _venue("dead", priority=0, reviews=999),
+        ])
+        store.soft_delete_venue("dead", "ineligible", "test")
+        assert store.list_servable_venue_ids_by_priority(10) == ["active"]
+
+    def test_repository_delegates_to_store(self):
+        store = self._store_with([
+            _venue("a", priority=1, reviews=1),
+            _venue("b", priority=0, reviews=1),
+        ])
+        repo = VenueRepository(
+            GeoRedisClient(fakeredis.FakeRedis(decode_responses=True)),
+            rds_store=store,
+        )
+        assert repo.list_servable_venue_ids_by_priority(10) == ["b", "a"]
 
 
 class TestPriorityPersistence:
@@ -200,6 +287,54 @@ async def test_live_and_weekly_request_identical_set():
     assert set(besttime.live_calls) == set(besttime.weekly_calls)
     # Weekly re-reading the same venues adds no new unique against the cap.
     assert budget.unique_touched_count() == 2
+
+
+class TestRefresherSelectsServable:
+    """_select_refresh_venue_ids sources from the served (serving-view) set, not
+    all active venues — the bounded budget targets venues users actually see."""
+
+    def _refresher(self, store, fake, *, with_budget):
+        repo = VenueRepository(GeoRedisClient(fake), rds_store=store)
+        refresher = VenuesRefresherService(
+            venue_dao=repo, besttime_api=_RecordingBesttime(), redis_client=fake
+        )
+        if with_budget:
+            refresher.set_budget_service(
+                VenueBudgetService(
+                    redis_client=fake,
+                    budget_dao=VenueBudgetDao(fake),
+                    year_month_provider=lambda: "2026-05",
+                )
+            )
+        return refresher
+
+    def test_bounded_selection_is_servable_by_priority_within_budget(self):
+        fake = fakeredis.FakeRedis(decode_responses=True)
+        fake.set(
+            "admin_config:venue_monthly_budget",
+            '{"monthly_quota": 500, "manual_reserve": 498}',  # X = 2
+        )
+        store = InMemoryRdsVenueStore()
+        store.upsert_venue(_venue("a", priority=0, reviews=10))
+        store.upsert_venue(_venue("b", priority=1, reviews=10))
+        store.upsert_venue(_venue("c", priority=2, reviews=10))
+        # Active, top priority/reviews, but ineligible: must never be selected.
+        store.upsert_venue(_venue("blocked", priority=0, reviews=999))
+        _block_google_type(store, "blocked")
+
+        refresher = self._refresher(store, fake, with_budget=True)
+        assert refresher._select_refresh_venue_ids("live_forecast") == ["a", "b"]
+
+    def test_standalone_fallback_uses_servable_set(self):
+        fake = fakeredis.FakeRedis(decode_responses=True)
+        store = InMemoryRdsVenueStore()
+        store.upsert_venue(_venue("served", priority=0))
+        store.upsert_venue(_venue("blocked", priority=0))
+        _block_google_type(store, "blocked")
+
+        refresher = self._refresher(store, fake, with_budget=False)
+        # No budget service wired -> the full servable set (not the active set).
+        assert set(refresher._select_refresh_venue_ids("live_forecast")) == {"served"}
 
 
 class TestAddVenueRadiusConstants:
