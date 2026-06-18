@@ -1,4 +1,3 @@
-@wip
 Feature: Force-update policy config validation
 
   The force_update admin config key defines, per platform, the minimum supported

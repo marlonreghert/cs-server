@@ -178,6 +178,7 @@ def _build_rds_layer(context) -> None:
     )
 
     from app.services.admin_config_service import AdminConfigService
+    from app.services.force_update import validate_force_update_config
     from app.services.venue_eligibility import EligibilityConfig
 
     def _validate_eligibility(value):
@@ -189,7 +190,10 @@ def _build_rds_layer(context) -> None:
     context.admin_config_service = AdminConfigService(
         redis_client=context.fake_redis,
         rds_store=context.rds_store,
-        validators={"venue_eligibility": _validate_eligibility},
+        validators={
+            "venue_eligibility": _validate_eligibility,
+            "force_update": validate_force_update_config,
+        },
     )
 
     from app.services.eligibility_rules import EligibilityRuleService

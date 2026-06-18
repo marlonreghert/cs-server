@@ -33,6 +33,7 @@ test-unit:
 		tests/test_rds_repository.py \
 		tests/test_rds_store_contract.py \
 		tests/test_admin_config.py \
+		tests/test_force_update_validator.py \
 		tests/test_redis_projection.py \
 		tests/test_eligibility_serving_view_parity.py \
 		tests/test_reactivation_migration.py \
