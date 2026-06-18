@@ -357,6 +357,26 @@ class RdsVenueStore:
                 "INSERT INTO engagement.hot_like_event (user_pseudo, venue_id) VALUES (:u, :v)"
             ), {"u": user_pseudo, "v": venue_id})
 
+    # ── app activity (one row per user per Recife day) ────────────────────────
+    def record_app_session(self, user_pseudo, activity_date) -> None:
+        # Idempotent per (user, day): the PK + DO NOTHING absorbs repeat pings.
+        with self.engine.begin() as conn:
+            conn.execute(text(
+                "INSERT INTO engagement.app_session_day (user_pseudo, activity_date) "
+                "VALUES (:u, :d) ON CONFLICT (user_pseudo, activity_date) DO NOTHING"
+            ), {"u": user_pseudo, "d": activity_date})
+
+    def count_users(self, since_date=None) -> int:
+        """Distinct active users; since_date=None counts all-time total, otherwise
+        users with any session on/after since_date (inclusive)."""
+        sql = "SELECT count(DISTINCT user_pseudo) FROM engagement.app_session_day"
+        params: dict = {}
+        if since_date is not None:
+            sql += " WHERE activity_date >= :since"
+            params["since"] = since_date
+        with self.engine.connect() as conn:
+            return int(conn.execute(text(sql), params).scalar() or 0)
+
     # ── admin config (system of record; mirrored to Redis by AdminConfigService) ─
     def upsert_admin_config(self, key, value, updated_by=None) -> None:
         with self.engine.begin() as conn:

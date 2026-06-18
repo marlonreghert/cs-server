@@ -599,6 +599,18 @@ LIVE_REFRESH_INTERVAL_MINUTES = Gauge(
 )
 
 # =============================================================================
+# ENGAGEMENT METRICS
+# =============================================================================
+
+# Outcomes of POST /v1/sessions (app-activity write-through). The raw user_id is
+# never a label — only the success/error result is recorded.
+ENGAGEMENT_SESSION_TOTAL = Counter(
+    "engagement_session_total",
+    "Outcomes of POST /v1/sessions app-activity recordings",
+    ["result"],  # success | error
+)
+
+# =============================================================================
 # APPLICATION INFO
 # =============================================================================
 

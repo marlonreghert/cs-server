@@ -1,4 +1,3 @@
-@wip
 Feature: User activity tracking and counts
   As the system of record
   I want to record each authenticated app session pseudonymized in RDS

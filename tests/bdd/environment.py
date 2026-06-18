@@ -95,9 +95,17 @@ def _build_test_app(context) -> None:
     # harness reports a meaningful HTTP 404 rather than crashing on import.
     app = FastAPI()
     try:
-        from app.routers import admin_trigger_router, set_admin_container
+        from app.routers import (
+            admin_trigger_router,
+            engagement_router,
+            set_admin_container,
+        )
 
         app.include_router(admin_trigger_router)
+        # Engagement write-through API (POST /v1/sessions etc). The service is
+        # wired in _build_rds_layer, which runs after this; set_engagement_service
+        # is called there once context.engagement_service exists.
+        app.include_router(engagement_router)
 
         # Pin year_month deterministically so scenarios can write counters
         # under a specific key.
@@ -176,6 +184,16 @@ def _build_rds_layer(context) -> None:
         rds_store=context.rds_store,
         pseudonymization_key="test-hmac-key",
     )
+    # Wire the engagement service into the API (POST /v1/sessions) and the admin
+    # counts endpoint (GET /admin/users/activity-counts). The engagement_router
+    # module is not reloaded between scenarios, so set it every scenario to avoid
+    # leaking a prior scenario's fake store. The admin route reads
+    # _container.engagement_service at request time off the shared container.
+    from app.routers import set_engagement_service
+
+    set_engagement_service(context.engagement_service)
+    if getattr(context, "container", None) is not None:
+        context.container.engagement_service = context.engagement_service
 
     from app.services.admin_config_service import AdminConfigService
     from app.services.venue_eligibility import EligibilityConfig

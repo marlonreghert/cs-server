@@ -585,6 +585,20 @@ async def list_venue_inventory(
         raise HTTPException(status_code=500, detail="venue inventory listing failed")
 
 
+@router.get("/users/activity-counts")
+async def user_activity_counts():
+    """Distinct-user counts for the admin dashboard: total plus trailing 1d/7d/30d
+    active windows. "Active" means the user made an authenticated app request that
+    Recife day (the closest backend-observable proxy for a login)."""
+    if _container is None:
+        raise HTTPException(status_code=503, detail="Container not initialized")
+    try:
+        return _container.engagement_service.activity_counts()
+    except Exception as e:
+        logger.error(f"[AdminTrigger] user activity counts failed: {e}")
+        raise HTTPException(status_code=500, detail="user activity counts failed")
+
+
 @router.post("/recount-discovery-points")
 async def recount_discovery_points():
     """Recount venues per discovery point using GEORADIUS and update counters."""
