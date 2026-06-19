@@ -333,6 +333,7 @@ class Container:
         # like engagement, not the projector). Per-key validators dispatch before
         # any write; eligibility keeps EligibilityConfig validation.
         from app.services.admin_config_service import AdminConfigService
+        from app.services.force_update import validate_force_update_config
         from app.services.venue_eligibility import EligibilityConfig
 
         def _validate_eligibility_config(value):
@@ -342,7 +343,10 @@ class Container:
         self.admin_config_service = AdminConfigService(
             redis_client=self.redis_client.client,
             rds_store=self.rds_store,
-            validators={"venue_eligibility": _validate_eligibility_config},
+            validators={
+                "venue_eligibility": _validate_eligibility_config,
+                "force_update": validate_force_update_config,
+            },
         )
 
         # Ex2: single-rule eligibility editing over admin.eligibility_rule rows;
