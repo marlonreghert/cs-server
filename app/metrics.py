@@ -559,6 +559,15 @@ VENUES_BY_PRICE_LEVEL = Gauge(
     ["price_level"],  # 1, 2, 3, 4, unknown
 )
 
+# Distribution of which rule produced the served price tier. Lets us watch the
+# enum-vs-range-fallback mix (expect enum to dominate, range to fill the enum-less
+# tail) and detect regressions after the price-signal re-source.
+VENUES_BY_PRICE_LEVEL_SOURCE = Gauge(
+    "venues_by_price_level_source",
+    "Number of venues by the source that produced the served price tier",
+    ["source"],  # google_enum, google_range, besttime, none
+)
+
 # =============================================================================
 # ADD-VENUE-BY-ADDRESS + MONTHLY BUDGET METRICS
 # =============================================================================

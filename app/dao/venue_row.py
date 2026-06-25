@@ -25,6 +25,12 @@ COLUMN_FIELDS: tuple[str, ...] = (
     "venue_lng",
     "venue_type",
     "price_level",
+    # Promoted price-signal columns (raw/auditable). Structured `price_range` is a
+    # jsonb column; the rest are scalars. All projector-rebuildable.
+    "price_range",
+    "google_price_level",
+    "besttime_price_level",
+    "price_level_source",
     "rating",
     "reviews",
     "forecast",

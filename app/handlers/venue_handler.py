@@ -423,6 +423,7 @@ class VenueHandler:
                     google_places_type=google_places_type,
                     **resolve_venue_display(google_places_type, m.venue.venue_type, m.venue.venue_name),
                     price_level=m.venue.price_level,
+                    price_range=m.venue.price_range,
                     rating=m.venue.rating,
                     reviews=m.venue.reviews,
                     weekly_forecast=m.weekly_forecast,

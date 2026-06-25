@@ -16,6 +16,10 @@ from app.api.google_places_client import GooglePlacesAPIClient, search_for_lgbtq
 from app.config import settings
 from app.dao.redis_venue_dao import RedisVenueDAO
 from app.models.vibe_attributes import VibeAttributes
+from app.services.price_signal import (
+    derive_price_signal,
+    price_level_from_enum,
+)
 from app.models.opening_hours import OpeningHours
 from app.models.instagram import VenueInstagram
 from app.models.venue_review import VenueReview, VenueReviews
@@ -37,23 +41,10 @@ logger = logging.getLogger(__name__)
 REQUESTS_PER_SECOND = 5
 REQUEST_DELAY = 1.0 / REQUESTS_PER_SECOND
 
-# Google Places API v1 returns priceLevel as an enum string. We persist it as
-# the 1-4 int the rest of the system (mobile PriceIndicator, scoring, etc.)
-# expects. PRICE_LEVEL_FREE / _UNSPECIFIED resolve to None — neither maps to
-# the 1-4 scale, and we'd rather leave the field empty than misrepresent.
-_PRICE_LEVEL_ENUM_TO_INT = {
-    "PRICE_LEVEL_INEXPENSIVE": 1,
-    "PRICE_LEVEL_MODERATE": 2,
-    "PRICE_LEVEL_EXPENSIVE": 3,
-    "PRICE_LEVEL_VERY_EXPENSIVE": 4,
-}
-
-
-def _price_level_to_int(value: Optional[str]) -> Optional[int]:
-    """Map Google's priceLevel enum string to our 1-4 int scale."""
-    if not value:
-        return None
-    return _PRICE_LEVEL_ENUM_TO_INT.get(value)
+# Google's priceLevel enum -> 1..4 tier mapping now lives in
+# app/services/price_signal.py (the single derivation source). Re-exported here as
+# `_price_level_to_int` for backward-compatible importers/tests.
+_price_level_to_int = price_level_from_enum
 
 
 class GooglePlacesEnrichmentService:
@@ -85,27 +76,27 @@ class GooglePlacesEnrichmentService:
         self._temporarily_closed_in_run = 0
 
     def _backfill_venue_review_signal(self, venue_id: str, details) -> None:
-        """Write Google's rating/userRatingCount/priceLevel onto the Venue.
+        """Write Google's rating/userRatingCount and the derived price signal onto
+        the Venue.
 
-        The Venue model's `rating`, `reviews`, and `price_level` fields are
-        what the venue card UI reads. The BestTime venue_filter discovery
-        path populates them at ingestion; the inventory-sync path (added in
-        #18) does not. Without this backfill, ~720 inventory-synced venues
-        in prod (Praça Laura Nigro, Jockey Club, Barchef, …) stay null
-        forever even though Google has the data.
+        The Venue card UI reads `rating`, `reviews`, and `price_level`. The BestTime
+        venue_filter discovery path populates them at ingestion; the inventory-sync
+        path (added in #18) does not. Without this backfill, inventory-synced venues
+        (Praça Laura Nigro, Jockey Club, …) stay null even though Google has the data.
 
-        Reads only — no Google call here. Skips persistence when every
-        Google value is None (no-op upsert would still rewrite the venue).
-        Preserves any pre-existing non-null Venue value when Google returns
-        None for that specific field (don't blank out BestTime-sourced
-        data).
+        Price tier is derived via the shared helper (enum > range > besttime > null,
+        never 0). Google's `priceLevel` enum is PRIMARY; the objective `priceRange`
+        is the FALLBACK that fills enum-less venues (e.g. Vasto). Raw signals
+        (`google_price_level`, `price_range`) are persisted for audit. Preservation:
+        when Google returns NO price signal, an existing real tier (1..4) is kept
+        as-is — never blanked and never clobbered by BestTime; only a stale `0`/NULL
+        falls through to the BestTime/NULL derivation. Reads only — no Google call.
         """
         google_rating = details.rating
         google_review_count = details.user_rating_count
-        google_price_int = _price_level_to_int(details.price_level)
-
-        if google_rating is None and google_review_count is None and google_price_int is None:
-            return
+        google_enum = details.price_level
+        google_range = details.price_range
+        google_price_signal = google_enum is not None or google_range is not None
 
         venue = self.venue_dao.get_venue(venue_id)
         if venue is None:
@@ -122,8 +113,33 @@ class GooglePlacesEnrichmentService:
         if google_review_count is not None and venue.reviews != google_review_count:
             venue.reviews = google_review_count
             changed = True
-        if google_price_int is not None and venue.price_level != google_price_int:
-            venue.price_level = google_price_int
+
+        # ── derive the served price tier (single never-0 rule) ──
+        # A stale legacy `0` is treated as "no tier" so it is never preserved/served.
+        existing_tier = venue.price_level if venue.price_level not in (None, 0) else None
+        if google_price_signal:
+            derived = derive_price_signal(
+                google_enum, google_range, venue.besttime_price_level
+            )
+            new_tier, new_source = derived.price_level, derived.source
+        elif existing_tier is not None:
+            # Google silent this run: keep the existing real tier + its source.
+            new_tier, new_source = existing_tier, venue.price_level_source
+        else:
+            derived = derive_price_signal(None, None, venue.besttime_price_level)
+            new_tier, new_source = derived.price_level, derived.source
+
+        if google_enum is not None and venue.google_price_level != google_enum:
+            venue.google_price_level = google_enum
+            changed = True
+        if google_range is not None and venue.price_range != google_range:
+            venue.price_range = google_range
+            changed = True
+        if venue.price_level != new_tier:
+            venue.price_level = new_tier
+            changed = True
+        if venue.price_level_source != new_source:
+            venue.price_level_source = new_source
             changed = True
 
         if changed:
@@ -131,7 +147,7 @@ class GooglePlacesEnrichmentService:
             logger.info(
                 f"[GooglePlacesEnrichment] Backfilled review signal for {venue_id}: "
                 f"rating={google_rating} reviews={google_review_count} "
-                f"price_level={google_price_int}"
+                f"price_level={new_tier} source={new_source}"
             )
 
     async def enrich_venue(

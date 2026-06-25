@@ -75,6 +75,20 @@ class FootTrafficForecast(BaseModel):
     day_info: Optional[DayInfo] = None
 
 
+class PriceRange(BaseModel):
+    """Objective money range from Google `priceRange` (the served structured range).
+
+    `currency` is the ISO code (Google `currencyCode`, e.g. "BRL" — not a symbol).
+    `min`/`max` are the start/end amounts in whole currency units. `max` is null
+    when Google returns an unbounded upper bound ("more than X").
+    """
+    currency: Optional[str] = None
+    min: Optional[float] = None
+    max: Optional[float] = None
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
 class Venue(BaseModel):
     """Venue with location, metadata, and forecast data."""
 
@@ -93,7 +107,15 @@ class Venue(BaseModel):
     venue_type: Optional[str] = None
     venue_dwell_time_min: Optional[int] = None
     venue_dwell_time_max: Optional[int] = None
+    # Served price tier: int 1..4 or NULL (unknown). NEVER 0 — `0` was the legacy
+    # "unknown rendered as cheapest" bug, eliminated by migration 0013 + the shared
+    # derivation helper (app/services/price_signal.py).
     price_level: Optional[int] = None
+    # Raw, auditable price signals backing the served tier (promoted RDS columns):
+    price_range: Optional[PriceRange] = None       # raw structured Google range
+    google_price_level: Optional[str] = None       # raw Google priceLevel enum string
+    besttime_price_level: Optional[int] = None      # raw BestTime price (derivation step 3)
+    price_level_source: Optional[str] = None        # google_enum | google_range | besttime | null
     rating: Optional[float] = None
     reviews: Optional[int] = None
 
@@ -161,7 +183,8 @@ class MinifiedVenue(BaseModel):
     label: Optional[str] = None               # PT-BR category label ("Bar", "Balada", "Restaurante")
     emoji: Optional[str] = None               # Category emoji
     color: Optional[str] = None               # Category color hex
-    price_level: Optional[int] = None
+    price_level: Optional[int] = None         # 1..4 or null (never 0)
+    price_range: Optional[PriceRange] = None  # structured money range for the detail view
     rating: Optional[float] = None
     reviews: Optional[int] = None
     venue_foot_traffic_forecast: Optional[list[FootTrafficForecast]] = None

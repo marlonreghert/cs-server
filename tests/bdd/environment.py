@@ -118,11 +118,17 @@ def _build_test_app(context) -> None:
             budget_dao=context.budget_dao,
             year_month_provider=_year_month_provider,
         )
+        # Google Places client for price re-sourcing. Constructing it opens an
+        # httpx pool but makes no network call; scenarios stub `get_place_details`.
+        from app.api.google_places_client import GooglePlacesAPIClient
+
+        context.google_places_client = GooglePlacesAPIClient(api_key="test")
         context.add_venue_handler = AddVenueHandler(
             venue_dao=context.venue_dao,
             besttime_api=context.besttime,
             budget_service=context.budget_service,
             redis_client=context.fake_redis,
+            google_places_client=context.google_places_client,
         )
 
         container = MagicMock()
@@ -175,6 +181,18 @@ def _build_rds_layer(context) -> None:
     context.rds_store = InMemoryRdsVenueStore()
     context.repository = VenueRepository(context.geo_redis, rds_store=context.rds_store)
     context.redis_only_dao = RedisVenueDAO(context.geo_redis)
+
+    # Google Places enrichment over the RDS-backed repository: enrichment writes
+    # land as promoted RDS columns (the production path), so price-signal scenarios
+    # assert on context.repository.get_venue (the column reconstruction).
+    from app.services.google_places_enrichment_service import (
+        GooglePlacesEnrichmentService,
+    )
+
+    context.enrichment_service = GooglePlacesEnrichmentService(
+        google_places_client=getattr(context, "google_places_client", None),
+        venue_dao=context.repository,
+    )
     context.redis_projection_service = RedisProjectionService(
         redis_only_dao=context.redis_only_dao,
         rds_store=context.rds_store,

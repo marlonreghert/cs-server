@@ -106,9 +106,60 @@ class TestVenuesRefresherService:
         assert venue.forecast is True
         assert venue.processed is True
         assert venue.rating == 4.5
-        assert venue.price_level == 2
+        # The mapper records BestTime's raw price in its own column; the served
+        # `price_level` is derived later in the refresh loop (and would preserve a
+        # Google-derived tier), so the pure mapper leaves it unset.
+        assert venue.besttime_price_level == 2
+        assert venue.price_level is None
         assert len(venue.venue_foot_traffic_forecast) == 1
         assert venue.venue_foot_traffic_forecast[0].day_int == 0
+
+    def test_refresh_preserves_google_tier_no_besttime_clobber(self, refresher_service):
+        """A BestTime refresh must NOT overwrite a Google-derived tier. The fresh
+        venue carries BestTime price 1; the existing venue has a google_enum tier 4
+        — the tier, source, range, and raw enum are preserved."""
+        from app.models import PriceRange
+
+        fresh = Venue(
+            venue_id="v1", venue_name="Bar", venue_address="x",
+            venue_lat=-8.0, venue_lng=-34.0, besttime_price_level=1,
+        )
+        existing = Venue(
+            venue_id="v1", venue_name="Bar", venue_address="x",
+            venue_lat=-8.0, venue_lng=-34.0,
+            price_level=4, price_level_source="google_enum",
+            google_price_level="PRICE_LEVEL_VERY_EXPENSIVE",
+            price_range=PriceRange(currency="BRL", min=80, max=200),
+        )
+
+        refresher_service._apply_besttime_refresh_price(fresh, existing)
+
+        assert fresh.price_level == 4
+        assert fresh.price_level_source == "google_enum"
+        assert fresh.google_price_level == "PRICE_LEVEL_VERY_EXPENSIVE"
+        assert fresh.price_range == PriceRange(currency="BRL", min=80, max=200)
+        # The raw BestTime price is still recorded for audit.
+        assert fresh.besttime_price_level == 1
+
+    def test_refresh_derives_besttime_tier_when_no_google_tier(self, refresher_service):
+        """With no prior Google tier, the refresh derives 1..4/NULL from BestTime."""
+        fresh = Venue(
+            venue_id="v2", venue_name="Bar", venue_address="x",
+            venue_lat=-8.0, venue_lng=-34.0, besttime_price_level=2,
+        )
+        refresher_service._apply_besttime_refresh_price(fresh, existing=None)
+        assert fresh.price_level == 2
+        assert fresh.price_level_source == "besttime"
+
+    def test_refresh_besttime_zero_resolves_to_null_never_zero(self, refresher_service):
+        """A raw BestTime 0 must resolve to NULL, never a served 0 tier."""
+        fresh = Venue(
+            venue_id="v3", venue_name="Bar", venue_address="x",
+            venue_lat=-8.0, venue_lng=-34.0, besttime_price_level=0,
+        )
+        refresher_service._apply_besttime_refresh_price(fresh, existing=None)
+        assert fresh.price_level is None
+        assert fresh.price_level_source is None
 
     @pytest.mark.asyncio
     async def test_deduplication_by_venue_id(self, refresher_service, mock_besttime_api, mock_venue_dao):

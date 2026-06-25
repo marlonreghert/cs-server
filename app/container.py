@@ -367,12 +367,14 @@ class Container:
             budget_dao=self.venue_budget_dao,
         )
 
-        # Add-by-address handler
+        # Add-by-address handler. The optional Google client lets a manual add with
+        # a place_id re-source its price tier (enum + range) via the shared helper.
         self.add_venue_handler = AddVenueHandler(
             venue_dao=self.redis_venue_dao,
             besttime_api=self.besttime_api,
             budget_service=self.venue_budget_service,
             redis_client=redis_internal_client,
+            google_places_client=self.google_places_api,
         )
 
         # Expose the budget service to the refresher so discovery can

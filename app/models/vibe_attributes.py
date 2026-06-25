@@ -3,6 +3,8 @@ from typing import Optional
 from datetime import datetime
 from pydantic import BaseModel, Field
 
+from app.models.venue import PriceRange
+
 
 class VibeAttribute(BaseModel):
     """Single vibe attribute with name and optional boolean value."""
@@ -152,8 +154,12 @@ class GooglePlacesDetailsResponse(BaseModel):
     rating: Optional[float] = None         # 0.0–5.0
     user_rating_count: Optional[int] = None
     # Google returns an enum string: PRICE_LEVEL_FREE / _INEXPENSIVE /
-    # _MODERATE / _EXPENSIVE / _VERY_EXPENSIVE. Mapped to 0-4 at write time.
+    # _MODERATE / _EXPENSIVE / _VERY_EXPENSIVE. Derived to a 1..4/NULL tier at
+    # write time via app/services/price_signal.py (PRIMARY source).
     price_level: Optional[str] = None
+    # Objective Google `priceRange` (currency + start/end money). Used as the
+    # FALLBACK tier source for enum-less venues, and served as the structured range.
+    price_range: Optional[PriceRange] = None
 
     def is_permanently_closed(self) -> bool:
         """Check if the place is permanently closed."""

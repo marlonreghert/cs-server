@@ -148,6 +148,15 @@ class Settings(BaseSettings):
     google_places_enrichment_cron: str = "0 3 * * *"  # Daily at 3 AM
     google_places_enrichment_on_startup: bool = False  # If True, run enrichment on startup
 
+    # Price-range -> tier bucketing thresholds, per ISO currency. Used ONLY for the
+    # enum-less FALLBACK path (Google `priceRange` with no `priceLevel` enum). Each
+    # value is three ascending cut points [c1, c2, c3] applied to the range midpoint
+    # ((min+max)/2, or `min`/startPrice when the upper bound is unbounded):
+    #   midpoint < c1 -> 1 | < c2 -> 2 | < c3 -> 3 | >= c3 -> 4
+    # A currency with no configured table yields no tier (the derivation falls
+    # through to BestTime/NULL). BRL anchored to observed Recife data.
+    price_range_tier_thresholds: dict[str, list[float]] = {"BRL": [40.0, 80.0, 160.0]}
+
     # Permanently closed venue handling (uses Google Places API businessStatus)
     # When enabled, venues marked as CLOSED_PERMANENTLY by Google are soft-deprecated
     # and retained in Redis for troubleshooting.
