@@ -45,6 +45,8 @@ test-unit:
 		tests/test_log_redaction.py \
 		tests/test_refresh_interval_watch.py \
 		tests/test_user_activity_tracking.py \
+		tests/test_price_signal.py \
+		tests/test_google_places_review_signal_backfill.py \
 		-v
 
 test-integration:

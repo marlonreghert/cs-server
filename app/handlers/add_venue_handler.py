@@ -22,6 +22,7 @@ from app.models import (
     Venue,
     VenueFilterParams,
 )
+from app.services.price_signal import derive_price_signal
 from app.services.venue_budget_service import VenueBudgetService
 
 logger = logging.getLogger(__name__)
@@ -68,11 +69,17 @@ class AddVenueHandler:
         besttime_api,
         budget_service: VenueBudgetService,
         redis_client,
+        google_places_client=None,
     ) -> None:
         self.venue_dao = venue_dao
         self.besttime = besttime_api
         self.budget = budget_service
         self.redis = redis_client
+        # Optional: when configured AND the request carries a `place_id`, the
+        # manual-add flow re-sources the price tier from Google (enum + range) via
+        # the shared derivation helper. Dependency-aware: absent client / place_id
+        # falls back to the BestTime price through the same helper (never 0).
+        self.google_places_client = google_places_client
 
     async def add(self, request: AddVenueByAddressRequest) -> AddVenueOutcome:
         radius_m = request.fallback_radius_meters or DEFAULT_FALLBACK_RADIUS_M
@@ -161,7 +168,7 @@ class AddVenueHandler:
             return await self._geo_fallback(request, radius_m, response)
 
         # 5. Success: persist + cache + record + report.
-        persisted_venue = _persist_new_venue(self.venue_dao, response)
+        persisted_venue = await self._persist_new_venue(response, request.place_id)
         # Record the unique BestTime interaction against the monthly ledger so
         # the unique-venue count reflects manual adds, not just refresh.
         self.budget.mark_touched(persisted_venue.venue_id)
@@ -306,8 +313,9 @@ class AddVenueHandler:
                 venue_type=match.venue_type,
                 rating=match.rating,
                 reviews=match.reviews,
-                price_level=match.price_level,
+                besttime_price_level=match.price_level,
             )
+            await self._derive_and_set_price(venue, request.place_id)
             self.venue_dao.upsert_venue(venue)
             # Count toward monthly budget only when truly new.
             self.budget.record_new_venue_from_discovery()
@@ -367,6 +375,65 @@ class AddVenueHandler:
             "venue_lng": venue.venue_lng,
         }
 
+    async def _persist_new_venue(self, response, place_id: Optional[str]) -> Venue:
+        """Build a Venue from a BestTime POST /forecasts response, derive its served
+        price tier (Google enum/range PRIMARY when a place_id + client are available,
+        BestTime fallback), and upsert it."""
+        info = response.venue_info if hasattr(response, "venue_info") else None
+        if info is None and isinstance(response, dict):
+            info = response.get("venue_info") or {}
+        venue_id = _get(info, "venue_id")
+        venue_lat = _get(info, "venue_lat") or 0.0
+        venue_lng = _get(info, "venue_lng")
+        if venue_lng is None:
+            venue_lng = _get(info, "venue_lon") or 0.0
+        venue = Venue(
+            processed=True,
+            forecast=True,
+            venue_id=venue_id,
+            venue_name=_get(info, "venue_name") or "",
+            venue_address=_get(info, "venue_address") or "",
+            venue_lat=float(venue_lat or 0.0),
+            venue_lng=float(venue_lng or 0.0),
+            rating=_get(info, "rating"),
+            reviews=_get(info, "reviews"),
+            besttime_price_level=_get(info, "price_level"),
+        )
+        await self._derive_and_set_price(venue, place_id)
+        self.venue_dao.upsert_venue(venue)
+        return venue
+
+    async def _derive_and_set_price(self, venue: Venue, place_id: Optional[str]) -> None:
+        """Set the served price tier on a venue via the shared derivation helper.
+
+        Re-sources Google's `priceLevel` enum + `priceRange` from `place_id` when a
+        Google client is configured (PRIMARY), falling back to the venue's BestTime
+        price (already on `besttime_price_level`). Dependency-aware and never raises:
+        a missing client / place_id / failed fetch falls through to BestTime/NULL.
+        Never writes 0.
+        """
+        google_enum = None
+        google_range = None
+        if place_id and self.google_places_client is not None:
+            try:
+                details = await self.google_places_client.get_place_details(place_id)
+            except Exception as e:
+                logger.warning(
+                    f"[AddVenueHandler] Google price fetch failed for {place_id}: "
+                    f"{type(e).__name__}: {e}"
+                )
+                details = None
+            if details is not None:
+                google_enum = details.price_level
+                google_range = details.price_range
+        derived = derive_price_signal(
+            google_enum, google_range, venue.besttime_price_level
+        )
+        venue.google_price_level = google_enum
+        venue.price_range = google_range
+        venue.price_level = derived.price_level
+        venue.price_level_source = derived.source
+
 
 def _field(source, key):
     """Read an attribute or dict key (BestTime responses come as either)."""
@@ -404,32 +471,6 @@ def _response_ok(response) -> bool:
             and bool(info.get("venue_id"))
         )
     return False
-
-
-def _persist_new_venue(venue_dao: RedisVenueDAO, response) -> Venue:
-    info = response.venue_info if hasattr(response, "venue_info") else None
-    if info is None and isinstance(response, dict):
-        info = response.get("venue_info") or {}
-    # Normalise the venue_info shape into a Venue.
-    venue_id = _get(info, "venue_id")
-    venue_lat = _get(info, "venue_lat") or 0.0
-    venue_lng = _get(info, "venue_lng")
-    if venue_lng is None:
-        venue_lng = _get(info, "venue_lon") or 0.0
-    venue = Venue(
-        processed=True,
-        forecast=True,
-        venue_id=venue_id,
-        venue_name=_get(info, "venue_name") or "",
-        venue_address=_get(info, "venue_address") or "",
-        venue_lat=float(venue_lat or 0.0),
-        venue_lng=float(venue_lng or 0.0),
-        rating=_get(info, "rating"),
-        reviews=_get(info, "reviews"),
-        price_level=_get(info, "price_level"),
-    )
-    venue_dao.upsert_venue(venue)
-    return venue
 
 
 def _get(source, key):

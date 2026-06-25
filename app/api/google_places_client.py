@@ -5,6 +5,7 @@ from typing import Optional
 import httpx
 
 from app.models.vibe_attributes import GooglePlacesDetailsResponse, VibeAttributes
+from app.models.venue import PriceRange
 from app.metrics import (
     GOOGLE_PLACES_API_CALLS_TOTAL,
     GOOGLE_PLACES_API_CALL_DURATION_SECONDS,
@@ -63,6 +64,9 @@ VIBE_FIELDS_MASK = ",".join([
     "rating",
     "userRatingCount",
     "priceLevel",
+    # Objective money range (currency + start/end). PRIMARY tier source stays the
+    # enum; this fills enum-less venues and is served as the structured range.
+    "priceRange",
 ])
 
 # Language code for Portuguese (Brazil) - used for opening hours descriptions
@@ -373,11 +377,12 @@ class GooglePlacesAPIClient:
             special_days=special_days,
             # Reviews
             reviews=parsed_reviews if parsed_reviews else None,
-            # Aggregate review signal (raw — enrichment service maps
-            # priceLevel enum → 0-4 int before writing to Venue).
+            # Aggregate review signal (raw — enrichment derives the 1..4/NULL tier
+            # from these via app/services/price_signal.py).
             rating=data.get("rating"),
             user_rating_count=data.get("userRatingCount"),
             price_level=data.get("priceLevel"),
+            price_range=_parse_price_range(data.get("priceRange")),
         )
 
     def details_to_vibe_attributes(
@@ -504,6 +509,42 @@ class GooglePlacesAPIClient:
             GOOGLE_PLACES_API_CALLS_TOTAL.labels(endpoint="place_photos", status="error").inc()
             logger.error(f"[GooglePlacesAPIClient] Photo fetch exception for {place_id}: {e}")
             return []
+
+
+def _money_units(money: Optional[dict]) -> Optional[float]:
+    """Parse a Google `Money` object's whole-currency `units` (a string-encoded
+    integer) to a number. Returns None when absent/unparsable."""
+    if not isinstance(money, dict):
+        return None
+    units = money.get("units")
+    if units is None:
+        return None
+    try:
+        return float(units)
+    except (TypeError, ValueError):
+        return None
+
+
+def _parse_price_range(price_range: Optional[dict]) -> Optional[PriceRange]:
+    """Parse Google `priceRange` ({startPrice, endPrice} `Money` objects) into a
+    structured PriceRange. `endPrice` may be absent (unbounded "more than X") ->
+    `max=None`. Never raises: a partial/garbage range yields None or a best-effort
+    range so the derivation can fall through."""
+    if not isinstance(price_range, dict):
+        return None
+    start = price_range.get("startPrice")
+    end = price_range.get("endPrice")
+    currency = None
+    if isinstance(start, dict):
+        currency = start.get("currencyCode")
+    if currency is None and isinstance(end, dict):
+        currency = end.get("currencyCode")
+    pmin = _money_units(start)
+    pmax = _money_units(end)
+    if currency is None and pmin is None and pmax is None:
+        return None
+    return PriceRange(currency=currency, min=pmin, max=pmax)
+
 
 async def search_for_lgbtq_indicators(summary: Optional[str]) -> bool:
     """Analyze summary text for LGBTQ+ friendliness indicators.

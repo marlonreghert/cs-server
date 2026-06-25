@@ -12,6 +12,7 @@ from app.models import (
     VenueFilterParams,
     VenueFilterVenue,
 )
+from app.services.price_signal import GOOGLE_SOURCES, derive_price_signal
 from app.metrics import (
     VENUES_TOTAL,
     VENUES_WITH_ATTRIBUTE,
@@ -27,6 +28,7 @@ from app.metrics import (
     VENUES_AVERAGE_RATING,
     VENUES_AVERAGE_REVIEWS,
     VENUES_BY_PRICE_LEVEL,
+    VENUES_BY_PRICE_LEVEL_SOURCE,
     INVENTORY_SYNC_VENUES_TOTAL,
     INVENTORY_SYNC_RUNS_TOTAL,
     DISCOVERY_SKIPPED_DUE_TO_MONTHLY_CAP_TOTAL,
@@ -263,6 +265,7 @@ class VenuesRefresherService:
         reviews_list = []
         type_counts = defaultdict(int)
         price_level_counts = defaultdict(int)
+        price_source_counts = defaultdict(int)
 
         for venue in venues:
             # Address
@@ -289,6 +292,9 @@ class VenuesRefresherService:
                 price_level_counts[str(venue.price_level)] += 1
             else:
                 price_level_counts["unknown"] += 1
+
+            # Which rule produced the served tier (audit-only field).
+            price_source_counts[venue.price_level_source or "none"] += 1
 
             # Venue type
             if venue.venue_type:
@@ -320,6 +326,16 @@ class VenuesRefresherService:
         # Update price level breakdown
         for price_level, count in price_level_counts.items():
             VENUES_BY_PRICE_LEVEL.labels(price_level=price_level).set(count)
+
+        # Tier-source breakdown (enum / range fallback / besttime / none).
+        for source in ("google_enum", "google_range", "besttime", "none"):
+            VENUES_BY_PRICE_LEVEL_SOURCE.labels(source=source).set(
+                price_source_counts.get(source, 0)
+            )
+        logger.info(
+            f"[VenuesRefresherService] Price tier sources: "
+            f"{dict(price_source_counts)}"
+        )
 
         # Update averages
         if ratings:
@@ -401,11 +417,38 @@ class VenuesRefresherService:
             venue_dwell_time_max=vf.venue_dwell_time_max,
             rating=vf.rating,
             reviews=vf.reviews,
-            price_level=vf.price_level,
+            # BestTime's raw price is kept in its own column and fed to the shared
+            # derivation as step 3; the served `price_level` is derived (never the
+            # raw int directly), preserving any Google-derived tier (see
+            # _apply_besttime_refresh_price).
+            besttime_price_level=vf.price_level,
             venue_foot_traffic_forecast=foot_traffic,
         )
 
         return venue
+
+    def _apply_besttime_refresh_price(self, venue: Venue, existing: "Venue | None") -> None:
+        """Set the served price tier on a refreshed venue from its BestTime price,
+        WITHOUT clobbering a Google-derived tier.
+
+        BestTime refresh rebuilds the Venue from scratch each cycle. If the venue
+        already carries a Google-derived tier (`price_level_source` in
+        google_enum/google_range with a real 1..4 value), preserve it and its raw
+        signals. Otherwise derive 1..4/NULL from the raw BestTime price (never 0).
+        """
+        if (
+            existing is not None
+            and existing.price_level_source in GOOGLE_SOURCES
+            and existing.price_level not in (None, 0)
+        ):
+            venue.price_level = existing.price_level
+            venue.price_level_source = existing.price_level_source
+            venue.price_range = existing.price_range
+            venue.google_price_level = existing.google_price_level
+            return
+        derived = derive_price_signal(None, None, venue.besttime_price_level)
+        venue.price_level = derived.price_level
+        venue.price_level_source = derived.source
 
     async def refresh_venues_data_by_venues_filter(
         self,
@@ -480,15 +523,19 @@ class VenuesRefresherService:
             )
 
             # Detect "new to our Redis state" before upsert so we can count
-            # it toward the monthly budget exactly once.
+            # it toward the monthly budget exactly once. Reuse the existing-venue
+            # read to preserve any Google-derived price tier across the refresh.
+            existing_venue = None
             was_new_to_redis = False
             if venue.venue_id:
                 try:
-                    was_new_to_redis = self.venue_dao.get_venue(venue.venue_id) is None
+                    existing_venue = self.venue_dao.get_venue(venue.venue_id)
                 except Exception:
                     # Be defensive: if we can't tell, assume new (it's only
                     # counter drift, BestTime is the source of truth).
-                    was_new_to_redis = True
+                    existing_venue = None
+                was_new_to_redis = existing_venue is None
+            self._apply_besttime_refresh_price(venue, existing_venue)
 
             try:
                 self.venue_dao.upsert_venue(venue)

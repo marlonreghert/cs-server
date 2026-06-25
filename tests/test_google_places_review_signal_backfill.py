@@ -180,8 +180,16 @@ class TestBackfillEndToEnd:
         assert upserted.price_level == 2  # unchanged
 
     async def test_skips_upsert_when_values_match_existing(self):
-        """Google returns the same numbers already on the Venue — no-op."""
-        venue = make_venue(rating=4.5, reviews=586, price_level=2)
+        """Google returns the same numbers already on the Venue — no-op. The
+        derived tier now also persists its source + raw enum, so a true no-op
+        requires those to already match too."""
+        venue = make_venue(
+            rating=4.5,
+            reviews=586,
+            price_level=2,
+            price_level_source="google_enum",
+            google_price_level="PRICE_LEVEL_MODERATE",
+        )
         details = GooglePlacesDetailsResponse(
             place_id="ChIJfake",
             business_status="OPERATIONAL",

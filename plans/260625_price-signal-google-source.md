@@ -193,6 +193,18 @@ DDL (described, not written here):
   derivation into one shared helper (service-level) so all three write paths
   (enrichment, BestTime refresh, add-venue) agree and the "never 0" rule is enforced
   in exactly one place.
+  **Execute-time correction (2026-06-25):** the plan's Evidence claim that add-venue
+  "set[s] `price_level` from a Google match" is FACTUALLY WRONG — all three add-venue
+  price write sites read BestTime (`NewVenueInfo.price_level` / `match.price_level`),
+  and the request's optional `place_id` was ignored. The add-venue scenario
+  nonetheless asserts `price_level_source = "google_range"`, which is unsatisfiable
+  without a Google signal. **User decision: expand scope** — when the request carries
+  a `place_id` and a Google client is configured, add-venue fetches Google Place
+  Details, feeds the enum + range into the shared helper (BestTime price as the step-3
+  fallback), and derives the tier/source. The Google path is OPTIONAL and
+  dependency-aware: no client or no `place_id` → fall back to BestTime through the
+  same helper (never 0). FLAG: this adds a Place Details ENTERPRISE-SKU call per
+  manual add when a `place_id` is supplied.
 - **BestTime refresh path.** In `app/services/venues_refresher_service.py`, persist
   the raw BestTime price into `besttime_price_level` (its own column) and feed it
   into the shared derivation as step 3. Do not let BestTime overwrite a Google-range
@@ -361,21 +373,23 @@ Manual or integration checks:
 - The price-relevant active inventory is backfilled with the corrected tier + range.
 
 ## Open Questions
-(Must be resolved before `/execute-feature`; they gate execute, not this plan.)
+(Resolved before `/execute-feature` on 2026-06-25; recorded here for the trail.)
 - **Final per-currency bucket thresholds and the exact robust statistic — for the
   enum-less FALLBACK path only.** Because the range bucket runs only when the enum
   is absent, thresholds are needed only for the currencies of enum-less venues, not
-  every currency in the DB (narrower scope than the original plan). Proposed: bucket
-  on the range midpoint (or `startPrice`/`min` when `endPrice` is unbounded) against
-  monotone BRL thresholds; the enum bands overlap so raw endpoints can't be used
-  directly. Numbers are unresolved.
-- **Unbounded `endPrice` handling.** Confirm `max = NULL` semantics end-to-end and
-  the bucketing rule when only `startPrice` is known ("more than X").
-- **Backfill cadence.** One-off re-source now vs folding price re-source into the
-  existing monthly enrichment cron (and the ENTERPRISE-SKU billing impact of each).
-- **`price_range` storage shape.** Single `jsonb` column vs discrete
-  `price_currency text` / `price_min numeric` / `price_max numeric` columns
-  (jsonb is simpler for the projection; discrete columns are queryable). Default
-  assumption for this plan: `jsonb`.
+  every currency in the DB (narrower scope than the original plan).
+  **Resolved: midpoint statistic.** Bucket on the range midpoint `(min+max)/2`, or
+  `min`/`startPrice` when `endPrice` is unbounded, against monotone BRL thresholds:
+  `tier 1: mid < 40`, `tier 2: 40 ≤ mid < 80`, `tier 3: 80 ≤ mid < 160`,
+  `tier 4: mid ≥ 160`. (Vasto BRL 80–200 → mid 140 → tier 3; min 180 unbounded →
+  tier 4.) Config-driven per-currency table in `app/config.py`; BRL only to start.
+- **Unbounded `endPrice` handling.** **Resolved (pinned by the feature file):**
+  `max = NULL` end-to-end; bucket on `startPrice`/`min` when `endPrice` is absent.
+- **Backfill cadence.** **Resolved: one-off runbook only.** No scheduler code lands
+  in this PR. Post-merge ops: RDS snapshot → manual `alembic upgrade head` (SSM) →
+  flip `google_places_enrichment_enabled` → run the one-off price backfill → flip
+  the flag back off. Documented in the PR body, not the diff.
+- **`price_range` storage shape.** **Resolved: single `jsonb` column** (plan
+  default; matches the feature's `{currency, min, max}` assertions).
 - **Optional CHECK constraint** `price_level IS NULL OR price_level BETWEEN 1 AND 4`
-  — adopt as a hard guard, or rely on the derivation helper alone?
+  — **Resolved: adopt** as a hard DB guard, added AFTER the `0 → NULL` data step.

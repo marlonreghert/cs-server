@@ -57,7 +57,9 @@ _WEEKLY = "besttime.weekly_forecast"
 _VENUE_SELECT = (
     "SELECT v.venue_id, v.venue_name, "
     "a.raw_text AS venue_address, a.lat AS venue_lat, a.lng AS venue_lng, "
-    "v.venue_type, v.price_level, v.rating, v.reviews, v.forecast, v.processed, "
+    "v.venue_type, v.price_level, v.price_range, v.google_price_level, "
+    "v.besttime_price_level, v.price_level_source, "
+    "v.rating, v.reviews, v.forecast, v.processed, "
     "v.priority, v.lifecycle_status, v.deprecated_at, v.deprecated_reason, "
     "v.deprecated_source, v.google_business_status, v.extra "
     "FROM venues.venue v LEFT JOIN venues.address a ON a.venue_id = v.venue_id"
@@ -112,19 +114,30 @@ class RdsVenueStore:
         # pre-drop window) is omitted from the column list, never passed as NULL,
         # so the relax→drop sequence stays clean.
         _, residual = split_venue_for_storage(venue)
+        price_range = (
+            json.dumps(venue.price_range.model_dump(by_alias=True))
+            if venue.price_range is not None
+            else None
+        )
         with self.engine.begin() as conn:
             conn.execute(text(
                 "INSERT INTO venues.venue (venue_id, venue_name, "
-                "venue_type, price_level, rating, reviews, priority, "
+                "venue_type, price_level, price_range, google_price_level, "
+                "besttime_price_level, price_level_source, rating, reviews, priority, "
                 "forecast, processed, lifecycle_status, deprecated_reason, "
                 "deprecated_source, deprecated_at, google_business_status, extra, updated_at) "
                 "VALUES (:venue_id, :venue_name, "
-                ":venue_type, :price_level, :rating, :reviews, :priority, :forecast, :processed, "
+                ":venue_type, :price_level, CAST(:price_range AS jsonb), :google_price_level, "
+                ":besttime_price_level, :price_level_source, :rating, :reviews, :priority, "
+                ":forecast, :processed, "
                 ":lifecycle_status, :deprecated_reason, :deprecated_source, :deprecated_at, "
                 ":google_business_status, CAST(:extra AS jsonb), now()) "
                 "ON CONFLICT (venue_id) DO UPDATE SET "
                 "venue_name=excluded.venue_name, "
                 "venue_type=excluded.venue_type, price_level=excluded.price_level, "
+                "price_range=excluded.price_range, google_price_level=excluded.google_price_level, "
+                "besttime_price_level=excluded.besttime_price_level, "
+                "price_level_source=excluded.price_level_source, "
                 "rating=excluded.rating, reviews=excluded.reviews, priority=excluded.priority, "
                 "forecast=excluded.forecast, "
                 "processed=excluded.processed, lifecycle_status=excluded.lifecycle_status, "
@@ -134,7 +147,12 @@ class RdsVenueStore:
             ), {
                 "venue_id": venue.venue_id, "venue_name": venue.venue_name,
                 "venue_type": venue.venue_type,
-                "price_level": venue.price_level, "rating": venue.rating,
+                "price_level": venue.price_level,
+                "price_range": price_range,
+                "google_price_level": venue.google_price_level,
+                "besttime_price_level": venue.besttime_price_level,
+                "price_level_source": venue.price_level_source,
+                "rating": venue.rating,
                 "reviews": venue.reviews, "priority": venue.priority,
                 "forecast": venue.forecast,
                 "processed": venue.processed, "lifecycle_status": venue.lifecycle_status,

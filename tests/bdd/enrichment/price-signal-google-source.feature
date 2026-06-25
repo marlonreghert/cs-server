@@ -1,4 +1,3 @@
-@wip
 Feature: Google priceLevel primary, priceRange fallback for the price tier
   As the price pipeline
   I must derive the served price tier from Google's locale-normalized priceLevel
@@ -88,4 +87,5 @@ Feature: Google priceLevel primary, priceRange fallback for the price tier
     When the venue is created
     Then its served price_level resolves to an expensive tier of 3 or 4 from the range
     And its served price_level is not 0
+    And its price_range is persisted as currency "BRL" with min 80 and max 200
     And its price_level_source is recorded as "google_range"
