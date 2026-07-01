@@ -380,6 +380,8 @@ class Container:
             budget_service=self.venue_budget_service,
             redis_client=redis_internal_client,
             google_places_client=self.google_places_api,
+            # Inline Google enrichment at add time (shares the handler's DAO).
+            google_places_enrichment_service=self.google_places_enrichment_service,
         )
 
         # Expose the budget service to the refresher so discovery can

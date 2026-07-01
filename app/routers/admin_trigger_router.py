@@ -68,6 +68,11 @@ JOB_REGISTRY = {
         "description": "Enrich venues with Google Places vibe attributes and business status",
         "default_config": {"force_refresh": False},
     },
+    "google_places_backfill": {
+        "label": "Google Places Pending Backfill",
+        "description": "One-time, idempotent Google-only enrichment of PENDING venues "
+        "(active, no vibe attributes). Skips enriched + no-match venues; no BestTime call.",
+    },
     "photos": {
         "label": "Photo Enrichment",
         "description": "Fetch venue photos from Google Places API",
@@ -132,6 +137,13 @@ async def _run_job(job_name: str, config: Optional[dict] = None):
         if c.google_places_enrichment_service is None:
             raise ValueError("Google Places API not configured")
         await c.google_places_enrichment_service.enrich_all_venues(force_refresh=force)
+    elif job_name == "google_places_backfill":
+        if c.google_places_enrichment_service is None:
+            raise ValueError("Google Places API not configured")
+        summary = await c.google_places_enrichment_service.enrich_pending_venues(
+            limit=cfg.get("limit")
+        )
+        logger.info(f"[AdminTrigger] google_places_backfill summary: {summary}")
     elif job_name == "photos":
         if c.photo_enrichment_service is None:
             raise ValueError("Photo enrichment not configured (missing Google Places API key)")
@@ -180,7 +192,7 @@ async def list_jobs():
     for name, info in JOB_REGISTRY.items():
         # Check if service is available
         available = True
-        if name == "google_places" and _container.google_places_enrichment_service is None:
+        if name in ("google_places", "google_places_backfill") and _container.google_places_enrichment_service is None:
             available = False
         elif name == "photos" and _container.photo_enrichment_service is None:
             available = False
