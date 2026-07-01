@@ -349,6 +349,10 @@ class Container:
                 "force_update": validate_force_update_config,
             },
         )
+        # The serve handler resolves the live-busyness freshness window through the
+        # admin-config mirror; wire it now that the service exists (venue_handler
+        # was built above, before admin_config_service).
+        self.venue_handler.admin_config_service = self.admin_config_service
 
         # Ex2: single-rule eligibility editing over admin.eligibility_rule rows;
         # rows are truth, the Redis mirror is reassembled from them on every write.

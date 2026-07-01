@@ -79,11 +79,11 @@ it is both available AND fresh:
 
 The effective window is resolved per request:
 `admin_config:live_freshness_max_age_minutes` (integer minutes) if present and
-in-bounds, else `settings.live_freshness_max_age_minutes`. **Default 1440
-minutes (24h)** — admin-tunable, no redeploy required.
+in-bounds, else `settings.live_freshness_max_age_minutes`. **Default 15
+minutes** (~3 missed 5-min refresh cycles) — admin-tunable, no redeploy required.
 
 ## Implementation Approach
-- **Settings:** add `live_freshness_max_age_minutes: int = 1440` to
+- **Settings:** add `live_freshness_max_age_minutes: int = 15` to
   `app/config.py`. Document it in `config.example.json` / `.env.example` if those
   enumerate settings.
 - **Threshold resolution:** read `admin_config:live_freshness_max_age_minutes`
@@ -112,7 +112,7 @@ minutes (24h)** — admin-tunable, no redeploy required.
   venues whose live payload is stale. Field is already `Optional[int]`
   (`app/models/venue.py:191`); the wire contract is unchanged. Verbose payload
   unchanged.
-- **Config:** new setting `live_freshness_max_age_minutes` (default 1440) + new
+- **Config:** new setting `live_freshness_max_age_minutes` (default 15) + new
   admin key `admin_config:live_freshness_max_age_minutes`.
 - **Persistence / migration:** None.
 
@@ -154,7 +154,7 @@ Pytest unit tests:
 
 Manual or integration checks:
 - Against a real Redis, write a `live_forecast_v1:<id>` whose `venue_current_gmttime`
-  is > 24h old, GET `/v1/venues/nearby`, and assert `venue_live_busyness` is null
+  is > 15 min old, GET `/v1/venues/nearby`, and assert `venue_live_busyness` is null
   while `weekly_forecast` remains.
 
 ## Acceptance Criteria
@@ -163,11 +163,11 @@ Manual or integration checks:
   forecast estimate with `is_forecast=true`.
 - A fresh cached live forecast is served with its live `venue_live_busyness`
   unchanged from today.
-- The window is 1440 minutes by default and overridable via
+- The window is 15 minutes by default and overridable via
   `admin_config:live_freshness_max_age_minutes` without redeploy.
 - Missing/unparseable gmttime degrades to forecast and is counted, never 500s.
 - A Prometheus counter exposes served vs stale-suppressed vs unparseable outcomes.
 
 ## Open Questions
-- None. (Threshold default 24h, admin-tunable with settings default, cs-server-only
+- None. (Threshold default 15 minutes, admin-tunable with settings default, cs-server-only
   with the vibes_bot dashboard left unchanged — all confirmed with the user.)
