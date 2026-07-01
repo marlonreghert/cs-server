@@ -55,11 +55,13 @@ def _find(context):
 
 
 # ── Background ────────────────────────────────────────────────────────────────
-@given("the live freshness window default is {minutes:d} minutes")
-def step_default_window(context, minutes):
-    # Documentation of the settings default (config.live_freshness_max_age_minutes);
-    # no override is set, so scenarios without an admin override use this window.
-    context.expected_default_minutes = minutes
+@given("the live refresh interval is set to {minutes:d} minutes")
+def step_set_refresh_interval(context, minutes):
+    # The freshness window is derived as factor x this interval, so setting it via
+    # the same admin key the refresher reads keeps the gate and refresher in sync.
+    context.admin_config_service.set(
+        "live_refresh_minutes", {"minutes": minutes}, updated_by="test"
+    )
 
 
 @given('the current time is "{ts}" UTC')

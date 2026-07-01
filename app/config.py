@@ -128,13 +128,16 @@ class Settings(BaseSettings):
     venues_live_refresh_minutes: int = 5
     weekly_forecast_cron: str = "0 0 * * 0"  # Sundays at 00:00
 
-    # Serve-time live-busyness freshness gate. A cached live value whose payload
-    # venue_current_gmttime is older than this window is suppressed at serve time
-    # (venue_live_busyness omitted) so vibes_bot falls back to the forecast
-    # estimate. 15 min ~= 3 missed 5-min refresh cycles, so a real BestTime
-    # outage flips to forecast within minutes without tripping on one blip.
-    # Admin-overridable at runtime via admin_config:live_freshness_max_age_minutes.
-    live_freshness_max_age_minutes: int = 15
+    # Serve-time live-busyness freshness gate. The stale window is DERIVED from
+    # the live refresh cadence so the two never desync: a cached live value is
+    # "stale" once older than live_freshness_refresh_factor × the effective
+    # refresh interval (admin_config:live_refresh_minutes, else
+    # venues_live_refresh_minutes above), floored at live_freshness_min_minutes to
+    # absorb BestTime/clock skew at short intervals. A slower refresh therefore
+    # auto-widens the window (venues get re-touched well inside it); suppressed
+    # venues fall back to the forecast estimate in vibes_bot.
+    live_freshness_refresh_factor: float = 2.0
+    live_freshness_min_minutes: int = 5
 
     # Venue discovery (catalog refresh + venue-filter). Disabled by default so
     # discovery does not spend BestTime's scarce monthly unique-venue cap; the

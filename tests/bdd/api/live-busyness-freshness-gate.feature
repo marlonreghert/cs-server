@@ -1,57 +1,64 @@
-Feature: Suppress stale live busyness at serve time
-  The nearby-venues API must not present an outdated live busyness value as if it
-  were current. A cached live forecast is refreshed periodically, but a BestTime
-  outage or a stalled refresh job can leave the last value in the cache
-  indefinitely. When the underlying live payload is older than a configurable
-  freshness window, the API must omit the live busyness value so the downstream
-  serving layer falls back to the forecast estimate instead of a stale number.
-  Freshness is derived from the live payload's own venue_current_gmttime; the
-  window defaults to 15 minutes and is overridable at runtime via the admin
-  config key "live_freshness_max_age_minutes" without a redeploy.
+Feature: Derive the live-busyness stale window from the refresh cadence
+  The nearby-venues API must not present outdated live busyness as current, but it
+  must also not flag a venue stale merely because it is between refresh cycles. The
+  freshness window is therefore DERIVED from the live refresh cadence: a cached
+  value is stale once older than 2x the effective refresh interval
+  (admin_config:live_refresh_minutes, else the settings default of 5 minutes),
+  floored at 5 minutes. A slower refresh automatically widens the window, so a
+  venue refreshed on schedule always serves as live and only a venue that has
+  missed a full cycle (a genuinely stalled refresh) is suppressed to forecast.
 
   Background:
-    Given the live freshness window default is 15 minutes
-    And the current time is "2026-07-01 12:00:00" UTC
+    Given the current time is "2026-07-01 12:00:00" UTC
 
-  Scenario: Serve a fresh live busyness value unchanged
+  Scenario: Default cadence — a 5-minute refresh yields a 10-minute window, serve within it
     Given a venue has a cached live forecast that is available
-    And the live forecast venue_current_gmttime is 5 minutes old
+    And the live forecast venue_current_gmttime is 8 minutes old
     When the nearby-venues endpoint is queried in minified mode
     Then the venue response must include "venue_live_busyness" from the live forecast
     And the serve metric outcome "served" must be incremented for that venue
 
-  Scenario: Suppress a live busyness value older than the freshness window
+  Scenario: Default cadence — a value past the 10-minute window is suppressed
     Given a venue has a cached live forecast that is available
-    And the live forecast venue_current_gmttime is 30 minutes old
+    And the live forecast venue_current_gmttime is 12 minutes old
     And the venue has a cached weekly forecast for the current day
     When the nearby-venues endpoint is queried in minified mode
     Then the venue response "venue_live_busyness" must be null
     And the venue response must still include the "weekly_forecast"
     And the serve metric outcome "suppressed_stale" must be incremented for that venue
 
-  Scenario: Treat a payload exactly at the window boundary as stale
+  Scenario: A slower refresh widens the window so mid-cycle values stay live
+    Given the live refresh interval is set to 15 minutes
+    And a venue has a cached live forecast that is available
+    And the live forecast venue_current_gmttime is 25 minutes old
+    When the nearby-venues endpoint is queried in minified mode
+    Then the venue response must include "venue_live_busyness" from the live forecast
+    And the serve metric outcome "served" must be incremented for that venue
+
+  Scenario: A value beyond the widened window is genuinely stale
+    Given the live refresh interval is set to 15 minutes
+    And a venue has a cached live forecast that is available
+    And the live forecast venue_current_gmttime is 40 minutes old
+    When the nearby-venues endpoint is queried in minified mode
+    Then the venue response "venue_live_busyness" must be null
+    And the serve metric outcome "suppressed_stale" must be incremented for that venue
+
+  Scenario: The window is floored so a very short cadence tolerates clock skew
+    Given the live refresh interval is set to 1 minutes
+    And a venue has a cached live forecast that is available
+    And the live forecast venue_current_gmttime is 4 minutes old
+    When the nearby-venues endpoint is queried in minified mode
+    Then the venue response must include "venue_live_busyness" from the live forecast
+
+  Scenario: Boundary — a value exactly at the window is stale
     Given a venue has a cached live forecast that is available
-    And the live forecast venue_current_gmttime is exactly 15 minutes old
+    And the live forecast venue_current_gmttime is exactly 10 minutes old
     When the nearby-venues endpoint is queried in minified mode
     Then the venue response "venue_live_busyness" must be null
 
-  Scenario: Suppress a live value whose timestamp cannot be parsed
+  Scenario: A value with an unparseable timestamp is suppressed
     Given a venue has a cached live forecast that is available
     And the live forecast venue_current_gmttime is not a parseable timestamp
     When the nearby-venues endpoint is queried in minified mode
     Then the venue response "venue_live_busyness" must be null
     And the serve metric outcome "suppressed_unparseable" must be incremented for that venue
-
-  Scenario: Apply a tighter admin-overridden freshness window within the request
-    Given the admin config "live_freshness_max_age_minutes" is set to 5
-    And a venue has a cached live forecast that is available
-    And the live forecast venue_current_gmttime is 10 minutes old
-    When the nearby-venues endpoint is queried in minified mode
-    Then the venue response "venue_live_busyness" must be null
-
-  Scenario: Fall back to the default window when the admin override is invalid
-    Given the admin config "live_freshness_max_age_minutes" is set to "not-a-number"
-    And a venue has a cached live forecast that is available
-    And the live forecast venue_current_gmttime is 5 minutes old
-    When the nearby-venues endpoint is queried in minified mode
-    Then the venue response must include "venue_live_busyness" from the live forecast

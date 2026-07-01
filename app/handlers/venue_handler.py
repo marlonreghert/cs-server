@@ -25,7 +25,10 @@ from app.models import (
     LiveForecastResponse,
     WeekRawDay,
 )
-from app.metrics import VENUE_SERVE_LIVE_BUSYNESS_TOTAL
+from app.metrics import (
+    VENUE_SERVE_LIVE_BUSYNESS_TOTAL,
+    VENUE_SERVE_LIVE_FORECAST_AGE_MINUTES,
+)
 from app.services.live_freshness import (
     classify_live_freshness,
     resolve_max_age_minutes,
@@ -287,15 +290,23 @@ class VenueHandler:
                 m.live_forecast is not None
                 and m.live_forecast.analysis.venue_live_busyness_available
             ):
-                verdict = classify_live_freshness(m.live_forecast, now_utc, max_age)
+                verdict, age_min = classify_live_freshness(
+                    m.live_forecast, now_utc, max_age
+                )
                 if verdict == FRESH:
                     live_busyness = m.live_forecast.analysis.venue_live_busyness
                     VENUE_SERVE_LIVE_BUSYNESS_TOTAL.labels(outcome="served").inc()
+                    VENUE_SERVE_LIVE_FORECAST_AGE_MINUTES.labels(
+                        outcome="served"
+                    ).observe(age_min)
                 elif verdict == STALE:
                     VENUE_SERVE_LIVE_BUSYNESS_TOTAL.labels(outcome="suppressed_stale").inc()
+                    VENUE_SERVE_LIVE_FORECAST_AGE_MINUTES.labels(
+                        outcome="suppressed_stale"
+                    ).observe(age_min)
                     logger.debug(
                         f"[VenueHandler] Suppressed stale live busyness for "
-                        f"{m.venue.venue_id} (gmttime="
+                        f"{m.venue.venue_id} ({age_min:.1f} min old, gmttime="
                         f"{m.live_forecast.venue_info.venue_current_gmttime!r})"
                     )
                 else:  # UNPARSEABLE
