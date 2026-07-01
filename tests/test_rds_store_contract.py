@@ -219,3 +219,44 @@ def test_admin_config_round_trip(store):
 
     store.delete_admin_config(key)
     assert store.get_admin_config(key) is None
+
+
+def test_geo_fence_round_trip(store):
+    # Default box is seeded (fake in __init__; real by migration 0014).
+    box = store.get_geo_fence()
+    assert set(box) >= {"min_lat", "max_lat", "min_lng", "max_lng", "enabled"}
+    assert box["min_lat"] < box["max_lat"] and box["min_lng"] < box["max_lng"]
+
+    # Upsert the single row (id=1) and read it back — widened + disabled.
+    new_box = {
+        "min_lat": -9.0, "max_lat": -7.0,
+        "min_lng": -36.0, "max_lng": -34.0,
+        "enabled": False,
+    }
+    store.set_geo_fence(new_box, updated_by="contract-test")
+    got = store.get_geo_fence()
+    assert got["min_lat"] == -9.0 and got["max_lat"] == -7.0
+    assert got["min_lng"] == -36.0 and got["max_lng"] == -34.0
+    assert got["enabled"] is False
+
+    # Restore the default (enabled) box so a shared scratch DB is not left disabled.
+    from app.services.venue_eligibility import DEFAULT_GEO_FENCE
+
+    store.set_geo_fence(dict(DEFAULT_GEO_FENCE), updated_by="contract-test")
+
+    # count_geo_excluded_active_venues() is a separate hand-written SQL predicate
+    # (observability only); pin it to the box semantics. Seed one in-box and one
+    # out-of-box active venue and assert the count rises by exactly one. Uses a
+    # delta (the shared scratch DB may hold other venues) so it is order-independent.
+    before = store.count_geo_excluded_active_venues()
+    in_vid, out_vid = _vid(), _vid()
+    store.upsert_venue(_venue(in_vid))  # _venue defaults to -8.05,-34.88 (inside box)
+    store.upsert_venue(Venue(
+        venue_id=out_vid, venue_name="Bar Paulista", venue_address="a",
+        venue_lat=-23.55, venue_lng=-46.63, venue_type="BAR",  # São Paulo, outside box
+    ))
+    after = store.count_geo_excluded_active_venues()
+    assert after - before == 1, (before, after)
+    # Soft-deleting the out-of-box venue drops it back out of the count (active-only).
+    store.soft_delete_venue(out_vid, "test_cleanup", "contract-test")
+    assert store.count_geo_excluded_active_venues() == before

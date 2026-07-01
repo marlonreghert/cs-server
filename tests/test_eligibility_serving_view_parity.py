@@ -22,10 +22,19 @@ from app.models.venue_category import (
     _GOOGLE_TO_CATEGORY,
     resolve_category,
 )
-from app.services.venue_eligibility import EligibilityConfig, evaluate
+from app.services.venue_eligibility import (
+    DEFAULT_GEO_FENCE,
+    EligibilityConfig,
+    evaluate,
+    geo_excluded,
+)
 from tests.rds_fake import InMemoryRdsVenueStore
 
 _VA = "google_places.vibe_attributes"
+
+# Inside the default Recife/Olinda box; outside it (São Paulo).
+_IN_LAT, _IN_LNG = -8.05, -34.88
+_OUT_LAT, _OUT_LNG = -23.55, -46.63
 
 
 def _store_kinds():
@@ -47,28 +56,46 @@ def _vid() -> str:
     return f"pv_{uuid.uuid4().hex[:12]}"
 
 
-# (label, venue_name, besttime_type, google_type, expected_eligible)
+# (label, venue_name, besttime_type, google_type, lat, lng, expected_eligible)
 # Every branch of evaluate(): empty name, blocked google/besttime, hard/ambiguous
-# keyword +/- good-category, labeled vs unlabeled, and plain-eligible.
+# keyword +/- good-category, labeled vs unlabeled, plain-eligible — PLUS the geo
+# dimension: an eligible venue outside the box is excluded; missing coords are
+# fail-open (still servable). Serving membership = (not soft_deletable) AND (not
+# geo_excluded); the two axes are orthogonal, so the geo fixtures pair
+# plain-eligible names with out-of-box / null coords.
 _FIXTURES = [
-    ("empty_name",            "",                  None,   None,             False),
-    ("blocked_google_type",   "Drogasil",          None,   "drugstore",      False),
-    ("blocked_besttime_type", "Some Parish",       "CHURCH", None,           False),
-    ("hard_kw_no_category",   "Drogaria Central",  None,   None,             False),
-    ("hard_kw_good_google",   "Farmácia Bar",      None,   "bar",            True),
-    ("ambig_kw_unlabeled",    "Bar da Praça",      None,   None,             True),
-    ("ambig_kw_labeled_bad",  "Mercado Central",   None,   "amusement_park", False),
-    ("ambig_kw_good_besttime","Bar do Mercado",    "BAR",  None,             True),
-    ("plain_bar",             "Boteco do Zé",      "BAR",  None,             True),
-    ("unlabeled_unknown",     "Cantina XYZ",       None,   None,             True),
+    ("empty_name",            "",                  None,   None,             _IN_LAT,  _IN_LNG,  False),
+    ("blocked_google_type",   "Drogasil",          None,   "drugstore",      _IN_LAT,  _IN_LNG,  False),
+    ("blocked_besttime_type", "Some Parish",       "CHURCH", None,           _IN_LAT,  _IN_LNG,  False),
+    ("hard_kw_no_category",   "Drogaria Central",  None,   None,             _IN_LAT,  _IN_LNG,  False),
+    ("hard_kw_good_google",   "Farmácia Bar",      None,   "bar",            _IN_LAT,  _IN_LNG,  True),
+    ("ambig_kw_unlabeled",    "Bar da Praça",      None,   None,             _IN_LAT,  _IN_LNG,  True),
+    ("ambig_kw_labeled_bad",  "Mercado Central",   None,   "amusement_park", _IN_LAT,  _IN_LNG,  False),
+    ("ambig_kw_good_besttime","Bar do Mercado",    "BAR",  None,             _IN_LAT,  _IN_LNG,  True),
+    ("plain_bar",             "Boteco do Zé",      "BAR",  None,             _IN_LAT,  _IN_LNG,  True),
+    ("unlabeled_unknown",     "Cantina XYZ",       None,   None,             _IN_LAT,  _IN_LNG,  True),
+    # ── geo dimension ────────────────────────────────────────────────────────
+    ("plain_bar_outside_box", "Boteco Fora",       "BAR",  None,             _OUT_LAT, _OUT_LNG, False),
+    ("good_google_outside",   "Bar Paulista",      None,   "bar",            _OUT_LAT, _OUT_LNG, False),
+    ("plain_bar_no_coords",   "Boteco Sem Coord",  "BAR",  None,             None,     None,     True),
 ]
 
 
-def _seed(store, vid, name, btype, gtype):
+def _seed(store, vid, name, btype, gtype, lat=_IN_LAT, lng=_IN_LNG):
+    # The Venue model requires float coords; venues.address.lat/lng can be NULL. To
+    # seed a coord-less venue, upsert placeholder coords then null the address row
+    # (mirrors the real LEFT JOIN yielding NULL lat/lng — fail-open).
     store.upsert_venue(Venue(
         venue_id=vid, venue_name=name, venue_address="a",
-        venue_lat=-8.05, venue_lng=-34.88, venue_type=btype,
+        venue_lat=lat if lat is not None else 0.0,
+        venue_lng=lng if lng is not None else 0.0,
+        venue_type=btype,
     ))
+    if lat is None or lng is None:
+        addr = store.get_address(vid)
+        if addr is not None:
+            addr["lat"] = lat
+            addr["lng"] = lng
     if gtype is not None:
         store.upsert_enrichment(
             _VA, vid, {"venue_id": vid, "google_primary_type": gtype, "google_place_id": "p"},
@@ -76,16 +103,28 @@ def _seed(store, vid, name, btype, gtype):
         )
 
 
-@pytest.mark.parametrize("label,name,btype,gtype,expected", _FIXTURES, ids=[f[0] for f in _FIXTURES])
-def test_view_matches_evaluate(store, label, name, btype, gtype, expected):
-    # The reference: evaluate() with the default block-list. The real view reads
-    # the migration-seeded default rules (equivalent to defaults); the fake derives
-    # defaults from its empty rule set.
-    reference_eligible = not evaluate(name, btype, gtype, EligibilityConfig.defaults()).soft_deletable
-    assert reference_eligible is expected, f"fixture {label} mislabeled vs evaluate()"
+@pytest.mark.parametrize(
+    "label,name,btype,gtype,lat,lng,expected", _FIXTURES, ids=[f[0] for f in _FIXTURES]
+)
+def test_view_matches_evaluate(store, label, name, btype, gtype, lat, lng, expected):
+    # venues.address.lat/lng are NOT NULL in real Postgres, so a coord-less venue
+    # cannot be represented there — the view's `lat IS NULL` fail-open branch is a
+    # defensive path (real data always has coords). Exercise it on the fake only.
+    if (lat is None or lng is None) and hasattr(store, "engine"):
+        pytest.skip("missing-coords fixture is fake-store only (address lat/lng NOT NULL in RDS)")
+
+    # The reference is the FULL serving predicate: (not soft_deletable) AND (not
+    # geo_excluded) against the default box. The real view reads the migration-
+    # seeded default rules + default geo_fence row; the fake derives both from its
+    # defaults. Geo is a separate axis, never folded into evaluate().soft_deletable.
+    not_soft_deletable = not evaluate(
+        name, btype, gtype, EligibilityConfig.defaults()
+    ).soft_deletable
+    reference_eligible = not_soft_deletable and not geo_excluded(lat, lng, DEFAULT_GEO_FENCE)
+    assert reference_eligible is expected, f"fixture {label} mislabeled vs evaluate()+geo"
 
     vid = _vid()
-    _seed(store, vid, name, btype, gtype)
+    _seed(store, vid, name, btype, gtype, lat, lng)
     servable = set(store.list_servable_venue_ids())
     assert (vid in servable) is expected, (
         f"{label}: view says servable={vid in servable}, expected {expected}"

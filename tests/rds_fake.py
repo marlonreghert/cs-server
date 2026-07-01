@@ -57,6 +57,10 @@ class InMemoryRdsVenueStore:
         self.admin_config: dict[str, dict] = {}
         # Ex2: admin.eligibility_rule — (rule_type, value) -> metadata.
         self.eligibility_rules: dict[tuple[str, str], dict] = {}
+        # admin.geo_fence (single row): the Recife/Olinda serve-time bbox. Seeded
+        # with the default so the fake mirrors the migration-seeded real table.
+        from app.services.venue_eligibility import DEFAULT_GEO_FENCE
+        self.geo_fence: dict = dict(DEFAULT_GEO_FENCE)
         self._down = False
 
     # ── test controls ────────────────────────────────────────────────────────
@@ -201,10 +205,12 @@ class InMemoryRdsVenueStore:
         from app.services.venue_eligibility import (
             evaluate as _evaluate,
             eligibility_config_from_rules as _config_from_rules,
+            geo_excluded as _geo_excluded,
         )
 
         self._guard()
         config = _config_from_rules(self.list_eligibility_rules())
+        box = self.geo_fence
         out = []
         for vid, row in self.venues.items():
             if row.get("lifecycle_status", "active") != "active":
@@ -215,10 +221,19 @@ class InMemoryRdsVenueStore:
                 gtype = va.get("google_primary_type") or (
                     va.get("payload") or {}
                 ).get("google_primary_type")
-            if not _evaluate(
+            if _evaluate(
                 row.get("venue_name"), row.get("venue_type"), gtype, config
             ).soft_deletable:
-                out.append(vid)
+                continue
+            # Geo-fence is a SEPARATE, reversible predicate (third state): drop an
+            # out-of-box venue from serving without soft-deleting it. Coords come
+            # from venues.address (mirrors the SQL view's LEFT JOIN). Mirrors the
+            # real serving.eligible_venue geo predicate; parity is pinned by
+            # tests/test_eligibility_serving_view_parity.py.
+            addr = self.addresses.get(vid) or {}
+            if _geo_excluded(addr.get("lat"), addr.get("lng"), box):
+                continue
+            out.append(vid)
         return out
 
     def list_servable_venue_ids_by_priority(self, limit: int) -> list[str]:
@@ -408,6 +423,34 @@ class InMemoryRdsVenueStore:
         self.eligibility_rules = {
             (rt, v): {"updated_by": updated_by, "updated_at": _now()} for rt, v in rules
         }
+
+    # ── geo-fence (admin.geo_fence single row; read by the serving view) ───────
+    def get_geo_fence(self) -> dict:
+        self._guard()
+        return dict(self.geo_fence)
+
+    def set_geo_fence(self, box: dict, updated_by=None) -> None:
+        """Persist the validated Recife/Olinda box (min/max lat/lng + enabled).
+        Mirrors an UPDATE of the single admin.geo_fence row."""
+        self._guard()
+        self.geo_fence = dict(box)
+
+    def count_geo_excluded_active_venues(self) -> int:
+        """Active venues with coordinates outside the enabled geo-fence box (the
+        reversible serve-time exclusion). Missing coords / a disabled box count as
+        zero (fail-open). Observability only — mirrors the real store's COUNT."""
+        self._guard()
+        from app.services.venue_eligibility import geo_excluded as _geo_excluded
+
+        box = self.geo_fence
+        count = 0
+        for vid, row in self.venues.items():
+            if row.get("lifecycle_status", "active") != "active":
+                continue
+            addr = self.addresses.get(vid) or {}
+            if _geo_excluded(addr.get("lat"), addr.get("lng"), box):
+                count += 1
+        return count
 
     def hot_like_event_count(self, venue_id) -> int:
         return sum(1 for e in self.hot_like_events if e["venue_id"] == venue_id)

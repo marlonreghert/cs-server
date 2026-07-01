@@ -34,6 +34,9 @@ from app.models.venue_category import resolve_category
 logger = logging.getLogger(__name__)
 
 ADMIN_CONFIG_ELIGIBILITY_KEY = "admin_config:venue_eligibility"
+# Redis mirror of the admin.geo_fence box (RDS is the durable truth the SQL view
+# reads). This mirror serves the admin GET + parity reads only.
+ADMIN_CONFIG_GEOFENCE_KEY = "admin_config:venue_geofence"
 
 # Source label used on every soft-delete this module drives.
 ELIGIBILITY_SOURCE = "eligibility_filter"
@@ -43,13 +46,30 @@ REASON_EMPTY_NAME = "ineligible_empty_name"
 REASON_NAME_KEYWORD = "ineligible_name_keyword"
 REASON_BESTTIME_TYPE = "ineligible_besttime_type"
 REASON_GOOGLE_TYPE = "ineligible_google_type"
+# Geo-fence exclusion is a THIRD state: not-servable but never soft-deletable
+# (reversible serve-time filter). It is applied as a separate predicate
+# (`geo_excluded`), NOT folded into evaluate()'s eligible/soft_deletable axis.
+REASON_GEO = "ineligible_geo"
 
 ALL_REASONS = (
     REASON_EMPTY_NAME,
     REASON_NAME_KEYWORD,
     REASON_BESTTIME_TYPE,
     REASON_GOOGLE_TYPE,
+    REASON_GEO,
 )
+
+# ── Recife/Olinda metro geo-fence (default seeded box) ───────────────────────
+# A venue is served only if its coordinates fall inside this box (fail-open on
+# missing coords). Confirmed default box; admin-editable via admin.geo_fence + the
+# Redis mirror. The SQL serving view enforces the same predicate in parity.
+DEFAULT_GEO_FENCE: dict = {
+    "min_lat": -8.30,
+    "max_lat": -7.85,
+    "min_lng": -35.10,
+    "max_lng": -34.80,
+    "enabled": True,
+}
 
 # ── BestTime types that must never reach clients ─────────────────────────────
 DEFAULT_BLOCKED_VENUE_TYPES: set[str] = {
@@ -413,3 +433,99 @@ def eligibility_config_from_rules(
     return EligibilityConfig.from_dict(
         assemble_eligibility_blob(rules), from_admin_override=from_admin_override
     )
+
+
+# ── Recife-metro geo-fence: a separate, reversible serve-time predicate ───────
+# Geo-exclusion is intentionally NOT part of evaluate()/soft_deletable. Serving
+# membership = (not evaluate().soft_deletable) AND (not geo_excluded(...)). Keeping
+# it separate preserves the "never irreversibly hide a real bar" policy: an
+# out-of-box venue is dropped from serving but never soft-deleted.
+_BOX_KEYS = ("min_lat", "max_lat", "min_lng", "max_lng")
+
+
+def validate_geo_fence(data: dict) -> dict:
+    """Validate an admin geo-fence payload and return a normalized box dict.
+
+    Requires numeric min_lat/max_lat/min_lng/max_lng with lat in [-90, 90], lng in
+    [-180, 180], and min < max on both axes. `enabled` defaults to True. Raises
+    ValueError on any invalid field so the admin endpoint can reject the write and
+    leave the active box unchanged.
+    """
+    if not isinstance(data, dict):
+        raise ValueError("geo-fence must be a JSON object")
+
+    box: dict = {}
+    for key in _BOX_KEYS:
+        if key not in data or data[key] is None:
+            raise ValueError(f"{key} is required")
+        value = data[key]
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError(f"{key} must be a number")
+        box[key] = float(value)
+
+    for lat_key in ("min_lat", "max_lat"):
+        if not (-90.0 <= box[lat_key] <= 90.0):
+            raise ValueError(f"{lat_key} must be between -90 and 90")
+    for lng_key in ("min_lng", "max_lng"):
+        if not (-180.0 <= box[lng_key] <= 180.0):
+            raise ValueError(f"{lng_key} must be between -180 and 180")
+    if box["min_lat"] >= box["max_lat"]:
+        raise ValueError("min_lat must be less than max_lat")
+    if box["min_lng"] >= box["max_lng"]:
+        raise ValueError("min_lng must be less than max_lng")
+
+    enabled = data.get("enabled", True)
+    if not isinstance(enabled, bool):
+        raise ValueError("enabled must be a boolean")
+    box["enabled"] = enabled
+    return box
+
+
+def geo_excluded(lat, lng, box: Optional[dict]) -> bool:
+    """True when a venue's coordinates place it OUTSIDE the enabled geo-fence box.
+
+    Fail-open: a missing box, a disabled box, or missing coordinates never exclude
+    (mirrors the reversible policy and the SQL view's fail-open LEFT JOIN). The box
+    keys are min_lat/max_lat/min_lng/max_lng/enabled.
+    """
+    if not box or not box.get("enabled", True):
+        return False
+    if lat is None or lng is None:
+        return False
+    try:
+        return not (
+            box["min_lat"] <= lat <= box["max_lat"]
+            and box["min_lng"] <= lng <= box["max_lng"]
+        )
+    except (KeyError, TypeError):
+        # A malformed box must never break filtering — treat as fail-open.
+        return False
+
+
+def load_geo_fence(redis_like: Optional[_SupportsGet]) -> dict:
+    """Read the live geo-fence box from the Redis mirror, falling back to the
+    seeded default. A missing key, unreadable client, malformed JSON, or invalid
+    shape all degrade to DEFAULT_GEO_FENCE so filtering never breaks (mirrors
+    load_eligibility_config). RDS (admin.geo_fence) is the durable truth."""
+    if redis_like is None:
+        return dict(DEFAULT_GEO_FENCE)
+    try:
+        raw = redis_like.get(ADMIN_CONFIG_GEOFENCE_KEY)
+    except Exception as e:  # pragma: no cover - defensive
+        logger.warning(
+            f"[venue_eligibility] Failed to read {ADMIN_CONFIG_GEOFENCE_KEY}, "
+            f"using default box: {e}"
+        )
+        return dict(DEFAULT_GEO_FENCE)
+
+    if raw is None:
+        return dict(DEFAULT_GEO_FENCE)
+
+    try:
+        return validate_geo_fence(json.loads(raw))
+    except (ValueError, TypeError, json.JSONDecodeError) as e:
+        logger.warning(
+            f"[venue_eligibility] {ADMIN_CONFIG_GEOFENCE_KEY} is invalid "
+            f"({e}); using default box"
+        )
+        return dict(DEFAULT_GEO_FENCE)

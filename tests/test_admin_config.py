@@ -137,6 +137,69 @@ def test_put_returns_502_when_mirror_fails():
     assert store.get_admin_config("scoring_weights")["value"] == {"a": 1}  # RDS committed
 
 
+# ── geo-fence endpoint (typed admin.geo_fence, NOT the generic admin_config) ──
+def test_geofence_get_returns_default_box():
+    svc, _, _ = _svc()
+    client = _client(svc)
+    resp = client.get("/admin/config/geofence")
+    assert resp.status_code == 200
+    box = resp.json()
+    assert set(box) >= {"min_lat", "max_lat", "min_lng", "max_lng", "enabled"}
+
+
+def _client_with_redis(svc, redis_client):
+    """A client whose container also exposes a venue_dao.client for the geo-fence
+    Redis mirror (the real container wires the DAO; _svc's SimpleNamespace does not)."""
+    app = FastAPI()
+    app.include_router(router)
+    set_container(SimpleNamespace(
+        admin_config_service=svc,
+        rds_store=svc.rds_store,
+        venue_dao=SimpleNamespace(client=redis_client),
+    ))
+    return TestClient(app)
+
+
+def test_geofence_put_routes_to_typed_table_not_admin_config():
+    # Route-collision guard: /config/geofence must hit the dedicated handler
+    # (writing admin.geo_fence via the store), NOT the generic /config/{key} which
+    # would land in admin.admin_config where the serving view never reads it.
+    svc, r, store = _svc()
+    client = _client_with_redis(svc, r)
+    new_box = {"min_lat": -9.0, "max_lat": -7.0, "min_lng": -36.0, "max_lng": -34.0, "enabled": True}
+    resp = client.put("/admin/config/geofence", json=new_box)
+    assert resp.status_code == 200
+    # Landed in the typed store row, not the generic admin_config blob.
+    assert store.get_geo_fence()["min_lat"] == -9.0
+    assert store.get_admin_config("geofence") is None
+    # Redis mirror written for admin/parity reads.
+    assert json.loads(r.get("admin_config:venue_geofence"))["max_lng"] == -34.0
+
+
+def test_geofence_put_invalid_returns_400_and_box_unchanged():
+    svc, _, store = _svc()
+    client = _client(svc)
+    before = store.get_geo_fence()
+    resp = client.put(
+        "/admin/config/geofence",
+        json={"min_lat": 0.0, "max_lat": -10.0, "min_lng": -36.0, "max_lng": -34.0},
+    )
+    assert resp.status_code == 400
+    assert store.get_geo_fence() == before  # active box untouched
+
+
+def test_venue_catalog_trigger_is_404_unknown_job():
+    # Discovery is dormant: venue_catalog was removed from JOB_REGISTRY.
+    from app.routers.admin_trigger_router import JOB_REGISTRY
+
+    assert "venue_catalog" not in JOB_REGISTRY
+    svc, _, _ = _svc()
+    client = _client(svc)
+    resp = client.post("/admin/trigger/venue_catalog")
+    assert resp.status_code == 404
+    assert "unknown job" in resp.text.lower()
+
+
 # ── legacy /venues/eligibility-config reconciled through AdminConfigService ──
 def _elig_client(container):
     app = FastAPI()

@@ -472,3 +472,59 @@ class RdsVenueStore:
                     "INSERT INTO admin.eligibility_rule (rule_type, value, updated_by, updated_at) "
                     "VALUES (:t, :v, :u, now()) ON CONFLICT (rule_type, value) DO NOTHING"
                 ), {"t": rule_type, "v": value, "u": updated_by})
+
+    # ── geo-fence (admin.geo_fence single row; read by serving.eligible_venue) ──
+    def get_geo_fence(self) -> dict:
+        """Return the single Recife/Olinda box row (min/max lat/lng + enabled).
+        Falls back to the seeded default if the row is somehow absent."""
+        from app.services.venue_eligibility import DEFAULT_GEO_FENCE
+
+        with self.engine.connect() as conn:
+            row = conn.execute(text(
+                "SELECT min_lat, max_lat, min_lng, max_lng, enabled "
+                "FROM admin.geo_fence WHERE id = 1"
+            )).mappings().first()
+        if row is None:
+            return dict(DEFAULT_GEO_FENCE)
+        return {
+            "min_lat": float(row["min_lat"]),
+            "max_lat": float(row["max_lat"]),
+            "min_lng": float(row["min_lng"]),
+            "max_lng": float(row["max_lng"]),
+            "enabled": bool(row["enabled"]),
+        }
+
+    def set_geo_fence(self, box: dict, updated_by=None) -> None:
+        """Upsert the single admin.geo_fence row (id=1). The serving view reads this
+        row directly, so the next projection reflects the new box."""
+        with self.engine.begin() as conn:
+            conn.execute(text(
+                "INSERT INTO admin.geo_fence "
+                "(id, min_lat, max_lat, min_lng, max_lng, enabled, updated_by, updated_at) "
+                "VALUES (1, :min_lat, :max_lat, :min_lng, :max_lng, :enabled, :u, now()) "
+                "ON CONFLICT (id) DO UPDATE SET "
+                "min_lat=excluded.min_lat, max_lat=excluded.max_lat, "
+                "min_lng=excluded.min_lng, max_lng=excluded.max_lng, "
+                "enabled=excluded.enabled, updated_by=excluded.updated_by, updated_at=now()"
+            ), {
+                "min_lat": box["min_lat"], "max_lat": box["max_lat"],
+                "min_lng": box["min_lng"], "max_lng": box["max_lng"],
+                "enabled": box.get("enabled", True), "u": updated_by,
+            })
+
+    def count_geo_excluded_active_venues(self) -> int:
+        """Active venues whose coordinates fall OUTSIDE the enabled geo-fence box —
+        the reversible serve-time exclusion (observability only). Fail-open: a
+        disabled fence or a NULL-coord address contributes zero (mirrors the view's
+        `enabled IS NOT TRUE OR lat IS NULL` fail-open and geo_excluded())."""
+        with self.engine.connect() as conn:
+            row = conn.execute(text(
+                "SELECT count(*) FROM venues.venue ve "
+                "JOIN venues.address a ON a.venue_id = ve.venue_id "
+                "CROSS JOIN admin.geo_fence f "
+                "WHERE ve.lifecycle_status = 'active' AND f.id = 1 AND f.enabled "
+                "AND a.lat IS NOT NULL AND a.lng IS NOT NULL "
+                "AND NOT (a.lat BETWEEN f.min_lat AND f.max_lat "
+                "         AND a.lng BETWEEN f.min_lng AND f.max_lng)"
+            )).first()
+        return int(row[0]) if row else 0

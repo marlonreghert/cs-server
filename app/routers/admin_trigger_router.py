@@ -8,15 +8,17 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException, Body, Query, Response
 from pydantic import BaseModel
 
-from app.config import settings
 from app.handlers.add_venue_handler import (
     AddVenueHandler,
     AddVenueByAddressRequest,
 )
 from app.services.venue_eligibility import (
     ADMIN_CONFIG_ELIGIBILITY_KEY,
+    ADMIN_CONFIG_GEOFENCE_KEY,
+    DEFAULT_GEO_FENCE,
     EligibilityConfig,
     load_eligibility_config,
+    validate_geo_fence,
 )
 from app.services.admin_config_service import AdminConfigService
 from app.services.eligibility_rules import EligibilityRuleService
@@ -45,12 +47,14 @@ class TriggerResponse(BaseModel):
     message: str
 
 
-# Map of job names to their execution logic
+# Map of job names to their execution logic.
+#
+# `venue_catalog` (venue-filter discovery) is intentionally ABSENT: discovery is
+# dormant after the 2026-07-01 incident (no startup, no scheduled job, no admin
+# trigger). Triggering it now returns the standard 404 "Unknown job". The refresher
+# method (`refresh_venues_by_filter_for_default_locations`) remains for future reuse
+# but has no reachable trigger path.
 JOB_REGISTRY = {
-    "venue_catalog": {
-        "label": "Venue Catalog Fetch",
-        "description": "Fetch venues from BestTime API for all default locations",
-    },
     "live_forecast": {
         "label": "Live Forecast Refresh",
         "description": "Refresh live busyness forecasts for all cached venues",
@@ -112,11 +116,7 @@ async def _run_job(job_name: str, config: Optional[dict] = None):
     limit = cfg.get("limit")
     start = time.perf_counter()
 
-    if job_name == "venue_catalog":
-        await c.venues_refresher_service.refresh_venues_by_filter_for_default_locations(
-            fetch_and_cache_live=True
-        )
-    elif job_name == "inventory_sync":
+    if job_name == "inventory_sync":
         await c.venues_refresher_service.sync_account_inventory_to_redis()
     elif job_name == "rebuild_redis":
         # Off-loop (B0): the projection body is synchronous + blocking; running it
@@ -225,17 +225,9 @@ async def trigger_job(job_name: str, config: Optional[dict] = None):
         raise HTTPException(status_code=503, detail="Container not initialized")
 
     if job_name not in JOB_REGISTRY:
+        # `venue_catalog` (discovery) is intentionally absent from JOB_REGISTRY and
+        # falls here — discovery has no reachable trigger by design.
         raise HTTPException(status_code=404, detail=f"Unknown job: {job_name}")
-
-    # Venue discovery is off by default — reject the manual catalog trigger so it
-    # cannot spend BestTime's monthly unique-venue cap. Read at call time so an
-    # admin-config flip takes effect without a restart.
-    if job_name == "venue_catalog" and not settings.discovery_enabled:
-        return TriggerResponse(
-            status="disabled",
-            job=job_name,
-            message="Venue catalog discovery is disabled (discovery_enabled=false)",
-        )
 
     # Check if already running
     existing = _running_jobs.get(job_name)
@@ -432,6 +424,73 @@ async def remove_eligibility_rule(
         logger.error(f"[AdminTrigger] Failed to remove eligibility rule: {e}")
         raise HTTPException(status_code=502, detail="failed to remove eligibility rule; retry")
     return cfg.to_public_dict()
+
+
+# ── Recife-metro geo-fence box (admin.geo_fence, read by serving.eligible_venue) ─
+# These routes MUST be declared before the generic `/config/{key}` handler below,
+# or Starlette matches `/config/geofence` as `{key}="geofence"` and the write lands
+# in admin.admin_config instead of admin.geo_fence — where the SQL view never sees
+# it. The geo-fence is a typed table because the serving view reads it.
+def _geo_fence_store():
+    if _container is None:
+        raise HTTPException(status_code=503, detail="Container not initialized")
+    store = getattr(_container, "rds_store", None)
+    if store is None or not hasattr(store, "get_geo_fence"):
+        raise HTTPException(status_code=503, detail="geo-fence store not configured")
+    return store
+
+
+def _geo_fence_redis_client():
+    """The Redis client used to mirror admin_config:venue_geofence (admin GET +
+    parity reads). Best-effort: a missing client just skips the mirror."""
+    venue_dao = getattr(_container, "venue_dao", None) or getattr(
+        _container, "redis_venue_dao", None
+    )
+    return getattr(venue_dao, "client", None)
+
+
+@router.get("/config/geofence")
+async def get_geo_fence():
+    """Return the active Recife/Olinda geo-fence box for the admin panel."""
+    store = _geo_fence_store()
+    try:
+        box = store.get_geo_fence()
+    except Exception as e:
+        logger.error(f"[AdminGeoFence] read failed: {e}")
+        raise HTTPException(status_code=502, detail="geo-fence read failed; retry")
+    return box or dict(DEFAULT_GEO_FENCE)
+
+
+@router.put("/config/geofence")
+async def put_geo_fence(box: dict = Body(...)):
+    """Update the geo-fence box (admin-tunable, no redeploy). Validates ranges
+    (lat -90..90, lng -180..180, min<max) and rejects invalid payloads with HTTP
+    400, leaving the active box unchanged. Writes the typed admin.geo_fence row
+    (the SQL serving view reads it), then mirrors admin_config:venue_geofence in
+    Redis for admin/parity reads. The next projection re-includes/excludes venues
+    accordingly (reversible)."""
+    try:
+        validated = validate_geo_fence(box)
+    except (ValueError, TypeError) as e:
+        raise HTTPException(status_code=400, detail=f"invalid geo-fence: {e}")
+
+    store = _geo_fence_store()
+    try:
+        store.set_geo_fence(validated, updated_by="admin")
+    except Exception as e:
+        logger.error(f"[AdminGeoFence] persist to RDS failed: {e}")
+        raise HTTPException(status_code=502, detail="failed to persist geo-fence; retry")
+
+    # Best-effort Redis mirror (admin GET + parity reads). RDS is the durable truth
+    # the serving view reads, so a mirror failure must not fail the write.
+    client = _geo_fence_redis_client()
+    if client is not None:
+        try:
+            client.set(ADMIN_CONFIG_GEOFENCE_KEY, json.dumps(validated))
+        except Exception as e:
+            logger.warning(f"[AdminGeoFence] Redis mirror write failed: {e}")
+
+    return validated
 
 
 # ── generic admin config (RDS system of record, Redis mirror) ────────────────

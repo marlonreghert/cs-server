@@ -6,16 +6,22 @@ import pytest
 
 from app.services.venue_eligibility import (
     ADMIN_CONFIG_ELIGIBILITY_KEY,
+    ADMIN_CONFIG_GEOFENCE_KEY,
     BLOCKED_NAME_KEYWORDS,
     DEFAULT_AMBIGUOUS_NAME_KEYWORDS,
+    DEFAULT_GEO_FENCE,
     DEFAULT_HARD_BLOCKED_NAME_KEYWORDS,
     EligibilityConfig,
     REASON_BESTTIME_TYPE,
     REASON_EMPTY_NAME,
+    REASON_GEO,
     REASON_GOOGLE_TYPE,
     REASON_NAME_KEYWORD,
     evaluate,
+    geo_excluded,
     load_eligibility_config,
+    load_geo_fence,
+    validate_geo_fence,
 )
 
 
@@ -152,3 +158,125 @@ class TestLoadEligibilityConfig:
 # now a non-destructive serving view (serving.eligible_venue), exercised by
 # tests/test_eligibility_serving_view_parity.py and the eligibility-serving-view
 # BDD feature. evaluate() remains the parity reference and is covered above.
+
+
+# A point inside the default Recife box, and one outside it (São Paulo).
+_IN = (-8.05, -34.88)
+_OUT = (-23.55, -46.63)
+
+
+class TestGeoExcluded:
+    """geo_excluded() is a SEPARATE, reversible predicate — never a soft-delete.
+    Serving membership is (not soft_deletable) AND (not geo_excluded)."""
+
+    def test_inside_box_not_excluded(self):
+        assert geo_excluded(_IN[0], _IN[1], DEFAULT_GEO_FENCE) is False
+
+    def test_outside_box_excluded(self):
+        assert geo_excluded(_OUT[0], _OUT[1], DEFAULT_GEO_FENCE) is True
+
+    def test_on_boundary_is_inside(self):
+        # Inclusive bounds: a venue exactly on min/max edges is inside.
+        assert geo_excluded(
+            DEFAULT_GEO_FENCE["min_lat"], DEFAULT_GEO_FENCE["min_lng"], DEFAULT_GEO_FENCE
+        ) is False
+        assert geo_excluded(
+            DEFAULT_GEO_FENCE["max_lat"], DEFAULT_GEO_FENCE["max_lng"], DEFAULT_GEO_FENCE
+        ) is False
+
+    def test_missing_coords_fail_open(self):
+        assert geo_excluded(None, None, DEFAULT_GEO_FENCE) is False
+        assert geo_excluded(_OUT[0], None, DEFAULT_GEO_FENCE) is False
+        assert geo_excluded(None, _OUT[1], DEFAULT_GEO_FENCE) is False
+
+    def test_disabled_box_never_excludes(self):
+        disabled = {**DEFAULT_GEO_FENCE, "enabled": False}
+        assert geo_excluded(_OUT[0], _OUT[1], disabled) is False
+
+    def test_none_or_malformed_box_fail_open(self):
+        assert geo_excluded(_OUT[0], _OUT[1], None) is False
+        assert geo_excluded(_OUT[0], _OUT[1], {}) is False
+        assert geo_excluded(_OUT[0], _OUT[1], {"enabled": True}) is False  # missing keys
+
+    def test_reason_geo_is_distinct(self):
+        # ineligible_geo must not collide with the name/type reasons.
+        assert REASON_GEO == "ineligible_geo"
+        assert REASON_GEO not in (
+            REASON_EMPTY_NAME, REASON_GOOGLE_TYPE, REASON_BESTTIME_TYPE, REASON_NAME_KEYWORD
+        )
+
+
+class TestValidateGeoFence:
+    def _valid(self):
+        return {"min_lat": -8.3, "max_lat": -7.85, "min_lng": -35.1, "max_lng": -34.8}
+
+    def test_valid_defaults_enabled_true(self):
+        box = validate_geo_fence(self._valid())
+        assert box["enabled"] is True
+        assert box["min_lat"] == -8.3 and box["max_lng"] == -34.8
+
+    def test_missing_field_raises(self):
+        bad = self._valid()
+        del bad["max_lat"]
+        with pytest.raises(ValueError):
+            validate_geo_fence(bad)
+
+    def test_min_ge_max_lat_raises(self):
+        bad = {**self._valid(), "min_lat": 0.0, "max_lat": -10.0}
+        with pytest.raises(ValueError):
+            validate_geo_fence(bad)
+
+    def test_min_ge_max_lng_raises(self):
+        bad = {**self._valid(), "min_lng": 0.0, "max_lng": -10.0}
+        with pytest.raises(ValueError):
+            validate_geo_fence(bad)
+
+    def test_lat_out_of_range_raises(self):
+        with pytest.raises(ValueError):
+            validate_geo_fence({**self._valid(), "min_lat": -100.0})
+
+    def test_lng_out_of_range_raises(self):
+        with pytest.raises(ValueError):
+            validate_geo_fence({**self._valid(), "max_lng": 200.0})
+
+    def test_non_numeric_raises(self):
+        with pytest.raises(ValueError):
+            validate_geo_fence({**self._valid(), "min_lat": "x"})
+
+    def test_bool_is_not_a_number(self):
+        with pytest.raises(ValueError):
+            validate_geo_fence({**self._valid(), "min_lat": True})
+
+    def test_non_bool_enabled_raises(self):
+        with pytest.raises(ValueError):
+            validate_geo_fence({**self._valid(), "enabled": "yes"})
+
+    def test_non_dict_raises(self):
+        with pytest.raises(ValueError):
+            validate_geo_fence(["not", "a", "dict"])
+
+
+class TestLoadGeoFence:
+    def test_none_client_returns_default(self):
+        assert load_geo_fence(None) == dict(DEFAULT_GEO_FENCE)
+
+    def test_absent_key_returns_default(self):
+        fake = fakeredis.FakeRedis(decode_responses=True)
+        assert load_geo_fence(fake) == dict(DEFAULT_GEO_FENCE)
+
+    def test_malformed_json_returns_default(self):
+        fake = fakeredis.FakeRedis(decode_responses=True)
+        fake.set(ADMIN_CONFIG_GEOFENCE_KEY, "{not json")
+        assert load_geo_fence(fake) == dict(DEFAULT_GEO_FENCE)
+
+    def test_invalid_box_returns_default(self):
+        fake = fakeredis.FakeRedis(decode_responses=True)
+        fake.set(ADMIN_CONFIG_GEOFENCE_KEY, json.dumps({"min_lat": 0.0, "max_lat": -1.0}))
+        assert load_geo_fence(fake) == dict(DEFAULT_GEO_FENCE)
+
+    def test_valid_override_is_applied(self):
+        fake = fakeredis.FakeRedis(decode_responses=True)
+        box = {"min_lat": -9.0, "max_lat": -7.0, "min_lng": -36.0, "max_lng": -34.0, "enabled": False}
+        fake.set(ADMIN_CONFIG_GEOFENCE_KEY, json.dumps(box))
+        loaded = load_geo_fence(fake)
+        assert loaded["min_lat"] == -9.0 and loaded["enabled"] is False
