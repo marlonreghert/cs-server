@@ -159,15 +159,48 @@ Manual or integration checks:
   no-match venues, and makes no BestTime calls.
 - Enrichment price is Google-only; NULL when Google has none.
 
-## Open Questions
-- **Google-only price fallback:** drop the stored `besttime_price_level` fallback in
-  `_backfill_venue_review_signal` entirely (making ALL enrichment price Google-only,
-  which can null out price for venues that only had a BestTime tier), or restrict
-  Google-only to the new add/backfill paths and leave the shared cron behavior as
-  is? User directive says Google-only — confirm the blast radius before executing.
-- **Cron enablement:** flip `google_places_enrichment_enabled` default in code, or
-  keep code default False and enable via prod env only (ops)?
-- **Backfill trigger:** admin endpoint (`google_places_backfill`) vs one-off
-  management entrypoint; batch size + Google rate-limit pacing.
-- **Attempt marker location:** `venues.venue.google_enrich_attempted_at` vs a
-  dedicated `google_places` table.
+## Open Questions (resolved at execution)
+- **Google-only price fallback → new paths only, via opt-in flag.** Add-time keeps
+  the existing enum>range>besttime derivation (the BestTime price is already in the
+  POST /forecasts response the add makes — no extra call). Only the **backfill** is
+  Google-only. Implemented by threading `google_only_price: bool = False` through
+  `enrich_venue`/`_backfill_venue_review_signal`; default False keeps cron **and**
+  add behavior byte-identical (behavior unchanged; only the signature grows).
+- **Cron enablement → NOT enabled.** Leave `google_places_enrichment_enabled=False`.
+  On-demand enrichment is the existing `google_places` admin trigger (reachable from
+  the vibes_bot admin panel). The plan's "re-enable cron" item is dropped.
+- **Backfill trigger → admin `JOB_REGISTRY` entry** `google_places_backfill`
+  (pending-only, bounded, Google-only price). Reuses `enrich_all_venues` selection.
+- **Attempt marker → reuse the existing empty-`vibe_attributes` marker.** No new
+  column/migration: `enrich_all_venues(force_refresh=False)` already (a) skips
+  venues with a `vibe_attributes` row (presence-based) and (b) caches an empty
+  `VibeAttributes(google_place_id="")` for no-Google-match venues, so a re-run skips
+  them. That is the marker.
+
+## Reconciled scope (as-built)
+The backfill is **already 90% built**: `enrich_all_venues(force_refresh=False)`
+does pending-only selection (presence-based skip over `list_servable_venue_ids()`,
+active AND eligible) + no-match marker caching + pacing. Net-new work is small:
+1. **Add-time:** inject `google_places_enrichment_service` into `AddVenueHandler`;
+   after persist, set a BestTime price baseline (`_derive_and_set_price(place_id=
+   None)` — no Google call), resolve `place_id = request.place_id or search_place_id`,
+   then `enrich_venue(venue_id, place_id, force_refresh=True)` (one Google fetch;
+   overwrites price when Google has it, preserves the baseline when Google is
+   silent). Failure logs + degrades; the add still succeeds. `enrich_venue` persists
+   `place_id` on the vibe row.
+2. **Google-only price flag:** opt-in param (above); backfill passes `True`.
+3. **Backfill job:** `google_places_backfill` = `enrich_all_venues(force_refresh=
+   False, google_only_price=True)` wrapped with `seen/enriched/skipped_cached/
+   no_google_match/error` summary counts + a runs metric.
+NOT done: no cron flag flip, no `google_enrich_attempted_at` migration, no new
+pending-selection SQL, no change to the shared helper's default behavior.
+
+Cross-feature note: the backfill selects `list_servable_venue_ids()`, which the
+just-merged geo-fence feature narrows to venues inside the Recife box. So the
+backfill fills *servable* pending venues — an out-of-region pending venue is not
+enriched (by design: don't spend Google budget on venues we won't serve). The
+motivating target (Beijupirá Olinda) is in-box, so it is covered.
+Add-path: `_persist_new_venue` sets a BestTime price BASELINE with
+`_derive_and_set_price(place_id=None)` (no Google call); `enrich_venue` makes the
+single Google Details fetch and overwrites the price when Google has one. This
+avoids a doubled paid Google Details call per add (pinned by a unit + BDD guard).

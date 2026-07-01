@@ -70,6 +70,7 @@ class AddVenueHandler:
         budget_service: VenueBudgetService,
         redis_client,
         google_places_client=None,
+        google_places_enrichment_service=None,
     ) -> None:
         self.venue_dao = venue_dao
         self.besttime = besttime_api
@@ -80,6 +81,10 @@ class AddVenueHandler:
         # the shared derivation helper. Dependency-aware: absent client / place_id
         # falls back to the BestTime price through the same helper (never 0).
         self.google_places_client = google_places_client
+        # Optional: fully Google-enriches the venue inline at add time (type/vibe,
+        # hours, reviews, business status, rating) after persist. Absent -> the add
+        # still succeeds with the BestTime-baseline price only (degrade-safe).
+        self.google_places_enrichment_service = google_places_enrichment_service
 
     async def add(self, request: AddVenueByAddressRequest) -> AddVenueOutcome:
         radius_m = request.fallback_radius_meters or DEFAULT_FALLBACK_RADIUS_M
@@ -172,6 +177,12 @@ class AddVenueHandler:
         # Record the unique BestTime interaction against the monthly ledger so
         # the unique-venue count reflects manual adds, not just refresh.
         self.budget.mark_touched(persisted_venue.venue_id)
+
+        # Fully Google-enrich the venue inline so it carries real metadata (type,
+        # hours, reviews, business status, rating) immediately — not just the
+        # BestTime-baseline price set in _persist_new_venue. Google-only: no extra
+        # BestTime call. Degrade-safe: any failure logs and the add still succeeds.
+        await self._enrich_from_google(persisted_venue, request.place_id)
 
         # Best-effort cache of week_raw days if BestTime included them.
         for day in response.analysis or []:
@@ -377,8 +388,14 @@ class AddVenueHandler:
 
     async def _persist_new_venue(self, response, place_id: Optional[str]) -> Venue:
         """Build a Venue from a BestTime POST /forecasts response, derive its served
-        price tier (Google enum/range PRIMARY when a place_id + client are available,
-        BestTime fallback), and upsert it."""
+        price tier, and upsert it.
+
+        Price sourcing avoids a doubled paid Google Details call: when an inline
+        enrichment service is wired, ``_enrich_from_google`` makes the single Google
+        fetch and sets the price, so here we set only a BestTime BASELINE
+        (``place_id=None`` — no Google call). Without an enrichment service (the
+        legacy path), we keep the original behavior and re-source the Google price
+        here from ``place_id``."""
         info = response.venue_info if hasattr(response, "venue_info") else None
         if info is None and isinstance(response, dict):
             info = response.get("venue_info") or {}
@@ -399,7 +416,12 @@ class AddVenueHandler:
             reviews=_get(info, "reviews"),
             besttime_price_level=_get(info, "price_level"),
         )
-        await self._derive_and_set_price(venue, place_id)
+        # When inline enrichment is wired, it owns the single Google Details fetch;
+        # set only the BestTime baseline here (place_id=None -> no Google call) to
+        # avoid a doubled paid call. Otherwise (legacy path) re-source Google price
+        # here as before.
+        price_place_id = None if self.google_places_enrichment_service is not None else place_id
+        await self._derive_and_set_price(venue, price_place_id)
         self.venue_dao.upsert_venue(venue)
         return venue
 
@@ -433,6 +455,48 @@ class AddVenueHandler:
         venue.price_range = google_range
         venue.price_level = derived.price_level
         venue.price_level_source = derived.source
+
+    async def _enrich_from_google(self, venue: Venue, request_place_id: Optional[str]) -> None:
+        """Fully Google-enrich a just-persisted venue inline (type/vibe, hours,
+        reviews, business status, rating; Google price overwrites the BestTime
+        baseline when present, else the baseline is preserved).
+
+        Resolves the Google place_id from the request or via Text Search when the
+        request carried none. Never raises: a missing service, no place_id, no
+        Google match, or a details failure just logs and returns — the add still
+        succeeds. Google-only: makes no BestTime call. enrich_venue persists the
+        place_id on the vibe row for future re-enrichment.
+        """
+        service = self.google_places_enrichment_service
+        if service is None:
+            return
+        try:
+            place_id = request_place_id
+            if not place_id and self.google_places_client is not None:
+                place_id = await self.google_places_client.search_place_id(
+                    venue_name=venue.venue_name,
+                    venue_address=venue.venue_address,
+                    lat=venue.venue_lat,
+                    lng=venue.venue_lng,
+                )
+            if not place_id:
+                logger.info(
+                    f"[AddVenueHandler] no Google place_id for {venue.venue_id}; "
+                    "skipping inline enrichment (Google fields stay empty)"
+                )
+                return
+            # force_refresh=True: the venue was just created, so any stale/empty
+            # vibe row must not short-circuit the fetch.
+            await service.enrich_venue(
+                venue_id=venue.venue_id,
+                google_place_id=place_id,
+                force_refresh=True,
+            )
+        except Exception as e:
+            logger.warning(
+                f"[AddVenueHandler] Google enrichment failed for {venue.venue_id}: "
+                f"{type(e).__name__}: {e}"
+            )
 
 
 def _field(source, key):

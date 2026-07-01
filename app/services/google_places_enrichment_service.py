@@ -75,7 +75,9 @@ class GooglePlacesEnrichmentService:
         self._permanently_closed_in_run = 0
         self._temporarily_closed_in_run = 0
 
-    def _backfill_venue_review_signal(self, venue_id: str, details) -> None:
+    def _backfill_venue_review_signal(
+        self, venue_id: str, details, google_only_price: bool = False
+    ) -> None:
         """Write Google's rating/userRatingCount and the derived price signal onto
         the Venue.
 
@@ -91,6 +93,11 @@ class GooglePlacesEnrichmentService:
         when Google returns NO price signal, an existing real tier (1..4) is kept
         as-is — never blanked and never clobbered by BestTime; only a stale `0`/NULL
         falls through to the BestTime/NULL derivation. Reads only — no Google call.
+
+        ``google_only_price`` (backfill path): drop the stored BestTime fallback from
+        the derivation so a venue with no Google price ends NULL (never a
+        BestTime-derived tier). Default False keeps cron + add price behavior
+        byte-identical. Preservation of an existing real tier still applies.
         """
         google_rating = details.rating
         google_review_count = details.user_rating_count
@@ -106,6 +113,9 @@ class GooglePlacesEnrichmentService:
             )
             return
 
+        # BestTime tier feeds the derivation only when Google-only is off.
+        besttime_fallback = None if google_only_price else venue.besttime_price_level
+
         changed = False
         if google_rating is not None and venue.rating != google_rating:
             venue.rating = google_rating
@@ -119,14 +129,14 @@ class GooglePlacesEnrichmentService:
         existing_tier = venue.price_level if venue.price_level not in (None, 0) else None
         if google_price_signal:
             derived = derive_price_signal(
-                google_enum, google_range, venue.besttime_price_level
+                google_enum, google_range, besttime_fallback
             )
             new_tier, new_source = derived.price_level, derived.source
         elif existing_tier is not None:
             # Google silent this run: keep the existing real tier + its source.
             new_tier, new_source = existing_tier, venue.price_level_source
         else:
-            derived = derive_price_signal(None, None, venue.besttime_price_level)
+            derived = derive_price_signal(None, None, besttime_fallback)
             new_tier, new_source = derived.price_level, derived.source
 
         if google_enum is not None and venue.google_price_level != google_enum:
@@ -155,6 +165,7 @@ class GooglePlacesEnrichmentService:
         venue_id: str,
         google_place_id: str,
         force_refresh: bool = False,
+        google_only_price: bool = False,
     ) -> Optional[VibeAttributes]:
         """Enrich a single venue with Google Places data.
 
@@ -165,6 +176,9 @@ class GooglePlacesEnrichmentService:
             venue_id: Our internal venue ID
             google_place_id: Google Place ID for the venue
             force_refresh: If True, fetch even if cached entry exists
+            google_only_price: If True, derive price from Google signals only (no
+                BestTime fallback) — used by the pending backfill. Default False
+                keeps cron + add price behavior byte-identical.
 
         Returns:
             VibeAttributes if successful, None on error or if venue was deprecated
@@ -282,7 +296,9 @@ class GooglePlacesEnrichmentService:
             # venues with these fields null; without this step they stay null
             # forever and the mobile card has no stars or price indicator
             # even though Google has the data.
-            self._backfill_venue_review_signal(venue_id, details)
+            self._backfill_venue_review_signal(
+                venue_id, details, google_only_price=google_only_price
+            )
 
             # Extract Instagram handle from website URL if it's an Instagram link
             # This provides a free, high-confidence source before Apify fallback
@@ -350,7 +366,9 @@ class GooglePlacesEnrichmentService:
 
         return successful
 
-    async def enrich_all_venues(self, force_refresh: bool = False) -> int:
+    async def enrich_all_venues(
+        self, force_refresh: bool = False, google_only_price: bool = False
+    ) -> int:
         """Enrich all known venues with Google Places data.
 
         This method fetches all venues from Redis and searches Google Places
@@ -361,6 +379,9 @@ class GooglePlacesEnrichmentService:
 
         Args:
             force_refresh: If True, re-check all venues even if already enriched.
+            google_only_price: If True, derive price from Google only (no BestTime
+                fallback). Default False keeps the cron/admin behavior unchanged;
+                the pending backfill passes True.
                           Use this to detect venues that have become permanently closed
                           since the last enrichment run.
 
@@ -430,6 +451,7 @@ class GooglePlacesEnrichmentService:
                 venue_id=venue_id,
                 google_place_id=google_place_id,
                 force_refresh=True,  # We already checked cache above
+                google_only_price=google_only_price,
             )
 
             if result:
@@ -454,6 +476,87 @@ class GooglePlacesEnrichmentService:
         )
 
         return successful
+
+    async def enrich_pending_venues(self, limit: Optional[int] = None) -> dict:
+        """One-time, idempotent, Google-only backfill of PENDING venues.
+
+        Pending = servable (active AND eligible) with no `vibe_attributes` row yet.
+        Reuses the same selection + no-match marker as ``enrich_all_venues``:
+        - already-enriched venues (a vibe_attributes row exists) are skipped
+          (presence-based), so this never reprocesses them;
+        - a venue with no Google match gets an empty ``VibeAttributes`` marker
+          (google_place_id="") so a re-run skips it — no BestTime column needed;
+        - price is Google-only (no BestTime fallback).
+
+        Bounded by ``limit`` (None = all pending). Makes NO BestTime call. Returns a
+        summary: seen/enriched/skipped_cached/no_google_match/error.
+        """
+        summary = {
+            "seen": 0, "enriched": 0, "skipped_cached": 0,
+            "no_google_match": 0, "error": 0,
+        }
+        servable_ids = self.venue_dao.list_servable_venue_ids()
+        logger.info(
+            f"[GooglePlacesEnrichment] Backfill: scanning {len(servable_ids)} "
+            f"servable venues for pending (limit={limit})"
+        )
+
+        for venue_id in servable_ids:
+            if limit is not None and summary["enriched"] + summary["no_google_match"] >= limit:
+                break
+
+            # Presence-based skip = the idempotency marker (enriched OR no-match).
+            existing = self.venue_dao.get_vibe_attributes(venue_id)
+            if existing is not None:
+                summary["skipped_cached"] += 1
+                VIBE_ATTRIBUTES_FETCH_RESULTS.labels(result="skipped_cached").inc()
+                continue
+
+            venue = self.venue_dao.get_venue(venue_id)
+            if venue is None:
+                summary["error"] += 1
+                VIBE_ATTRIBUTES_FETCH_RESULTS.labels(result="skipped_no_venue").inc()
+                continue
+
+            summary["seen"] += 1
+            google_place_id = await self.google_places_client.search_place_id(
+                venue_name=venue.venue_name,
+                venue_address=venue.venue_address,
+                lat=venue.venue_lat,
+                lng=venue.venue_lng,
+            )
+
+            if not google_place_id:
+                # No Google match: write the empty marker so re-runs skip this venue.
+                logger.info(
+                    f"[GooglePlacesEnrichment] Backfill: no Google match for "
+                    f"{venue.venue_name} ({venue_id}); marking attempted"
+                )
+                self.venue_dao.set_vibe_attributes(
+                    VibeAttributes(venue_id=venue_id, google_place_id="")
+                )
+                summary["no_google_match"] += 1
+                VIBE_ATTRIBUTES_FETCH_RESULTS.labels(result="no_google_match").inc()
+                await asyncio.sleep(REQUEST_DELAY)
+                continue
+
+            result = await self.enrich_venue(
+                venue_id=venue_id,
+                google_place_id=google_place_id,
+                force_refresh=True,
+                google_only_price=True,
+            )
+            if result is not None:
+                summary["enriched"] += 1
+            else:
+                summary["error"] += 1
+            # Two Google calls per venue (search + details): pace accordingly.
+            await asyncio.sleep(REQUEST_DELAY * 2)
+
+        count = self.venue_dao.count_venues_with_vibe_attributes()
+        VENUES_WITH_VIBE_ATTRIBUTES.set(count)
+        logger.info(f"[GooglePlacesEnrichment] Backfill complete: {summary}")
+        return summary
 
     def get_vibe_attributes(self, venue_id: str) -> Optional[VibeAttributes]:
         """Get cached vibe attributes for a venue.

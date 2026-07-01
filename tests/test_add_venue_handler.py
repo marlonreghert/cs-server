@@ -378,3 +378,138 @@ async def test_venue_lon_in_response_is_normalised_to_venue_lng(handler, besttim
     persisted = json.loads(fake.get("venues_geo_place_v1:ven_lon_alias"))
     assert "venue_lng" in persisted
     assert persisted["venue_lng"] == -34.88
+
+
+# ── add-time Google enrichment (inline, degrade-safe) ─────────────────────────
+def _enrich_handler(venue_dao, besttime, budget, fake, enrichment):
+    """Handler wired with an injected enrichment service (mock)."""
+    return AddVenueHandler(
+        venue_dao=venue_dao,
+        besttime_api=besttime,
+        budget_service=budget,
+        redis_client=fake,
+        google_places_enrichment_service=enrichment,
+    )
+
+
+@pytest.mark.asyncio
+async def test_add_time_enrichment_called_with_request_place_id(
+    venue_dao, besttime, budget, fake
+):
+    besttime.add_venue_to_account.return_value = _ok_response("ven_enr")
+    besttime.get_live_forecast.return_value = _live_unavailable("ven_enr")
+    enrichment = AsyncMock()
+    handler = _enrich_handler(venue_dao, besttime, budget, fake, enrichment)
+
+    outcome = await handler.add(_req(place_id="places/ChIJreq"))
+
+    assert outcome.status_code == 201
+    # enrich_venue called inline with the request's place_id, force_refresh=True.
+    enrichment.enrich_venue.assert_awaited_once()
+    kwargs = enrichment.enrich_venue.await_args.kwargs
+    assert kwargs["venue_id"] == "ven_enr"
+    assert kwargs["google_place_id"] == "places/ChIJreq"
+    assert kwargs["force_refresh"] is True
+
+
+@pytest.mark.asyncio
+async def test_add_time_enrichment_resolves_place_id_when_absent(
+    venue_dao, besttime, budget, fake
+):
+    besttime.add_venue_to_account.return_value = _ok_response("ven_res")
+    besttime.get_live_forecast.return_value = _live_unavailable("ven_res")
+    enrichment = AsyncMock()
+    handler = _enrich_handler(venue_dao, besttime, budget, fake, enrichment)
+    # No google_places_client -> _enrich_from_google cannot search; simulate one by
+    # attaching a client mock whose search returns a resolved id.
+    handler.google_places_client = AsyncMock()
+    handler.google_places_client.search_place_id.return_value = "places/ChIJresolved"
+
+    await handler.add(_req())  # no place_id on the request
+
+    handler.google_places_client.search_place_id.assert_awaited_once()
+    kwargs = enrichment.enrich_venue.await_args.kwargs
+    assert kwargs["google_place_id"] == "places/ChIJresolved"
+
+
+@pytest.mark.asyncio
+async def test_add_time_enrichment_failure_does_not_fail_add(
+    venue_dao, besttime, budget, fake
+):
+    besttime.add_venue_to_account.return_value = _ok_response("ven_deg")
+    besttime.get_live_forecast.return_value = _live_unavailable("ven_deg")
+    enrichment = AsyncMock()
+    enrichment.enrich_venue.side_effect = RuntimeError("google down")
+    handler = _enrich_handler(venue_dao, besttime, budget, fake, enrichment)
+
+    outcome = await handler.add(_req(place_id="places/ChIJboom"))
+
+    # The add still succeeds despite the enrichment blowing up (degrade-safe).
+    assert outcome.status_code == 201
+    assert outcome.body["venue_id"] == "ven_deg"
+
+
+@pytest.mark.asyncio
+async def test_add_time_no_place_id_and_no_client_skips_enrichment(
+    venue_dao, besttime, budget, fake
+):
+    besttime.add_venue_to_account.return_value = _ok_response("ven_skip")
+    besttime.get_live_forecast.return_value = _live_unavailable("ven_skip")
+    enrichment = AsyncMock()
+    handler = _enrich_handler(venue_dao, besttime, budget, fake, enrichment)
+    handler.google_places_client = None  # cannot resolve a place_id
+
+    outcome = await handler.add(_req())  # no place_id
+
+    assert outcome.status_code == 201
+    enrichment.enrich_venue.assert_not_awaited()  # nothing to enrich, add still ok
+
+
+@pytest.mark.asyncio
+async def test_add_without_enrichment_service_still_succeeds(handler, besttime, fake):
+    # The default `handler` fixture has NO enrichment service wired.
+    besttime.add_venue_to_account.return_value = _ok_response("ven_noenr")
+    besttime.get_live_forecast.return_value = _live_unavailable("ven_noenr")
+
+    outcome = await handler.add(_req(place_id="places/ChIJnone"))
+
+    assert outcome.status_code == 201  # add unaffected by the absent optional dep
+
+
+@pytest.mark.asyncio
+async def test_add_with_place_id_fetches_google_details_once(
+    venue_dao, besttime, budget, fake
+):
+    # Regression: _persist_new_venue must NOT fetch Google Details for the price
+    # (place_id=None baseline); enrich_venue owns the single Details call. Two
+    # fetches = a doubled paid API call per add.
+    from app.api.google_places_client import GooglePlacesAPIClient
+    from app.models.vibe_attributes import GooglePlacesDetailsResponse
+    from app.services.google_places_enrichment_service import GooglePlacesEnrichmentService
+
+    besttime.add_venue_to_account.return_value = _ok_response("ven_1fetch")
+    besttime.get_live_forecast.return_value = _live_unavailable("ven_1fetch")
+    # Real client (sync details_to_vibe_attributes intact); only stub the network
+    # call so we can count it.
+    gclient = GooglePlacesAPIClient(api_key="test")
+    gclient.get_place_details = AsyncMock(return_value=GooglePlacesDetailsResponse(
+        place_id="places/ChIJreq", business_status="OPERATIONAL",
+        primary_type="bar", price_level="PRICE_LEVEL_MODERATE",
+    ))
+    enrichment = GooglePlacesEnrichmentService(
+        google_places_client=gclient, venue_dao=venue_dao
+    )
+    handler = AddVenueHandler(
+        venue_dao=venue_dao, besttime_api=besttime, budget_service=budget,
+        redis_client=fake, google_places_client=gclient,
+        google_places_enrichment_service=enrichment,
+    )
+
+    outcome = await handler.add(_req(place_id="places/ChIJreq"))
+
+    assert outcome.status_code == 201
+    assert gclient.get_place_details.await_count == 1
+    # Google price won (enrichment overwrote the None baseline).
+    persisted = venue_dao.get_venue("ven_1fetch")
+    assert persisted.price_level == 2
+    assert persisted.price_level_source == "google_enum"

@@ -1,9 +1,8 @@
-@wip
-Feature: Google-only venue enrichment (add-time, cron, pending backfill)
+Feature: Google-only venue enrichment (add-time, admin-triggered, pending backfill)
   As the venue platform
   I must enrich venues with Google Places metadata (type, hours, reviews,
   business status, rating, price) at add time and via a pending backfill,
-  using Google only and never spending BestTime credits,
+  spending no BestTime credit on enrichment,
   so venues are usable immediately without polluting the BestTime quota.
 
   # Add-time enrichment
@@ -28,9 +27,9 @@ Feature: Google-only venue enrichment (add-time, cron, pending backfill)
     And the venue's Google fields remain empty
     And no BestTime price fallback is applied
 
-  # Re-enabled background enrichment
-  Scenario: The background enrichment enriches only venues that need it
-    Given the Google enrichment job runs on schedule
+  # On-demand enrichment (admin panel trigger; cron stays disabled)
+  Scenario: The admin-triggered enrichment enriches only venues that need it
+    Given the Google enrichment job is triggered from the admin panel
     When it processes the catalog without forcing a refresh
     Then already-enriched venues are skipped
     And no BestTime call is made
@@ -48,9 +47,9 @@ Feature: Google-only venue enrichment (add-time, cron, pending backfill)
     Then the venue is marked as attempted
     And a second backfill run does not call Google again for that venue
 
-  # Google-only guarantee
-  Scenario: A venue with no Google price ends with no price, not a BestTime tier
-    Given a venue being enriched whose Google details carry no price
-    When enrichment completes
+  # Google-only guarantee (backfill path)
+  Scenario: A backfilled venue with no Google price ends with no price, not a BestTime tier
+    Given a pending venue that carries a stored BestTime price tier but whose Google details carry no price
+    When the pending backfill enriches it
     Then the venue's price is empty
     And its price source is not BestTime
