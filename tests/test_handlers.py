@@ -1,7 +1,7 @@
 """Unit tests for handlers."""
 import pytest
 from unittest.mock import Mock, patch
-from datetime import datetime
+from datetime import datetime, timezone
 
 import pytz
 
@@ -255,9 +255,14 @@ class TestVenueHandler:
             price_level=2,
         )
         mock_venue_dao.get_nearby_venues.return_value = [v1]
+        # A fresh gmttime is now required for a live value to be served (the serve
+        # handler suppresses live busyness older than the freshness window).
         mock_venue_dao.get_live_forecast.return_value = LiveForecastResponse(
             status="OK",
-            venue_info=VenueInfo(venue_id="v1"),
+            venue_info=VenueInfo(
+                venue_id="v1",
+                venue_current_gmttime=datetime.now(timezone.utc).isoformat(),
+            ),
             analysis=Analysis(
                 venue_live_busyness=75, venue_live_busyness_available=True
             ),

@@ -482,6 +482,18 @@ VENUES_LIVE_FORECAST_AVAILABILITY_RATIO = Gauge(
     "Ratio of venues with live forecast data to total venues (0-1)",
 )
 
+# Serve-time live-busyness freshness outcomes (nearby-serve minified path).
+# served: a fresh live value was served as-is.
+# suppressed_stale: a present live value was omitted because its payload age
+#   exceeded the freshness window (downstream falls back to forecast).
+# suppressed_unparseable: a present live value was omitted because its
+#   venue_current_gmttime was missing/unparseable (fail toward forecast).
+VENUE_SERVE_LIVE_BUSYNESS_TOTAL = Counter(
+    "venue_serve_live_busyness_total",
+    "Live busyness outcomes when serving nearby venues",
+    ["outcome"],  # served | suppressed_stale | suppressed_unparseable
+)
+
 # =============================================================================
 # REFRESH OPERATION METRICS
 # =============================================================================

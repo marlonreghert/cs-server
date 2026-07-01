@@ -1,6 +1,6 @@
 """Venue handler for HTTP requests."""
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional
 
 import pytz
@@ -25,6 +25,14 @@ from app.models import (
     LiveForecastResponse,
     WeekRawDay,
 )
+from app.metrics import VENUE_SERVE_LIVE_BUSYNESS_TOTAL
+from app.services.live_freshness import (
+    classify_live_freshness,
+    resolve_max_age_minutes,
+    utc_now,
+    FRESH,
+    STALE,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -32,13 +40,17 @@ logger = logging.getLogger(__name__)
 class VenueHandler:
     """Handler for venue-related HTTP requests."""
 
-    def __init__(self, venue_dao: RedisVenueDAO):
+    def __init__(self, venue_dao: RedisVenueDAO, admin_config_service=None):
         """Initialize venue handler.
 
         Args:
             venue_dao: Redis DAO for venue data access
+            admin_config_service: optional admin-config reader used to resolve the
+                live-busyness freshness window at serve time; falls back to the
+                settings default when absent.
         """
         self.venue_dao = venue_dao
+        self.admin_config_service = admin_config_service
 
     def _derive_hours_from_forecast(self, venue_id: str) -> Optional[list[str]]:
         """Derive opening hours from BestTime weekly forecast data.
@@ -125,8 +137,12 @@ class VenueHandler:
         # 2. Merge with live and weekly forecasts
         merged = self._merge(venues)
 
-        # 3. Transform based on verbose flag
-        result = self._transform(merged, verbose)
+        # 3. Transform based on verbose flag. Resolve the live-busyness freshness
+        # window once per request (admin override or settings default) and stamp a
+        # single "now" so every venue is judged against the same instant.
+        now_utc = utc_now()
+        max_age = timedelta(minutes=resolve_max_age_minutes(self.admin_config_service))
+        result = self._transform(merged, verbose, now_utc, max_age)
 
         logger.info(f"[VenueHandler] Returning {len(result)} venues")
         return result
@@ -237,7 +253,11 @@ class VenueHandler:
         return out
 
     def _transform(
-        self, merged: list[VenueWithLive], verbose: bool
+        self,
+        merged: list[VenueWithLive],
+        verbose: bool,
+        now_utc: datetime,
+        max_age: timedelta,
     ) -> list[VenueWithLive] | list[MinifiedVenue]:
         """Transform merged venues based on verbose flag.
 
@@ -257,13 +277,36 @@ class VenueHandler:
         # Minified mode: extract essential fields
         minified: list[MinifiedVenue] = []
         for m in merged:
-            # Extract live busyness (only if available)
+            # Extract live busyness (only if available AND fresh). A cached live
+            # value whose payload is older than the freshness window — or whose
+            # gmttime is un-datable — is suppressed here (left None) so vibes_bot
+            # falls back to the forecast estimate instead of serving a stale live
+            # number. See app/services/live_freshness.py.
             live_busyness: Optional[int] = None
             if (
                 m.live_forecast is not None
                 and m.live_forecast.analysis.venue_live_busyness_available
             ):
-                live_busyness = m.live_forecast.analysis.venue_live_busyness
+                verdict = classify_live_freshness(m.live_forecast, now_utc, max_age)
+                if verdict == FRESH:
+                    live_busyness = m.live_forecast.analysis.venue_live_busyness
+                    VENUE_SERVE_LIVE_BUSYNESS_TOTAL.labels(outcome="served").inc()
+                elif verdict == STALE:
+                    VENUE_SERVE_LIVE_BUSYNESS_TOTAL.labels(outcome="suppressed_stale").inc()
+                    logger.debug(
+                        f"[VenueHandler] Suppressed stale live busyness for "
+                        f"{m.venue.venue_id} (gmttime="
+                        f"{m.live_forecast.venue_info.venue_current_gmttime!r})"
+                    )
+                else:  # UNPARSEABLE
+                    VENUE_SERVE_LIVE_BUSYNESS_TOTAL.labels(
+                        outcome="suppressed_unparseable"
+                    ).inc()
+                    logger.debug(
+                        f"[VenueHandler] Suppressed live busyness with unparseable "
+                        f"gmttime for {m.venue.venue_id} "
+                        f"({m.live_forecast.venue_info.venue_current_gmttime!r})"
+                    )
 
             # Get vibe labels, summary, and Google type if available
             vibe_labels: Optional[list[str]] = None
