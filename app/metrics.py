@@ -494,6 +494,18 @@ VENUE_SERVE_LIVE_BUSYNESS_TOTAL = Counter(
     ["outcome"],  # served | suppressed_stale | suppressed_unparseable
 )
 
+# Age (minutes) of the live forecast payload at serve time, split by outcome.
+# Lets you tell "really stale" from normal refresh desync: with the window set to
+# ~2x the refresh cadence, a healthy venue is re-touched well inside it, so
+# suppressed_stale ages clustered just past the window are pipeline desync while a
+# long tail (hours) is a venue whose refresh is genuinely failing/skipped.
+VENUE_SERVE_LIVE_FORECAST_AGE_MINUTES = Histogram(
+    "venue_serve_live_forecast_age_minutes",
+    "Age in minutes of the live forecast payload at nearby-serve time",
+    ["outcome"],  # served | suppressed_stale
+    buckets=(1, 2, 5, 10, 15, 20, 30, 45, 60, 120, 240),
+)
+
 # =============================================================================
 # REFRESH OPERATION METRICS
 # =============================================================================
