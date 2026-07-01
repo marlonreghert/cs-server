@@ -32,6 +32,7 @@ class BestTimeAPIClient:
         api_key_public: str,
         api_key_private: str,
         timeout: float = 10.0,
+        add_venue_timeout: float = 30.0,
     ):
         """Initialize BestTime API client.
 
@@ -39,12 +40,17 @@ class BestTimeAPIClient:
             base_url: Base URL for BestTime API (e.g., "https://besttime.app/api/v1")
             api_key_public: Public API key
             api_key_private: Private API key
-            timeout: Request timeout in seconds
+            timeout: Request timeout in seconds for the frequent live/read calls
+            add_venue_timeout: Request timeout in seconds for the slow, synchronous
+                POST /forecasts "create venue" call (add_venue_to_account). Kept
+                separate and larger because BestTime builds a fresh forecast on
+                that request and is far slower than the read paths.
         """
         self.base_url = base_url.rstrip("/")
         self.api_key_public = api_key_public
         self.api_key_private = api_key_private
         self.timeout = timeout
+        self.add_venue_timeout = add_venue_timeout
 
         # Create async HTTP client with connection pooling
         self.client = httpx.AsyncClient(
@@ -289,6 +295,7 @@ class BestTimeAPIClient:
                 url=url,
                 params=query_params,
                 headers={"Content-Type": "application/json"},
+                timeout=self.add_venue_timeout,
             )
             duration = time.perf_counter() - start_time
             BESTTIME_API_CALL_DURATION_SECONDS.labels(endpoint=endpoint).observe(duration)
