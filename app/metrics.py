@@ -73,7 +73,17 @@ BESTTIME_API_CALL_DURATION_SECONDS = Histogram(
 BESTTIME_API_ERRORS_TOTAL = Counter(
     "besttime_api_errors_total",
     "Total number of BestTime API errors",
-    ["endpoint", "error_type"],  # error_type: http_error, timeout, connection_error
+    ["endpoint", "error_type"],  # error_type: http_error, timeout,
+                                 # connection_error, invalid_json,
+                                 # invalid_response_schema
+)
+
+# Analysis day entries dropped while parsing a POST /forecasts (create venue)
+# response. Analysis is best-effort on creates: a malformed day never fails
+# the envelope, but each drop is counted here (and WARNING-logged).
+BESTTIME_ADD_VENUE_ANALYSIS_DROPPED_TOTAL = Counter(
+    "besttime_add_venue_analysis_days_dropped_total",
+    "Analysis day entries dropped while parsing BestTime POST /forecasts responses",
 )
 
 # =============================================================================
@@ -612,7 +622,8 @@ ADD_VENUE_BY_ADDRESS_TOTAL = Counter(
     "Outcomes of POST /admin/venues/by-address",
     ["result"],  # created | already_exists | matched_via_geo_fallback |
                  # quota_exhausted | besttime_monthly_cap | besttime_error |
-                 # besttime_rejected_no_geo_match | validation_error
+                 # besttime_bad_response | besttime_rejected_no_geo_match |
+                 # validation_error
 )
 
 INVENTORY_SYNC_VENUES_TOTAL = Counter(

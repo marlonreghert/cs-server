@@ -13,6 +13,7 @@ from typing import Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.api.besttime_client import BestTimeInvalidResponseError
 from app.dao.redis_venue_dao import RedisVenueDAO
 from app.metrics import (
     ADD_VENUE_BY_ADDRESS_TOTAL,
@@ -134,6 +135,17 @@ class AddVenueHandler:
         try:
             response = await self.besttime.add_venue_to_account(
                 request.venue_name, request.venue_address
+            )
+        except BestTimeInvalidResponseError as e:
+            # BestTime answered, but with a body we cannot parse — our parse
+            # bug or their contract change, NOT an outage. Keep it legible so
+            # operators do not chase a fake BestTime incident.
+            self.budget.release_manual_slot()
+            ADD_VENUE_BY_ADDRESS_TOTAL.labels(result="besttime_bad_response").inc()
+            logger.error(f"[AddVenueHandler] BestTime bad response: {e}")
+            return AddVenueOutcome(
+                status_code=502,
+                body={"detail": "BestTime returned an unparseable response"},
             )
         except Exception as e:
             self.budget.release_manual_slot()

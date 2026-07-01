@@ -1,6 +1,9 @@
 """Unit tests for Pydantic data models."""
 import json
+import logging
 import pytest
+from pydantic import ValidationError
+from prometheus_client import REGISTRY
 from app.models import (
     Venue,
     FootTrafficForecast,
@@ -8,6 +11,7 @@ from app.models import (
     DayInfoV2,
     OpenCloseDetail,
     LiveForecastResponse,
+    NewVenueResponse,
     VenueInfo,
     Analysis,
     WeekRawResponse,
@@ -238,6 +242,130 @@ class TestWeekRawModels:
         assert response.status == "OK"
         assert len(response.analysis.week_raw) == 7
         assert response.window.week_window == "This week"
+
+
+def _create_day_real_shape(day_int: int) -> dict:
+    """One POST /forecasts analysis entry in BestTime's real shape: day_int
+    nested inside day_info, hourly day_raw list alongside (structure of the
+    2026-07-01 prod ValidationError input)."""
+    return {
+        "day_info": {
+            "day_int": day_int,
+            "day_max": 90,
+            "day_mean": 40,
+            "day_rank_max": 3,
+            "day_rank_mean": 5,
+            "day_text": "Monday",
+            "venue_open": 18,
+            "venue_closed": 2,
+        },
+        "day_raw": [day_int] * 24,
+        "busy_hours": [20, 21],
+        "quiet_hours": [7],
+    }
+
+
+def _new_venue_body(analysis) -> dict:
+    return {
+        "status": "OK",
+        "venue_info": {
+            "venue_id": "ven_real_shape",
+            "venue_name": "Laca Burguer",
+            "venue_address": "Av. Conselheiro Aguiar 123, Recife - PE",
+            "venue_lat": -8.119,
+            "venue_lon": -34.904,
+        },
+        "analysis": analysis,
+    }
+
+
+def _dropped_metric() -> float:
+    return (
+        REGISTRY.get_sample_value("besttime_add_venue_analysis_days_dropped_total")
+        or 0.0
+    )
+
+
+class TestNewVenueResponseParsing:
+    """POST /forecasts response parsing: real create shape + tolerant analysis."""
+
+    def test_real_create_shape_parses_and_lifts_day_int(self):
+        body = _new_venue_body([_create_day_real_shape(d) for d in range(7)])
+
+        parsed = NewVenueResponse.model_validate(body)
+
+        assert parsed.is_ok()
+        assert parsed.venue_info.venue_id == "ven_real_shape"
+        assert parsed.venue_info.venue_lng == -34.904
+        assert [d.day_int for d in parsed.analysis] == list(range(7))
+        assert all(isinstance(d, WeekRawDay) for d in parsed.analysis)
+        assert parsed.analysis[3].day_raw == [3] * 24
+        # Day metadata is preserved for downstream week_raw caching.
+        assert parsed.analysis[0].day_info.day_int == 0
+
+    def test_legacy_flat_shape_still_parses(self):
+        body = _new_venue_body(
+            [{"day_int": 2, "day_raw": [5] * 24}, {"day_int": 3, "day_raw": [6] * 24}]
+        )
+
+        parsed = NewVenueResponse.model_validate(body)
+
+        assert [d.day_int for d in parsed.analysis] == [2, 3]
+
+    def test_mixed_analysis_keeps_good_and_drops_bad(self, caplog):
+        good = [_create_day_real_shape(0), {"day_int": 1, "day_raw": [4] * 24}]
+        bad = [
+            {"day_info": {"day_text": "no day number"}, "day_raw": [1] * 24},
+            {"day_info": {"day_int": 5}, "day_raw": "not-a-list"},
+            "not-even-a-dict",
+        ]
+        before = _dropped_metric()
+
+        with caplog.at_level(logging.WARNING, logger="app.models.new_venue"):
+            parsed = NewVenueResponse.model_validate(_new_venue_body(good + bad))
+
+        assert [d.day_int for d in parsed.analysis] == [0, 1]
+        assert _dropped_metric() - before == len(bad)
+        dropped_warnings = [
+            r for r in caplog.records if "unparseable analysis entry" in r.getMessage()
+        ]
+        assert len(dropped_warnings) == len(bad)
+        # The warning names the venue and entry index, never the payload.
+        assert "ven_real_shape" in dropped_warnings[0].getMessage()
+
+    def test_is_ok_unaffected_by_fully_unparseable_analysis(self):
+        parsed = NewVenueResponse.model_validate(
+            _new_venue_body(["pending", {"junk": True}])
+        )
+
+        assert parsed.is_ok()
+        assert parsed.analysis == []
+
+    def test_non_list_analysis_is_ignored(self):
+        parsed = NewVenueResponse.model_validate(_new_venue_body("forecasting"))
+
+        assert parsed.is_ok()
+        assert parsed.analysis == []
+
+    def test_docs_shape_epoch_analysis_int_is_accepted(self):
+        body = _new_venue_body([])
+        body["epoch_analysis"] = 1783000000
+
+        assert NewVenueResponse.model_validate(body).is_ok()
+
+    def test_envelope_failure_still_raises(self):
+        with pytest.raises(ValidationError):
+            NewVenueResponse.model_validate(
+                {"forecast": "maybe", "venue_info": "not-an-object"}
+            )
+
+    def test_error_status_body_parses_as_not_ok(self):
+        parsed = NewVenueResponse.model_validate(
+            {"status": "Error", "message": "Could not geocode address"}
+        )
+
+        assert not parsed.is_ok()
+        assert parsed.message == "Could not geocode address"
 
 
 def test_json_round_trip():
