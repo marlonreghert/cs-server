@@ -1,4 +1,4 @@
 """API clients package."""
-from app.api.besttime_client import BestTimeAPIClient
+from app.api.besttime_client import BestTimeAPIClient, BestTimeInvalidResponseError
 
-__all__ = ["BestTimeAPIClient"]
+__all__ = ["BestTimeAPIClient", "BestTimeInvalidResponseError"]

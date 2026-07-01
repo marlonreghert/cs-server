@@ -1,4 +1,3 @@
-@wip
 Feature: Parse the real BestTime create-venue response
   As the venue platform
   I must correctly parse BestTime's real POST /forecasts success response

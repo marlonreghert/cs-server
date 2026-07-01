@@ -247,6 +247,52 @@ async def test_transport_error_releases_reservation(handler, besttime, fake):
     assert int(fake.get("venue_add_counter_v1:2026-05") or 0) == 0
 
 
+def _add_venue_result_metric(result: str) -> float:
+    from prometheus_client import REGISTRY
+
+    return (
+        REGISTRY.get_sample_value("add_venue_by_address_total", {"result": result})
+        or 0.0
+    )
+
+
+@pytest.mark.asyncio
+async def test_bad_response_returns_honest_502_and_releases_slot(
+    handler, besttime, fake
+):
+    """A response-schema failure must not masquerade as a BestTime outage."""
+    from app.api.besttime_client import BestTimeInvalidResponseError
+
+    besttime.add_venue_to_account.side_effect = BestTimeInvalidResponseError(
+        "unparseable POST /forecasts response envelope"
+    )
+    bad_before = _add_venue_result_metric("besttime_bad_response")
+    error_before = _add_venue_result_metric("besttime_error")
+
+    outcome = await handler.add(_req())
+
+    assert outcome.status_code == 502
+    assert "unparseable" in outcome.body["detail"].lower()
+    assert "unavailable" not in outcome.body["detail"].lower()
+    assert _add_venue_result_metric("besttime_bad_response") - bad_before == 1
+    assert _add_venue_result_metric("besttime_error") - error_before == 0
+    # Reservation released → counter unchanged.
+    assert int(fake.get("venue_add_counter_v1:2026-05") or 0) == 0
+
+
+@pytest.mark.asyncio
+async def test_transport_error_keeps_besttime_error_metric(handler, besttime, fake):
+    besttime.add_venue_to_account.side_effect = httpx.ConnectError("simulated")
+    bad_before = _add_venue_result_metric("besttime_bad_response")
+    error_before = _add_venue_result_metric("besttime_error")
+
+    outcome = await handler.add(_req())
+
+    assert outcome.status_code == 502
+    assert _add_venue_result_metric("besttime_error") - error_before == 1
+    assert _add_venue_result_metric("besttime_bad_response") - bad_before == 0
+
+
 @pytest.mark.asyncio
 async def test_besttime_status_error_triggers_geo_fallback_hit(
     handler, besttime, venue_dao, fake
