@@ -140,6 +140,12 @@ class Settings(BaseSettings):
     besttime_public_key: str = "pub_4f4f184e1a5f4f50a48e945fde7ab2ea"
     besttime_endpoint_base_v1: str = "https://besttime.app/api/v1"
     besttime_search_polling_wait_seconds: int = 15
+    # Dedicated timeout (seconds) for the slow, synchronous POST /forecasts
+    # "create venue" call (add_venue_to_account). BestTime builds a fresh
+    # forecast on this request, so it is far slower than the live/read calls;
+    # keep it well above the tight client-wide default so a manual add survives
+    # slow-but-healthy BestTime latency instead of raising ReadTimeout.
+    besttime_add_venue_timeout_seconds: float = 30.0
 
     # Google Places API Configuration
     # Enrichment includes: vibe attributes, business status checks, permanently closed detection

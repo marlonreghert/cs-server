@@ -293,3 +293,84 @@ class TestBestTimeAPIClient:
         with patch.object(api_client.client, "aclose", new_callable=AsyncMock) as mock_close:
             await api_client.close()
             mock_close.assert_called_once()
+
+
+class TestAddVenueTimeout:
+    """The slow POST /forecasts create call gets its own longer timeout,
+    independent of the tight client-wide default used by read calls."""
+
+    def test_default_add_venue_timeout_is_30_and_base_timeout_unchanged(self):
+        client = BestTimeAPIClient(
+            base_url="https://besttime.app/api/v1",
+            api_key_public="pub",
+            api_key_private="priv",
+        )
+        assert client.add_venue_timeout == 30.0
+        # The client-wide default (used by live/read calls) must stay tight.
+        assert client.timeout == 10.0
+
+    def test_explicit_add_venue_timeout_overrides_default(self):
+        client = BestTimeAPIClient(
+            base_url="https://besttime.app/api/v1",
+            api_key_public="pub",
+            api_key_private="priv",
+            timeout=10.0,
+            add_venue_timeout=45.0,
+        )
+        assert client.add_venue_timeout == 45.0
+
+    @pytest.mark.asyncio
+    async def test_add_venue_request_uses_add_venue_timeout(self):
+        """add_venue_to_account must issue POST /forecasts with the configured
+        add-venue timeout, not the client-wide default."""
+        client = BestTimeAPIClient(
+            base_url="https://besttime.app/api/v1",
+            api_key_public="pub",
+            api_key_private="priv",
+            timeout=10.0,
+            add_venue_timeout=30.0,
+        )
+        with patch.object(client.client, "request", new_callable=AsyncMock) as mock_request:
+            mock_response = Mock()
+            mock_response.status_code = 200
+            mock_response.json.return_value = {
+                "status": "OK",
+                "venue_info": {
+                    "venue_id": "ven_fresh_001",
+                    "venue_name": "Bar do Joao",
+                    "venue_address": "Rua das Flores 123",
+                    "venue_lat": -8.05,
+                    "venue_lon": -34.88,
+                },
+                "analysis": [],
+            }
+            mock_request.return_value = mock_response
+
+            result = await client.add_venue_to_account("Bar do Joao", "Rua das Flores 123")
+
+            assert result.is_ok()
+            assert mock_request.call_args.kwargs["timeout"] == 30.0
+
+    @pytest.mark.asyncio
+    async def test_read_calls_do_not_override_timeout(self, api_client):
+        """Read/list calls must not pass a per-request timeout, so they inherit
+        the tight client-wide default (10s)."""
+        with patch.object(api_client.client, "request", new_callable=AsyncMock) as mock_request:
+            mock_response = Mock()
+            mock_response.status_code = 200
+            mock_response.json.return_value = {
+                "status": "OK",
+                "venues_n": 0,
+                "venues": [],
+            }
+            mock_request.return_value = mock_response
+
+            params = VenueFilterParams(lat=-8.07834, lng=-34.90938, radius=5000, live=True)
+            await api_client.venue_filter(params)
+
+            assert "timeout" not in mock_request.call_args.kwargs
+
+    def test_settings_default_add_venue_timeout(self):
+        from app.config import settings
+
+        assert settings.besttime_add_venue_timeout_seconds == 30.0
