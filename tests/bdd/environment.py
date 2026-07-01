@@ -212,6 +212,8 @@ def _build_rds_layer(context) -> None:
     set_engagement_service(context.engagement_service)
     if getattr(context, "container", None) is not None:
         context.container.engagement_service = context.engagement_service
+        # The geo-fence admin endpoint reads/writes admin.geo_fence via the store.
+        context.container.rds_store = context.rds_store
 
     from app.services.admin_config_service import AdminConfigService
     from app.services.force_update import validate_force_update_config

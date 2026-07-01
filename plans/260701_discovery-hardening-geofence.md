@@ -184,11 +184,31 @@ Manual or integration checks:
   safe default fallback; changes are reversible on the next projection.
 - Serving-view and `evaluate()` parity holds for the geo dimension.
 
-## Open Questions
-- vibes_bot preflight: the vibes_bot submodule is currently on
-  `feature/bot-response-latency` (another in-flight effort), not `main`. Its
-  admin-UI plan (for editing the geo-fence box) cannot be created until it is on a
-  clean `main`. Resolve how to proceed (finish/park that branch, or plan the
-  vibes_bot side afterward) before `/execute-feature` of the vibes_bot side.
-- Exact default Recife/Olinda box coordinates to seed (starting proposal:
-  lat −8.30..−7.85, lng −35.10..−34.80) — confirm before execution.
+## Open Questions (resolved at execution)
+- vibes_bot preflight: the vibes_bot admin-UI editor is a **non-goal** of this
+  cs-server plan (it only defines the endpoint contract). The vibes_bot side is a
+  separate, later per-repo plan and does not block this cs-server execution.
+- Exact default Recife/Olinda box coordinates — **confirmed** at execution as the
+  proposed box: lat −8.30..−7.85, lng −35.10..−34.80 (seeded in migration 0014 and
+  `DEFAULT_GEO_FENCE`).
+
+## Execution notes (as-built)
+- **Discovery points already dormant:** there is no `DEFAULT_DISCOVERY_POINTS`
+  constant, and `_get_discovery_points()` already returns `[]` when the admin
+  config is empty/absent. "Discovery keeps no configured points" needed no new
+  code — it is a BDD assertion of existing behavior.
+- **No `evaluate()` production callers:** serving membership is enforced solely by
+  the `serving.eligible_venue` SQL view. The geo predicate is therefore a
+  **separate** function (`geo_excluded`, a reversible third state — never folded
+  into `evaluate()`/`soft_deletable`); the Python side exists only to keep the fake
+  store + parity test honest. No serving/inventory-sync/discovery callers needed
+  coordinate threading.
+- **Route ordering:** `GET`/`PUT /admin/config/geofence` are declared **before** the
+  generic `/config/{key}` handler so the write lands in the typed `admin.geo_fence`
+  table (read by the view), not `admin.admin_config`.
+- **Observability:** added a `venues_geo_excluded` gauge set on each projector
+  rebuild (active venues outside the enabled box) alongside the existing
+  `serving_view_venues` gauge; `REASON_GEO = "ineligible_geo"` added to
+  `ALL_REASONS` for serve-time labeling.
+- **Migration id:** `0014_geofence_eligible_venue` (down_revision `0013…`; the
+  plan's `0011` was illustrative).

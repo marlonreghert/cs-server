@@ -619,132 +619,20 @@ async def startup_essential(settings: Settings):
 
 
 async def startup_background_pipelines(settings: Settings):
-    """Run enrichment pipelines and data refreshes in the background.
+    """No-op by design: **no pipeline runs on startup**.
 
-    These run AFTER the server is already accepting requests, so existing
-    Redis data can be served while pipelines update it incrementally.
+    After the 2026-07-01 incident (a restart ran discovery and spent the scarce
+    BestTime unique-venue quota), startup only serves the already-projected Redis
+    data. All refresh/enrichment runs via the scheduled cron jobs
+    (``register_refresh_jobs``) or explicit admin-panel triggers
+    (``admin_trigger_router`` / ``JOB_REGISTRY``). The ``*_on_startup`` settings are
+    intentionally dead — a stray ``*_on_startup=true`` must not re-trigger anything.
+    The pipeline service methods remain intact for the cron/admin trigger paths.
     """
-    logger.info("[Main] Starting background enrichment pipelines")
-
-    # Initial data refresh (if enabled)
-    if settings.refresh_on_startup:
-        logger.info("[Main] Refreshing venues data (initial load)")
-        try:
-            await container.venues_refresher_service.refresh_venues_by_filter_for_default_locations(
-                fetch_and_cache_live=True
-            )
-            logger.info("[Main] Initial venue refresh completed")
-        except Exception as e:
-            logger.error(f"[Main] Initial venue refresh failed: {e}")
-
-        logger.info("[Main] Refreshing venues live forecast (initial load)")
-        try:
-            await container.venues_refresher_service.refresh_live_forecasts_for_all_venues()
-            logger.info("[Main] Initial live forecast refresh completed")
-        except Exception as e:
-            logger.error(f"[Main] Initial live forecast refresh failed: {e}")
-
-        logger.info("[Main] Refreshing weekly forecasts (initial load)")
-        try:
-            await container.venues_refresher_service.refresh_weekly_forecasts_for_all_venues()
-            logger.info("[Main] Initial weekly forecast refresh completed")
-        except Exception as e:
-            logger.error(f"[Main] Initial weekly forecast refresh failed: {e}")
-    else:
-        logger.info("[Main] Skipping initial refresh (REFRESH_ON_STARTUP=false)")
-
-    # Google Places enrichment
-    if (
-        settings.google_places_enrichment_on_startup
-        and settings.google_places_api_key
-        and container.google_places_enrichment_service is not None
-    ):
-        force_refresh = settings.remove_permanently_closed_venues
-        logger.info(f"[Main] Running Google Places enrichment (force_refresh={force_refresh})")
-        try:
-            await container.google_places_enrichment_service.enrich_all_venues(
-                force_refresh=force_refresh
-            )
-            logger.info("[Main] Initial Google Places enrichment completed")
-        except Exception as e:
-            logger.error(f"[Main] Initial Google Places enrichment failed: {e}")
-
-    # Photo enrichment
-    if (
-        settings.photo_enrichment_on_startup
-        and settings.google_places_api_key
-        and container.photo_enrichment_service is not None
-    ):
-        logger.info("[Main] Enriching venues with photos (background)")
-        try:
-            await container.photo_enrichment_service.refresh_photos_for_venues()
-            logger.info("[Main] Initial photo enrichment completed")
-        except Exception as e:
-            logger.error(f"[Main] Initial photo enrichment failed: {e}")
-
-    # Instagram enrichment
-    if (
-        settings.instagram_enrichment_on_startup
-        and settings.apify_api_token
-        and container.instagram_enrichment_service is not None
-    ):
-        logger.info("[Main] Running Instagram enrichment (background)")
-        try:
-            await container.instagram_enrichment_service.enrich_all_venues()
-            logger.info("[Main] Initial Instagram enrichment completed")
-        except Exception as e:
-            logger.error(f"[Main] Initial Instagram enrichment failed: {e}")
-
-    # IG posts enrichment
-    if (
-        settings.ig_posts_enrichment_on_startup
-        and settings.apify_api_token
-        and container.instagram_posts_enrichment_service is not None
-    ):
-        logger.info("[Main] Running IG posts enrichment (background)")
-        try:
-            await container.instagram_posts_enrichment_service.enrich_all_venues()
-            logger.info("[Main] Initial IG posts enrichment completed")
-        except Exception as e:
-            logger.error(f"[Main] Initial IG posts enrichment failed: {e}")
-
-    # Menu photo enrichment
-    if (
-        settings.menu_enrichment_on_startup
-        and container.menu_photo_enrichment_service is not None
-    ):
-        logger.info("[Main] Running menu photo enrichment (background)")
-        try:
-            await container.menu_photo_enrichment_service.enrich_all_venues()
-            logger.info("[Main] Initial menu photo enrichment completed")
-        except Exception as e:
-            logger.error(f"[Main] Initial menu photo enrichment failed: {e}")
-
-    # Menu extraction
-    if (
-        settings.menu_extraction_on_startup
-        and container.menu_extraction_service is not None
-    ):
-        logger.info("[Main] Running menu extraction (background)")
-        try:
-            await container.menu_extraction_service.extract_all_venues()
-            logger.info("[Main] Initial menu extraction completed")
-        except Exception as e:
-            logger.error(f"[Main] Initial menu extraction failed: {e}")
-
-    # Vibe classification
-    if (
-        settings.vibe_classifier_on_startup
-        and container.vibe_classifier_service is not None
-    ):
-        logger.info("[Main] Running vibe classification (background)")
-        try:
-            await container.vibe_classifier_service.classify_all_venues()
-            logger.info("[Main] Initial vibe classification completed")
-        except Exception as e:
-            logger.error(f"[Main] Initial vibe classification failed: {e}")
-
-    logger.info("[Main] Background enrichment pipelines completed")
+    logger.info(
+        "[Main] No pipelines run on startup by design; refresh/enrichment happen "
+        "via scheduled cron jobs or admin-panel triggers"
+    )
 
 
 async def shutdown_sequence():
@@ -779,22 +667,18 @@ async def lifespan(app: FastAPI):
     # Phase 1: Essential init (blocking) — server won't accept requests until done
     await startup_essential(settings)
 
-    # Phase 2: Start scheduled background jobs
+    # Phase 2: Start scheduled background jobs (cron: live/weekly refresh; discovery
+    # stays gated off). This is the ONLY on-start scheduling path.
     logger.info("[Main] Starting periodic jobs")
     start_background_jobs(settings)
 
-    # Phase 3: Enrichment pipelines run as a background task AFTER yield,
-    # meaning the server is already accepting requests.
-    enrichment_task = asyncio.create_task(startup_background_pipelines(settings))
+    # Phase 3: No pipeline runs on startup by design (log-only no-op). Refresh and
+    # enrichment happen via the scheduled cron jobs above or admin-panel triggers.
+    await startup_background_pipelines(settings)
 
     yield  # ← Server is now accepting requests
 
     # Shutdown
-    enrichment_task.cancel()
-    try:
-        await enrichment_task
-    except asyncio.CancelledError:
-        pass
     await shutdown_sequence()
 
 

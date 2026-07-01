@@ -17,6 +17,7 @@ from app.metrics import (
     REDIS_PROJECTION_REMOVED_TOTAL,
     REDIS_PROJECTION_VENUES,
     SERVING_VIEW_VENUES,
+    VENUES_GEO_EXCLUDED,
 )
 from app.models import (
     LiveForecastResponse,
@@ -89,6 +90,15 @@ class RedisProjectionService:
             return summary
         servable_set = set(servable_ids)
         SERVING_VIEW_VENUES.set(len(servable_set))
+        # Geo-fence effect (observability only): active venues currently dropped
+        # from serving because their coords are outside the enabled box. Best-effort
+        # — a count failure must never abort the projection.
+        try:
+            geo_excluded_count = self.rds_store.count_geo_excluded_active_venues()
+            VENUES_GEO_EXCLUDED.set(geo_excluded_count)
+            summary["geo_excluded"] = geo_excluded_count
+        except Exception as e:
+            logger.warning(f"[Rebuild] geo-excluded count failed: {e}")
         for venue_id in servable_ids:
             row = self.rds_store.get_venue(venue_id)
             try:

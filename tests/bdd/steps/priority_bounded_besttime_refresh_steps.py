@@ -267,7 +267,13 @@ def step_trigger_rejected(context):
         body = resp.json()
     except Exception:
         pass
-    rejected = resp.status_code == 403 or body.get("status") == "disabled"
+    # Discovery is dormant: venue_catalog was removed from JOB_REGISTRY, so the
+    # manual trigger is now rejected as an unknown job (404). Older builds rejected
+    # it as 403 / status "disabled"; accept either as a valid rejection.
+    rejected = (
+        resp.status_code in (403, 404)
+        or body.get("status") == "disabled"
+    )
     assert rejected, f"expected rejection, got {resp.status_code}: {resp.text[:300]}"
 
 

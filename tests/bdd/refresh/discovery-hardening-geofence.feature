@@ -1,4 +1,3 @@
-@wip
 Feature: Discovery/startup hardening and Recife-metro geo-fence eligibility
   As the venue platform
   I must never run pipelines on startup, never trigger venue-filter discovery,

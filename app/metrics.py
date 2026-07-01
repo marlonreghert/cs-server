@@ -414,6 +414,17 @@ SERVING_VIEW_VENUES = Gauge(
     "projector run",
 )
 
+# Active venues currently dropped from serving by the Recife-metro geo-fence
+# (coordinates outside the enabled box). Reversible serve-time filter — these
+# venues stay active in RDS and re-enter serving if the box is widened/disabled.
+# Distinct from SERVING_VIEW_VENUES (which conflates geo with type/name eligibility)
+# so an operator can see the geo-fence's specific effect. Set on each projector run.
+VENUES_GEO_EXCLUDED = Gauge(
+    "venues_geo_excluded",
+    "Active venues excluded from serving by the geo-fence (outside the enabled box) "
+    "on the last projector run",
+)
+
 REDIS_PROJECTION_REMOVED_TOTAL = Counter(
     "redis_projection_removed_total",
     "Total venues reconciled out of the Redis serving set by the projector "
