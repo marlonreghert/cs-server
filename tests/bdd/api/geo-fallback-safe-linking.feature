@@ -33,11 +33,12 @@ Feature: Geo-fallback safe linking — fold+best-match, generic-name guard, undo
     Then the add completes as matched via geo fallback
 
   # newly_linked flag
-  Scenario: The link outcome says whether a new catalog row was created
+  Scenario: The link outcome says whether a new catalog row was created and why it matched
     Given BestTime rejects a create with a venue info block without a venue id
     And the geo fallback offers a matching candidate not yet in the catalog
     When an operator adds the venue by name and address
     Then the geo fallback outcome reports the venue as newly linked
+    And the outcome reports which matching rule linked it
 
   # (c) undo
   Scenario: Undoing a fresh link removes it from serving and returns the slot
