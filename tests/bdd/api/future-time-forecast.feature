@@ -1,4 +1,3 @@
-@wip
 Feature: Future-time weekly forecast for /v1/venues/nearby
   As the venue-serving API, given a caller that asks for a future day,
   the nearby-venues response must carry that day's weekly forecast so

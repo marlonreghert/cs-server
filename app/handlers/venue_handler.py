@@ -98,7 +98,12 @@ class VenueHandler:
         return descriptions if any_data else None
 
     def get_venues_nearby(
-        self, lat: float, lon: float, radius: float, verbose: bool = False
+        self,
+        lat: float,
+        lon: float,
+        radius: float,
+        verbose: bool = False,
+        target_day_offset: Optional[int] = None,
     ) -> list[VenueWithLive] | list[MinifiedVenue]:
         """Get venues near a location with live and weekly forecasts.
 
@@ -115,6 +120,9 @@ class VenueHandler:
             lon: Longitude
             radius: Radius in kilometers
             verbose: If True, return full VenueWithLive; if False, return MinifiedVenue
+            target_day_offset: Days forward from today (0=today) selecting which
+                weekly-forecast day to attach. Interpreted modulo 7 (the forecast
+                is weekly-periodic). None or 0 keeps today's forecast.
 
         Returns:
             List of VenueWithLive (verbose=True) or MinifiedVenue (verbose=False)
@@ -138,7 +146,7 @@ class VenueHandler:
         logger.info(f"[VenueHandler] Found {len(venues)} nearby venues")
 
         # 2. Merge with live and weekly forecasts
-        merged = self._merge(venues)
+        merged = self._merge(venues, target_day_offset=target_day_offset)
 
         # 3. Transform based on verbose flag. Resolve the live-busyness freshness
         # window once per request (admin override or settings default) and stamp a
@@ -172,7 +180,9 @@ class VenueHandler:
         """
         return self.venue_dao.get_nearby_venues(lat, lon, radius)
 
-    def _merge(self, venues: list[Venue]) -> list[VenueWithLive]:
+    def _merge(
+        self, venues: list[Venue], target_day_offset: Optional[int] = None
+    ) -> list[VenueWithLive]:
         """Merge venues with live and weekly forecasts.
 
         CRITICAL: Implements exact logic from Go (lines 130-196).
@@ -205,12 +215,15 @@ class VenueHandler:
         python_weekday = recife_time.weekday()  # 0=Mon, 6=Sun
 
         # CRITICAL: Python weekday() already matches BestTime day_int!
-        # No conversion needed (unlike Go which has 0=Sun)
-        besttime_day_int = python_weekday
+        # No conversion needed (unlike Go which has 0=Sun). Shift by the requested
+        # forward offset (0=today) and wrap modulo 7 — the weekly forecast is
+        # weekly-periodic, so an out-of-week offset resolves to the same weekday.
+        besttime_day_int = (python_weekday + (target_day_offset or 0)) % 7
 
         logger.info(
             f"[VenueHandler] Current Recife time: {recife_time.strftime('%Y-%m-%d %H:%M:%S %Z')}, "
-            f"Python weekday: {python_weekday}, BestTime day_int: {besttime_day_int}"
+            f"Python weekday: {python_weekday}, target_day_offset: {target_day_offset}, "
+            f"BestTime day_int: {besttime_day_int}"
         )
 
         for v in venues:
