@@ -1,6 +1,6 @@
 """FastAPI routes for venue endpoints."""
 import logging
-from typing import Union
+from typing import Optional, Union
 
 from fastapi import APIRouter, HTTPException, Query
 
@@ -43,11 +43,22 @@ def get_venues_nearby(
         False,
         description="If true, return full VenueWithLive; if false, return MinifiedVenue",
     ),
+    target_day_offset: Optional[int] = Query(
+        None,
+        ge=0,
+        description=(
+            "Days forward from today (0=today) to select the weekly-forecast day. "
+            "Interpreted modulo 7 since the forecast is weekly-periodic. Omitted or "
+            "0 returns today's forecast (backward-compatible)."
+        ),
+    ),
 ) -> Union[list[VenueWithLive], list[MinifiedVenue]]:
     """Get nearby venues with live and weekly forecasts."""
     try:
         handler = get_handler()
-        return handler.get_venues_nearby(lat, lon, radius, verbose)
+        return handler.get_venues_nearby(
+            lat, lon, radius, verbose, target_day_offset=target_day_offset
+        )
     except HTTPException:
         raise
     except Exception as e:

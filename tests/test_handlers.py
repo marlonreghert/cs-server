@@ -226,6 +226,69 @@ class TestVenueHandler:
         # The merge path should request day_int=6 (Sunday) before fallback hours load all days
         assert mock_venue_dao.get_week_raw_forecast.call_args_list[0].args == ("v1", 6)
 
+    @patch("app.handlers.venue_handler.datetime")
+    def test_target_day_offset_selects_future_day(
+        self, mock_datetime, venue_handler, mock_venue_dao
+    ):
+        """target_day_offset shifts the requested weekly-forecast day forward."""
+        v1 = Venue(venue_id="v1", venue_name="Bar v1", venue_lat=-8.0, venue_lng=-34.9)
+        mock_venue_dao.get_nearby_venues.return_value = [v1]
+        mock_venue_dao.get_live_forecast.return_value = None
+        mock_venue_dao.get_week_raw_forecast.return_value = None
+
+        # Monday (Python weekday=0) + offset 3 -> day_int 3 (Thursday).
+        mock_recife_time = datetime(2026, 1, 26, 12, 0, 0)  # Monday
+        mock_datetime.now.return_value = mock_recife_time
+
+        venue_handler.get_venues_nearby(
+            lat=-8.0, lon=-34.9, radius=5.0, target_day_offset=3
+        )
+
+        assert mock_venue_dao.get_week_raw_forecast.call_args_list[0].args == ("v1", 3)
+
+    @patch("app.handlers.venue_handler.datetime")
+    def test_target_day_offset_wraps_modulo_7(
+        self, mock_datetime, venue_handler, mock_venue_dao
+    ):
+        """An offset beyond the week wraps around (weekly-periodic forecast)."""
+        v1 = Venue(venue_id="v1", venue_name="Bar v1", venue_lat=-8.0, venue_lng=-34.9)
+        mock_venue_dao.get_nearby_venues.return_value = [v1]
+        mock_venue_dao.get_live_forecast.return_value = None
+        mock_venue_dao.get_week_raw_forecast.return_value = None
+
+        # Sunday (Python weekday=6) + offset 8 -> (6 + 8) % 7 = 0 (Monday).
+        mock_recife_time = datetime(2026, 2, 1, 12, 0, 0)  # Sunday
+        mock_datetime.now.return_value = mock_recife_time
+
+        venue_handler.get_venues_nearby(
+            lat=-8.0, lon=-34.9, radius=5.0, target_day_offset=8
+        )
+
+        assert mock_venue_dao.get_week_raw_forecast.call_args_list[0].args == ("v1", 0)
+
+    @patch("app.handlers.venue_handler.datetime")
+    def test_target_day_offset_none_and_zero_match_today(
+        self, mock_datetime, venue_handler, mock_venue_dao
+    ):
+        """Omitting the offset and passing 0 both resolve to today's day."""
+        v1 = Venue(venue_id="v1", venue_name="Bar v1", venue_lat=-8.0, venue_lng=-34.9)
+        mock_venue_dao.get_nearby_venues.return_value = [v1]
+        mock_venue_dao.get_live_forecast.return_value = None
+        mock_venue_dao.get_week_raw_forecast.return_value = None
+
+        mock_recife_time = datetime(2026, 1, 28, 12, 0, 0)  # Wednesday (weekday=2)
+        mock_datetime.now.return_value = mock_recife_time
+
+        venue_handler.get_venues_nearby(lat=-8.0, lon=-34.9, radius=5.0)
+        venue_handler.get_venues_nearby(
+            lat=-8.0, lon=-34.9, radius=5.0, target_day_offset=0
+        )
+
+        calls = mock_venue_dao.get_week_raw_forecast.call_args_list
+        assert calls[0].args == ("v1", 2)  # omitted -> today
+        # second invocation's first forecast fetch also targets today
+        assert ("v1", 2) in [c.args for c in calls]
+
     def test_verbose_mode_returns_full_structure(self, venue_handler, mock_venue_dao):
         """Test verbose=True returns full VenueWithLive."""
         v1 = Venue(venue_id="v1", venue_name="Bar v1", venue_lat=-8.0, venue_lng=-34.9)
