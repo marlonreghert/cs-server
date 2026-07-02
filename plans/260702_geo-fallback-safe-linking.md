@@ -64,7 +64,12 @@ every link reversible:
   containment, then higher address-token overlap (fold both addresses, split
   to token sets, intersect), then BestTime order. Top candidate wins.
 - **Response:** the `matched_via_geo_fallback` 200 body gains
-  `newly_linked: true|false` (true only when the link upserted a new row).
+  `newly_linked: true|false` (true only when the link upserted a new row)
+  and `match_reason: "exact"|"containment"` (which matcher rule linked it).
+  `match_reason` exists for BACKEND AUTOMATION: a future batch-add flow
+  auto-keeps `exact` links and queues `containment` links for human review
+  within the 24h undo window — the panel's Keep/Undo decision, expressed as
+  data instead of a banner.
 - **Undo:** `POST /admin/venues/geo-link/undo` with `{venue_id}`:
   - venue exists, is active, and `created_at` is within 24h → soft-delete with
     `reason="geo_link_undone"`, `source="admin_geo_link_undo"`, decrement the
@@ -84,7 +89,8 @@ every link reversible:
 - **Matcher (`add_venue_handler.py`):** rewrite `_find_name_match` per the
   ranking rules above, reusing `_fold_text`; module-level constant
   `MIN_CONTAINMENT_MATCH_LEN = 5`.
-- **Body flag:** thread `was_new` into the 200 body as `newly_linked`.
+- **Body flag:** thread `was_new` into the 200 body as `newly_linked`, and
+  the winning rule from `_find_name_match` as `match_reason`.
 - **Undo endpoint:** router `POST /admin/venues/geo-link/undo` →
   `add_venue_handler.undo_geo_link(venue_id)` (or a small dedicated handler),
   using `venue_dao`/rds store reads, `soft_delete_venue`, and a budget-service
@@ -120,7 +126,8 @@ Scenarios:
   linked, not the first-listed one.
 - A short generic name ("Bar") does not containment-match a longer name
   ("Barcelona Bar"); an exact short name still matches.
-- The geo-fallback success body says whether the venue was newly linked.
+- The geo-fallback success body says whether the venue was newly linked and
+  which matcher rule (exact vs containment) produced the link.
 - Undoing a fresh link deprecates the venue, returns the month-counter slot,
   and the venue leaves the eligible serving set.
 - Undo is idempotent (second call reports already undone, no double decrement).
