@@ -3,6 +3,7 @@ import logging
 import time
 from typing import Optional
 import httpx
+from pydantic import ValidationError
 
 from typing import AsyncIterator
 
@@ -21,6 +22,12 @@ from app.metrics import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+class BestTimeInvalidResponseError(Exception):
+    """BestTime answered 2xx but the body's envelope (status / venue_info)
+    cannot be parsed. Distinct from transport errors so callers can tell a
+    parse bug on our side from a BestTime outage."""
 
 
 class BestTimeAPIClient:
@@ -317,7 +324,27 @@ class BestTimeAPIClient:
                 ).inc()
                 raise
 
-            parsed = NewVenueResponse.model_validate(body)
+            try:
+                parsed = NewVenueResponse.model_validate(body)
+            except ValidationError as e:
+                # Analysis parsing is tolerant, so only the envelope
+                # (status / message / venue_info) can fail here. Surface it
+                # as its own legible failure, not a transport error.
+                BESTTIME_API_CALLS_TOTAL.labels(endpoint=endpoint, status="error").inc()
+                BESTTIME_API_ERRORS_TOTAL.labels(
+                    endpoint=endpoint, error_type="invalid_response_schema"
+                ).inc()
+                failed_fields = sorted(
+                    {".".join(str(loc) for loc in err["loc"]) for err in e.errors()}
+                )
+                logger.error(
+                    f"[BestTimeAPIClient] POST {endpoint} returned an "
+                    f"unparseable envelope; failed fields: {failed_fields}"
+                )
+                raise BestTimeInvalidResponseError(
+                    f"unparseable POST {endpoint} response envelope "
+                    f"(failed fields: {failed_fields})"
+                ) from e
             if parsed.is_ok():
                 BESTTIME_API_CALLS_TOTAL.labels(endpoint=endpoint, status="success").inc()
             else:

@@ -374,3 +374,92 @@ class TestAddVenueTimeout:
         from app.config import settings
 
         assert settings.besttime_add_venue_timeout_seconds == 30.0
+
+
+class TestAddVenueResponseParsing:
+    """add_venue_to_account must parse the real create response and classify
+    an unparseable envelope as its own error type, not a transport failure."""
+
+    def _mock_response(self, body: dict):
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = body
+        return mock_response
+
+    @staticmethod
+    def _errors_metric() -> float:
+        from prometheus_client import REGISTRY
+
+        return (
+            REGISTRY.get_sample_value(
+                "besttime_api_errors_total",
+                {"endpoint": "/forecasts", "error_type": "invalid_response_schema"},
+            )
+            or 0.0
+        )
+
+    @pytest.mark.asyncio
+    async def test_real_create_shape_returns_ok_response(self, api_client):
+        body = {
+            "status": "OK",
+            "venue_info": {
+                "venue_id": "ven_real_001",
+                "venue_name": "Laca Burguer",
+                "venue_address": "Av. Conselheiro Aguiar 123",
+                "venue_lat": -8.119,
+                "venue_lon": -34.904,
+            },
+            "analysis": [
+                {
+                    "day_info": {"day_int": day, "day_text": "Monday"},
+                    "day_raw": [day] * 24,
+                }
+                for day in range(7)
+            ],
+        }
+        with patch.object(
+            api_client.client, "request", new_callable=AsyncMock
+        ) as mock_request:
+            mock_request.return_value = self._mock_response(body)
+
+            result = await api_client.add_venue_to_account("Laca Burguer", "Av. 123")
+
+        assert result.is_ok()
+        assert [d.day_int for d in result.analysis] == list(range(7))
+
+    @pytest.mark.asyncio
+    async def test_unparseable_envelope_raises_typed_error_not_validation_error(
+        self, api_client
+    ):
+        from pydantic import ValidationError
+
+        from app.api.besttime_client import BestTimeInvalidResponseError
+
+        before = self._errors_metric()
+        with patch.object(
+            api_client.client, "request", new_callable=AsyncMock
+        ) as mock_request:
+            mock_request.return_value = self._mock_response(
+                {"forecast": "maybe", "venue_info": "not-an-object"}
+            )
+
+            with pytest.raises(BestTimeInvalidResponseError) as exc_info:
+                await api_client.add_venue_to_account("Bar", "Rua 1")
+
+        assert not isinstance(exc_info.value, ValidationError)
+        # The typed error names the failed envelope fields for the ERROR log.
+        assert "status" in str(exc_info.value)
+        assert self._errors_metric() - before == 1
+
+    @pytest.mark.asyncio
+    async def test_transport_error_does_not_use_schema_error_type(self, api_client):
+        before = self._errors_metric()
+        with patch.object(
+            api_client.client, "request", new_callable=AsyncMock
+        ) as mock_request:
+            mock_request.side_effect = httpx.ConnectError("refused")
+
+            with pytest.raises(httpx.ConnectError):
+                await api_client.add_venue_to_account("Bar", "Rua 1")
+
+        assert self._errors_metric() - before == 0
