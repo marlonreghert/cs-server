@@ -167,7 +167,16 @@ def _install_real_besttime(context) -> None:
         if path.endswith("/forecasts"):
             if error is not None:
                 raise error
-            return httpx.Response(200, json=body)
+            # Rejections arrive as 4xx with a parseable body; default 200.
+            status = getattr(context, "besttime_http_status", 200)
+            return httpx.Response(status, json=body)
+        if path.endswith("/venues/filter"):
+            filter_body = getattr(context, "besttime_filter_body", None)
+            if filter_body is not None:
+                return httpx.Response(200, json=filter_body)
+            return httpx.Response(
+                404, json={"status": "Error", "message": "unexpected"}
+            )
         if path.endswith("/venues"):
             inventory_error = getattr(context, "besttime_inventory_error", None)
             if inventory_error is not None:

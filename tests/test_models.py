@@ -367,6 +367,32 @@ class TestNewVenueResponseParsing:
         assert not parsed.is_ok()
         assert parsed.message == "Could not geocode address"
 
+    def test_rejection_with_idless_venue_info_parses_as_not_ok(self):
+        """The prod 2026-07-02 15:14 shape: a 4xx rejection body that carries
+        a venue_info block WITHOUT venue_id (nothing was created). The
+        envelope must parse so the handler takes the rejection path instead
+        of the bad-response classification."""
+        parsed = NewVenueResponse.model_validate(
+            {
+                "status": "Error",
+                "message": "The venue could not be found.",
+                "venue_info": {
+                    "venue_name": "Mansao da Matuta",
+                    "venue_address": "R. do Bonfim, 82 - Carmo, Olinda - PE",
+                },
+            }
+        )
+
+        assert not parsed.is_ok()
+        assert parsed.message == "The venue could not be found."
+        assert parsed.venue_info is not None
+        assert parsed.venue_info.venue_id is None
+
+    def test_is_ok_requires_a_non_empty_venue_id(self):
+        for venue_id in (None, ""):
+            body = {"status": "OK", "venue_info": {"venue_id": venue_id}}
+            assert not NewVenueResponse.model_validate(body).is_ok()
+
 
 def test_json_round_trip():
     """Test JSON serialization round trip."""
