@@ -624,7 +624,8 @@ ADD_VENUE_BY_ADDRESS_TOTAL = Counter(
                  # matched_via_geo_fallback | quota_exhausted |
                  # besttime_monthly_cap | besttime_error |
                  # besttime_bad_response | besttime_rejected_no_geo_match |
-                 # timeout_unconfirmed | validation_error
+                 # timeout_unconfirmed | validation_error |
+                 # geo_link_undone | geo_link_undo_rejected
 )
 
 INVENTORY_SYNC_VENUES_TOTAL = Counter(

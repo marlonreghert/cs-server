@@ -8,6 +8,7 @@ green run in BDD validates the happy path end-to-end; these unit tests
 pin the branching contract.
 """
 import json
+from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock
 
 import fakeredis
@@ -783,3 +784,295 @@ async def test_inventory_match_returns_none_when_absent(
     match = await handler._find_in_account_inventory("Bar do Joao", "Rua das Flores")
 
     assert match is None
+
+
+# ── geo-fallback matcher ranking (_find_name_match) ───────────────────────────
+from types import SimpleNamespace  # noqa: E402
+
+from app.handlers.add_venue_handler import (  # noqa: E402
+    GEO_LINK_UNDO_SOURCE,
+    VENUE_LOOKUP_BY_ADDRESS_KEY_V1,
+    _address_hash,
+    _find_name_match,
+)
+
+
+def _cand(venue_id, name, address=""):
+    return SimpleNamespace(venue_id=venue_id, venue_name=name, venue_address=address)
+
+
+def test_find_name_match_exact_beats_containment():
+    # A containment candidate is listed first, but the exact one must win.
+    venues = [
+        _cand("ven_contain", "Bar do Joao e Filhos"),
+        _cand("ven_exact", "Bar do Joao"),
+    ]
+    match, reason = _find_name_match(venues, "Bar do Joao", "")
+    assert match.venue_id == "ven_exact"
+    assert reason == "exact"
+
+
+def test_find_name_match_overlap_tiebreak_among_exact():
+    # Same folded name, different addresses: the one overlapping the request
+    # address wins even though it is listed second.
+    venues = [
+        _cand("ven_far", "Bar do Joao", "Rua Distante 1, Olinda"),
+        _cand("ven_near", "Bar do Joao", "Rua das Flores 123, Recife"),
+    ]
+    match, reason = _find_name_match(
+        venues, "Bar do Joao", "Rua das Flores 123, Recife - PE"
+    )
+    assert match.venue_id == "ven_near"
+    assert reason == "exact"
+
+
+def test_find_name_match_containment_min_len_boundary():
+    # 4-char shorter name never containment-links; 5-char does.
+    assert _find_name_match([_cand("v", "Cafe Rio")], "Cafe", "") == (None, None)
+    match, reason = _find_name_match([_cand("v", "Pizza Place")], "Pizza", "")
+    assert match.venue_id == "v" and reason == "containment"
+
+
+def test_find_name_match_short_generic_word_does_not_link():
+    # The originating bug: "bar" must not link to "barcelona bar".
+    assert _find_name_match([_cand("v", "Barcelona Bar")], "Bar", "") == (None, None)
+
+
+def test_find_name_match_accent_and_punctuation_folding():
+    match, reason = _find_name_match(
+        [_cand("v", "Laca Burguer Boa Viagem")], "Laça Burguer, Boa Viagem!", ""
+    )
+    assert match.venue_id == "v" and reason == "exact"
+
+
+def test_find_name_match_skips_empty_candidate_and_empty_submitted():
+    # Empty candidate names are skipped; an empty submitted name matches nothing.
+    assert _find_name_match([_cand("v", "")], "Bar do Joao", "") == (None, None)
+    assert _find_name_match([_cand("v", "Bar do Joao")], "", "") == (None, None)
+
+
+# ── geo-link undo (undo_geo_link) ─────────────────────────────────────────────
+@pytest.fixture
+def rds_fake_store():
+    from tests.rds_fake import InMemoryRdsVenueStore
+
+    return InMemoryRdsVenueStore()
+
+
+@pytest.fixture
+def undo_handler(venue_dao, besttime, budget, fake, rds_fake_store):
+    return AddVenueHandler(
+        venue_dao=venue_dao,
+        besttime_api=besttime,
+        budget_service=budget,
+        redis_client=fake,
+        rds_store=rds_fake_store,
+    )
+
+
+_UNDO_NAME = "Bar do Joao"
+_UNDO_ADDRESS = "Rua das Flores 123, Recife - PE"
+
+
+def _seed_linked_venue(rds_store, fake, venue_id="ven_linked", counter=1):
+    """Mirror the post-link state: an RDS row (created just now), the month
+    counter incremented, and the address-hash cache entry present."""
+    rds_store.upsert_venue(
+        Venue(
+            processed=True,
+            forecast=True,
+            venue_id=venue_id,
+            venue_name=_UNDO_NAME,
+            venue_address=_UNDO_ADDRESS,
+            venue_lat=-8.05,
+            venue_lng=-34.88,
+        )
+    )
+    fake.set("venue_add_counter_v1:2026-05", counter)
+    fake.set(
+        VENUE_LOOKUP_BY_ADDRESS_KEY_V1.format(hash=_address_hash(_UNDO_NAME, _UNDO_ADDRESS)),
+        venue_id,
+    )
+
+
+@pytest.mark.asyncio
+async def test_undo_geo_link_missing_returns_404(undo_handler):
+    outcome = await undo_handler.undo_geo_link("ven_unknown")
+    assert outcome.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_undo_geo_link_fresh_link_deprecates_returns_slot_drops_cache(
+    undo_handler, rds_fake_store, fake
+):
+    _seed_linked_venue(rds_fake_store, fake)
+    undone_before = _add_venue_result_metric("geo_link_undone")
+
+    outcome = await undo_handler.undo_geo_link("ven_linked")
+
+    assert outcome.status_code == 200
+    assert outcome.body["status"] == "undone"
+    row = rds_fake_store.get_venue("ven_linked")
+    assert row["lifecycle_status"] == "deprecated"
+    assert row["deprecated_source"] == GEO_LINK_UNDO_SOURCE
+    # Discovery slot returned.
+    assert int(fake.get("venue_add_counter_v1:2026-05")) == 0
+    # Address cache dropped so a re-add is not short-circuited to the dead row.
+    assert (
+        fake.get(
+            VENUE_LOOKUP_BY_ADDRESS_KEY_V1.format(
+                hash=_address_hash(_UNDO_NAME, _UNDO_ADDRESS)
+            )
+        )
+        is None
+    )
+    assert _add_venue_result_metric("geo_link_undone") - undone_before == 1
+
+
+@pytest.mark.asyncio
+async def test_undo_geo_link_older_than_24h_rejected_409(
+    undo_handler, rds_fake_store, fake
+):
+    _seed_linked_venue(rds_fake_store, fake)
+    old = datetime.now(timezone.utc) - timedelta(hours=25)
+    rds_fake_store.venues["ven_linked"]["created_at"] = old.isoformat()
+
+    outcome = await undo_handler.undo_geo_link("ven_linked")
+
+    assert outcome.status_code == 409
+    # Counter untouched; venue still active.
+    assert int(fake.get("venue_add_counter_v1:2026-05")) == 1
+    assert rds_fake_store.get_venue("ven_linked")["lifecycle_status"] == "active"
+
+
+@pytest.mark.asyncio
+async def test_undo_geo_link_idempotent_no_double_decrement(
+    undo_handler, rds_fake_store, fake
+):
+    _seed_linked_venue(rds_fake_store, fake)
+    first = await undo_handler.undo_geo_link("ven_linked")
+    assert first.body["status"] == "undone"
+    assert int(fake.get("venue_add_counter_v1:2026-05")) == 0
+
+    second = await undo_handler.undo_geo_link("ven_linked")
+
+    assert second.status_code == 200
+    assert second.body["status"] == "already_undone"
+    # Counter did NOT go negative / move again.
+    assert int(fake.get("venue_add_counter_v1:2026-05")) == 0
+
+
+@pytest.mark.asyncio
+async def test_undo_geo_link_deprecated_by_other_source_rejected_409(
+    undo_handler, rds_fake_store, fake
+):
+    _seed_linked_venue(rds_fake_store, fake)
+    rds_fake_store.soft_delete_venue(
+        "ven_linked", "ineligible_google_type", "eligibility_filter"
+    )
+
+    outcome = await undo_handler.undo_geo_link("ven_linked")
+
+    assert outcome.status_code == 409
+    # Not laundered into an already_undone; the eligibility deprecation stands.
+    assert rds_fake_store.get_venue("ven_linked")["deprecated_source"] == "eligibility_filter"
+
+
+@pytest.mark.asyncio
+async def test_readd_after_undo_reactivates_despite_stale_address_cache(
+    besttime, budget, fake, rds_fake_store
+):
+    """A re-add must NOT be blocked by a stale address-cache entry left after an
+    undo. The undo's cache drop is keyed on BestTime's stored name, so when the
+    operator's submitted name differs (accents/punctuation — the folding case)
+    the entry survives and points at the now-deprecated row. The add must fall
+    through the deprecated hit to BestTime, which reactivates it."""
+    from app.dao.venue_repository import VenueRepository
+
+    repo = VenueRepository(GeoRedisClient(fake), rds_store=rds_fake_store)
+    handler = AddVenueHandler(
+        venue_dao=repo,
+        besttime_api=besttime,
+        budget_service=budget,
+        redis_client=fake,
+        rds_store=rds_fake_store,
+    )
+    vid = "ven_geo_link"
+    submitted_name = "Laça Burguer, Boa Viagem!"     # operator input
+    stored_name = "Laca Burguer Boa Viagem"          # BestTime normalized
+    address = "Rua das Flores 123, Recife - PE"
+
+    # Post-undo state: RDS row deprecated by an undo, and a stale address-cache
+    # entry keyed on the SUBMITTED name still pointing at it.
+    rds_fake_store.upsert_venue(
+        Venue(
+            processed=True, forecast=True, venue_id=vid,
+            venue_name=stored_name, venue_address=address,
+            venue_lat=-8.05, venue_lng=-34.88,
+        )
+    )
+    rds_fake_store.soft_delete_venue(vid, "geo_link_undone", GEO_LINK_UNDO_SOURCE)
+    fake.set(
+        VENUE_LOOKUP_BY_ADDRESS_KEY_V1.format(hash=_address_hash(submitted_name, address)),
+        vid,
+    )
+
+    besttime.add_venue_to_account.return_value = _ok_response(vid)
+    besttime.get_live_forecast.return_value = _live_unavailable(vid)
+
+    outcome = await handler.add(
+        _req(venue_name=submitted_name, venue_address=address)
+    )
+
+    assert outcome.status_code == 201
+    assert outcome.body["status"] == "created"
+    assert besttime.add_venue_to_account.await_count == 1  # did NOT short-circuit
+    assert rds_fake_store.get_venue(vid)["lifecycle_status"] == "active"
+
+
+@pytest.mark.asyncio
+async def test_readd_of_otherwise_deprecated_venue_still_short_circuits(
+    besttime, budget, fake, rds_fake_store
+):
+    """The deprecated fall-through is scoped to the geo-link-undo source ONLY.
+    A cached hit on a venue deprecated for any other reason (e.g. permanently
+    closed) keeps the pre-existing free already_exists short-circuit — falling
+    through would spend a BestTime create on a venue _preserve_deprecation
+    keeps hidden anyway."""
+    from app.dao.venue_repository import VenueRepository
+
+    repo = VenueRepository(GeoRedisClient(fake), rds_store=rds_fake_store)
+    handler = AddVenueHandler(
+        venue_dao=repo,
+        besttime_api=besttime,
+        budget_service=budget,
+        redis_client=fake,
+        rds_store=rds_fake_store,
+    )
+    vid = "ven_closed_forever"
+    name = "Bar Fechado"
+    address = "Rua Antiga 1, Recife - PE"
+
+    rds_fake_store.upsert_venue(
+        Venue(
+            processed=True, forecast=True, venue_id=vid,
+            venue_name=name, venue_address=address,
+            venue_lat=-8.05, venue_lng=-34.88,
+        )
+    )
+    rds_fake_store.soft_delete_venue(
+        vid, "google_places_closed_permanently", "google_places"
+    )
+    fake.set(
+        VENUE_LOOKUP_BY_ADDRESS_KEY_V1.format(hash=_address_hash(name, address)),
+        vid,
+    )
+
+    outcome = await handler.add(_req(venue_name=name, venue_address=address))
+
+    assert outcome.status_code == 200
+    assert outcome.body["status"] == "already_exists"
+    assert besttime.add_venue_to_account.await_count == 0  # no BestTime spend
+    assert (
+        rds_fake_store.get_venue(vid)["deprecated_source"] == "google_places"
+    )

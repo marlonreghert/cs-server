@@ -61,7 +61,7 @@ _VENUE_SELECT = (
     "v.besttime_price_level, v.price_level_source, "
     "v.rating, v.reviews, v.forecast, v.processed, "
     "v.priority, v.lifecycle_status, v.deprecated_at, v.deprecated_reason, "
-    "v.deprecated_source, v.google_business_status, v.extra "
+    "v.deprecated_source, v.google_business_status, v.created_at, v.extra "
     "FROM venues.venue v LEFT JOIN venues.address a ON a.venue_id = v.venue_id"
 )
 
@@ -91,7 +91,19 @@ class RdsVenueStore:
         row = self.get_venue(venue.venue_id)
         if row is None:
             return
-        if row.get("lifecycle_status") == "deprecated" and venue.is_active():
+        # A geo-link undo is reversible by design: an active re-add of a venue
+        # deprecated by an undo IS allowed to reactivate (clearing the deprecation
+        # fields). Every other deprecation source keeps the resurrect-block.
+        reactivating_undo = (
+            row.get("lifecycle_status") == "deprecated"
+            and venue.is_active()
+            and row.get("deprecated_source") == "admin_geo_link_undo"
+        )
+        if (
+            row.get("lifecycle_status") == "deprecated"
+            and venue.is_active()
+            and not reactivating_undo
+        ):
             venue.lifecycle_status = "deprecated"
             venue.deprecated_reason = row.get("deprecated_reason")
             venue.deprecated_source = row.get("deprecated_source")

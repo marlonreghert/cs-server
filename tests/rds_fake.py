@@ -82,7 +82,19 @@ class InMemoryRdsVenueStore:
         if row is None:
             return
         gbs = row.get("google_business_status")
-        if row.get("lifecycle_status") == "deprecated" and venue.is_active():
+        # Parity with RdsVenueStore: a geo-link undo is reversible — an active
+        # re-add of an undo-deprecated venue reactivates it; any other source
+        # keeps the resurrect-block.
+        reactivating_undo = (
+            row.get("lifecycle_status") == "deprecated"
+            and venue.is_active()
+            and row.get("deprecated_source") == "admin_geo_link_undo"
+        )
+        if (
+            row.get("lifecycle_status") == "deprecated"
+            and venue.is_active()
+            and not reactivating_undo
+        ):
             venue.lifecycle_status = "deprecated"
             venue.deprecated_reason = row.get("deprecated_reason")
             venue.deprecated_source = row.get("deprecated_source")

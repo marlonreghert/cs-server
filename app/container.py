@@ -382,6 +382,9 @@ class Container:
             google_places_client=self.google_places_api,
             # Inline Google enrichment at add time (shares the handler's DAO).
             google_places_enrichment_service=self.google_places_enrichment_service,
+            # System of record for the geo-link undo path (created_at recency
+            # guard + soft-delete; the projector then drops it from serving).
+            rds_store=self.rds_store,
         )
 
         # Expose the budget service to the refresher so discovery can

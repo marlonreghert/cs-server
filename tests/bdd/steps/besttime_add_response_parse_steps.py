@@ -223,7 +223,10 @@ def _post_add(context) -> None:
     _wire_inline_enrichment(context)
     _snapshot_metrics(context)
 
-    request = AddVenueByAddressRequest.model_validate(_VENUE)
+    # Scenarios can override request fields (e.g. a shorter venue_name) via
+    # context.add_request_override; absent, the shared _VENUE payload is used.
+    payload = {**_VENUE, **(getattr(context, "add_request_override", None) or {})}
+    request = AddVenueByAddressRequest.model_validate(payload)
     records: list[logging.LogRecord] = []
     handler = _ListLogHandler(records)
     app_logger = logging.getLogger("app")

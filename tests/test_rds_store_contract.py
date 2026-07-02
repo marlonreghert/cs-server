@@ -99,6 +99,25 @@ def test_active_readd_does_not_resurrect_deprecated(store):
     assert vid in store.list_deprecated_venue_ids()
 
 
+def test_geo_link_undo_source_allows_reactivation(store):
+    # The one resurrect-block exemption: a venue deprecated by an undo
+    # (source="admin_geo_link_undo") IS reactivated by an active re-add, clearing
+    # the deprecation fields — otherwise a re-add after an undo would be poisoned.
+    # Both stores must honour it identically.
+    vid = _vid()
+    store.upsert_venue(_venue(vid))
+    store.soft_delete_venue(vid, "geo_link_undone", "admin_geo_link_undo")
+    assert store.get_venue(vid)["lifecycle_status"] == "deprecated"
+
+    store.upsert_venue(_venue(vid, "Re-added Active"))  # incoming lifecycle=active
+    row = store.get_venue(vid)
+    assert row["lifecycle_status"] == "active"           # reactivated
+    assert row["deprecated_reason"] is None
+    assert row["deprecated_source"] is None
+    assert vid in store.list_active_venue_ids()
+    assert vid not in store.list_deprecated_venue_ids()
+
+
 def test_enrichment_upsert_history_and_soft_delete(store):
     vid = _vid()
     store.upsert_venue(_venue(vid))  # FK parent

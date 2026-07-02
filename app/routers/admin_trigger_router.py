@@ -6,7 +6,7 @@ import time
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Body, Query, Response
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app.handlers.add_venue_handler import (
     AddVenueHandler,
@@ -285,6 +285,32 @@ async def add_venue_by_address(request: AddVenueByAddressRequest, response: Resp
         )
     handler: AddVenueHandler = _container.add_venue_handler
     outcome = await handler.add(request)
+    response.status_code = outcome.status_code
+    return outcome.body
+
+
+class GeoLinkUndoRequest(BaseModel):
+    venue_id: str = Field(..., min_length=1)
+
+
+@router.post("/venues/geo-link/undo")
+async def undo_geo_link(request: GeoLinkUndoRequest, response: Response):
+    """Reverse a fresh geo-fallback link (contract for the vibes_bot admin panel).
+
+    Returns 200 {status:"undone"} on success, 200 {status:"already_undone"} when
+    idempotent, 404 when the venue is unknown, 409 when it is not undo-eligible
+    (older than 24h or deprecated by something other than a prior undo). See
+    app/handlers/add_venue_handler.py:undo_geo_link for the full matrix.
+    """
+    if _container is None:
+        raise HTTPException(status_code=503, detail="Container not initialized")
+    handler: Optional[AddVenueHandler] = getattr(_container, "add_venue_handler", None)
+    if handler is None:
+        raise HTTPException(
+            status_code=503,
+            detail="add-venue handler not configured",
+        )
+    outcome = await handler.undo_geo_link(request.venue_id)
     response.status_code = outcome.status_code
     return outcome.body
 
