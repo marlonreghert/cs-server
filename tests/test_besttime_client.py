@@ -433,6 +433,33 @@ class TestAddVenueResponseParsing:
         assert [d.day_int for d in result.analysis] == list(range(7))
 
     @pytest.mark.asyncio
+    async def test_4xx_rejection_with_idless_venue_info_returns_parsed_not_ok(
+        self, api_client
+    ):
+        """Prod 2026-07-02: a 404 rejection whose venue_info has no venue_id
+        must return a parsed non-OK response (so the handler takes the
+        rejection path), not raise the typed invalid-response error."""
+        before = self._errors_metric()
+        mock_response = Mock()
+        mock_response.status_code = 404
+        mock_response.json.return_value = {
+            "status": "Error",
+            "message": "The venue could not be found.",
+            "venue_info": {"venue_name": "Mansao da Matuta"},
+        }
+        with patch.object(
+            api_client.client, "request", new_callable=AsyncMock
+        ) as mock_request:
+            mock_request.return_value = mock_response
+
+            result = await api_client.add_venue_to_account("Mansao", "R. Bonfim 82")
+
+        assert not result.is_ok()
+        assert result.message == "The venue could not be found."
+        assert result.venue_info.venue_id is None
+        assert self._errors_metric() - before == 0
+
+    @pytest.mark.asyncio
     async def test_unparseable_envelope_raises_typed_error_not_validation_error(
         self, api_client
     ):

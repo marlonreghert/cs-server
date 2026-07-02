@@ -24,9 +24,15 @@ class NewVenueInfo(BaseModel):
     BestTime uses `venue_lon` here (vs `venue_lng` in /api/v1/venues). We
     accept both spellings via alias and always expose `venue_lng` to the
     rest of the codebase.
+
+    `venue_id` is optional: a 4xx rejection (geocoder miss / unforecastable
+    venue — prod 2026-07-02) carries a venue_info block WITHOUT an id since
+    nothing was created. The envelope must still parse so the handler can
+    take the rejection path; `NewVenueResponse.is_ok()` already requires a
+    non-empty venue_id for success.
     """
 
-    venue_id: str
+    venue_id: Optional[str] = None
     venue_name: Optional[str] = None
     venue_address: Optional[str] = None
     venue_lat: Optional[float] = None

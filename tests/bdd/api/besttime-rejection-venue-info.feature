@@ -1,4 +1,3 @@
-@wip
 Feature: BestTime rejections with partial venue info take the rejection path
   As the venue platform
   I must treat a BestTime create rejection whose venue info carries no venue id
@@ -23,4 +22,4 @@ Feature: BestTime rejections with partial venue info take the rejection path
   Scenario: A body with no usable status still classifies as a bad response
     Given BestTime replies with a body that has no usable status or venue info
     When an operator adds the venue
-    Then the add fails with the bad-response error
+    Then the add fails with a bad-response error that names an unparseable response
