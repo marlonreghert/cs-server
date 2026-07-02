@@ -1028,3 +1028,51 @@ async def test_readd_after_undo_reactivates_despite_stale_address_cache(
     assert outcome.body["status"] == "created"
     assert besttime.add_venue_to_account.await_count == 1  # did NOT short-circuit
     assert rds_fake_store.get_venue(vid)["lifecycle_status"] == "active"
+
+
+@pytest.mark.asyncio
+async def test_readd_of_otherwise_deprecated_venue_still_short_circuits(
+    besttime, budget, fake, rds_fake_store
+):
+    """The deprecated fall-through is scoped to the geo-link-undo source ONLY.
+    A cached hit on a venue deprecated for any other reason (e.g. permanently
+    closed) keeps the pre-existing free already_exists short-circuit — falling
+    through would spend a BestTime create on a venue _preserve_deprecation
+    keeps hidden anyway."""
+    from app.dao.venue_repository import VenueRepository
+
+    repo = VenueRepository(GeoRedisClient(fake), rds_store=rds_fake_store)
+    handler = AddVenueHandler(
+        venue_dao=repo,
+        besttime_api=besttime,
+        budget_service=budget,
+        redis_client=fake,
+        rds_store=rds_fake_store,
+    )
+    vid = "ven_closed_forever"
+    name = "Bar Fechado"
+    address = "Rua Antiga 1, Recife - PE"
+
+    rds_fake_store.upsert_venue(
+        Venue(
+            processed=True, forecast=True, venue_id=vid,
+            venue_name=name, venue_address=address,
+            venue_lat=-8.05, venue_lng=-34.88,
+        )
+    )
+    rds_fake_store.soft_delete_venue(
+        vid, "google_places_closed_permanently", "google_places"
+    )
+    fake.set(
+        VENUE_LOOKUP_BY_ADDRESS_KEY_V1.format(hash=_address_hash(name, address)),
+        vid,
+    )
+
+    outcome = await handler.add(_req(venue_name=name, venue_address=address))
+
+    assert outcome.status_code == 200
+    assert outcome.body["status"] == "already_exists"
+    assert besttime.add_venue_to_account.await_count == 0  # no BestTime spend
+    assert (
+        rds_fake_store.get_venue(vid)["deprecated_source"] == "google_places"
+    )

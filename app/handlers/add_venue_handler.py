@@ -125,11 +125,16 @@ class AddVenueHandler:
         )
         if existing_id:
             persisted = self.venue_dao.get_venue(existing_id)
-            # Only short-circuit on an ACTIVE hit. A deprecated hit (e.g. a stale
-            # cache entry left by an undone geo link) must fall through to the
-            # BestTime path, which reactivates it via _preserve_deprecation — so a
-            # re-add after an undo is never blocked.
-            if persisted is not None and persisted.is_active():
+            # Short-circuit on an ACTIVE hit — and, unchanged from before, on a
+            # venue deprecated for any reason OTHER than a geo-link undo (e.g.
+            # permanently closed): falling through would spend a BestTime create
+            # on a venue _preserve_deprecation keeps hidden anyway. Only the
+            # admin_geo_link_undo source falls through to the BestTime path,
+            # which reactivates it — so a re-add after an undo is never blocked.
+            if persisted is not None and (
+                persisted.is_active()
+                or persisted.deprecated_source != GEO_LINK_UNDO_SOURCE
+            ):
                 ADD_VENUE_BY_ADDRESS_TOTAL.labels(result="already_exists").inc()
                 return AddVenueOutcome(
                     status_code=200,
