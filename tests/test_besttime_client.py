@@ -299,13 +299,13 @@ class TestAddVenueTimeout:
     """The slow POST /forecasts create call gets its own longer timeout,
     independent of the tight client-wide default used by read calls."""
 
-    def test_default_add_venue_timeout_is_30_and_base_timeout_unchanged(self):
+    def test_default_add_venue_timeout_is_60_and_base_timeout_unchanged(self):
         client = BestTimeAPIClient(
             base_url="https://besttime.app/api/v1",
             api_key_public="pub",
             api_key_private="priv",
         )
-        assert client.add_venue_timeout == 30.0
+        assert client.add_venue_timeout == 60.0
         # The client-wide default (used by live/read calls) must stay tight.
         assert client.timeout == 10.0
 
@@ -371,9 +371,14 @@ class TestAddVenueTimeout:
             assert "timeout" not in mock_request.call_args.kwargs
 
     def test_settings_default_add_venue_timeout(self):
-        from app.config import settings
+        from app.config import Settings, settings
 
-        assert settings.besttime_add_venue_timeout_seconds == 30.0
+        # Field default is 60s (env/JSON overrides still win at runtime).
+        assert (
+            Settings.model_fields["besttime_add_venue_timeout_seconds"].default
+            == 60.0
+        )
+        assert settings.besttime_add_venue_timeout_seconds == 60.0
 
 
 class TestAddVenueResponseParsing:

@@ -559,3 +559,227 @@ async def test_add_with_place_id_fetches_google_details_once(
     persisted = venue_dao.get_venue("ven_1fetch")
     assert persisted.price_level == 2
     assert persisted.price_level_source == "google_enum"
+
+
+# ── timeout self-recovery via the account inventory (free read) ───────────────
+from app.handlers.add_venue_handler import _fold_text  # noqa: E402
+from app.models import AccountInventoryVenue  # noqa: E402
+
+
+def _inventory(rows):
+    """An async-generator factory matching list_account_inventory's shape."""
+
+    async def _iter(page_size: int = 1000):
+        for row in rows:
+            yield AccountInventoryVenue.model_validate(row)
+
+    return _iter
+
+
+def _timeout_handler(venue_dao, besttime, budget, fake, **kwargs):
+    """Handler with the recovery grace delay disabled so tests stay fast."""
+    return AddVenueHandler(
+        venue_dao=venue_dao,
+        besttime_api=besttime,
+        budget_service=budget,
+        redis_client=fake,
+        timeout_recovery_grace_seconds=0.0,
+        **kwargs,
+    )
+
+
+_INVENTORY_ROW = {
+    "venue_id": "ven_recovered",
+    # Accents, case, and punctuation differ from the submitted "Bar do Joao".
+    "venue_name": "BAR DO JOÃO",
+    "venue_address": "Rua das Flores, 123, Recife - PE",
+    "venue_lat": -8.05,
+    "venue_lng": -34.88,
+    "venue_forecasted": True,
+}
+
+
+@pytest.mark.asyncio
+async def test_timeout_recovers_created_venue_from_inventory(
+    venue_dao, besttime, budget, fake
+):
+    besttime.add_venue_to_account.side_effect = httpx.ReadTimeout("simulated")
+    besttime.list_account_inventory = _inventory([_INVENTORY_ROW])
+    besttime.get_live_forecast.return_value = _live_unavailable("ven_recovered")
+    handler = _timeout_handler(venue_dao, besttime, budget, fake)
+    recovered_before = _add_venue_result_metric("created_recovered_timeout")
+    created_before = _add_venue_result_metric("created")
+
+    outcome = await handler.add(_req())
+
+    assert outcome.status_code == 201
+    assert outcome.body["status"] == "created"
+    assert outcome.body["recovered_from_timeout"] is True
+    assert outcome.body["venue_id"] == "ven_recovered"
+    # Persisted, slot kept, ledger marked — exactly like a normal create.
+    assert fake.get("venues_geo_place_v1:ven_recovered") is not None
+    assert int(fake.get("venue_add_counter_v1:2026-05")) == 1
+    assert fake.sismember("besttime_touched_v1:2026-05", "ven_recovered")
+    # Never a second create (each POST /forecasts re-charges).
+    assert besttime.add_venue_to_account.await_count == 1
+    assert (
+        _add_venue_result_metric("created_recovered_timeout") - recovered_before == 1
+    )
+    assert _add_venue_result_metric("created") - created_before == 0
+
+
+@pytest.mark.asyncio
+async def test_timeout_unconfirmed_releases_slot_with_honest_detail(
+    venue_dao, besttime, budget, fake
+):
+    besttime.add_venue_to_account.side_effect = httpx.ReadTimeout("simulated")
+    besttime.list_account_inventory = _inventory(
+        [{**_INVENTORY_ROW, "venue_id": "ven_other", "venue_name": "Other Bar"}]
+    )
+    handler = _timeout_handler(venue_dao, besttime, budget, fake)
+    unconfirmed_before = _add_venue_result_metric("timeout_unconfirmed")
+    error_before = _add_venue_result_metric("besttime_error")
+
+    outcome = await handler.add(_req())
+
+    assert outcome.status_code == 502
+    detail = outcome.body["detail"].lower()
+    assert "timed out" in detail
+    assert "not confirmed" in detail
+    assert "retry" in detail and "same venue" in detail
+    # Slot released; nothing persisted or ledgered.
+    assert int(fake.get("venue_add_counter_v1:2026-05") or 0) == 0
+    assert not fake.sismember("besttime_touched_v1:2026-05", "ven_other")
+    # Timeout is classified as its own outcome, not a generic transport error.
+    assert _add_venue_result_metric("timeout_unconfirmed") - unconfirmed_before == 1
+    assert _add_venue_result_metric("besttime_error") - error_before == 0
+    assert besttime.add_venue_to_account.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_timeout_reconcile_failure_degrades_to_timeout_error(
+    venue_dao, besttime, budget, fake
+):
+    besttime.add_venue_to_account.side_effect = httpx.ReadTimeout("simulated")
+
+    async def _broken_inventory(page_size: int = 1000):
+        raise httpx.ConnectError("inventory down")
+        yield  # pragma: no cover
+
+    besttime.list_account_inventory = _broken_inventory
+    handler = _timeout_handler(venue_dao, besttime, budget, fake)
+
+    outcome = await handler.add(_req())
+
+    assert outcome.status_code == 502
+    assert "timed out" in outcome.body["detail"].lower()
+    assert int(fake.get("venue_add_counter_v1:2026-05") or 0) == 0
+    assert besttime.add_venue_to_account.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_non_timeout_transport_error_does_not_reconcile(
+    venue_dao, besttime, budget, fake
+):
+    """Only timeouts trigger the inventory reconcile — a connect error means
+    the create never reached BestTime, so there is nothing to recover."""
+    besttime.add_venue_to_account.side_effect = httpx.ConnectError("refused")
+    inventory_calls = []
+
+    async def _tracking_inventory(page_size: int = 1000):
+        inventory_calls.append(1)
+        yield AccountInventoryVenue.model_validate(_INVENTORY_ROW)
+
+    besttime.list_account_inventory = _tracking_inventory
+    handler = _timeout_handler(venue_dao, besttime, budget, fake)
+
+    outcome = await handler.add(_req())
+
+    assert outcome.status_code == 502
+    assert "unavailable" in outcome.body["detail"].lower()
+    assert not inventory_calls
+
+
+@pytest.mark.asyncio
+async def test_timeout_recovery_runs_inline_enrichment(
+    venue_dao, besttime, budget, fake
+):
+    besttime.add_venue_to_account.side_effect = httpx.ReadTimeout("simulated")
+    besttime.list_account_inventory = _inventory([_INVENTORY_ROW])
+    besttime.get_live_forecast.return_value = _live_unavailable("ven_recovered")
+    enrichment = AsyncMock()
+    handler = _timeout_handler(
+        venue_dao, besttime, budget, fake,
+        google_places_enrichment_service=enrichment,
+    )
+
+    outcome = await handler.add(_req(place_id="places/ChIJrec"))
+
+    assert outcome.status_code == 201
+    kwargs = enrichment.enrich_venue.await_args.kwargs
+    assert kwargs["venue_id"] == "ven_recovered"
+    assert kwargs["google_place_id"] == "places/ChIJrec"
+    assert kwargs["force_refresh"] is True
+
+
+@pytest.mark.asyncio
+async def test_geo_fallback_unavailable_carries_besttime_message(
+    handler, besttime, fake
+):
+    besttime.add_venue_to_account.return_value = NewVenueResponse.model_validate(
+        {"status": "Error", "message": "Could not geocode address"}
+    )
+    besttime.venue_filter.side_effect = httpx.ConnectError("filter down")
+
+    outcome = await handler.add(_req())
+
+    assert outcome.status_code == 502
+    assert outcome.body["besttime_message"] == "Could not geocode address"
+    assert outcome.body["besttime_status"] == "Error"
+
+
+def test_fold_text_normalizes_accents_case_and_punctuation():
+    assert _fold_text("LAÇA, Pina!") == "laca pina"
+    assert _fold_text("Beijupirá  Recife") == "beijupira recife"
+    assert _fold_text("Bar do João") == _fold_text("bar do joao")
+    assert _fold_text("") == ""
+
+
+@pytest.mark.asyncio
+async def test_inventory_match_disambiguates_by_address_overlap(
+    venue_dao, besttime, budget, fake
+):
+    rows = [
+        {
+            "venue_id": "ven_wrong_branch",
+            "venue_name": "Bar do João",
+            "venue_address": "Av. Boa Viagem 999, Recife - PE",
+        },
+        {
+            "venue_id": "ven_right_branch",
+            "venue_name": "Bar do João",
+            "venue_address": "Rua das Flores, 123, Recife - PE",
+        },
+    ]
+    besttime.list_account_inventory = _inventory(rows)
+    handler = _timeout_handler(venue_dao, besttime, budget, fake)
+
+    match = await handler._find_in_account_inventory(
+        "Bar do Joao", "Rua das Flores 123, Recife - PE"
+    )
+
+    assert match.venue_id == "ven_right_branch"
+
+
+@pytest.mark.asyncio
+async def test_inventory_match_returns_none_when_absent(
+    venue_dao, besttime, budget, fake
+):
+    besttime.list_account_inventory = _inventory(
+        [{"venue_id": "ven_x", "venue_name": "Something Else Entirely"}]
+    )
+    handler = _timeout_handler(venue_dao, besttime, budget, fake)
+
+    match = await handler._find_in_account_inventory("Bar do Joao", "Rua das Flores")
+
+    assert match is None

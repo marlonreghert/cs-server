@@ -145,12 +145,19 @@ def _install_real_besttime(context) -> None:
     """Swap the harness's programmable BestTime stub for the real client over
     a mocked HTTP transport. The scenario's Given programmed either a raw JSON
     body (context.besttime_http_body) or a transport error
-    (context.besttime_http_error) for POST /forecasts."""
+    (context.besttime_http_error) for POST /forecasts, and optionally the
+    GET /venues account inventory (context.besttime_inventory_body rows or
+    context.besttime_inventory_error). Every request is recorded in
+    context.besttime_http_requests so scenarios can assert call counts."""
     body = getattr(context, "besttime_http_body", None)
     error = getattr(context, "besttime_http_error", None)
+    context.besttime_http_requests = []
 
     def respond(request: httpx.Request) -> httpx.Response:
         path = request.url.path
+        context.besttime_http_requests.append(
+            {"method": request.method, "path": path}
+        )
         if path.endswith("/forecasts/live"):
             # Inline live forecast is best-effort in the handler; reply
             # "no live data" so the add path under test stays deterministic.
@@ -161,6 +168,14 @@ def _install_real_besttime(context) -> None:
             if error is not None:
                 raise error
             return httpx.Response(200, json=body)
+        if path.endswith("/venues"):
+            inventory_error = getattr(context, "besttime_inventory_error", None)
+            if inventory_error is not None:
+                raise inventory_error
+            inventory = getattr(context, "besttime_inventory_body", None)
+            if inventory is not None:
+                page = int(request.url.params.get("page", "0"))
+                return httpx.Response(200, json=inventory if page == 0 else [])
         return httpx.Response(404, json={"status": "Error", "message": "unexpected"})
 
     client = BestTimeAPIClient(

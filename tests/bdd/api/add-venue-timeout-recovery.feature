@@ -1,4 +1,3 @@
-@wip
 Feature: Add-venue 60s timeout with self-recovery of timed-out creates
   As the venue platform
   I must wait long enough for BestTime's slow create endpoint,

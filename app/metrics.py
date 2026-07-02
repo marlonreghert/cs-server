@@ -620,10 +620,11 @@ VENUES_BY_PRICE_LEVEL_SOURCE = Gauge(
 ADD_VENUE_BY_ADDRESS_TOTAL = Counter(
     "add_venue_by_address_total",
     "Outcomes of POST /admin/venues/by-address",
-    ["result"],  # created | already_exists | matched_via_geo_fallback |
-                 # quota_exhausted | besttime_monthly_cap | besttime_error |
+    ["result"],  # created | created_recovered_timeout | already_exists |
+                 # matched_via_geo_fallback | quota_exhausted |
+                 # besttime_monthly_cap | besttime_error |
                  # besttime_bad_response | besttime_rejected_no_geo_match |
-                 # validation_error
+                 # timeout_unconfirmed | validation_error
 )
 
 INVENTORY_SYNC_VENUES_TOTAL = Counter(

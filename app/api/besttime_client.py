@@ -39,7 +39,7 @@ class BestTimeAPIClient:
         api_key_public: str,
         api_key_private: str,
         timeout: float = 10.0,
-        add_venue_timeout: float = 30.0,
+        add_venue_timeout: float = 60.0,
     ):
         """Initialize BestTime API client.
 
