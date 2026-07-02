@@ -220,3 +220,10 @@ class VenueBudgetService:
         """Increment the counter for a new venue discovered via /venues/filter."""
         year_month = self._year_month_provider()
         return self.dao.increment_month(year_month, 1)
+
+    def release_discovery_slot(self) -> None:
+        """Return one slot recorded via record_new_venue_from_discovery — the
+        mirror of release_manual_slot, used when a geo-fallback link is undone.
+        Clamped at the floor by the DAO."""
+        year_month = self._year_month_provider()
+        self.dao.decrement_month(year_month, 1)

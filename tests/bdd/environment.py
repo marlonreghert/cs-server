@@ -214,6 +214,10 @@ def _build_rds_layer(context) -> None:
         context.container.engagement_service = context.engagement_service
         # The geo-fence admin endpoint reads/writes admin.geo_fence via the store.
         context.container.rds_store = context.rds_store
+    # The geo-link undo path reads created_at / soft-deletes on the system of
+    # record; hand the add handler the RDS store so undo has it in BDD too.
+    if getattr(context, "add_venue_handler", None) is not None:
+        context.add_venue_handler.rds_store = context.rds_store
 
     from app.services.admin_config_service import AdminConfigService
     from app.services.force_update import validate_force_update_config

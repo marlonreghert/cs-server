@@ -12,6 +12,7 @@ import logging
 import time
 import unicodedata
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Optional
 
 import httpx
@@ -42,6 +43,19 @@ MAX_FALLBACK_RADIUS_M = 50
 # BestTime's side; give their inventory a moment to reflect it before the
 # free reconcile read.
 DEFAULT_TIMEOUT_RECOVERY_GRACE_SECONDS = 2.0
+# Geo-fallback containment (substring) matches are gated on the shorter folded
+# name being at least this long, so a short generic word ("bar") can never
+# containment-link to a longer name ("barcelona bar") — only an exact folded
+# match links a shorter-than-this name.
+MIN_CONTAINMENT_MATCH_LEN = 5
+# A fresh geo-fallback link is reversible for this window (measured from the
+# venue's RDS created_at). Undo past the window is refused as not undo-eligible.
+GEO_LINK_UNDO_WINDOW_SECONDS = 24 * 60 * 60
+# Deprecation reason/source stamped by an undo. The source is the reactivation
+# key: an active re-add of a venue deprecated with this source is allowed to
+# resurrect it (RdsVenueStore._preserve_deprecation exemption).
+GEO_LINK_UNDO_REASON = "geo_link_undone"
+GEO_LINK_UNDO_SOURCE = "admin_geo_link_undo"
 
 
 class AddVenueByAddressRequest(BaseModel):
@@ -80,12 +94,17 @@ class AddVenueHandler:
         redis_client,
         google_places_client=None,
         google_places_enrichment_service=None,
+        rds_store=None,
         timeout_recovery_grace_seconds: float = DEFAULT_TIMEOUT_RECOVERY_GRACE_SECONDS,
     ) -> None:
         self.venue_dao = venue_dao
         self.besttime = besttime_api
         self.budget = budget_service
         self.redis = redis_client
+        # System-of-record store for the geo-link undo path: reads created_at for
+        # the recency guard and soft-deletes on RDS (the projector then drops the
+        # venue from serving). Optional so non-RDS wirings still construct.
+        self.rds_store = rds_store
         self.timeout_recovery_grace_seconds = timeout_recovery_grace_seconds
         # Optional: when configured AND the request carries a `place_id`, the
         # manual-add flow re-sources the price tier from Google (enum + range) via
@@ -106,7 +125,11 @@ class AddVenueHandler:
         )
         if existing_id:
             persisted = self.venue_dao.get_venue(existing_id)
-            if persisted is not None:
+            # Only short-circuit on an ACTIVE hit. A deprecated hit (e.g. a stale
+            # cache entry left by an undone geo link) must fall through to the
+            # BestTime path, which reactivates it via _preserve_deprecation — so a
+            # re-add after an undo is never blocked.
+            if persisted is not None and persisted.is_active():
                 ADD_VENUE_BY_ADDRESS_TOTAL.labels(result="already_exists").inc()
                 return AddVenueOutcome(
                     status_code=200,
@@ -413,6 +436,11 @@ class AddVenueHandler:
             return None
         folded = venue_name.strip().lower()
         for venue in nearby:
+            # Skip deprecated venues so a re-add of an undone geo link is not
+            # short-circuited to the dead row — it falls through to BestTime,
+            # which reactivates it.
+            if not venue.is_active():
+                continue
             name = (venue.venue_name or "").strip().lower()
             if not name:
                 continue
@@ -452,7 +480,9 @@ class AddVenueHandler:
                 },
             )
 
-        match = _find_name_match(filter_response.venues or [], request.venue_name)
+        match, match_reason = _find_name_match(
+            filter_response.venues or [], request.venue_name, request.venue_address
+        )
         if match is None:
             ADD_VENUE_BY_ADDRESS_TOTAL.labels(
                 result="besttime_rejected_no_geo_match"
@@ -510,8 +540,110 @@ class AddVenueHandler:
                 "venue_lat": match.venue_lat,
                 "venue_lng": match.venue_lng,
                 "source": "venues_filter_radius",
+                # was_new drives undoability (only a newly-created row is
+                # undoable); match_reason feeds batch automation (auto-keep
+                # "exact", queue "containment" for review within the undo window).
+                "newly_linked": was_new,
+                "match_reason": match_reason,
             },
         )
+
+    async def undo_geo_link(self, venue_id: str) -> AddVenueOutcome:
+        """Reverse a fresh geo-fallback link on the system of record.
+
+        Eligibility (checked in order): the venue must exist (else 404); if it is
+        already deprecated by a prior undo it is a 200 no-op (idempotent, no
+        second counter decrement); if it is deprecated by anything else, or older
+        than the 24h window, it is a 409 (not undo-eligible). An eligible venue is
+        soft-deleted with the geo-link-undo source (the projector then removes it
+        from serving), the discovery slot is returned to the monthly counter, and
+        the address-hash cache entry is dropped so a future re-add is not
+        short-circuited to the now-deprecated row.
+        """
+        if self.rds_store is None:
+            logger.error("[AddVenueHandler] geo-link undo unavailable: no RDS store")
+            return AddVenueOutcome(
+                status_code=503,
+                body={"detail": "geo-link undo unavailable: system-of-record store not configured"},
+            )
+
+        row = self.rds_store.get_venue(venue_id)
+        if row is None:
+            ADD_VENUE_BY_ADDRESS_TOTAL.labels(result="geo_link_undo_rejected").inc()
+            logger.warning(f"[AddVenueHandler] geo-link undo: venue {venue_id!r} not found")
+            return AddVenueOutcome(
+                status_code=404,
+                body={"detail": f"venue {venue_id} not found"},
+            )
+
+        if row.get("lifecycle_status") == "deprecated":
+            if row.get("deprecated_source") == GEO_LINK_UNDO_SOURCE:
+                # Idempotent: a repeat undo of an already-undone link is a no-op
+                # and must NOT decrement the counter a second time.
+                logger.info(f"[AddVenueHandler] geo-link undo: {venue_id} already undone")
+                return AddVenueOutcome(
+                    status_code=200,
+                    body={"status": "already_undone", "venue_id": venue_id},
+                )
+            ADD_VENUE_BY_ADDRESS_TOTAL.labels(result="geo_link_undo_rejected").inc()
+            logger.warning(
+                f"[AddVenueHandler] geo-link undo refused: {venue_id} deprecated by "
+                f"{row.get('deprecated_source')!r}, not a geo-link undo"
+            )
+            return AddVenueOutcome(
+                status_code=409,
+                body={
+                    "detail": (
+                        f"venue {venue_id} is not undo-eligible "
+                        f"(deprecated by {row.get('deprecated_source')})"
+                    )
+                },
+            )
+
+        created_at = _coerce_dt(row.get("created_at"))
+        if created_at is None or _age_seconds(created_at) > GEO_LINK_UNDO_WINDOW_SECONDS:
+            ADD_VENUE_BY_ADDRESS_TOTAL.labels(result="geo_link_undo_rejected").inc()
+            logger.warning(
+                f"[AddVenueHandler] geo-link undo refused: {venue_id} outside the 24h "
+                f"window (created_at={row.get('created_at')!r})"
+            )
+            return AddVenueOutcome(
+                status_code=409,
+                body={
+                    "detail": (
+                        f"venue {venue_id} is older than 24h and cannot be undone"
+                    )
+                },
+            )
+
+        # Eligible: soft-delete on RDS (projector drops it from serving next
+        # cycle), return the discovery slot, drop the address cache. The touch
+        # ledger entry stays — the BestTime interaction really happened.
+        self.rds_store.soft_delete_venue(
+            venue_id, reason=GEO_LINK_UNDO_REASON, source=GEO_LINK_UNDO_SOURCE
+        )
+        self.budget.release_discovery_slot()
+        self._drop_address_cache(row.get("venue_name") or "", row.get("venue_address") or "")
+        VENUE_MONTHLY_NEW_COUNT.set(self.budget.get_snapshot().month_counter)
+        ADD_VENUE_BY_ADDRESS_TOTAL.labels(result="geo_link_undone").inc()
+        logger.info(
+            f"[AddVenueHandler] geo-link undo: {venue_id} deprecated, discovery slot returned"
+        )
+        return AddVenueOutcome(
+            status_code=200,
+            body={"status": "undone", "venue_id": venue_id},
+        )
+
+    def _drop_address_cache(self, venue_name: str, venue_address: str) -> None:
+        """Delete the name+address → venue_id lookup entry so a re-add is not
+        short-circuited to a just-undone (deprecated) venue. Best-effort."""
+        key = VENUE_LOOKUP_BY_ADDRESS_KEY_V1.format(
+            hash=_address_hash(venue_name, venue_address)
+        )
+        try:
+            self.redis.delete(key)
+        except Exception as e:
+            logger.warning(f"[AddVenueHandler] address-cache delete failed: {e}")
 
     async def _inline_live_forecast(self, venue_id: str) -> None:
         try:
@@ -721,12 +853,66 @@ def _get(source, key):
     return None
 
 
-def _find_name_match(venues: list, venue_name: str):
-    folded = venue_name.strip().lower()
-    for v in venues:
-        n = (getattr(v, "venue_name", None) or "").strip().lower()
-        if not n:
+def _find_name_match(venues: list, venue_name: str, venue_address: str = ""):
+    """Pick the best geo-fallback candidate, returning ``(venue, reason)`` where
+    reason is ``"exact"`` or ``"containment"`` — or ``(None, None)`` when nothing
+    matches.
+
+    A candidate matches when its folded name equals the submitted folded name
+    ("exact"), or when one folded name contains the other AND the shorter folded
+    name is at least ``MIN_CONTAINMENT_MATCH_LEN`` characters ("containment") — so
+    a short generic word never containment-links to a longer name. Among matches,
+    exact ranks above containment; ties break on address-token overlap (folded,
+    set-intersected), then BestTime's original order.
+    """
+    submitted = _fold_text(venue_name)
+    if not submitted:
+        return None, None
+    submitted_tokens = set(_fold_text(venue_address).split())
+    best_key = None
+    best_venue = None
+    best_reason = None
+    for index, v in enumerate(venues):
+        candidate = _fold_text(getattr(v, "venue_name", None) or "")
+        if not candidate:
             continue
-        if folded == n or folded in n or n in folded:
-            return v
-    return None
+        if candidate == submitted:
+            reason = "exact"
+            rank_primary = 0
+        elif submitted in candidate or candidate in submitted:
+            if min(len(submitted), len(candidate)) < MIN_CONTAINMENT_MATCH_LEN:
+                continue
+            reason = "containment"
+            rank_primary = 1
+        else:
+            continue
+        overlap = len(
+            submitted_tokens
+            & set(_fold_text(getattr(v, "venue_address", None) or "").split())
+        )
+        # Lower is better: exact before containment, then more overlap, then the
+        # earlier candidate in BestTime's order.
+        key = (rank_primary, -overlap, index)
+        if best_key is None or key < best_key:
+            best_key, best_venue, best_reason = key, v, reason
+    if best_venue is None:
+        return None, None
+    return best_venue, best_reason
+
+
+def _coerce_dt(value):
+    """Coerce a timestamp to a datetime (Postgres yields datetime; the RDS fake /
+    JSON yields an ISO string). Returns None on a missing/unparseable value."""
+    if isinstance(value, str):
+        try:
+            return datetime.fromisoformat(value)
+        except ValueError:
+            return None
+    return value
+
+
+def _age_seconds(dt: datetime) -> float:
+    """Seconds since ``dt``, treating a naive datetime as UTC."""
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - dt).total_seconds()

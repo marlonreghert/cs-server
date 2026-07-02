@@ -1,4 +1,3 @@
-@wip
 Feature: Geo-fallback safe linking — fold+best-match, generic-name guard, undoable links
   As the venue platform
   I must link a rejected add only to the right nearby venue,
