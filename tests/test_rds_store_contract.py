@@ -290,3 +290,40 @@ def test_geo_fence_round_trip(store):
     # Soft-deleting the out-of-circle venue drops it from the count (active-only).
     store.soft_delete_venue(out_vid, "test_cleanup", "contract-test")
     assert store.count_geo_excluded_active_venues() == before
+
+
+def test_outside_circles_count_ignores_enabled_and_fails_open_on_empty(store):
+    # count_active_venues_outside_circles() is the admin panel's warning number:
+    # it must keep counting while the fence is DISABLED (that's exactly when the
+    # operator needs to see what re-entered serving), and an empty circle list
+    # counts zero on both counters (no circles = no restriction — the fail-open
+    # the view, geo_excluded(), and both counts share). Deltas keep it
+    # order-independent on a shared scratch DB.
+    from app.services.venue_eligibility import default_geo_fence
+
+    store.set_geo_fence(default_geo_fence(), updated_by="contract-test")
+    before = store.count_active_venues_outside_circles()
+    out_vid = _vid()
+    store.upsert_venue(Venue(
+        venue_id=out_vid, venue_name="Bar Paulista", venue_address="a",
+        venue_lat=-23.55, venue_lng=-46.63, venue_type="BAR",  # São Paulo, outside
+    ))
+    assert store.count_active_venues_outside_circles() - before == 1
+
+    # Disabled fence: the gauge count goes fail-open (0) but the warning number
+    # still reports what sits outside the configured circles.
+    disabled = default_geo_fence()
+    disabled["enabled"] = False
+    store.set_geo_fence(disabled, updated_by="contract-test")
+    assert store.count_geo_excluded_active_venues() == 0
+    assert store.count_active_venues_outside_circles() - before == 1
+
+    # Empty circle list (reachable only by hand — the API requires ≥1 city when
+    # enabled): both counts are zero, matching the view's fail-open geo term.
+    store.set_geo_fence({"enabled": True, "cities": []}, updated_by="contract-test")
+    assert store.count_geo_excluded_active_venues() == 0
+    assert store.count_active_venues_outside_circles() == 0
+
+    # Restore the seeded default so later tests see a sane shared scratch DB.
+    store.soft_delete_venue(out_vid, "test_cleanup", "contract-test")
+    store.set_geo_fence(default_geo_fence(), updated_by="contract-test")

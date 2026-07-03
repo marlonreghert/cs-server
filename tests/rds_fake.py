@@ -451,12 +451,30 @@ class InMemoryRdsVenueStore:
 
     def count_geo_excluded_active_venues(self) -> int:
         """Active venues with coordinates outside every enabled fence circle (the
-        reversible serve-time exclusion). Missing coords / a disabled fence count
-        as zero (fail-open). Observability only — mirrors the real store's COUNT."""
+        reversible serve-time exclusion). Missing coords / a disabled fence / an
+        empty circle list count as zero (fail-open). Observability only —
+        mirrors the real store's COUNT."""
         self._guard()
         from app.services.venue_eligibility import geo_excluded as _geo_excluded
 
         fence = self.geo_fence
+        count = 0
+        for vid, row in self.venues.items():
+            if row.get("lifecycle_status", "active") != "active":
+                continue
+            addr = self.addresses.get(vid) or {}
+            if _geo_excluded(addr.get("lat"), addr.get("lng"), fence):
+                count += 1
+        return count
+
+    def count_active_venues_outside_circles(self) -> int:
+        """Active venues outside every configured circle regardless of the
+        enabled flag — the admin panel's warning number. Mirrors the real
+        store's COUNT: an empty circle list counts zero."""
+        self._guard()
+        from app.services.venue_eligibility import geo_excluded as _geo_excluded
+
+        fence = {**self.geo_fence, "enabled": True}
         count = 0
         for vid, row in self.venues.items():
             if row.get("lifecycle_status", "active") != "active":

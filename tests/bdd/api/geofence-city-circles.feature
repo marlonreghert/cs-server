@@ -79,3 +79,18 @@ Feature: Geo-fence as capital-city circles inside serving eligibility
     When the admin disables the geo-fence
     And the serving projection runs
     Then the venue is included in the serving set
+
+  Scenario: The fence reports how many active venues sit outside its circles
+    Given the fence has the city "recife" at 30 km
+    And an active venue with coordinates 100 km from the "recife" center
+    And an active venue with coordinates 10 km from the "recife" center
+    When the admin reads the geo-fence config
+    Then the response reports 1 venue outside the circles
+
+  Scenario: The outside-circles count is reported even while the fence is off
+    Given the fence has the city "recife" at 30 km
+    And an active venue with coordinates 100 km from the "recife" center
+    When the admin disables the geo-fence
+    And the admin reads the geo-fence config
+    Then the response has enabled false
+    And the response reports 1 venue outside the circles

@@ -144,8 +144,42 @@ def test_geofence_get_returns_default_fence():
     resp = client.get("/admin/config/geofence")
     assert resp.status_code == 200
     fence = resp.json()
-    assert set(fence) == {"enabled", "cities"}
+    assert set(fence) == {"enabled", "cities", "geo_excluded_active"}
     assert [c["slug"] for c in fence["cities"]] == ["recife"]
+    # No venues seeded → nothing outside the circles (and never null when the
+    # store can count).
+    assert fence["geo_excluded_active"] == 0
+
+
+def test_geofence_count_degrades_to_none_when_uncountable():
+    # The warning number is best-effort: a store that cannot count (deploy
+    # window before migration 0015, or a query failure) yields null — the
+    # endpoint itself never fails.
+    svc, _, store = _svc()
+
+    def boom():
+        raise RuntimeError("relation admin.geo_fence_city does not exist")
+
+    store.count_active_venues_outside_circles = boom
+    client = _client(svc)
+    resp = client.get("/admin/config/geofence")
+    assert resp.status_code == 200
+    assert resp.json()["geo_excluded_active"] is None
+
+
+def test_geofence_put_response_carries_the_count():
+    svc, r, _ = _svc()
+    client = _client_with_redis(svc, r)
+    resp = client.put(
+        "/admin/config/geofence",
+        json={"enabled": False, "cities": [{"slug": "recife", "radius_km": 40}]},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["geo_excluded_active"] == 0
+    # The Redis mirror stays the bare validated fence — the count is
+    # response-only (the mirror must round-trip validate_geo_fence()).
+    mirrored = json.loads(r.get("admin_config:venue_geofence"))
+    assert "geo_excluded_active" not in mirrored
 
 
 def test_geofence_capitals_catalog_route():

@@ -153,6 +153,13 @@ def step_enabled_true(context):
     assert resp.json().get("enabled") is True, resp.json()
 
 
+@then("the response has enabled false")
+def step_read_enabled_false(context):
+    resp = context.read_resp
+    assert resp.status_code == 200, f"fence GET failed: {resp.status_code} {resp.text}"
+    assert resp.json().get("enabled") is False, resp.json()
+
+
 @then('the response lists one city with slug "{slug}", its catalog coordinates, and radius_km {radius:d}')
 def step_one_city(context, slug, radius):
     cities = _fence_cities(context.read_resp)
@@ -326,4 +333,18 @@ def step_venue_still_active(context):
     assert row is not None, f"{context.subject_id} vanished from the system of record"
     assert row.get("lifecycle_status", "active") == "active", (
         f"geo exclusion must never soft-delete: {row}"
+    )
+
+
+# ── the panel's warning number ───────────────────────────────────────────────
+@then("the response reports {count:d} venue outside the circles")
+def step_outside_circles_count(context, count):
+    resp = context.read_resp
+    assert resp.status_code == 200, f"fence GET failed: {resp.status_code} {resp.text}"
+    body = resp.json()
+    assert "geo_excluded_active" in body, (
+        f"fence response must carry geo_excluded_active: {body}"
+    )
+    assert body["geo_excluded_active"] == count, (
+        f"expected {count} outside the circles, got {body['geo_excluded_active']}"
     )

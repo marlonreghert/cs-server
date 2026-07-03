@@ -489,17 +489,36 @@ def _geo_fence_redis_client():
     return getattr(venue_dao, "client", None)
 
 
+def _geo_excluded_active_count(store) -> Optional[int]:
+    """Active venues outside every configured circle regardless of the enabled
+    flag — the panel's warning number (what the restriction excludes while on;
+    what re-enters serving while off). Best-effort: None when it cannot be
+    computed (e.g. the deploy-before-migration window) — never fails the
+    endpoint."""
+    counter = getattr(store, "count_active_venues_outside_circles", None)
+    if counter is None:
+        return None
+    try:
+        return int(counter())
+    except Exception as e:
+        logger.warning(f"[AdminGeoFence] outside-circles count failed: {e}")
+        return None
+
+
 @router.get("/config/geofence")
 async def get_geo_fence():
     """Return the active geo-fence for the admin panel: the enabled flag plus
-    every configured capital circle with catalog-resolved coordinates."""
+    every configured capital circle with catalog-resolved coordinates, and
+    `geo_excluded_active` — active venues outside every circle (null when the
+    count is unavailable)."""
     store = _geo_fence_store()
     try:
         fence = store.get_geo_fence()
     except Exception as e:
         logger.error(f"[AdminGeoFence] read failed: {e}")
         raise HTTPException(status_code=502, detail="geo-fence read failed; retry")
-    return fence or default_geo_fence()
+    fence = fence or default_geo_fence()
+    return {**fence, "geo_excluded_active": _geo_excluded_active_count(store)}
 
 
 @router.get("/config/geofence/capitals")
@@ -540,7 +559,8 @@ async def put_geo_fence(fence: dict = Body(...)):
     )
 
     # Best-effort Redis mirror (admin GET + parity reads). RDS is the durable truth
-    # the serving view reads, so a mirror failure must not fail the write.
+    # the serving view reads, so a mirror failure must not fail the write. The
+    # mirror stays the bare validated fence; the count is response-only.
     client = _geo_fence_redis_client()
     if client is not None:
         try:
@@ -548,7 +568,7 @@ async def put_geo_fence(fence: dict = Body(...)):
         except Exception as e:
             logger.warning(f"[AdminGeoFence] Redis mirror write failed: {e}")
 
-    return validated
+    return {**validated, "geo_excluded_active": _geo_excluded_active_count(store)}
 
 
 # ── generic admin config (RDS system of record, Redis mirror) ────────────────

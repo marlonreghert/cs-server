@@ -42,7 +42,13 @@ Create Date: 2026-07-02
 """
 from alembic import op
 
-from app.services.venue_eligibility import DEFAULT_GEO_FENCE
+# Historical seed, frozen at this revision (this WAS the code default when 0015
+# shipped). Never import live constants into a migration — 0014 had to be
+# patched for exactly that when the box default became city circles.
+_SEED_CITIES = (
+    {"slug": "recife", "name": "Recife", "lat": -8.0476, "lng": -34.8770,
+     "radius_km": 40.0},
+)
 
 revision = "0015_geofence_city_circles"
 down_revision = "0014_geofence_eligible_venue"
@@ -143,10 +149,12 @@ WHERE g.name_trim <> ''
           WHERE r.rule_type = 'ambiguous_name_keyword'
             AND strpos(g.name_lower, r.value) > 0))
   -- Geo-fence (fail-open): OK when the fence is absent/disabled, coords are
-  -- missing, or the venue is inside ANY configured capital circle.
+  -- missing, NO circle is configured (empty table = restriction off, matching
+  -- geo_excluded()'s fail-open), or the venue is inside ANY capital circle.
   AND (
         fence.enabled IS NOT TRUE
         OR g.lat IS NULL OR g.lng IS NULL
+        OR NOT EXISTS (SELECT 1 FROM admin.geo_fence_city)
         OR EXISTS (
              SELECT 1 FROM admin.geo_fence_city c
              WHERE 2 * 6371.0088 * asin(sqrt(
@@ -248,9 +256,9 @@ def upgrade() -> None:
 
     op.execute(CREATE_CITY_TABLE)
     bind = op.get_bind()
-    # Seed the code default (recife @ 40 km) so the view, the Python predicate,
-    # and a defaults-serving pre-migration reader all agree on day one.
-    for city in DEFAULT_GEO_FENCE["cities"]:
+    # Seed the frozen default (recife @ 40 km) so the view, the Python
+    # predicate, and a defaults-serving pre-migration reader agree on day one.
+    for city in _SEED_CITIES:
         bind.execute(text(SEED_CITY), {
             "slug": city["slug"], "name": city["name"],
             "lat": city["lat"], "lng": city["lng"],

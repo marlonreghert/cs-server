@@ -542,12 +542,26 @@ class RdsVenueStore:
                     "radius_km": city["radius_km"], "u": updated_by,
                 })
 
+    # Shared circle-membership predicate (haversine on the 6371.0088 km mean
+    # Earth radius) — keep in lockstep with the serving view's geo term. The
+    # leading EXISTS keeps an empty circle list fail-open (excludes nothing),
+    # matching the view and geo_excluded().
+    _OUTSIDE_CIRCLES_SQL = (
+        "AND EXISTS (SELECT 1 FROM admin.geo_fence_city) "
+        "AND NOT EXISTS ("
+        "  SELECT 1 FROM admin.geo_fence_city c "
+        "  WHERE 2 * 6371.0088 * asin(sqrt("
+        "          pow(sin(radians(a.lat - c.lat) / 2), 2)"
+        "          + cos(radians(c.lat)) * cos(radians(a.lat))"
+        "            * pow(sin(radians(a.lng - c.lng) / 2), 2))) <= c.radius_km)"
+    )
+
     def count_geo_excluded_active_venues(self) -> int:
         """Active venues whose coordinates fall OUTSIDE every enabled fence
         circle — the reversible serve-time exclusion (observability only).
-        Fail-open: a disabled fence or a NULL-coord address contributes zero.
-        The haversine (mean Earth radius 6371.0088) duplicates the view's geo
-        term so this gauge stays in lockstep with serving membership."""
+        Fail-open: a disabled fence, an empty circle list, or a NULL-coord
+        address contributes zero. The haversine duplicates the view's geo term
+        so this gauge stays in lockstep with serving membership."""
         with self.engine.connect() as conn:
             row = conn.execute(text(
                 "SELECT count(*) FROM venues.venue ve "
@@ -555,11 +569,22 @@ class RdsVenueStore:
                 "CROSS JOIN admin.geo_fence f "
                 "WHERE ve.lifecycle_status = 'active' AND f.id = 1 AND f.enabled "
                 "AND a.lat IS NOT NULL AND a.lng IS NOT NULL "
-                "AND NOT EXISTS ("
-                "  SELECT 1 FROM admin.geo_fence_city c "
-                "  WHERE 2 * 6371.0088 * asin(sqrt("
-                "          pow(sin(radians(a.lat - c.lat) / 2), 2)"
-                "          + cos(radians(c.lat)) * cos(radians(a.lat))"
-                "            * pow(sin(radians(a.lng - c.lng) / 2), 2))) <= c.radius_km)"
+                + self._OUTSIDE_CIRCLES_SQL
+            )).first()
+        return int(row[0]) if row else 0
+
+    def count_active_venues_outside_circles(self) -> int:
+        """Active venues whose coordinates fall outside EVERY configured circle,
+        regardless of the enabled flag — the admin panel's warning number: how
+        many venues the restriction excludes while on, and how many re-enter
+        serving the moment it is turned off (and leave again when re-enabled).
+        An empty circle list counts zero (no circles = no restriction)."""
+        with self.engine.connect() as conn:
+            row = conn.execute(text(
+                "SELECT count(*) FROM venues.venue ve "
+                "JOIN venues.address a ON a.venue_id = ve.venue_id "
+                "WHERE ve.lifecycle_status = 'active' "
+                "AND a.lat IS NOT NULL AND a.lng IS NOT NULL "
+                + self._OUTSIDE_CIRCLES_SQL
             )).first()
         return int(row[0]) if row else 0
