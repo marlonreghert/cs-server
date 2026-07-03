@@ -1,4 +1,3 @@
-@wip
 Feature: Geo-fence as capital-city circles inside serving eligibility
   The geo restriction must be a set of state-capital circles (capital +
   radius km) managed through the admin geofence contract, enforced only at

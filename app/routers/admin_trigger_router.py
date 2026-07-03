@@ -15,8 +15,9 @@ from app.handlers.add_venue_handler import (
 from app.services.venue_eligibility import (
     ADMIN_CONFIG_ELIGIBILITY_KEY,
     ADMIN_CONFIG_GEOFENCE_KEY,
-    DEFAULT_GEO_FENCE,
+    STATE_CAPITALS,
     EligibilityConfig,
+    default_geo_fence,
     load_eligibility_config,
     validate_geo_fence,
 )
@@ -464,11 +465,12 @@ async def remove_eligibility_rule(
     return cfg.to_public_dict()
 
 
-# ── Recife-metro geo-fence box (admin.geo_fence, read by serving.eligible_venue) ─
+# ── Capital-circle geo-fence (admin.geo_fence + admin.geo_fence_city, read by
+# serving.eligible_venue) ──────────────────────────────────────────────────────
 # These routes MUST be declared before the generic `/config/{key}` handler below,
 # or Starlette matches `/config/geofence` as `{key}="geofence"` and the write lands
-# in admin.admin_config instead of admin.geo_fence — where the SQL view never sees
-# it. The geo-fence is a typed table because the serving view reads it.
+# in admin.admin_config instead of the geo-fence tables — where the SQL view never
+# sees it. The geo-fence lives in typed tables because the serving view reads them.
 def _geo_fence_store():
     if _container is None:
         raise HTTPException(status_code=503, detail="Container not initialized")
@@ -489,26 +491,39 @@ def _geo_fence_redis_client():
 
 @router.get("/config/geofence")
 async def get_geo_fence():
-    """Return the active Recife/Olinda geo-fence box for the admin panel."""
+    """Return the active geo-fence for the admin panel: the enabled flag plus
+    every configured capital circle with catalog-resolved coordinates."""
     store = _geo_fence_store()
     try:
-        box = store.get_geo_fence()
+        fence = store.get_geo_fence()
     except Exception as e:
         logger.error(f"[AdminGeoFence] read failed: {e}")
         raise HTTPException(status_code=502, detail="geo-fence read failed; retry")
-    return box or dict(DEFAULT_GEO_FENCE)
+    return fence or default_geo_fence()
+
+
+@router.get("/config/geofence/capitals")
+async def list_geo_fence_capitals():
+    """The server-side capital catalog for the admin panel's city select — the
+    26 Brazilian state capitals + Brasília, sorted by name. The server owns all
+    coordinates; PUT /config/geofence accepts only slug + radius_km."""
+    return {"capitals": sorted(
+        (dict(c) for c in STATE_CAPITALS), key=lambda c: c["name"]
+    )}
 
 
 @router.put("/config/geofence")
-async def put_geo_fence(box: dict = Body(...)):
-    """Update the geo-fence box (admin-tunable, no redeploy). Validates ranges
-    (lat -90..90, lng -180..180, min<max) and rejects invalid payloads with HTTP
-    400, leaving the active box unchanged. Writes the typed admin.geo_fence row
-    (the SQL serving view reads it), then mirrors admin_config:venue_geofence in
-    Redis for admin/parity reads. The next projection re-includes/excludes venues
-    accordingly (reversible)."""
+async def put_geo_fence(fence: dict = Body(...)):
+    """Replace the geo-fence (admin-tunable, no redeploy): full-list
+    {"enabled": bool, "cities": [{"slug", "radius_km"}]}, slug resolved to
+    catalog coordinates server-side. Rejects with HTTP 400 — fence unchanged —
+    on an unknown/duplicate slug, an out-of-[1,200] radius, `enabled` true with
+    zero cities, or a legacy bounding-box payload. Writes the typed geo-fence
+    tables transactionally (the SQL serving view reads them), then mirrors
+    admin_config:venue_geofence in Redis for admin/parity reads. The next
+    projection re-includes/excludes venues accordingly (reversible)."""
     try:
-        validated = validate_geo_fence(box)
+        validated = validate_geo_fence(fence)
     except (ValueError, TypeError) as e:
         raise HTTPException(status_code=400, detail=f"invalid geo-fence: {e}")
 
@@ -518,6 +533,11 @@ async def put_geo_fence(box: dict = Body(...)):
     except Exception as e:
         logger.error(f"[AdminGeoFence] persist to RDS failed: {e}")
         raise HTTPException(status_code=502, detail="failed to persist geo-fence; retry")
+    logger.info(
+        "[AdminGeoFence] fence updated by=admin enabled=%s cities=%s",
+        validated["enabled"],
+        [f"{c['slug']}@{c['radius_km']:g}km" for c in validated["cities"]],
+    )
 
     # Best-effort Redis mirror (admin GET + parity reads). RDS is the durable truth
     # the serving view reads, so a mirror failure must not fail the write.

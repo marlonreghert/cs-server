@@ -1,12 +1,12 @@
 Feature: Discovery/startup hardening and Recife-metro geo-fence eligibility
   As the venue platform
   I must never run pipelines on startup, never trigger venue-filter discovery,
-  and serve only venues inside the allowed Recife/Olinda region,
+  and serve only venues inside the allowed capital-city circles,
   so the catalog stays clean and the scarce BestTime quota is not spent on
   out-of-region venues.
 
   Background:
-    Given the venue platform is configured with the default Recife/Olinda geo-fence box
+    Given the venue platform is configured with the default Recife geo-fence circle
 
   # 1 — No pipeline runs on startup
   Scenario: Startup runs no pipeline even when every on-startup flag is set
@@ -32,16 +32,16 @@ Feature: Discovery/startup hardening and Recife-metro geo-fence eligibility
     Given the discovery points admin config is empty or absent
     Then the venue-filter discovery has no locations to query
 
-  # 3 — Recife-metro geo-fence eligibility
-  Scenario: A venue outside the Recife box is excluded from serving
-    Given an active venue whose coordinates fall outside the Recife box
+  # 3 — capital-circle geo-fence eligibility
+  Scenario: A venue outside the Recife circle is excluded from serving
+    Given an active venue whose coordinates fall outside the Recife circle
     When the serving projection is rebuilt
     Then the venue is absent from the eligible serving set
     And the venue is not counted toward the priority refresh budget
     And the venue row remains in the system of record (not deleted)
 
-  Scenario: A venue inside the Recife box remains eligible
-    Given an active venue located in Olinda inside the Recife box
+  Scenario: A venue inside the Recife circle remains eligible
+    Given an active venue located in Olinda inside the Recife circle
     When the serving projection is rebuilt
     Then the venue is present in the eligible serving set
 
@@ -51,18 +51,18 @@ Feature: Discovery/startup hardening and Recife-metro geo-fence eligibility
     Then the venue is not excluded by the geo-fence
     And the geo-fence exclusion is reversible and never soft-deletes the venue
 
-  Scenario: Editing the geo-fence box re-includes a venue that now falls inside
-    Given a venue previously excluded because it was outside the box
-    When an operator widens the geo-fence box to include the venue
+  Scenario: Widening the geo-fence re-includes a venue that now falls inside
+    Given a venue previously excluded because it was outside the fence
+    When an operator widens the Recife radius to include the venue
     And the serving projection is rebuilt
     Then the venue becomes present in the eligible serving set
 
-  Scenario: An invalid geo-fence update is rejected and leaves the box unchanged
-    When an operator submits a geo-fence box with min latitude greater than max latitude
+  Scenario: An invalid geo-fence update is rejected and leaves the fence unchanged
+    When an operator submits a geo-fence with an out-of-range radius
     Then the update is rejected
-    And the active geo-fence box is unchanged
+    And the active geo-fence is unchanged
 
   Scenario: Serving-view and code eligibility agree on the geo dimension
-    Given a mix of venues inside and outside the Recife box
+    Given a mix of venues inside and outside the Recife circle
     When eligibility is computed by the serving view and by the code evaluator
     Then both classify exactly the same venues as eligible

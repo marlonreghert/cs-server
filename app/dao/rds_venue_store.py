@@ -485,50 +485,69 @@ class RdsVenueStore:
                     "VALUES (:t, :v, :u, now()) ON CONFLICT (rule_type, value) DO NOTHING"
                 ), {"t": rule_type, "v": value, "u": updated_by})
 
-    # ── geo-fence (admin.geo_fence single row; read by serving.eligible_venue) ──
+    # ── geo-fence (admin.geo_fence enabled flag + admin.geo_fence_city circles;
+    #    read by serving.eligible_venue) ────────────────────────────────────────
     def get_geo_fence(self) -> dict:
-        """Return the single Recife/Olinda box row (min/max lat/lng + enabled).
-        Falls back to the seeded default if the row is somehow absent."""
-        from app.services.venue_eligibility import DEFAULT_GEO_FENCE
+        """Return the active fence: {"enabled": bool, "cities": [{slug, name,
+        lat, lng, radius_km}]} with circles sorted by name. Defensive: any read
+        failure (notably the deploy-before-migration window where
+        admin.geo_fence_city does not exist yet) logs and serves the seeded
+        default so the admin GET never 500s."""
+        from app.services.venue_eligibility import default_geo_fence
 
-        with self.engine.connect() as conn:
-            row = conn.execute(text(
-                "SELECT min_lat, max_lat, min_lng, max_lng, enabled "
-                "FROM admin.geo_fence WHERE id = 1"
-            )).mappings().first()
+        try:
+            with self.engine.connect() as conn:
+                row = conn.execute(text(
+                    "SELECT enabled FROM admin.geo_fence WHERE id = 1"
+                )).first()
+                cities = conn.execute(text(
+                    "SELECT slug, name, lat, lng, radius_km "
+                    "FROM admin.geo_fence_city ORDER BY name"
+                )).mappings().all()
+        except Exception as e:
+            logger.error(f"[RdsVenueStore] geo-fence read failed; serving defaults: {e}")
+            return default_geo_fence()
         if row is None:
-            return dict(DEFAULT_GEO_FENCE)
+            return default_geo_fence()
         return {
-            "min_lat": float(row["min_lat"]),
-            "max_lat": float(row["max_lat"]),
-            "min_lng": float(row["min_lng"]),
-            "max_lng": float(row["max_lng"]),
-            "enabled": bool(row["enabled"]),
+            "enabled": bool(row[0]),
+            "cities": [{
+                "slug": c["slug"], "name": c["name"],
+                "lat": float(c["lat"]), "lng": float(c["lng"]),
+                "radius_km": float(c["radius_km"]),
+            } for c in cities],
         }
 
-    def set_geo_fence(self, box: dict, updated_by=None) -> None:
-        """Upsert the single admin.geo_fence row (id=1). The serving view reads this
-        row directly, so the next projection reflects the new box."""
+    def set_geo_fence(self, fence: dict, updated_by=None) -> None:
+        """Transactionally replace admin.geo_fence_city with the validated
+        circle list and upsert the singleton enabled flag — all-or-nothing so an
+        invalid write can never partially apply. The serving view reads these
+        tables directly, so the next projection reflects the new fence."""
         with self.engine.begin() as conn:
             conn.execute(text(
-                "INSERT INTO admin.geo_fence "
-                "(id, min_lat, max_lat, min_lng, max_lng, enabled, updated_by, updated_at) "
-                "VALUES (1, :min_lat, :max_lat, :min_lng, :max_lng, :enabled, :u, now()) "
-                "ON CONFLICT (id) DO UPDATE SET "
-                "min_lat=excluded.min_lat, max_lat=excluded.max_lat, "
-                "min_lng=excluded.min_lng, max_lng=excluded.max_lng, "
-                "enabled=excluded.enabled, updated_by=excluded.updated_by, updated_at=now()"
-            ), {
-                "min_lat": box["min_lat"], "max_lat": box["max_lat"],
-                "min_lng": box["min_lng"], "max_lng": box["max_lng"],
-                "enabled": box.get("enabled", True), "u": updated_by,
-            })
+                "INSERT INTO admin.geo_fence (id, enabled, updated_by, updated_at) "
+                "VALUES (1, :enabled, :u, now()) "
+                "ON CONFLICT (id) DO UPDATE SET enabled=excluded.enabled, "
+                "updated_by=excluded.updated_by, updated_at=now()"
+            ), {"enabled": fence.get("enabled", True), "u": updated_by})
+            conn.execute(text("DELETE FROM admin.geo_fence_city"))
+            for city in fence.get("cities", []):
+                conn.execute(text(
+                    "INSERT INTO admin.geo_fence_city "
+                    "(slug, name, lat, lng, radius_km, updated_by, updated_at) "
+                    "VALUES (:slug, :name, :lat, :lng, :radius_km, :u, now())"
+                ), {
+                    "slug": city["slug"], "name": city["name"],
+                    "lat": city["lat"], "lng": city["lng"],
+                    "radius_km": city["radius_km"], "u": updated_by,
+                })
 
     def count_geo_excluded_active_venues(self) -> int:
-        """Active venues whose coordinates fall OUTSIDE the enabled geo-fence box —
-        the reversible serve-time exclusion (observability only). Fail-open: a
-        disabled fence or a NULL-coord address contributes zero (mirrors the view's
-        `enabled IS NOT TRUE OR lat IS NULL` fail-open and geo_excluded())."""
+        """Active venues whose coordinates fall OUTSIDE every enabled fence
+        circle — the reversible serve-time exclusion (observability only).
+        Fail-open: a disabled fence or a NULL-coord address contributes zero.
+        The haversine (mean Earth radius 6371.0088) duplicates the view's geo
+        term so this gauge stays in lockstep with serving membership."""
         with self.engine.connect() as conn:
             row = conn.execute(text(
                 "SELECT count(*) FROM venues.venue ve "
@@ -536,7 +555,11 @@ class RdsVenueStore:
                 "CROSS JOIN admin.geo_fence f "
                 "WHERE ve.lifecycle_status = 'active' AND f.id = 1 AND f.enabled "
                 "AND a.lat IS NOT NULL AND a.lng IS NOT NULL "
-                "AND NOT (a.lat BETWEEN f.min_lat AND f.max_lat "
-                "         AND a.lng BETWEEN f.min_lng AND f.max_lng)"
+                "AND NOT EXISTS ("
+                "  SELECT 1 FROM admin.geo_fence_city c "
+                "  WHERE 2 * 6371.0088 * asin(sqrt("
+                "          pow(sin(radians(a.lat - c.lat) / 2), 2)"
+                "          + cos(radians(c.lat)) * cos(radians(a.lat))"
+                "            * pow(sin(radians(a.lng - c.lng) / 2), 2))) <= c.radius_km)"
             )).first()
         return int(row[0]) if row else 0

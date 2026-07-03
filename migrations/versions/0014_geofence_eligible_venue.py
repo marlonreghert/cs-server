@@ -35,7 +35,17 @@ Create Date: 2026-07-01
 """
 from alembic import op
 
-from app.services.venue_eligibility import DEFAULT_GEO_FENCE
+# Historical seed values, frozen at this revision. (This box WAS
+# app.services.venue_eligibility.DEFAULT_GEO_FENCE when 0014 shipped; 0015
+# replaced that constant with capital-city circles, so the box is inlined here
+# to keep the 0001→head chain runnable on a fresh database.)
+_SEED_BOX = {
+    "min_lat": -8.30,
+    "max_lat": -7.85,
+    "min_lng": -35.10,
+    "max_lng": -34.80,
+    "enabled": True,
+}
 
 revision = "0014_geofence_eligible_venue"
 down_revision = "0013_price_level_objective_source"
@@ -198,13 +208,7 @@ def upgrade() -> None:
     from sqlalchemy import text
 
     op.execute(CREATE_TABLE)
-    op.get_bind().execute(text(SEED_ROW), {
-        "min_lat": DEFAULT_GEO_FENCE["min_lat"],
-        "max_lat": DEFAULT_GEO_FENCE["max_lat"],
-        "min_lng": DEFAULT_GEO_FENCE["min_lng"],
-        "max_lng": DEFAULT_GEO_FENCE["max_lng"],
-        "enabled": DEFAULT_GEO_FENCE["enabled"],
-    })
+    op.get_bind().execute(text(SEED_ROW), dict(_SEED_BOX))
     op.execute(CREATE_VIEW_GEO)
 
 
