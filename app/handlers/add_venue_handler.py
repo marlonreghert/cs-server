@@ -18,7 +18,10 @@ from typing import Optional
 import httpx
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.api.besttime_client import BestTimeInvalidResponseError
+from app.api.besttime_client import (
+    BestTimeInvalidResponseError,
+    BestTimeRateLimitedError,
+)
 from app.dao.redis_venue_dao import RedisVenueDAO
 from app.metrics import (
     ADD_VENUE_BY_ADDRESS_TOTAL,
@@ -194,6 +197,16 @@ class AddVenueHandler:
                 status_code=502,
                 body={"detail": "BestTime returned an unparseable response"},
             )
+        except BestTimeRateLimitedError as e:
+            # Venue-search rate window exhausted (client pacing or persistent
+            # 429s). Nothing was created and no quota drawn — retryable later.
+            self.budget.release_manual_slot()
+            ADD_VENUE_BY_ADDRESS_TOTAL.labels(result="besttime_error").inc()
+            logger.warning(f"[AddVenueHandler] BestTime rate limited: {e}")
+            return AddVenueOutcome(
+                status_code=502,
+                body={"detail": "BestTime is rate limiting; retry shortly"},
+            )
         except Exception as e:
             self.budget.release_manual_slot()
             ADD_VENUE_BY_ADDRESS_TOTAL.labels(result="besttime_error").inc()
@@ -273,8 +286,9 @@ class AddVenueHandler:
                     f"{venue.venue_id} day={day.day_int}: {e}"
                 )
 
-        # Best-effort inline live forecast fetch.
-        await self._inline_live_forecast(venue.venue_id)
+        # No live-busyness fetch here — live retrieval spends BestTime credits
+        # and belongs exclusively to the live pipeline, which picks the venue
+        # up from the serving view once it is prioritized.
 
         # Cache the deterministic name+address lookup for next time.
         self._save_address_cache(
@@ -649,31 +663,6 @@ class AddVenueHandler:
             self.redis.delete(key)
         except Exception as e:
             logger.warning(f"[AddVenueHandler] address-cache delete failed: {e}")
-
-    async def _inline_live_forecast(self, venue_id: str) -> None:
-        try:
-            live = await self.besttime.get_live_forecast(venue_id=venue_id)
-        except Exception as e:
-            logger.warning(
-                f"[AddVenueHandler] inline live forecast failed for {venue_id}: {e}"
-            )
-            return
-        status = getattr(live, "status", None) or (live.get("status") if isinstance(live, dict) else None)
-        available = False
-        analysis = getattr(live, "analysis", None) or (live.get("analysis") if isinstance(live, dict) else None)
-        if analysis is not None:
-            if hasattr(analysis, "venue_live_busyness_available"):
-                available = bool(analysis.venue_live_busyness_available)
-            elif isinstance(analysis, dict):
-                available = bool(analysis.get("venue_live_busyness_available"))
-        if status != "OK" or not available:
-            return
-        try:
-            self.venue_dao.set_live_forecast(live)
-        except Exception as e:
-            logger.warning(
-                f"[AddVenueHandler] live forecast persist failed for {venue_id}: {e}"
-            )
 
     def _already_exists_body(self, venue: Venue) -> dict:
         return {

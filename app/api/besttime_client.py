@@ -1,7 +1,9 @@
 """BestTime API client with async HTTP support."""
+import asyncio
 import logging
 import time
-from typing import Optional
+from collections import deque
+from typing import Callable, Optional
 import httpx
 from pydantic import ValidationError
 
@@ -19,6 +21,7 @@ from app.metrics import (
     BESTTIME_API_CALLS_TOTAL,
     BESTTIME_API_CALL_DURATION_SECONDS,
     BESTTIME_API_ERRORS_TOTAL,
+    BESTTIME_SEARCH_RATE_LIMIT_TOTAL,
 )
 
 logger = logging.getLogger(__name__)
@@ -28,6 +31,103 @@ class BestTimeInvalidResponseError(Exception):
     """BestTime answered 2xx but the body's envelope (status / venue_info)
     cannot be parsed. Distinct from transport errors so callers can tell a
     parse bug on our side from a BestTime outage."""
+
+
+class BestTimeRateLimitedError(Exception):
+    """A BestTime venue-search call could not proceed within the configured
+    rate-limit wait budget (nothing was sent, no search quota drawn), or
+    BestTime kept answering HTTP 429 after bounded retries. Retryable later —
+    callers should surface it as a temporary BestTime condition, never as a
+    venue rejection."""
+
+
+# BestTime's documented Venue Search limits (documentation.besttime.app):
+# 30 requests/minute and 300 requests/hour. The create call (POST /forecasts)
+# draws the same "Venue Search" monthly quota, so it is paced with the family.
+_MINUTE_WINDOW_SECONDS = 60.0
+_HOUR_WINDOW_SECONDS = 3600.0
+
+
+def _looks_like_monthly_cap_body(response: httpx.Response) -> bool:
+    """True when a 429 body carries BestTime's monthly unique-venue cap message
+    (mirrors the handler's `_is_monthly_cap_rejection` keywords). Cap answers
+    must flow through the normal parse path — they are a terminal quota state,
+    not a transient rate limit worth retrying."""
+    try:
+        message = response.json().get("message")
+    except Exception:
+        return False
+    if not isinstance(message, str):
+        return False
+    low = message.lower()
+    return "monthly venues" in low or "venue counter will reset" in low
+
+
+class _SearchRateLimiter:
+    """Client-side sliding-window pacing for the venue-search family.
+
+    Waits (bounded by max_wait_seconds) until both the per-minute and per-hour
+    windows have room; a wait that would exceed the budget raises
+    BestTimeRateLimitedError before anything is sent. Clock and sleep are
+    injectable so tests never sleep for real.
+    """
+
+    def __init__(
+        self,
+        per_minute: int,
+        per_hour: int,
+        max_wait_seconds: float,
+        time_func: Callable[[], float] = time.monotonic,
+        sleep_func: Callable[[float], "asyncio.Future"] = asyncio.sleep,
+    ):
+        self.per_minute = per_minute
+        self.per_hour = per_hour
+        self.max_wait_seconds = max_wait_seconds
+        self._time = time_func
+        self._sleep = sleep_func
+        self._minute: deque[float] = deque()
+        self._hour: deque[float] = deque()
+        self._lock = asyncio.Lock()
+
+    def _required_wait(self, now: float) -> float:
+        while self._minute and now - self._minute[0] >= _MINUTE_WINDOW_SECONDS:
+            self._minute.popleft()
+        while self._hour and now - self._hour[0] >= _HOUR_WINDOW_SECONDS:
+            self._hour.popleft()
+        wait = 0.0
+        if self.per_minute > 0 and len(self._minute) >= self.per_minute:
+            wait = max(wait, self._minute[0] + _MINUTE_WINDOW_SECONDS - now)
+        if self.per_hour > 0 and len(self._hour) >= self.per_hour:
+            wait = max(wait, self._hour[0] + _HOUR_WINDOW_SECONDS - now)
+        return wait
+
+    async def acquire(self, endpoint: str) -> None:
+        waited_total = 0.0
+        while True:
+            async with self._lock:
+                now = self._time()
+                wait = self._required_wait(now)
+                if wait <= 0:
+                    self._minute.append(now)
+                    self._hour.append(now)
+                    return
+                if waited_total + wait > self.max_wait_seconds:
+                    BESTTIME_SEARCH_RATE_LIMIT_TOTAL.labels(
+                        endpoint=endpoint, event="rejected"
+                    ).inc()
+                    raise BestTimeRateLimitedError(
+                        f"venue-search rate window full; needs {wait:.1f}s more "
+                        f"(budget {self.max_wait_seconds:.0f}s exhausted)"
+                    )
+            BESTTIME_SEARCH_RATE_LIMIT_TOTAL.labels(
+                endpoint=endpoint, event="waited"
+            ).inc()
+            logger.info(
+                f"[BestTimeAPIClient] pacing {endpoint}: waiting {wait:.1f}s "
+                f"for the venue-search rate window"
+            )
+            await self._sleep(wait)
+            waited_total += wait
 
 
 class BestTimeAPIClient:
@@ -40,6 +140,9 @@ class BestTimeAPIClient:
         api_key_private: str,
         timeout: float = 10.0,
         add_venue_timeout: float = 60.0,
+        search_rate_per_minute: int = 30,
+        search_rate_per_hour: int = 300,
+        rate_max_wait_seconds: float = 75.0,
     ):
         """Initialize BestTime API client.
 
@@ -52,12 +155,23 @@ class BestTimeAPIClient:
                 POST /forecasts "create venue" call (add_venue_to_account). Kept
                 separate and larger because BestTime builds a fresh forecast on
                 that request and is far slower than the read paths.
+            search_rate_per_minute / search_rate_per_hour: BestTime's documented
+                Venue Search limits (30/min, 300/hour); paces the search-family
+                calls client-side. <=0 disables that window.
+            rate_max_wait_seconds: longest total pacing/429 wait per call before
+                failing fast with BestTimeRateLimitedError.
         """
         self.base_url = base_url.rstrip("/")
         self.api_key_public = api_key_public
         self.api_key_private = api_key_private
         self.timeout = timeout
         self.add_venue_timeout = add_venue_timeout
+        self.rate_max_wait_seconds = rate_max_wait_seconds
+        self._search_limiter = _SearchRateLimiter(
+            per_minute=search_rate_per_minute,
+            per_hour=search_rate_per_hour,
+            max_wait_seconds=rate_max_wait_seconds,
+        )
 
         # Create async HTTP client with connection pooling
         self.client = httpx.AsyncClient(
@@ -69,12 +183,25 @@ class BestTimeAPIClient:
         """Close the HTTP client and clean up resources."""
         await self.client.aclose()
 
+    @staticmethod
+    def _retry_after_seconds(response: httpx.Response, attempt: int) -> float:
+        """Wait before retrying a 429: honor Retry-After when parseable, else
+        exponential backoff (1s, 2s, ...)."""
+        header = response.headers.get("retry-after")
+        if header is not None:
+            try:
+                return max(0.0, float(header))
+            except ValueError:
+                pass
+        return float(2**attempt)
+
     async def _request(
         self,
         method: str,
         endpoint: str,
         params: Optional[dict] = None,
         json_body: Optional[dict] = None,
+        retry_429: bool = False,
     ) -> dict:
         """Make an HTTP request to the BestTime API.
 
@@ -83,6 +210,9 @@ class BestTimeAPIClient:
             endpoint: API endpoint path
             params: Query parameters
             json_body: JSON request body
+            retry_429: retry HTTP 429 answers (bounded, Retry-After-aware) —
+                used by the venue-search-family calls, which BestTime rate
+                limits at 30/min and 300/hour.
 
         Returns:
             JSON response as dict
@@ -90,6 +220,7 @@ class BestTimeAPIClient:
         Raises:
             httpx.HTTPStatusError: If response status is not 2xx
             httpx.RequestError: If request fails
+            BestTimeRateLimitedError: retry_429 exhausted its bounded retries
         """
         url = f"{self.base_url}{endpoint}"
 
@@ -98,13 +229,39 @@ class BestTimeAPIClient:
         start_time = time.perf_counter()
 
         try:
-            response = await self.client.request(
-                method=method,
-                url=url,
-                params=params,
-                json=json_body,
-                headers={"Content-Type": "application/json"},
-            )
+            attempt = 0
+            waited = 0.0
+            while True:
+                response = await self.client.request(
+                    method=method,
+                    url=url,
+                    params=params,
+                    json=json_body,
+                    headers={"Content-Type": "application/json"},
+                )
+                if not (retry_429 and response.status_code == 429):
+                    break
+                wait = self._retry_after_seconds(response, attempt)
+                if attempt >= 2 or waited + wait > self.rate_max_wait_seconds:
+                    BESTTIME_SEARCH_RATE_LIMIT_TOTAL.labels(
+                        endpoint=endpoint, event="rejected"
+                    ).inc()
+                    BESTTIME_API_CALLS_TOTAL.labels(
+                        endpoint=endpoint, status="error"
+                    ).inc()
+                    raise BestTimeRateLimitedError(
+                        f"BestTime kept answering 429 on {method} {endpoint}"
+                    )
+                BESTTIME_SEARCH_RATE_LIMIT_TOTAL.labels(
+                    endpoint=endpoint, event="retry_429"
+                ).inc()
+                logger.warning(
+                    f"[BestTimeAPIClient] 429 on {method} {endpoint}; "
+                    f"retrying in {wait:.1f}s (attempt {attempt + 1}/3)"
+                )
+                await asyncio.sleep(wait)
+                waited += wait
+                attempt += 1
 
             logger.debug(f"[BestTimeAPIClient] Response status: {response.status_code}")
 
@@ -159,7 +316,10 @@ class BestTimeAPIClient:
 
         logger.info(f"[BestTimeAPIClient] Calling venue_filter with {len(query_params)} params")
 
-        response_data = await self._request("GET", "/venues/filter", params=query_params)
+        await self._search_limiter.acquire("/venues/filter")
+        response_data = await self._request(
+            "GET", "/venues/filter", params=query_params, retry_429=True
+        )
 
         response = VenueFilterResponse(**response_data)
         logger.info(
@@ -266,8 +426,9 @@ class BestTimeAPIClient:
             "Consider using venue_filter() instead."
         )
 
+        await self._search_limiter.acquire("/venues/search")
         response_data = await self._request(
-            "POST", "/venues/search", params=query_params
+            "POST", "/venues/search", params=query_params, retry_429=True
         )
 
         return response_data
@@ -295,15 +456,49 @@ class BestTimeAPIClient:
         }
         endpoint = "/forecasts"
         url = f"{self.base_url}{endpoint}"
+        # The create draws the BestTime "Venue Search" quota and shares its
+        # 30/min + 300/hour rate limits — pace it with the search family.
+        await self._search_limiter.acquire(endpoint)
         start_time = time.perf_counter()
         try:
-            response = await self.client.request(
-                method="POST",
-                url=url,
-                params=query_params,
-                headers={"Content-Type": "application/json"},
-                timeout=self.add_venue_timeout,
-            )
+            attempt = 0
+            waited = 0.0
+            while True:
+                response = await self.client.request(
+                    method="POST",
+                    url=url,
+                    params=query_params,
+                    headers={"Content-Type": "application/json"},
+                    timeout=self.add_venue_timeout,
+                )
+                if response.status_code != 429:
+                    break
+                # A 429 carrying the monthly-cap message is a terminal quota
+                # state, not a transient rate limit: let it flow to the normal
+                # parse path so the handler surfaces the cap legibly.
+                if _looks_like_monthly_cap_body(response):
+                    break
+                wait = self._retry_after_seconds(response, attempt)
+                if attempt >= 2 or waited + wait > self.rate_max_wait_seconds:
+                    BESTTIME_SEARCH_RATE_LIMIT_TOTAL.labels(
+                        endpoint=endpoint, event="rejected"
+                    ).inc()
+                    BESTTIME_API_CALLS_TOTAL.labels(
+                        endpoint=endpoint, status="error"
+                    ).inc()
+                    raise BestTimeRateLimitedError(
+                        f"BestTime kept answering 429 on POST {endpoint}"
+                    )
+                BESTTIME_SEARCH_RATE_LIMIT_TOTAL.labels(
+                    endpoint=endpoint, event="retry_429"
+                ).inc()
+                logger.warning(
+                    f"[BestTimeAPIClient] 429 on POST {endpoint} (create); "
+                    f"retrying in {wait:.1f}s (attempt {attempt + 1}/3)"
+                )
+                await asyncio.sleep(wait)
+                waited += wait
+                attempt += 1
             duration = time.perf_counter() - start_time
             BESTTIME_API_CALL_DURATION_SECONDS.labels(endpoint=endpoint).observe(duration)
 
@@ -430,6 +625,9 @@ class BestTimeAPIClient:
         if collection_id:
             query_params["collection_id"] = collection_id
 
-        response_data = await self._request("GET", "/venues/progress", params=query_params)
+        await self._search_limiter.acquire("/venues/progress")
+        response_data = await self._request(
+            "GET", "/venues/progress", params=query_params, retry_429=True
+        )
 
         return response_data
