@@ -241,41 +241,89 @@ def test_admin_config_round_trip(store):
 
 
 def test_geo_fence_round_trip(store):
-    # Default box is seeded (fake in __init__; real by migration 0014).
-    box = store.get_geo_fence()
-    assert set(box) >= {"min_lat", "max_lat", "min_lng", "max_lng", "enabled"}
-    assert box["min_lat"] < box["max_lat"] and box["min_lng"] < box["max_lng"]
+    # Default fence is seeded (fake in __init__; real by migration 0015).
+    fence = store.get_geo_fence()
+    assert set(fence) == {"enabled", "cities"}
+    assert isinstance(fence["cities"], list)
 
-    # Upsert the single row (id=1) and read it back — widened + disabled.
-    new_box = {
-        "min_lat": -9.0, "max_lat": -7.0,
-        "min_lng": -36.0, "max_lng": -34.0,
+    # Replace the circle list whole (two cities, disabled) and read it back —
+    # coordinates round-trip and circles come back sorted by name.
+    from app.services.venue_eligibility import CAPITALS_BY_SLUG, default_geo_fence
+
+    new_fence = {
         "enabled": False,
+        "cities": [
+            {**CAPITALS_BY_SLUG["salvador"], "radius_km": 25.0},
+            {**CAPITALS_BY_SLUG["recife"], "radius_km": 30.0},
+        ],
     }
-    store.set_geo_fence(new_box, updated_by="contract-test")
+    store.set_geo_fence(new_fence, updated_by="contract-test")
     got = store.get_geo_fence()
-    assert got["min_lat"] == -9.0 and got["max_lat"] == -7.0
-    assert got["min_lng"] == -36.0 and got["max_lng"] == -34.0
     assert got["enabled"] is False
+    by_slug = {c["slug"]: c for c in got["cities"]}
+    assert set(by_slug) == {"recife", "salvador"}
+    assert by_slug["recife"]["radius_km"] == 30.0
+    assert by_slug["salvador"]["radius_km"] == 25.0
+    assert by_slug["recife"]["lat"] == CAPITALS_BY_SLUG["recife"]["lat"]
 
-    # Restore the default (enabled) box so a shared scratch DB is not left disabled.
-    from app.services.venue_eligibility import DEFAULT_GEO_FENCE
-
-    store.set_geo_fence(dict(DEFAULT_GEO_FENCE), updated_by="contract-test")
+    # Replace again with a single circle: the transactional full-list replace
+    # must drop salvador, not accumulate.
+    store.set_geo_fence(default_geo_fence(), updated_by="contract-test")
+    got = store.get_geo_fence()
+    assert [c["slug"] for c in got["cities"]] == ["recife"]
+    assert got["enabled"] is True  # also restores a shared scratch DB to sane
 
     # count_geo_excluded_active_venues() is a separate hand-written SQL predicate
-    # (observability only); pin it to the box semantics. Seed one in-box and one
-    # out-of-box active venue and assert the count rises by exactly one. Uses a
-    # delta (the shared scratch DB may hold other venues) so it is order-independent.
+    # (observability only); pin it to the circle semantics. Seed one in-circle and
+    # one out-of-circle active venue and assert the count rises by exactly one.
+    # Uses a delta (the shared scratch DB may hold other venues) so it is
+    # order-independent.
     before = store.count_geo_excluded_active_venues()
     in_vid, out_vid = _vid(), _vid()
-    store.upsert_venue(_venue(in_vid))  # _venue defaults to -8.05,-34.88 (inside box)
+    store.upsert_venue(_venue(in_vid))  # _venue defaults to -8.05,-34.88 (in-circle)
     store.upsert_venue(Venue(
         venue_id=out_vid, venue_name="Bar Paulista", venue_address="a",
-        venue_lat=-23.55, venue_lng=-46.63, venue_type="BAR",  # São Paulo, outside box
+        venue_lat=-23.55, venue_lng=-46.63, venue_type="BAR",  # São Paulo, outside
     ))
     after = store.count_geo_excluded_active_venues()
     assert after - before == 1, (before, after)
-    # Soft-deleting the out-of-box venue drops it back out of the count (active-only).
+    # Soft-deleting the out-of-circle venue drops it from the count (active-only).
     store.soft_delete_venue(out_vid, "test_cleanup", "contract-test")
     assert store.count_geo_excluded_active_venues() == before
+
+
+def test_outside_circles_count_ignores_enabled_and_fails_open_on_empty(store):
+    # count_active_venues_outside_circles() is the admin panel's warning number:
+    # it must keep counting while the fence is DISABLED (that's exactly when the
+    # operator needs to see what re-entered serving), and an empty circle list
+    # counts zero on both counters (no circles = no restriction — the fail-open
+    # the view, geo_excluded(), and both counts share). Deltas keep it
+    # order-independent on a shared scratch DB.
+    from app.services.venue_eligibility import default_geo_fence
+
+    store.set_geo_fence(default_geo_fence(), updated_by="contract-test")
+    before = store.count_active_venues_outside_circles()
+    out_vid = _vid()
+    store.upsert_venue(Venue(
+        venue_id=out_vid, venue_name="Bar Paulista", venue_address="a",
+        venue_lat=-23.55, venue_lng=-46.63, venue_type="BAR",  # São Paulo, outside
+    ))
+    assert store.count_active_venues_outside_circles() - before == 1
+
+    # Disabled fence: the gauge count goes fail-open (0) but the warning number
+    # still reports what sits outside the configured circles.
+    disabled = default_geo_fence()
+    disabled["enabled"] = False
+    store.set_geo_fence(disabled, updated_by="contract-test")
+    assert store.count_geo_excluded_active_venues() == 0
+    assert store.count_active_venues_outside_circles() - before == 1
+
+    # Empty circle list (reachable only by hand — the API requires ≥1 city when
+    # enabled): both counts are zero, matching the view's fail-open geo term.
+    store.set_geo_fence({"enabled": True, "cities": []}, updated_by="contract-test")
+    assert store.count_geo_excluded_active_venues() == 0
+    assert store.count_active_venues_outside_circles() == 0
+
+    # Restore the seeded default so later tests see a sane shared scratch DB.
+    store.soft_delete_venue(out_vid, "test_cleanup", "contract-test")
+    store.set_geo_fence(default_geo_fence(), updated_by="contract-test")

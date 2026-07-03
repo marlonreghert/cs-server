@@ -57,10 +57,11 @@ class InMemoryRdsVenueStore:
         self.admin_config: dict[str, dict] = {}
         # Ex2: admin.eligibility_rule — (rule_type, value) -> metadata.
         self.eligibility_rules: dict[tuple[str, str], dict] = {}
-        # admin.geo_fence (single row): the Recife/Olinda serve-time bbox. Seeded
-        # with the default so the fake mirrors the migration-seeded real table.
-        from app.services.venue_eligibility import DEFAULT_GEO_FENCE
-        self.geo_fence: dict = dict(DEFAULT_GEO_FENCE)
+        # admin.geo_fence enabled flag + admin.geo_fence_city circles, held as
+        # one {"enabled", "cities": [...]} dict. Seeded with the default fence
+        # (recife @ 40 km) so the fake mirrors the migration-seeded real tables.
+        from app.services.venue_eligibility import default_geo_fence
+        self.geo_fence: dict = default_geo_fence()
         self._down = False
 
     # ── test controls ────────────────────────────────────────────────────────
@@ -222,7 +223,7 @@ class InMemoryRdsVenueStore:
 
         self._guard()
         config = _config_from_rules(self.list_eligibility_rules())
-        box = self.geo_fence
+        fence = self.geo_fence
         out = []
         for vid, row in self.venues.items():
             if row.get("lifecycle_status", "active") != "active":
@@ -238,12 +239,12 @@ class InMemoryRdsVenueStore:
             ).soft_deletable:
                 continue
             # Geo-fence is a SEPARATE, reversible predicate (third state): drop an
-            # out-of-box venue from serving without soft-deleting it. Coords come
+            # out-of-fence venue from serving without soft-deleting it. Coords come
             # from venues.address (mirrors the SQL view's LEFT JOIN). Mirrors the
             # real serving.eligible_venue geo predicate; parity is pinned by
             # tests/test_eligibility_serving_view_parity.py.
             addr = self.addresses.get(vid) or {}
-            if _geo_excluded(addr.get("lat"), addr.get("lng"), box):
+            if _geo_excluded(addr.get("lat"), addr.get("lng"), fence):
                 continue
             out.append(vid)
         return out
@@ -436,31 +437,50 @@ class InMemoryRdsVenueStore:
             (rt, v): {"updated_by": updated_by, "updated_at": _now()} for rt, v in rules
         }
 
-    # ── geo-fence (admin.geo_fence single row; read by the serving view) ───────
+    # ── geo-fence (enabled flag + capital circles; read by the serving view) ───
     def get_geo_fence(self) -> dict:
         self._guard()
-        return dict(self.geo_fence)
+        return copy.deepcopy(self.geo_fence)
 
-    def set_geo_fence(self, box: dict, updated_by=None) -> None:
-        """Persist the validated Recife/Olinda box (min/max lat/lng + enabled).
-        Mirrors an UPDATE of the single admin.geo_fence row."""
+    def set_geo_fence(self, fence: dict, updated_by=None) -> None:
+        """Persist the validated fence ({"enabled", "cities": [...]}) whole.
+        Mirrors the real store's transactional replace of admin.geo_fence_city
+        plus the admin.geo_fence enabled upsert."""
         self._guard()
-        self.geo_fence = dict(box)
+        self.geo_fence = copy.deepcopy(fence)
 
     def count_geo_excluded_active_venues(self) -> int:
-        """Active venues with coordinates outside the enabled geo-fence box (the
-        reversible serve-time exclusion). Missing coords / a disabled box count as
-        zero (fail-open). Observability only — mirrors the real store's COUNT."""
+        """Active venues with coordinates outside every enabled fence circle (the
+        reversible serve-time exclusion). Missing coords / a disabled fence / an
+        empty circle list count as zero (fail-open). Observability only —
+        mirrors the real store's COUNT."""
         self._guard()
         from app.services.venue_eligibility import geo_excluded as _geo_excluded
 
-        box = self.geo_fence
+        fence = self.geo_fence
         count = 0
         for vid, row in self.venues.items():
             if row.get("lifecycle_status", "active") != "active":
                 continue
             addr = self.addresses.get(vid) or {}
-            if _geo_excluded(addr.get("lat"), addr.get("lng"), box):
+            if _geo_excluded(addr.get("lat"), addr.get("lng"), fence):
+                count += 1
+        return count
+
+    def count_active_venues_outside_circles(self) -> int:
+        """Active venues outside every configured circle regardless of the
+        enabled flag — the admin panel's warning number. Mirrors the real
+        store's COUNT: an empty circle list counts zero."""
+        self._guard()
+        from app.services.venue_eligibility import geo_excluded as _geo_excluded
+
+        fence = {**self.geo_fence, "enabled": True}
+        count = 0
+        for vid, row in self.venues.items():
+            if row.get("lifecycle_status", "active") != "active":
+                continue
+            addr = self.addresses.get(vid) or {}
+            if _geo_excluded(addr.get("lat"), addr.get("lng"), fence):
                 count += 1
         return count
 

@@ -24,8 +24,10 @@ hardcoded defaults below so a bad admin write can never break filtering.
 """
 from __future__ import annotations
 
+import copy
 import json
 import logging
+import math
 from dataclasses import dataclass, field
 from typing import Optional, Protocol
 
@@ -34,8 +36,9 @@ from app.models.venue_category import resolve_category
 logger = logging.getLogger(__name__)
 
 ADMIN_CONFIG_ELIGIBILITY_KEY = "admin_config:venue_eligibility"
-# Redis mirror of the admin.geo_fence box (RDS is the durable truth the SQL view
-# reads). This mirror serves the admin GET + parity reads only.
+# Redis mirror of the geo-fence (admin.geo_fence enabled flag + the
+# admin.geo_fence_city circles; RDS is the durable truth the SQL view reads).
+# This mirror serves the admin GET + parity reads only.
 ADMIN_CONFIG_GEOFENCE_KEY = "admin_config:venue_geofence"
 
 # Source label used on every soft-delete this module drives.
@@ -59,17 +62,64 @@ ALL_REASONS = (
     REASON_GEO,
 )
 
-# ── Recife/Olinda metro geo-fence (default seeded box) ───────────────────────
-# A venue is served only if its coordinates fall inside this box (fail-open on
-# missing coords). Confirmed default box; admin-editable via admin.geo_fence + the
-# Redis mirror. The SQL serving view enforces the same predicate in parity.
+# ── State-capital catalog (the only cities the geo-fence can hold) ───────────
+# The 26 Brazilian state capitals + Brasília, city-center coordinates accurate
+# to ≤0.05°. The server owns ALL coordinates: admins configure slug + radius
+# only, and every read resolves coords from this catalog. Adding another
+# municipality later is a one-line edit here, not a schema change.
+STATE_CAPITALS: tuple[dict, ...] = (
+    {"slug": "aracaju", "name": "Aracaju", "lat": -10.9472, "lng": -37.0731},
+    {"slug": "belem", "name": "Belém", "lat": -1.4558, "lng": -48.4902},
+    {"slug": "belo-horizonte", "name": "Belo Horizonte", "lat": -19.9167, "lng": -43.9345},
+    {"slug": "boa-vista", "name": "Boa Vista", "lat": 2.8235, "lng": -60.6758},
+    {"slug": "brasilia", "name": "Brasília", "lat": -15.7939, "lng": -47.8828},
+    {"slug": "campo-grande", "name": "Campo Grande", "lat": -20.4697, "lng": -54.6201},
+    {"slug": "cuiaba", "name": "Cuiabá", "lat": -15.6014, "lng": -56.0979},
+    {"slug": "curitiba", "name": "Curitiba", "lat": -25.4284, "lng": -49.2733},
+    {"slug": "florianopolis", "name": "Florianópolis", "lat": -27.5954, "lng": -48.5480},
+    {"slug": "fortaleza", "name": "Fortaleza", "lat": -3.7319, "lng": -38.5267},
+    {"slug": "goiania", "name": "Goiânia", "lat": -16.6869, "lng": -49.2648},
+    {"slug": "joao-pessoa", "name": "João Pessoa", "lat": -7.1195, "lng": -34.8450},
+    {"slug": "macapa", "name": "Macapá", "lat": 0.0349, "lng": -51.0694},
+    {"slug": "maceio", "name": "Maceió", "lat": -9.6498, "lng": -35.7089},
+    {"slug": "manaus", "name": "Manaus", "lat": -3.1190, "lng": -60.0217},
+    {"slug": "natal", "name": "Natal", "lat": -5.7945, "lng": -35.2110},
+    {"slug": "palmas", "name": "Palmas", "lat": -10.1844, "lng": -48.3336},
+    {"slug": "porto-alegre", "name": "Porto Alegre", "lat": -30.0346, "lng": -51.2177},
+    {"slug": "porto-velho", "name": "Porto Velho", "lat": -8.7612, "lng": -63.9004},
+    {"slug": "recife", "name": "Recife", "lat": -8.0476, "lng": -34.8770},
+    {"slug": "rio-branco", "name": "Rio Branco", "lat": -9.9754, "lng": -67.8249},
+    {"slug": "rio-de-janeiro", "name": "Rio de Janeiro", "lat": -22.9068, "lng": -43.1729},
+    {"slug": "salvador", "name": "Salvador", "lat": -12.9714, "lng": -38.5014},
+    {"slug": "sao-luis", "name": "São Luís", "lat": -2.5307, "lng": -44.3068},
+    {"slug": "sao-paulo", "name": "São Paulo", "lat": -23.5505, "lng": -46.6333},
+    {"slug": "teresina", "name": "Teresina", "lat": -5.0892, "lng": -42.8019},
+    {"slug": "vitoria", "name": "Vitória", "lat": -20.3155, "lng": -40.3128},
+)
+CAPITALS_BY_SLUG: dict[str, dict] = {c["slug"]: c for c in STATE_CAPITALS}
+
+# Admin-tunable circle radius bounds (km). The 1 km floor prevents the
+# serve-nothing cliff of a degenerate circle; 200 km comfortably covers any
+# metro region while keeping a fat-fingered "20000" out.
+MIN_RADIUS_KM = 1.0
+MAX_RADIUS_KM = 200.0
+
+# ── Default geo-fence: Recife @ 40 km ─────────────────────────────────────────
+# A venue is served only if it falls inside ANY enabled circle (fail-open on
+# missing coords). The 40 km Recife circle strictly contains the pre-0015
+# bounding box (farthest box corner ≈37.3 km from the center), so migrating
+# never shrinks the serving set. Admin-editable via admin.geo_fence(_city) +
+# the Redis mirror; the SQL serving view enforces the same predicate in parity.
 DEFAULT_GEO_FENCE: dict = {
-    "min_lat": -8.30,
-    "max_lat": -7.85,
-    "min_lng": -35.10,
-    "max_lng": -34.80,
     "enabled": True,
+    "cities": [{**CAPITALS_BY_SLUG["recife"], "radius_km": 40.0}],
 }
+
+
+def default_geo_fence() -> dict:
+    """A fresh deep copy of the default fence — the nested cities list must
+    never be shared with (or mutated by) callers."""
+    return copy.deepcopy(DEFAULT_GEO_FENCE)
 
 # ── BestTime types that must never reach clients ─────────────────────────────
 DEFAULT_BLOCKED_VENUE_TYPES: set[str] = {
@@ -435,97 +485,137 @@ def eligibility_config_from_rules(
     )
 
 
-# ── Recife-metro geo-fence: a separate, reversible serve-time predicate ───────
+# ── Capital-circle geo-fence: a separate, reversible serve-time predicate ─────
 # Geo-exclusion is intentionally NOT part of evaluate()/soft_deletable. Serving
 # membership = (not evaluate().soft_deletable) AND (not geo_excluded(...)). Keeping
 # it separate preserves the "never irreversibly hide a real bar" policy: an
-# out-of-box venue is dropped from serving but never soft-deleted.
-_BOX_KEYS = ("min_lat", "max_lat", "min_lng", "max_lng")
+# out-of-fence venue is dropped from serving but never soft-deleted.
+_LEGACY_BOX_KEYS = ("min_lat", "max_lat", "min_lng", "max_lng")
+
+# Mean-Earth radius (km) used by the SQL view's haversine — keep in lockstep
+# with migration 0015 so the Python predicate and the view agree at boundaries.
+_EARTH_RADIUS_KM = 6371.0088
+
+
+def haversine_km(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
+    """Great-circle distance in km (mean Earth radius, matches the SQL view)."""
+    return 2 * _EARTH_RADIUS_KM * math.asin(math.sqrt(
+        math.sin(math.radians(lat2 - lat1) / 2) ** 2
+        + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2))
+        * math.sin(math.radians(lng2 - lng1) / 2) ** 2
+    ))
 
 
 def validate_geo_fence(data: dict) -> dict:
-    """Validate an admin geo-fence payload and return a normalized box dict.
+    """Validate an admin geo-fence payload and return the normalized fence:
+    ``{"enabled": bool, "cities": [{slug, name, lat, lng, radius_km}]}``.
 
-    Requires numeric min_lat/max_lat/min_lng/max_lng with lat in [-90, 90], lng in
-    [-180, 180], and min < max on both axes. `enabled` defaults to True. Raises
-    ValueError on any invalid field so the admin endpoint can reject the write and
-    leave the active box unchanged.
+    The payload carries slug + radius_km per city; coordinates are ALWAYS
+    resolved from STATE_CAPITALS (the server owns them — caller-sent coords are
+    ignored). Raises ValueError on: a legacy bounding-box payload, an unknown or
+    duplicate slug, a non-numeric or out-of-[MIN_RADIUS_KM, MAX_RADIUS_KM]
+    radius, a non-boolean `enabled`, or `enabled` true with zero cities (the
+    serve-everything cliff). `enabled` false with zero cities is a valid "fence
+    off" state. The admin endpoint rejects the write on any error, leaving the
+    active fence unchanged.
     """
     if not isinstance(data, dict):
         raise ValueError("geo-fence must be a JSON object")
-
-    box: dict = {}
-    for key in _BOX_KEYS:
-        if key not in data or data[key] is None:
-            raise ValueError(f"{key} is required")
-        value = data[key]
-        if isinstance(value, bool) or not isinstance(value, (int, float)):
-            raise ValueError(f"{key} must be a number")
-        box[key] = float(value)
-
-    for lat_key in ("min_lat", "max_lat"):
-        if not (-90.0 <= box[lat_key] <= 90.0):
-            raise ValueError(f"{lat_key} must be between -90 and 90")
-    for lng_key in ("min_lng", "max_lng"):
-        if not (-180.0 <= box[lng_key] <= 180.0):
-            raise ValueError(f"{lng_key} must be between -180 and 180")
-    if box["min_lat"] >= box["max_lat"]:
-        raise ValueError("min_lat must be less than max_lat")
-    if box["min_lng"] >= box["max_lng"]:
-        raise ValueError("min_lng must be less than max_lng")
+    if any(key in data for key in _LEGACY_BOX_KEYS):
+        raise ValueError(
+            "the bounding-box geo-fence was replaced by capital-city circles; "
+            'send {"enabled": bool, "cities": [{"slug": ..., "radius_km": ...}]}'
+        )
 
     enabled = data.get("enabled", True)
     if not isinstance(enabled, bool):
         raise ValueError("enabled must be a boolean")
-    box["enabled"] = enabled
-    return box
+
+    cities = data.get("cities")
+    if cities is None:
+        raise ValueError('cities is required (a list of {"slug", "radius_km"})')
+    if not isinstance(cities, list):
+        raise ValueError('cities must be a list of {"slug", "radius_km"}')
+    if enabled and not cities:
+        raise ValueError("an enabled geo-fence requires at least one city")
+
+    seen: set[str] = set()
+    normalized: list[dict] = []
+    for entry in cities:
+        if not isinstance(entry, dict):
+            raise ValueError('each city must be an object with "slug" and "radius_km"')
+        slug = entry.get("slug")
+        capital = CAPITALS_BY_SLUG.get(slug) if isinstance(slug, str) else None
+        if capital is None:
+            raise ValueError(f"unknown capital slug: {slug!r}")
+        if slug in seen:
+            raise ValueError(f"duplicate capital slug: {slug}")
+        seen.add(slug)
+        radius = entry.get("radius_km")
+        if isinstance(radius, bool) or not isinstance(radius, (int, float)):
+            raise ValueError(f"radius_km for {slug} must be a number")
+        if not (MIN_RADIUS_KM <= float(radius) <= MAX_RADIUS_KM):
+            raise ValueError(
+                f"radius_km for {slug} must be between "
+                f"{MIN_RADIUS_KM:g} and {MAX_RADIUS_KM:g} km"
+            )
+        normalized.append({**capital, "radius_km": float(radius)})
+    # Canonical order: by name, matching the store's ORDER BY — so the PUT
+    # response, the Redis mirror, and every GET agree byte-for-byte.
+    normalized.sort(key=lambda c: c["name"])
+    return {"enabled": enabled, "cities": normalized}
 
 
-def geo_excluded(lat, lng, box: Optional[dict]) -> bool:
-    """True when a venue's coordinates place it OUTSIDE the enabled geo-fence box.
+def geo_excluded(lat, lng, fence: Optional[dict]) -> bool:
+    """True when a venue's coordinates fall OUTSIDE every enabled fence circle.
 
-    Fail-open: a missing box, a disabled box, or missing coordinates never exclude
-    (mirrors the reversible policy and the SQL view's fail-open LEFT JOIN). The box
-    keys are min_lat/max_lat/min_lng/max_lng/enabled.
+    Fail-open: a missing/disabled fence, missing coordinates, or an empty or
+    malformed city list never exclude (mirrors the reversible policy and the SQL
+    view's fail-open predicate). Each city holds catalog lat/lng + radius_km;
+    membership is haversine distance ≤ radius to ANY circle.
     """
-    if not box or not box.get("enabled", True):
+    if not fence or not fence.get("enabled", True):
         return False
     if lat is None or lng is None:
         return False
+    cities = fence.get("cities")
+    if not isinstance(cities, list) or not cities:
+        return False
     try:
-        return not (
-            box["min_lat"] <= lat <= box["max_lat"]
-            and box["min_lng"] <= lng <= box["max_lng"]
+        return all(
+            haversine_km(lat, lng, c["lat"], c["lng"]) > c["radius_km"]
+            for c in cities
         )
     except (KeyError, TypeError):
-        # A malformed box must never break filtering — treat as fail-open.
+        # A malformed fence must never break filtering — treat as fail-open.
         return False
 
 
 def load_geo_fence(redis_like: Optional[_SupportsGet]) -> dict:
-    """Read the live geo-fence box from the Redis mirror, falling back to the
-    seeded default. A missing key, unreadable client, malformed JSON, or invalid
-    shape all degrade to DEFAULT_GEO_FENCE so filtering never breaks (mirrors
-    load_eligibility_config). RDS (admin.geo_fence) is the durable truth."""
+    """Read the live geo-fence from the Redis mirror, falling back to the seeded
+    default. A missing key, unreadable client, malformed JSON, or invalid shape —
+    including a pre-0015 legacy bounding-box blob — all degrade to the default
+    fence so filtering never breaks (mirrors load_eligibility_config). RDS
+    (admin.geo_fence + admin.geo_fence_city) is the durable truth."""
     if redis_like is None:
-        return dict(DEFAULT_GEO_FENCE)
+        return default_geo_fence()
     try:
         raw = redis_like.get(ADMIN_CONFIG_GEOFENCE_KEY)
     except Exception as e:  # pragma: no cover - defensive
         logger.warning(
             f"[venue_eligibility] Failed to read {ADMIN_CONFIG_GEOFENCE_KEY}, "
-            f"using default box: {e}"
+            f"using default fence: {e}"
         )
-        return dict(DEFAULT_GEO_FENCE)
+        return default_geo_fence()
 
     if raw is None:
-        return dict(DEFAULT_GEO_FENCE)
+        return default_geo_fence()
 
     try:
         return validate_geo_fence(json.loads(raw))
     except (ValueError, TypeError, json.JSONDecodeError) as e:
         logger.warning(
             f"[venue_eligibility] {ADMIN_CONFIG_GEOFENCE_KEY} is invalid "
-            f"({e}); using default box"
+            f"({e}); using default fence"
         )
-        return dict(DEFAULT_GEO_FENCE)
+        return default_geo_fence()

@@ -7,10 +7,10 @@ Three coupled behaviours, all driven through production surfaces:
      called.
   2. Discovery is dormant — the venue_catalog admin trigger is a 404 (removed from
      JOB_REGISTRY); discovery points admin config is empty by default.
-  3. Recife-metro geo-fence — the RDS-fake serving view (context.rds_store, mirror
-     of serving.eligible_venue) excludes out-of-box venues; the box is edited via
-     the real PUT /admin/config/geofence endpoint (context.client) so the endpoint
-     write-routing is exercised, not shortcut.
+  3. Capital-circle geo-fence — the RDS-fake serving view (context.rds_store,
+     mirror of serving.eligible_venue) excludes venues outside every configured
+     circle; the fence is edited via the real PUT /admin/config/geofence endpoint
+     (context.client) so the endpoint write-routing is exercised, not shortcut.
 
 The RDS layer (context.repository / rds_store / redis_projection_service /
 redis_only_dao) is built per scenario in environment.py.
@@ -25,17 +25,17 @@ from behave import given, when, then  # type: ignore[import-untyped]
 
 from app.models import Venue
 
-# Default Recife/Olinda box (confirmed): lat -8.30..-7.85, lng -35.10..-34.80.
-_DEFAULT_BOX = {
-    "min_lat": -8.30, "max_lat": -7.85,
-    "min_lng": -35.10, "max_lng": -34.80,
+# Default fence: the Recife circle at 40 km (the PUT payload carries slug +
+# radius only; the server resolves coordinates from its capitals catalog).
+_DEFAULT_FENCE_PAYLOAD = {
     "enabled": True,
+    "cities": [{"slug": "recife", "radius_km": 40}],
 }
-# A point well inside the box (central Recife).
+# A point well inside the Recife circle (central Recife).
 _INSIDE_LAT, _INSIDE_LNG = -8.05, -34.88
-# Olinda — inside the box, north of Recife.
+# Olinda — ≈7 km from the Recife center, inside the circle.
 _OLINDA_LAT, _OLINDA_LNG = -7.99, -34.85
-# Well outside the box (e.g. São Paulo).
+# Well outside every circle (e.g. São Paulo).
 _OUTSIDE_LAT, _OUTSIDE_LNG = -23.55, -46.63
 
 
@@ -65,22 +65,21 @@ def _servable(context) -> set[str]:
     return set(context.rds_store.list_servable_venue_ids())
 
 
-def _put_geofence(context, box: dict):
-    """Edit the box through the real admin endpoint (exercises write-routing)."""
-    return context.client.put("/admin/config/geofence", json=box)
+def _put_geofence(context, fence: dict):
+    """Edit the fence through the real admin endpoint (exercises write-routing)."""
+    return context.client.put("/admin/config/geofence", json=fence)
 
 
 # ── Background ────────────────────────────────────────────────────────────────
-@given("the venue platform is configured with the default Recife/Olinda geo-fence box")
-def step_default_box(context):
+@given("the venue platform is configured with the default Recife geo-fence circle")
+def step_default_fence(context):
     context.named_ids = {}
-    # Seed the default box through the fake store's dedicated geo-fence method
-    # (mirror of admin.geo_fence). Guarded so the Background does not crash before
-    # the method exists — the geo assertions then fail on membership (true red),
-    # not on a missing attribute.
-    setter = getattr(context.rds_store, "set_geo_fence", None)
-    if callable(setter):
-        setter(dict(_DEFAULT_BOX))
+    # Assert the default fence through the real admin endpoint so every scenario
+    # starts from the known recife@40km circle regardless of the fake's seed.
+    resp = _put_geofence(context, dict(_DEFAULT_FENCE_PAYLOAD))
+    assert resp.status_code == 200, (
+        f"seeding the default fence failed: {resp.status_code} {resp.text}"
+    )
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -296,16 +295,16 @@ def step_no_discovery_points(context):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 3 — Recife-metro geo-fence eligibility
+# 3 — capital-circle geo-fence eligibility
 # ══════════════════════════════════════════════════════════════════════════════
-@given("an active venue whose coordinates fall outside the Recife box")
+@given("an active venue whose coordinates fall outside the Recife circle")
 def step_venue_outside(context):
     context.subject_id = _seed(
         context, "outside_bar", "Outside Bar", _OUTSIDE_LAT, _OUTSIDE_LNG
     )
 
 
-@given("an active venue located in Olinda inside the Recife box")
+@given("an active venue located in Olinda inside the Recife circle")
 def step_venue_olinda(context):
     context.subject_id = _seed(
         context, "olinda_bar", "Olinda Bar", _OLINDA_LAT, _OLINDA_LNG
@@ -319,19 +318,19 @@ def step_venue_no_coords(context):
     )
 
 
-@given("a venue previously excluded because it was outside the box")
+@given("a venue previously excluded because it was outside the fence")
 def step_venue_previously_excluded(context):
-    # Just north of the default box's max_lat (-7.85): outside now, inside a widened
-    # box. Using a point near the boundary keeps the "widen" edit small + realistic.
+    # ≈83 km north of the Recife center: outside the default 40 km circle,
+    # inside the widened 100 km one the operator sets below.
     context.subject_id = _seed(
-        context, "boundary_bar", "Boundary Bar", -7.70, -34.85
+        context, "boundary_bar", "Boundary Bar", -7.30, -34.85
     )
     assert context.subject_id not in _servable(context), (
-        "venue must start excluded (outside the default box)"
+        "venue must start excluded (outside the default 40 km circle)"
     )
 
 
-@given("a mix of venues inside and outside the Recife box")
+@given("a mix of venues inside and outside the Recife circle")
 def step_mix_of_venues(context):
     context.inside_ids = {
         _seed(context, "mix_in_1", "Mix In 1", _INSIDE_LAT, _INSIDE_LNG),
@@ -355,41 +354,55 @@ def step_eligibility_evaluated(context):
     context.servable = _servable(context)
 
 
-@when("an operator widens the geo-fence box to include the venue")
-def step_widen_box(context):
-    widened = dict(_DEFAULT_BOX)
-    widened["max_lat"] = -7.50  # now includes the boundary venue at -7.70
+@when("an operator widens the Recife radius to include the venue")
+def step_widen_fence(context):
+    widened = {"enabled": True, "cities": [{"slug": "recife", "radius_km": 100}]}
     resp = _put_geofence(context, widened)
     assert resp.status_code == 200, f"widen PUT failed: {resp.status_code} {resp.text}"
 
 
-@when("an operator submits a geo-fence box with min latitude greater than max latitude")
-def step_invalid_box(context):
-    context.box_before = _servable(context)
-    bad = dict(_DEFAULT_BOX)
-    bad["min_lat"], bad["max_lat"] = 0.0, -10.0  # min > max
+@when("an operator submits a geo-fence with an out-of-range radius")
+def step_invalid_fence(context):
+    context.servable_before = _servable(context)
+    bad = {"enabled": True, "cities": [{"slug": "recife", "radius_km": 0}]}
     context.invalid_resp = _put_geofence(context, bad)
 
 
-def _box_from_store(context) -> dict:
-    """Read the active box from the fake store (mirror of admin.geo_fence),
-    falling back to the confirmed default when the accessor does not exist yet."""
+def _fence_from_store(context) -> dict:
+    """Read the active fence from the fake store (mirror of the geo-fence
+    tables), falling back to the seeded default if the accessor is missing."""
     getter = getattr(context.rds_store, "get_geo_fence", None)
     if callable(getter):
-        box = getter()
-        if box:
-            return box
-    return dict(_DEFAULT_BOX)
+        fence = getter()
+        if fence:
+            return fence
+    from app.services.venue_eligibility import default_geo_fence
+
+    return default_geo_fence()
 
 
-def _inside_box(lat, lng, box) -> bool:
-    """Fail-open bbox: missing coords or a disabled box are never excluded."""
-    if not box or not box.get("enabled", True):
+def _inside_fence(lat, lng, fence) -> bool:
+    """Fail-open circles: missing coords, a disabled fence, or no cities are
+    never excluded. Independent haversine (not geo_excluded()) so this parity
+    check does not reuse the code under test."""
+    import math
+
+    if not fence or not fence.get("enabled", True):
         return True
     if lat is None or lng is None:
         return True
-    return (box["min_lat"] <= lat <= box["max_lat"]
-            and box["min_lng"] <= lng <= box["max_lng"])
+    cities = fence.get("cities") or []
+    if not cities:
+        return True
+    for c in cities:
+        d = 2 * 6371.0088 * math.asin(math.sqrt(
+            math.sin(math.radians(lat - c["lat"]) / 2) ** 2
+            + math.cos(math.radians(c["lat"])) * math.cos(math.radians(lat))
+            * math.sin(math.radians(lng - c["lng"]) / 2) ** 2
+        ))
+        if d <= c["radius_km"]:
+            return True
+    return False
 
 
 @when("eligibility is computed by the serving view and by the code evaluator")
@@ -400,7 +413,7 @@ def step_computed_both_ways(context):
     )
 
     config = eligibility_config_from_rules(context.rds_store.list_eligibility_rules())
-    box = _box_from_store(context)
+    fence = _fence_from_store(context)
     context.view_eligible = _servable(context)
 
     code_eligible = set()
@@ -412,7 +425,7 @@ def step_computed_both_ways(context):
         verdict = evaluate(row.get("venue_name"), row.get("venue_type"), None, config)
         if verdict.soft_deletable:
             continue
-        if not _inside_box(lat, lng, box):
+        if not _inside_fence(lat, lng, fence):
             continue
         code_eligible.add(vid)
     context.code_eligible = code_eligible
@@ -486,13 +499,13 @@ def step_update_rejected(context):
     )
 
 
-@then("the active geo-fence box is unchanged")
-def step_box_unchanged(context):
-    # The serving set is identical to before the invalid PUT (box never mutated).
-    assert _servable(context) == context.box_before
-    box = context.rds_store.get_geo_fence()
-    assert box["min_lat"] == _DEFAULT_BOX["min_lat"], box
-    assert box["max_lat"] == _DEFAULT_BOX["max_lat"], box
+@then("the active geo-fence is unchanged")
+def step_fence_unchanged(context):
+    # The serving set is identical to before the invalid PUT (fence never mutated).
+    assert _servable(context) == context.servable_before
+    fence = context.rds_store.get_geo_fence()
+    assert fence["enabled"] is True, fence
+    assert [(c["slug"], c["radius_km"]) for c in fence["cities"]] == [("recife", 40.0)], fence
 
 
 @then("both classify exactly the same venues as eligible")

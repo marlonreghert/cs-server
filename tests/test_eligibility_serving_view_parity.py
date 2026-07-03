@@ -32,7 +32,8 @@ from tests.rds_fake import InMemoryRdsVenueStore
 
 _VA = "google_places.vibe_attributes"
 
-# Inside the default Recife/Olinda box; outside it (São Paulo).
+# Inside the default fence (the 40 km Recife circle); outside every circle
+# (São Paulo).
 _IN_LAT, _IN_LNG = -8.05, -34.88
 _OUT_LAT, _OUT_LNG = -23.55, -46.63
 
@@ -59,10 +60,10 @@ def _vid() -> str:
 # (label, venue_name, besttime_type, google_type, lat, lng, expected_eligible)
 # Every branch of evaluate(): empty name, blocked google/besttime, hard/ambiguous
 # keyword +/- good-category, labeled vs unlabeled, plain-eligible — PLUS the geo
-# dimension: an eligible venue outside the box is excluded; missing coords are
-# fail-open (still servable). Serving membership = (not soft_deletable) AND (not
-# geo_excluded); the two axes are orthogonal, so the geo fixtures pair
-# plain-eligible names with out-of-box / null coords.
+# dimension: an eligible venue outside every fence circle is excluded; missing
+# coords are fail-open (still servable). Serving membership = (not
+# soft_deletable) AND (not geo_excluded); the two axes are orthogonal, so the
+# geo fixtures pair plain-eligible names with out-of-fence / null coords.
 _FIXTURES = [
     ("empty_name",            "",                  None,   None,             _IN_LAT,  _IN_LNG,  False),
     ("blocked_google_type",   "Drogasil",          None,   "drugstore",      _IN_LAT,  _IN_LNG,  False),
@@ -75,7 +76,7 @@ _FIXTURES = [
     ("plain_bar",             "Boteco do Zé",      "BAR",  None,             _IN_LAT,  _IN_LNG,  True),
     ("unlabeled_unknown",     "Cantina XYZ",       None,   None,             _IN_LAT,  _IN_LNG,  True),
     # ── geo dimension ────────────────────────────────────────────────────────
-    ("plain_bar_outside_box", "Boteco Fora",       "BAR",  None,             _OUT_LAT, _OUT_LNG, False),
+    ("plain_bar_outside_fence", "Boteco Fora",     "BAR",  None,             _OUT_LAT, _OUT_LNG, False),
     ("good_google_outside",   "Bar Paulista",      None,   "bar",            _OUT_LAT, _OUT_LNG, False),
     ("plain_bar_no_coords",   "Boteco Sem Coord",  "BAR",  None,             None,     None,     True),
 ]
@@ -114,9 +115,10 @@ def test_view_matches_evaluate(store, label, name, btype, gtype, lat, lng, expec
         pytest.skip("missing-coords fixture is fake-store only (address lat/lng NOT NULL in RDS)")
 
     # The reference is the FULL serving predicate: (not soft_deletable) AND (not
-    # geo_excluded) against the default box. The real view reads the migration-
-    # seeded default rules + default geo_fence row; the fake derives both from its
-    # defaults. Geo is a separate axis, never folded into evaluate().soft_deletable.
+    # geo_excluded) against the default fence (recife @ 40 km). The real view
+    # reads the migration-seeded default rules + geo-fence tables; the fake
+    # derives both from its defaults. Geo is a separate axis, never folded into
+    # evaluate().soft_deletable.
     not_soft_deletable = not evaluate(
         name, btype, gtype, EligibilityConfig.defaults()
     ).soft_deletable

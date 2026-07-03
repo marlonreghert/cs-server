@@ -137,14 +137,61 @@ def test_put_returns_502_when_mirror_fails():
     assert store.get_admin_config("scoring_weights")["value"] == {"a": 1}  # RDS committed
 
 
-# ── geo-fence endpoint (typed admin.geo_fence, NOT the generic admin_config) ──
-def test_geofence_get_returns_default_box():
+# ── geo-fence endpoints (typed geo-fence tables, NOT the generic admin_config) ─
+def test_geofence_get_returns_default_fence():
     svc, _, _ = _svc()
     client = _client(svc)
     resp = client.get("/admin/config/geofence")
     assert resp.status_code == 200
-    box = resp.json()
-    assert set(box) >= {"min_lat", "max_lat", "min_lng", "max_lng", "enabled"}
+    fence = resp.json()
+    assert set(fence) == {"enabled", "cities", "geo_excluded_active"}
+    assert [c["slug"] for c in fence["cities"]] == ["recife"]
+    # No venues seeded → nothing outside the circles (and never null when the
+    # store can count).
+    assert fence["geo_excluded_active"] == 0
+
+
+def test_geofence_count_degrades_to_none_when_uncountable():
+    # The warning number is best-effort: a store that cannot count (deploy
+    # window before migration 0015, or a query failure) yields null — the
+    # endpoint itself never fails.
+    svc, _, store = _svc()
+
+    def boom():
+        raise RuntimeError("relation admin.geo_fence_city does not exist")
+
+    store.count_active_venues_outside_circles = boom
+    client = _client(svc)
+    resp = client.get("/admin/config/geofence")
+    assert resp.status_code == 200
+    assert resp.json()["geo_excluded_active"] is None
+
+
+def test_geofence_put_response_carries_the_count():
+    svc, r, _ = _svc()
+    client = _client_with_redis(svc, r)
+    resp = client.put(
+        "/admin/config/geofence",
+        json={"enabled": False, "cities": [{"slug": "recife", "radius_km": 40}]},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["geo_excluded_active"] == 0
+    # The Redis mirror stays the bare validated fence — the count is
+    # response-only (the mirror must round-trip validate_geo_fence()).
+    mirrored = json.loads(r.get("admin_config:venue_geofence"))
+    assert "geo_excluded_active" not in mirrored
+
+
+def test_geofence_capitals_catalog_route():
+    # /config/geofence/capitals must resolve to the dedicated handler (the
+    # generic /config/{key} matches a single segment only).
+    svc, _, _ = _svc()
+    client = _client(svc)
+    resp = client.get("/admin/config/geofence/capitals")
+    assert resp.status_code == 200
+    capitals = resp.json()["capitals"]
+    assert len(capitals) == 27
+    assert [c["name"] for c in capitals] == sorted(c["name"] for c in capitals)
 
 
 def _client_with_redis(svc, redis_client):
@@ -162,30 +209,50 @@ def _client_with_redis(svc, redis_client):
 
 def test_geofence_put_routes_to_typed_table_not_admin_config():
     # Route-collision guard: /config/geofence must hit the dedicated handler
-    # (writing admin.geo_fence via the store), NOT the generic /config/{key} which
-    # would land in admin.admin_config where the serving view never reads it.
+    # (writing the typed geo-fence tables via the store), NOT the generic
+    # /config/{key} which would land in admin.admin_config where the serving
+    # view never reads it.
     svc, r, store = _svc()
     client = _client_with_redis(svc, r)
-    new_box = {"min_lat": -9.0, "max_lat": -7.0, "min_lng": -36.0, "max_lng": -34.0, "enabled": True}
-    resp = client.put("/admin/config/geofence", json=new_box)
+    resp = client.put(
+        "/admin/config/geofence",
+        json={"enabled": True, "cities": [{"slug": "salvador", "radius_km": 25}]},
+    )
     assert resp.status_code == 200
-    # Landed in the typed store row, not the generic admin_config blob.
-    assert store.get_geo_fence()["min_lat"] == -9.0
+    # Landed in the typed store, not the generic admin_config blob, with the
+    # coordinates resolved server-side from the capitals catalog.
+    stored = store.get_geo_fence()
+    assert [c["slug"] for c in stored["cities"]] == ["salvador"]
+    assert stored["cities"][0]["lat"] == pytest.approx(-12.9714)
     assert store.get_admin_config("geofence") is None
     # Redis mirror written for admin/parity reads.
-    assert json.loads(r.get("admin_config:venue_geofence"))["max_lng"] == -34.0
+    mirrored = json.loads(r.get("admin_config:venue_geofence"))
+    assert [c["slug"] for c in mirrored["cities"]] == ["salvador"]
 
 
-def test_geofence_put_invalid_returns_400_and_box_unchanged():
+def test_geofence_put_invalid_returns_400_and_fence_unchanged():
     svc, _, store = _svc()
     client = _client(svc)
     before = store.get_geo_fence()
     resp = client.put(
         "/admin/config/geofence",
-        json={"min_lat": 0.0, "max_lat": -10.0, "min_lng": -36.0, "max_lng": -34.0},
+        json={"enabled": True, "cities": [{"slug": "narnia", "radius_km": 25}]},
     )
     assert resp.status_code == 400
-    assert store.get_geo_fence() == before  # active box untouched
+    assert store.get_geo_fence() == before  # active fence untouched
+
+
+def test_geofence_put_legacy_box_is_400_naming_new_shape():
+    svc, _, store = _svc()
+    client = _client(svc)
+    before = store.get_geo_fence()
+    resp = client.put(
+        "/admin/config/geofence",
+        json={"min_lat": -9.0, "max_lat": -7.0, "min_lng": -36.0, "max_lng": -34.0},
+    )
+    assert resp.status_code == 400
+    assert "cities" in resp.text
+    assert store.get_geo_fence() == before
 
 
 def test_venue_catalog_trigger_is_404_unknown_job():
