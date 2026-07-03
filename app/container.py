@@ -115,6 +115,9 @@ class Container:
             api_key_private=settings.besttime_private_key,
             base_url=settings.besttime_endpoint_base_v1,
             add_venue_timeout=settings.besttime_add_venue_timeout_seconds,
+            search_rate_per_minute=settings.besttime_search_rate_per_minute,
+            search_rate_per_hour=settings.besttime_search_rate_per_hour,
+            rate_max_wait_seconds=settings.besttime_rate_max_wait_seconds,
         )
 
         # Initialize Google Places API client (for enrichment and photos)

@@ -158,6 +158,17 @@ class Settings(BaseSettings):
     # slow-but-healthy BestTime latency instead of raising ReadTimeout (prod
     # incidents 2026-07-01/02 saw healthy creates outlive 30s).
     besttime_add_venue_timeout_seconds: float = 60.0
+    # BestTime's documented Venue Search rate limits (30 requests/minute,
+    # 300 requests/hour). The client paces the search family — POST /forecasts
+    # create, /venues/filter, /venues/search, /venues/progress — inside these
+    # windows and fails fast (BestTimeRateLimitedError) when a call would need
+    # to wait longer than the max-wait budget. <=0 disables a window. The
+    # budget covers a full minute window (60s + slack) so per-minute pacing
+    # always waits, while an exhausted hour window (waits up to 3600s) fails
+    # fast instead of hanging the caller.
+    besttime_search_rate_per_minute: int = 30
+    besttime_search_rate_per_hour: int = 300
+    besttime_rate_max_wait_seconds: float = 75.0
 
     # Google Places API Configuration
     # Enrichment includes: vibe attributes, business status checks, permanently closed detection

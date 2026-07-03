@@ -495,3 +495,125 @@ class TestAddVenueResponseParsing:
                 await api_client.add_venue_to_account("Bar", "Rua 1")
 
         assert self._errors_metric() - before == 0
+
+
+class TestSearchRateLimiter:
+    """Window math for the venue-search pacing limiter (injected fake clock —
+    no real sleeping)."""
+
+    def _limiter(self, per_minute=2, per_hour=3, max_wait=75.0):
+        from app.api.besttime_client import _SearchRateLimiter
+
+        clock = {"now": 1000.0}
+        sleeps: list[float] = []
+
+        async def fake_sleep(seconds: float) -> None:
+            sleeps.append(seconds)
+            clock["now"] += seconds
+
+        limiter = _SearchRateLimiter(
+            per_minute=per_minute,
+            per_hour=per_hour,
+            max_wait_seconds=max_wait,
+            time_func=lambda: clock["now"],
+            sleep_func=fake_sleep,
+        )
+        return limiter, clock, sleeps
+
+    @pytest.mark.asyncio
+    async def test_under_the_window_never_waits(self):
+        limiter, _, sleeps = self._limiter()
+        await limiter.acquire("/venues/filter")
+        await limiter.acquire("/venues/filter")
+        assert sleeps == []
+
+    @pytest.mark.asyncio
+    async def test_minute_window_full_waits_until_slot_frees(self):
+        limiter, _, sleeps = self._limiter(per_minute=2, per_hour=100)
+        await limiter.acquire("/forecasts")
+        await limiter.acquire("/forecasts")
+        await limiter.acquire("/forecasts")  # third call must wait ~60s
+        assert len(sleeps) == 1
+        assert sleeps[0] == pytest.approx(60.0)
+
+    @pytest.mark.asyncio
+    async def test_wait_beyond_budget_raises_before_sending(self):
+        from app.api.besttime_client import BestTimeRateLimitedError
+
+        # Hour window full → needed wait (~3600s) far exceeds max_wait.
+        limiter, _, sleeps = self._limiter(per_minute=100, per_hour=2, max_wait=30.0)
+        await limiter.acquire("/forecasts")
+        await limiter.acquire("/forecasts")
+        with pytest.raises(BestTimeRateLimitedError):
+            await limiter.acquire("/forecasts")
+        assert sleeps == []  # rejected without sleeping
+
+    @pytest.mark.asyncio
+    async def test_window_frees_after_time_passes(self):
+        limiter, clock, sleeps = self._limiter(per_minute=2, per_hour=100)
+        await limiter.acquire("/forecasts")
+        await limiter.acquire("/forecasts")
+        clock["now"] += 61.0  # minute window expired
+        await limiter.acquire("/forecasts")
+        assert sleeps == []
+
+
+class TestCreate429Retry:
+    """HTTP 429 handling on the POST /forecasts create."""
+
+    def _response(self, status, body, headers=None):
+        return httpx.Response(
+            status, json=body, headers=headers or {},
+            request=httpx.Request("POST", "https://besttime.app/api/v1/forecasts"),
+        )
+
+    @pytest.mark.asyncio
+    async def test_429_then_success_is_retried(self, api_client):
+        ok_body = {
+            "status": "OK",
+            "venue_info": {
+                "venue_id": "ven_ok",
+                "venue_name": "Bar",
+                "venue_address": "Rua 1",
+            },
+        }
+        responses = [
+            self._response(429, {"status": "Error", "message": "Too many requests."},
+                           {"Retry-After": "0"}),
+            self._response(200, ok_body),
+        ]
+        with patch.object(api_client.client, "request", new_callable=AsyncMock) as mock_request:
+            mock_request.side_effect = responses
+            parsed = await api_client.add_venue_to_account("Bar", "Rua 1")
+        assert mock_request.await_count == 2
+        assert parsed.is_ok()
+
+    @pytest.mark.asyncio
+    async def test_persistent_429_raises_rate_limited(self, api_client):
+        from app.api.besttime_client import BestTimeRateLimitedError
+
+        limit = self._response(
+            429, {"status": "Error", "message": "Too many requests."},
+            {"Retry-After": "0"},
+        )
+        with patch.object(api_client.client, "request", new_callable=AsyncMock) as mock_request:
+            mock_request.return_value = limit
+            with pytest.raises(BestTimeRateLimitedError):
+                await api_client.add_venue_to_account("Bar", "Rua 1")
+        assert mock_request.await_count == 3  # initial + 2 bounded retries
+
+    @pytest.mark.asyncio
+    async def test_429_with_monthly_cap_message_is_not_retried(self, api_client):
+        cap_body = {
+            "status": "Error",
+            "message": "Max amount of monthly venues (500) reached. "
+                       "Venue counter will reset next month.",
+        }
+        with patch.object(api_client.client, "request", new_callable=AsyncMock) as mock_request:
+            mock_request.return_value = self._response(429, cap_body)
+            parsed = await api_client.add_venue_to_account("Bar", "Rua 1")
+        # Terminal quota state: single call, flows to the normal parse path so
+        # the handler can surface the cap legibly.
+        assert mock_request.await_count == 1
+        assert not parsed.is_ok()
+        assert "monthly venues" in (parsed.message or "").lower()

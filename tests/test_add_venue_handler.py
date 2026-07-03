@@ -139,9 +139,10 @@ async def test_create_happy_path_persists_and_increments(handler, besttime, venu
     assert fake.get("venues_geo_place_v1:ven_happy") is not None
     # Counter incremented.
     assert int(fake.get("venue_add_counter_v1:2026-05")) == 1
-    # BestTime called exactly once for add + once for live.
+    # BestTime called exactly once for the add — and NEVER for live busyness:
+    # live retrieval spends credits and belongs to the live pipeline only.
     assert besttime.add_venue_to_account.await_count == 1
-    assert besttime.get_live_forecast.await_count == 1
+    assert besttime.get_live_forecast.await_count == 0
 
 
 @pytest.mark.asyncio

@@ -78,6 +78,17 @@ BESTTIME_API_ERRORS_TOTAL = Counter(
                                  # invalid_response_schema
 )
 
+# Client-side pacing + 429 handling for the BestTime venue-search family
+# (POST /forecasts create, /venues/filter, /venues/search, /venues/progress),
+# which BestTime limits to 30 req/min and 300 req/hour.
+BESTTIME_SEARCH_RATE_LIMIT_TOTAL = Counter(
+    "besttime_search_rate_limit_total",
+    "BestTime venue-search rate-limit events",
+    ["endpoint", "event"],  # event: waited (paced before send),
+                            # retry_429 (server 429, retrying),
+                            # rejected (wait budget exhausted)
+)
+
 # Analysis day entries dropped while parsing a POST /forecasts (create venue)
 # response. Analysis is best-effort on creates: a malformed day never fails
 # the envelope, but each drop is counted here (and WARNING-logged).

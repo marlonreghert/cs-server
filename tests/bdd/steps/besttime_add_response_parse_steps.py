@@ -167,6 +167,14 @@ def _install_real_besttime(context) -> None:
         if path.endswith("/forecasts"):
             if error is not None:
                 raise error
+            # A programmed sequence wins (e.g. 429-then-success for the
+            # rate-limit retry scenarios); each entry is (status, body, headers).
+            seq = getattr(context, "besttime_http_sequence", None)
+            if seq:
+                seq_status, seq_body, seq_headers = seq.pop(0)
+                return httpx.Response(
+                    seq_status, json=seq_body, headers=seq_headers or {}
+                )
             # Rejections arrive as 4xx with a parseable body; default 200.
             status = getattr(context, "besttime_http_status", 200)
             return httpx.Response(status, json=body)
