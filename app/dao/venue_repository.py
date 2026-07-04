@@ -178,7 +178,13 @@ class VenueRepository(RedisVenueDAO):
         )
 
     # ── instagram ───────────────────────────────────────────────────────────────
-    def set_venue_instagram(self, instagram) -> None:
+    def set_venue_instagram(
+        self, instagram, cache_ttl_days: int = 30, not_found_ttl_days: int = 7
+    ) -> None:
+        # TTL kwargs exist for signature parity with RedisVenueDAO — every
+        # enrichment caller passes them. RDS is the system of record, so
+        # nothing expires here; the projection re-asserts the Redis cache.
+        del cache_ttl_days, not_found_ttl_days
         self.rds_store.upsert_enrichment(
             "instagram.handle", instagram.venue_id, _json(instagram), history=_HISTORY,
             promoted={"instagram_handle": getattr(instagram, "instagram_handle", None)},
