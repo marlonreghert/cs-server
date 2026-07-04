@@ -317,9 +317,38 @@ class BestTimeAPIClient:
         logger.info(f"[BestTimeAPIClient] Calling venue_filter with {len(query_params)} params")
 
         await self._search_limiter.acquire("/venues/filter")
-        response_data = await self._request(
-            "GET", "/venues/filter", params=query_params, retry_429=True
-        )
+        try:
+            response_data = await self._request(
+                "GET", "/venues/filter", params=query_params, retry_429=True
+            )
+        except httpx.HTTPStatusError as e:
+            # BestTime answers a ZERO-MATCH filter with HTTP 404 and a
+            # parseable body ({"status":"Error","venues":[],"message":"No
+            # venues found matching the filter criteria...", ...}). That is a
+            # legitimate empty result, not a transport failure — surfacing it
+            # as an error made the add handler's geo-fallback classify
+            # terminal "nothing nearby" rejections as retryable
+            # besttime_error 502s (prod 2026-07-04, 25 misclassified adds).
+            if e.response.status_code != 404:
+                raise
+            try:
+                body = e.response.json()
+            except Exception:
+                raise e
+            if not isinstance(body.get("venues"), list):
+                raise
+            logger.info(
+                "[BestTimeAPIClient] venue_filter: zero matches "
+                f"(404-empty envelope): {str(body.get('message'))[:120]}"
+            )
+            BESTTIME_API_CALLS_TOTAL.labels(
+                endpoint="/venues/filter", status="success"
+            ).inc()
+            return VenueFilterResponse(
+                status=body.get("status") or "Error",
+                venues=[],
+                venues_n=0,
+            )
 
         response = VenueFilterResponse(**response_data)
         logger.info(
