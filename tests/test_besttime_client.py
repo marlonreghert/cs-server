@@ -617,3 +617,37 @@ class TestCreate429Retry:
         assert mock_request.await_count == 1
         assert not parsed.is_ok()
         assert "monthly venues" in (parsed.message or "").lower()
+
+
+class TestVenueFilter404Empty:
+    """BestTime answers zero-match filters with 404 + an empty-venues envelope."""
+
+    def _response(self, status, body):
+        return httpx.Response(
+            status, json=body,
+            request=httpx.Request("GET", "https://besttime.app/api/v1/venues/filter"),
+        )
+
+    @pytest.mark.asyncio
+    async def test_404_with_empty_venues_is_a_zero_match_result(self, api_client):
+        from app.models import VenueFilterParams
+
+        body = {"status": "Error", "venues": [],
+                "message": "No venues found matching the filter criteria."}
+        with patch.object(api_client.client, "request", new_callable=AsyncMock) as mock_request:
+            mock_request.return_value = self._response(404, body)
+            resp = await api_client.venue_filter(
+                VenueFilterParams(lat=-9.67, lng=-35.72, radius=50, limit=25))
+        assert resp.venues == []
+        assert resp.venues_n == 0
+
+    @pytest.mark.asyncio
+    async def test_404_without_venues_key_still_raises(self, api_client):
+        from app.models import VenueFilterParams
+
+        with patch.object(api_client.client, "request", new_callable=AsyncMock) as mock_request:
+            mock_request.return_value = self._response(
+                404, {"status": "Error", "message": "unexpected"})
+            with pytest.raises(httpx.HTTPStatusError):
+                await api_client.venue_filter(
+                    VenueFilterParams(lat=-9.67, lng=-35.72, radius=50, limit=25))

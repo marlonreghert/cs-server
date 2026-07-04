@@ -131,3 +131,12 @@ def step_completes_via_geo_fallback(context):
     body = context.response.json()
     assert body.get("status") == "matched_via_geo_fallback", context.response.text
     assert body.get("venue_id") == "ven_geo_fallback_match_001", context.response.text
+
+
+@given("the geo fallback area has no venues at all")
+def step_filter_404_empty(context):
+    # BestTime answers a zero-match /venues/filter with HTTP 404 + a parseable
+    # empty-venues envelope (NOT a 200). Before the 2026-07-04 fix the client
+    # raised on it, so terminal "nothing nearby" rejections were misclassified
+    # as retryable besttime_error 502s.
+    context.besttime_filter_404_empty = True

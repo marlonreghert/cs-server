@@ -23,3 +23,12 @@ Feature: BestTime rejections with partial venue info take the rejection path
     Given BestTime replies with a body that has no usable status or venue info
     When an operator adds the venue
     Then the add fails with a bad-response error that names an unparseable response
+
+  Scenario: A rejection whose fallback area is empty is terminal, not a fake outage
+    Given BestTime rejects a create with an explanatory message and a venue info block without a venue id
+    And the geo fallback area has no venues at all
+    When an operator adds the venue by name and address
+    Then the add fails as a rejection, not as an unparseable response
+    And the error response carries BestTime's message
+    And the geo fallback was attempted
+    And the reserved quota slot is released

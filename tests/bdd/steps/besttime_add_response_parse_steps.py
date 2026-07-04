@@ -179,6 +179,15 @@ def _install_real_besttime(context) -> None:
             status = getattr(context, "besttime_http_status", 200)
             return httpx.Response(status, json=body)
         if path.endswith("/venues/filter"):
+            if getattr(context, "besttime_filter_404_empty", False):
+                # The REAL BestTime zero-match reply (probed 2026-07-04):
+                # HTTP 404 with a parseable empty-venues envelope.
+                return httpx.Response(404, json={
+                    "status": "Error",
+                    "venues": [],
+                    "message": "No venues found matching the filter criteria. "
+                               "Try to 1)remove filters, 2) Add new venues",
+                })
             filter_body = getattr(context, "besttime_filter_body", None)
             if filter_body is not None:
                 return httpx.Response(200, json=filter_body)
