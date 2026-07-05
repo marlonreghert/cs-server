@@ -131,6 +131,15 @@ def _build_test_app(context) -> None:
             google_places_client=context.google_places_client,
         )
 
+        from app.services.batch_add_service import BatchAddService
+
+        context.batch_add_service = BatchAddService(
+            handler=context.add_venue_handler,
+            redis_client=context.fake_redis,
+            google_client=context.google_places_client,
+            budget_service=context.budget_service,
+        )
+
         container = MagicMock()
         container.venue_dao = context.venue_dao
         container.redis_venue_dao = context.venue_dao
@@ -139,6 +148,7 @@ def _build_test_app(context) -> None:
         container.fixed_year_month = context.fixed_year_month
         container.add_venue_handler = context.add_venue_handler
         container.venue_budget_service = context.budget_service
+        container.batch_add_service = context.batch_add_service
         try:
             set_admin_container(container)
         except Exception:

@@ -188,6 +188,72 @@ class GooglePlacesAPIClient:
             logger.error(f"[GooglePlacesAPIClient] Text search exception: {e}")
             return None
 
+    async def get_place_location(
+        self, place_id: str
+    ) -> Optional[tuple[float, float]]:
+        """Fetch just a place's (lat, lng) via Places (New) with a minimal field
+        mask. Used by the batch-add path to resolve coordinates for rows that
+        carry a place_id but no coords. Returns None if unavailable.
+        """
+        if not place_id:
+            return None
+        pid = place_id if place_id.startswith("places/") else f"places/{place_id}"
+        url = f"{GOOGLE_PLACES_API_BASE}/{pid}"
+        headers = {
+            "X-Goog-Api-Key": self.api_key,
+            "X-Goog-FieldMask": "location",
+        }
+        start_time = time.perf_counter()
+        try:
+            response = await self.client.get(url, headers=headers)
+            response.raise_for_status()
+            loc = (response.json() or {}).get("location") or {}
+            lat, lng = loc.get("latitude"), loc.get("longitude")
+            GOOGLE_PLACES_API_CALL_DURATION_SECONDS.labels(
+                endpoint="place_location"
+            ).observe(time.perf_counter() - start_time)
+            GOOGLE_PLACES_API_CALLS_TOTAL.labels(
+                endpoint="place_location", status="success"
+            ).inc()
+            if lat is None or lng is None:
+                return None
+            return float(lat), float(lng)
+        except Exception as e:  # noqa: BLE001
+            GOOGLE_PLACES_API_CALL_DURATION_SECONDS.labels(
+                endpoint="place_location"
+            ).observe(time.perf_counter() - start_time)
+            GOOGLE_PLACES_API_CALLS_TOTAL.labels(
+                endpoint="place_location", status="error"
+            ).inc()
+            logger.warning(
+                f"[GooglePlacesAPIClient] get_place_location failed for "
+                f"{place_id}: {type(e).__name__}: {e}"
+            )
+            return None
+
+    async def resolve_coordinates(
+        self,
+        venue_name: str,
+        venue_address: str,
+        place_id: Optional[str] = None,
+        lat_bias: Optional[float] = None,
+        lng_bias: Optional[float] = None,
+    ) -> tuple[Optional[str], Optional[float], Optional[float]]:
+        """Resolve a venue's Google place_id + (lat, lng). Uses the given
+        place_id when present, otherwise a Text Search (biased by the city
+        center). Returns (place_id, lat, lng) with None fields when a step
+        cannot be resolved. Never raises.
+        """
+        pid = place_id or await self.search_place_id(
+            venue_name, venue_address, lat=lat_bias, lng=lng_bias
+        )
+        if not pid:
+            return None, None, None
+        loc = await self.get_place_location(pid)
+        if loc is None:
+            return pid, None, None
+        return pid, loc[0], loc[1]
+
     async def get_place_details(
         self,
         place_id: str,
