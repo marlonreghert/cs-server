@@ -124,6 +124,18 @@ def test_put_invalid_eligibility_returns_400():
     assert resp.status_code == 400
 
 
+def test_put_accepts_top_level_list_value():
+    # vibe_modes is stored as an ordered array of mode configs. The generic
+    # config PUT must accept a top-level JSON array, not only an object, or the
+    # admin panel can never save it (a 422 dict_type otherwise).
+    svc, _, _ = _svc()
+    client = _client(svc)
+    modes = [{"id": "explorar", "enabled": True}, {"id": "familia", "enabled": True}]
+    assert client.put("/admin/config/vibe_modes", json=modes).status_code == 200
+    got = client.get("/admin/config/vibe_modes").json()["value"]
+    assert got == modes and isinstance(got, list)
+
+
 def test_put_returns_502_when_mirror_fails():
     svc, r, store = _svc()
 
