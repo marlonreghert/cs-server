@@ -12,6 +12,7 @@ from app.handlers.add_venue_handler import (
     AddVenueHandler,
     AddVenueByAddressRequest,
 )
+from app.models.batch_add import BatchAddRequest
 from app.services.venue_eligibility import (
     ADMIN_CONFIG_ELIGIBILITY_KEY,
     ADMIN_CONFIG_GEOFENCE_KEY,
@@ -288,6 +289,41 @@ async def add_venue_by_address(request: AddVenueByAddressRequest, response: Resp
     outcome = await handler.add(request)
     response.status_code = outcome.status_code
     return outcome.body
+
+
+@router.post("/venues/batch-add")
+async def batch_add_venues(request: BatchAddRequest, response: Response):
+    """Add a whole curated list server-side, deterministically.
+
+    Launches a background job that runs each row through the same
+    AddVenueHandler.add() as POST /venues/by-address (same dedupe, geo-fallback,
+    timeout recovery, enrichment, and BestTime rate limiter), persisting a
+    pollable summary. Returns immediately with a job_id — poll
+    GET /venues/batch-add/{job_id} for progress + the final per-row results.
+    See app/services/batch_add_service.py.
+    """
+    if _container is None:
+        raise HTTPException(status_code=503, detail="Container not initialized")
+    service = getattr(_container, "batch_add_service", None)
+    if service is None:
+        raise HTTPException(status_code=503, detail="batch-add service not configured")
+    accepted = service.start_job(request)
+    response.status_code = 202
+    return accepted
+
+
+@router.get("/venues/batch-add/{job_id}")
+async def get_batch_add_job(job_id: str):
+    """Poll a batch-add job: {status, processed, total, summary, results, budget}."""
+    if _container is None:
+        raise HTTPException(status_code=503, detail="Container not initialized")
+    service = getattr(_container, "batch_add_service", None)
+    if service is None:
+        raise HTTPException(status_code=503, detail="batch-add service not configured")
+    job = service.get_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="job not found")
+    return job
 
 
 class GeoLinkUndoRequest(BaseModel):

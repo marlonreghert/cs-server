@@ -12,6 +12,7 @@ from app.api import BestTimeAPIClient
 from app.api.google_places_client import GooglePlacesAPIClient
 from app.services import VenueService, VenuesRefresherService, VenueBudgetService
 from app.handlers import AddVenueHandler
+from app.services.batch_add_service import BatchAddService
 from app.services.google_places_enrichment_service import GooglePlacesEnrichmentService
 from app.services.photo_enrichment_service import PhotoEnrichmentService
 from app.api.apify_instagram_client import ApifyInstagramClient
@@ -388,6 +389,15 @@ class Container:
             # System of record for the geo-link undo path (created_at recency
             # guard + soft-delete; the projector then drops it from serving).
             rds_store=self.rds_store,
+        )
+
+        # Server-side batch venue-add: runs a curated list through the same
+        # add_venue_handler in one pollable background job.
+        self.batch_add_service = BatchAddService(
+            handler=self.add_venue_handler,
+            redis_client=redis_internal_client,
+            google_client=self.google_places_api,
+            budget_service=self.venue_budget_service,
         )
 
         # Expose the budget service to the refresher so discovery can
