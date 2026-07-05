@@ -123,20 +123,20 @@ def default_geo_fence() -> dict:
 
 # ── BestTime types that must never reach clients ─────────────────────────────
 DEFAULT_BLOCKED_VENUE_TYPES: set[str] = {
-    "PARK", "CITY_PARK", "SHOPPING", "SHOPPING_CENTER", "DEPARTMENT_STORE",
+    "SHOPPING", "SHOPPING_CENTER", "DEPARTMENT_STORE",
     "SUPERMARKET", "GROCERY", "MARKET", "COFFEE", "FAST_FOOD", "BAKERY",
     "DESSERT", "LIBRARY", "SCHOOL", "CHURCH", "TEMPLE", "GYM", "FITNESS",
     "HOSPITAL", "PHARMACY", "BANK", "GAS_STATION", "MUSEUM",
     "MODERN_ART_MUSEUM", "APPAREL", "GIFTS", "PERSONAL_CARE",
     "TELECOMMUNICATIONS_SERVICE_PROVIDER", "BUSINESS_MANAGEMENT_CONSULTANT",
     "SOCIAL_SERVICES_ORGANIZATION", "TOURIST_DESTINATION", "HISTORICAL",
-    "PLAZA", "SPORTS_COMPLEX", "SPORTS_CLUB", "GOLF", "BOATING",
+    "SPORTS_COMPLEX", "SPORTS_CLUB", "GOLF", "BOATING",
 }
 
 # ── Google Places types that must never reach clients ────────────────────────
 # More accurate than BestTime types since Google classifies venues correctly.
 DEFAULT_BLOCKED_GOOGLE_TYPES: set[str] = {
-    "park", "city_park", "garden", "national_park",
+    "garden", "national_park",
     "shopping_mall", "department_store",
     "store", "home_goods_store", "furniture_store", "electronics_store",
     "auto_parts_store", "cell_phone_store", "shoe_store", "cosmetics_store",
@@ -145,7 +145,6 @@ DEFAULT_BLOCKED_GOOGLE_TYPES: set[str] = {
     "library", "book_store",
     "warehouse_store", "building_materials_store",
     "drugstore", "pharmacy",
-    "plaza",
     "supermarket", "grocery_store",
     "liquor_store",
     "florist",

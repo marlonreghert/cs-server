@@ -29,9 +29,11 @@ class TestVenueTypes:
 class TestBlockedVenueTypes:
     """Verify DEFAULT_BLOCKED_VENUE_TYPES blocks junk types."""
 
-    def test_blocks_parks(self):
-        assert "PARK" in DEFAULT_BLOCKED_VENUE_TYPES
-        assert "CITY_PARK" in DEFAULT_BLOCKED_VENUE_TYPES
+    def test_does_not_block_parks(self):
+        """PARK/CITY_PARK were unblocked so praças/urban parks resolve to the
+        PARK category and serve (park-category-eligibility feature)."""
+        assert "PARK" not in DEFAULT_BLOCKED_VENUE_TYPES
+        assert "CITY_PARK" not in DEFAULT_BLOCKED_VENUE_TYPES
 
     def test_blocks_shopping(self):
         assert "SHOPPING" in DEFAULT_BLOCKED_VENUE_TYPES
@@ -147,10 +149,14 @@ class TestGooglePlacesDetailsPrimaryType:
 class TestBlockedGoogleTypes:
     """Verify BLOCKED_GOOGLE_TYPES catches junk from Google Places."""
 
-    def test_blocks_parks(self):
+    def test_blocks_garden_and_national_park_only(self):
+        """park/city_park/plaza were unblocked (PARK category); garden and
+        national_park stay blocked (park-category-eligibility feature)."""
         from app.services.venues_refresher_service import BLOCKED_GOOGLE_TYPES
-        for t in ["park", "city_park", "garden", "national_park"]:
+        for t in ["garden", "national_park"]:
             assert t in BLOCKED_GOOGLE_TYPES
+        for t in ["park", "city_park", "plaza"]:
+            assert t not in BLOCKED_GOOGLE_TYPES
 
     def test_blocks_shopping(self):
         from app.services.venues_refresher_service import BLOCKED_GOOGLE_TYPES

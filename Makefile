@@ -30,6 +30,7 @@ test-unit:
 		tests/test_add_venue_handler.py \
 		tests/test_besttime_inventory_sync.py \
 		tests/test_venue_eligibility.py \
+		tests/test_venue_category.py \
 		tests/test_rds_repository.py \
 		tests/test_rds_store_contract.py \
 		tests/test_admin_config.py \

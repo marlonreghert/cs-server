@@ -1,4 +1,3 @@
-@wip
 Feature: PARK category resolution and eligibility for praças and urban parks
   As the venue serving pipeline
   I want plaza, city park, park, and historic landmark venues to resolve to a

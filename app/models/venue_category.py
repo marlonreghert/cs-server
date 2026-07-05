@@ -25,6 +25,7 @@ CATEGORIES = {
     "LIVE_MUSIC":   {"label": "Música ao Vivo",    "emoji": "🎵", "color": "#EC4899"},
     "CASINO":       {"label": "Cassino",           "emoji": "🎰", "color": "#EAB308"},
     "ENTERTAINMENT":{"label": "Entretenimento",    "emoji": "🎮", "color": "#8B5CF6"},
+    "PARK":         {"label": "Ao Ar Livre",       "emoji": "🌳", "color": "#16A34A"},
     "OTHER":        {"label": "Outro",             "emoji": "📍", "color": "#6B7280"},
 }
 
@@ -93,6 +94,11 @@ GRANULAR_LABELS = {
     "video_arcade":             "Fliperama",
     # Casino
     "casino":                   "Cassino",
+    # Parks / open-air
+    "plaza":                    "Praça",
+    "city_park":                "Parque Urbano",
+    "park":                     "Parque",
+    "historical_landmark":      "Marco Histórico",
 }
 
 # ── Google Places type → VibeSense category ──────────────────────────────────
@@ -160,6 +166,11 @@ _GOOGLE_TO_CATEGORY = {
     "video_arcade":             "ENTERTAINMENT",
     # Casino
     "casino":                   "CASINO",
+    # Parks / open-air (garden, national_park intentionally NOT mapped — stay OTHER)
+    "park":                     "PARK",
+    "plaza":                    "PARK",
+    "city_park":                "PARK",
+    "historical_landmark":      "PARK",
 }
 
 # ── BestTime type → VibeSense category (fallback) ───────────────────────────
@@ -178,6 +189,9 @@ _BESTTIME_TO_CATEGORY = {
     "BISTRO":           "FOOD_DRINK",
     "RESTAURANT":       "RESTAURANT",
     "CAFE":             "COFFEE_SHOP",
+    "PARK":             "PARK",
+    "PLAZA":            "PARK",
+    "CITY_PARK":        "PARK",
 }
 
 
