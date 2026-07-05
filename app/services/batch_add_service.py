@@ -32,6 +32,15 @@ JOB_TTL_SECONDS = 7 * 24 * 3600
 # Outcomes that end the job early — "stop spending" states.
 _STOP_OUTCOMES = {"quota_exhausted", "besttime_monthly_cap", "besttime_bad_response"}
 
+# Coordinate resolution (Google) pacing + retry. A large batch that skips
+# unresolved rows instantly would blaze through hundreds of Google calls per
+# second the moment resolution starts failing, deepening a per-minute quota
+# spike into a cascade that skips the rest of the list (prod 2026-07-05: 314
+# rows skipped after a QPM spike ~row 120). Pace every Google-touching row and
+# retry a transient miss with backoff so a momentary 429 recovers.
+_GOOGLE_PACE_SECONDS = 0.3
+_COORD_RETRY_BACKOFFS = (2.0, 5.0)
+
 
 def _classify(outcome: AddVenueOutcome) -> dict:
     """Map an AddVenueOutcome to a batch row result dict."""
@@ -168,6 +177,23 @@ class BatchAddService:
                 job["finished_at"] = time.time()
                 self._save(job)
 
+    def _already_active_id(self, name: str, address: str) -> Optional[str]:
+        """Cheap address-hash store check (handler step 1) — no coords, no
+        Google, no BestTime. Lets a re-run skip coord resolution entirely for
+        rows already added, which both avoids wasted Google quota and removes
+        the cascade trigger. Best-effort: any error falls through to the full
+        flow."""
+        try:
+            vid = self.handler._lookup_cached_venue_id(name, address)
+            if not vid:
+                return None
+            venue = self.handler.venue_dao.get_venue(vid)
+            if venue is not None and venue.is_active():
+                return vid
+        except Exception:  # noqa: BLE001
+            return None
+        return None
+
     async def _resolve_coords(
         self, row: BatchAddRow
     ) -> tuple[Optional[str], Optional[float], Optional[float]]:
@@ -175,13 +201,23 @@ class BatchAddService:
             return row.place_id, row.venue_lat, row.venue_lng
         if self.google is None:
             return row.place_id, None, None
-        return await self.google.resolve_coordinates(
-            row.venue_name,
-            row.venue_address,
-            place_id=row.place_id,
-            lat_bias=row.bias_lat,
-            lng_bias=row.bias_lng,
-        )
+        # Pace + retry: a transient Google QPM 429 returns None; back off and
+        # retry rather than skip (which would speed the loop into a cascade).
+        attempts = (0.0,) + _COORD_RETRY_BACKOFFS
+        pid = row.place_id
+        for i, backoff in enumerate(attempts):
+            if backoff:
+                await asyncio.sleep(backoff)
+            pid, lat, lng = await self.google.resolve_coordinates(
+                row.venue_name,
+                row.venue_address,
+                place_id=pid,
+                lat_bias=row.bias_lat,
+                lng_bias=row.bias_lng,
+            )
+            if lat is not None and lng is not None:
+                return pid, lat, lng
+        return pid, None, None
 
     async def _run_job(self, job: dict, rows: list[BatchAddRow]) -> None:
         summary: dict[str, int] = {}
@@ -189,22 +225,36 @@ class BatchAddService:
             t0 = time.perf_counter()
             result = {"index": idx, "venue_name": row.venue_name,
                       "venue_address": row.venue_address}
+            used_google = False
             try:
-                place_id, lat, lng = await self._resolve_coords(row)
-                if lat is None or lng is None:
-                    result.update(outcome="skipped_unresolved_coords",
-                                  http=None, venue_id=None,
-                                  detail=f"place_id={place_id}")
+                # Re-run fast-path: already-active by address hash → record
+                # already_exists without any Google/BestTime call.
+                pre_id = self._already_active_id(
+                    row.venue_name, row.venue_address
+                )
+                if pre_id is not None:
+                    result.update(outcome="already_exists", http=200,
+                                  venue_id=pre_id, detail="address-hash hit")
                 else:
-                    req = AddVenueByAddressRequest(
-                        venue_name=row.venue_name,
-                        venue_address=row.venue_address,
-                        venue_lat=lat,
-                        venue_lng=lng,
-                        place_id=place_id,
+                    used_google = (
+                        self.google is not None
+                        and (row.venue_lat is None or row.venue_lng is None)
                     )
-                    outcome = await self.handler.add(req)
-                    result.update(_classify(outcome))
+                    place_id, lat, lng = await self._resolve_coords(row)
+                    if lat is None or lng is None:
+                        result.update(outcome="skipped_unresolved_coords",
+                                      http=None, venue_id=None,
+                                      detail=f"place_id={place_id}")
+                    else:
+                        req = AddVenueByAddressRequest(
+                            venue_name=row.venue_name,
+                            venue_address=row.venue_address,
+                            venue_lat=lat,
+                            venue_lng=lng,
+                            place_id=place_id,
+                        )
+                        outcome = await self.handler.add(req)
+                        result.update(_classify(outcome))
             except Exception as e:  # noqa: BLE001
                 logger.error(
                     f"[BatchAddService] row {idx} '{row.venue_name}' "
@@ -220,6 +270,12 @@ class BatchAddService:
             job["processed"] = idx + 1
             job["summary"] = summary
             self._save(job)
+
+            # Steady pace on Google-touching rows: keeps the resolve rate under
+            # the Places QPM quota so a burst never trips the cascade in the
+            # first place (retry backoff above recovers if one slips through).
+            if used_google and idx < len(rows) - 1:
+                await asyncio.sleep(_GOOGLE_PACE_SECONDS)
 
             if result["outcome"] in _STOP_OUTCOMES:
                 job["status"] = "stopped"

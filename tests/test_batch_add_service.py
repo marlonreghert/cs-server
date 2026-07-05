@@ -6,7 +6,15 @@ import pytest
 
 from app.handlers.add_venue_handler import AddVenueOutcome
 from app.models.batch_add import BatchAddRequest
+import app.services.batch_add_service as bas
 from app.services.batch_add_service import BatchAddService, _classify
+
+
+@pytest.fixture(autouse=True)
+def _no_real_sleeps(monkeypatch):
+    # Zero the coord-retry backoffs + steady pace so tests don't wall-clock sleep.
+    monkeypatch.setattr(bas, "_COORD_RETRY_BACKOFFS", (0.0, 0.0))
+    monkeypatch.setattr(bas, "_GOOGLE_PACE_SECONDS", 0.0)
 
 
 # ── outcome classification ───────────────────────────────────────────────────
@@ -57,11 +65,35 @@ class _Budget:
         return _Snap(self.n)
 
 
+class _Venue:
+    def __init__(self, active):
+        self._active = active
+
+    def is_active(self):
+        return self._active
+
+
+class _Dao:
+    def __init__(self, venues=None):
+        self.venues = venues or {}
+
+    def get_venue(self, vid):
+        return self.venues.get(vid)
+
+
 class _Handler:
-    """Scripted handler: maps venue_name -> AddVenueOutcome; records calls."""
-    def __init__(self, script):
+    """Scripted handler: maps venue_name -> AddVenueOutcome; records calls.
+
+    `cached` maps (name) -> venue_id for the address-hash fast-path;
+    `dao_venues` maps venue_id -> _Venue for the active check."""
+    def __init__(self, script, cached=None, dao_venues=None):
         self.script = script
         self.calls = []
+        self._cached = cached or {}
+        self.venue_dao = _Dao(dao_venues or {})
+
+    def _lookup_cached_venue_id(self, name, address):
+        return self._cached.get(name)
 
     async def add(self, request):
         self.calls.append(request.venue_name)
@@ -69,12 +101,20 @@ class _Handler:
 
 
 class _Google:
-    """Resolves coords for names in `coords`; None otherwise."""
-    def __init__(self, coords):
+    """Resolves coords for names in `coords`; None otherwise. `fail_first`
+    maps name -> number of leading None responses before success (to exercise
+    the paced retry)."""
+    def __init__(self, coords, fail_first=None):
         self.coords = coords
+        self.fail_first = dict(fail_first or {})
+        self.calls = {}
 
     async def resolve_coordinates(self, name, address, place_id=None,
                                   lat_bias=None, lng_bias=None):
+        self.calls[name] = self.calls.get(name, 0) + 1
+        if self.fail_first.get(name, 0) > 0:
+            self.fail_first[name] -= 1
+            return place_id, None, None
         c = self.coords.get(name)
         if c is None:
             return place_id, None, None
@@ -184,6 +224,68 @@ async def test_prepassed_coords_skip_google():
     job = await _run_to_completion(svc, req)
     assert job["summary"] == {"created": 1}
     assert handler.calls == ["A"]
+
+
+@pytest.mark.asyncio
+async def test_already_active_row_skips_google_and_handler():
+    # Re-run fast-path: an address-hash hit on an ACTIVE venue records
+    # already_exists with zero Google/BestTime work.
+    handler = _Handler(
+        script={"B": AddVenueOutcome(201, {"status": "created", "venue_id": "vB"})},
+        cached={"A": "vA"},
+        dao_venues={"vA": _Venue(active=True)},
+    )
+    google = _Google({"B": (-9.6, -35.7)})
+    svc = _service(handler, google)
+    req = BatchAddRequest(venues=[
+        {"venue_name": "A", "venue_address": "a"},   # already active
+        {"venue_name": "B", "venue_address": "b"},   # new
+    ])
+    job = await _run_to_completion(svc, req)
+    assert job["summary"] == {"already_exists": 1, "created": 1}
+    assert handler.calls == ["B"]            # A never reached the handler
+    assert "A" not in google.calls           # A never touched Google
+
+
+@pytest.mark.asyncio
+async def test_deprecated_cached_row_falls_through_to_full_flow():
+    # An address-hash hit whose venue is NOT active must not short-circuit.
+    handler = _Handler(
+        script={"A": AddVenueOutcome(201, {"status": "created", "venue_id": "vA2"})},
+        cached={"A": "vA_old"},
+        dao_venues={"vA_old": _Venue(active=False)},
+    )
+    google = _Google({"A": (-9.6, -35.7)})
+    svc = _service(handler, google)
+    req = BatchAddRequest(venues=[{"venue_name": "A", "venue_address": "a"}])
+    job = await _run_to_completion(svc, req)
+    assert job["summary"] == {"created": 1}
+    assert handler.calls == ["A"]
+
+
+@pytest.mark.asyncio
+async def test_coord_resolution_retries_a_transient_miss():
+    handler = _Handler({"A": AddVenueOutcome(201, {"status": "created",
+                                                   "venue_id": "vA"})})
+    google = _Google({"A": (-9.6, -35.7)}, fail_first={"A": 1})  # miss then hit
+    svc = _service(handler, google)
+    req = BatchAddRequest(venues=[{"venue_name": "A", "venue_address": "a"}])
+    job = await _run_to_completion(svc, req)
+    assert job["summary"] == {"created": 1}
+    assert google.calls["A"] == 2  # first None, retry succeeded
+
+
+@pytest.mark.asyncio
+async def test_coord_resolution_gives_up_after_bounded_retries():
+    handler = _Handler({"A": AddVenueOutcome(201, {"status": "created",
+                                                   "venue_id": "vA"})})
+    google = _Google({"A": (-9.6, -35.7)}, fail_first={"A": 9})  # always miss
+    svc = _service(handler, google)
+    req = BatchAddRequest(venues=[{"venue_name": "A", "venue_address": "a"}])
+    job = await _run_to_completion(svc, req)
+    assert job["summary"] == {"skipped_unresolved_coords": 1}
+    assert google.calls["A"] == 3   # initial + 2 bounded retries
+    assert handler.calls == []
 
 
 @pytest.mark.asyncio
