@@ -3,7 +3,7 @@ import asyncio
 import json
 import logging
 import time
-from typing import Optional
+from typing import Optional, Union
 
 from fastapi import APIRouter, HTTPException, Body, Query, Response
 from pydantic import BaseModel, Field
@@ -633,10 +633,15 @@ async def get_admin_config(key: str):
 
 
 @router.put("/config/{key}")
-async def put_admin_config(key: str, value: dict = Body(...)):
+async def put_admin_config(key: str, value: Union[dict, list] = Body(...)):
     """Write a config key to RDS (truth) then mirror Redis. Per-key validation
     runs before any write; a failed mirror after the RDS commit returns 502 so
-    the caller retries (idempotent)."""
+    the caller retries (idempotent).
+
+    Accepts a JSON object OR array: most config keys are objects, but a few are
+    list-valued (notably ``vibe_modes``, an ordered array of mode configs). The
+    storage layer (RDS ``jsonb`` + the ``json.dumps`` Redis mirror) handles both,
+    so the HTTP boundary must not reject a top-level array."""
     svc = _admin_config_service()
     try:
         stored = svc.set(key, value, updated_by="admin")
