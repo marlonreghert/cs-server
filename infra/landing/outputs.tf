@@ -18,5 +18,5 @@ output "cloudfront_domain_name" {
 }
 
 output "site_bucket" {
-  value = aws_s3_bucket.site.bucket
+  value = try(aws_s3_bucket.site.bucket, null)
 }
