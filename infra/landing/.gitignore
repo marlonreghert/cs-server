@@ -1,0 +1,9 @@
+# Terraform — state lives in S3; never commit local state or provider binaries.
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+!*.tfvars.example
+crash.log
+override.tf
+override.tf.json
