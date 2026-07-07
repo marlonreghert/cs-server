@@ -1,15 +1,15 @@
-Feature: Google priceLevel primary, priceRange fallback for the price tier
+Feature: Objective priceRange primary, priceLevel enum fallback for the price tier
   As the price pipeline
-  I must derive the served price tier from Google's locale-normalized priceLevel
-  enum first, fall back to bucketing the objective priceRange only when the enum is
-  absent and then to BestTime, never serve tier 0, persist the raw signals for
-  audit, and project a structured price range.
+  I must derive the served price tier from Google's objective priceRange first,
+  fall back to the coarse priceLevel enum only when no usable range exists and then
+  to BestTime, never serve tier 0, persist the raw signals for audit, and project a
+  structured price range.
 
   Background:
     Given enrichment derives the served price tier in the order
       | rank | source        |
-      | 1    | google_enum   |
-      | 2    | google_range  |
+      | 1    | google_range  |
+      | 2    | google_enum   |
       | 3    | besttime      |
       | 4    | null          |
     And the served price tier is an integer 1 to 4 or null
@@ -22,14 +22,14 @@ Feature: Google priceLevel primary, priceRange fallback for the price tier
     And its price_level_source is recorded as "google_enum"
     And its served price_level is not 0
 
-  Scenario: When both Google signals are present the enum wins and the range is kept raw
-    Given a price-relevant venue whose Google details carry both a priceLevel enum of PRICE_LEVEL_VERY_EXPENSIVE and a priceRange of BRL 80 to 200
+  Scenario: When both Google signals are present the objective range wins over the enum
+    Given a price-relevant venue whose Google details carry both a priceLevel enum of PRICE_LEVEL_MODERATE and a priceRange of BRL 80 to 160
     When the venue is enriched
-    Then its served price_level is derived from the enum as tier 4
-    And its price_level_source is recorded as "google_enum"
-    And its price_range is persisted as currency "BRL" with min 80 and max 200
+    Then its served price_level resolves to an expensive tier of 3 or 4 from the range
+    And its price_level_source is recorded as "google_range"
+    And its price_range is persisted as currency "BRL" with min 80 and max 160
 
-  Scenario: An enum-less expensive venue is tiered from the price range as the fallback
+  Scenario: An enum-less expensive venue is tiered from its price range
     Given a price-relevant venue whose Google details carry a priceRange of BRL 80 to 200
     And the venue has no usable Google priceLevel enum
     When the venue is enriched

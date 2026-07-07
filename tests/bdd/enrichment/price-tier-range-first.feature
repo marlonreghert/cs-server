@@ -1,4 +1,3 @@
-@wip
 Feature: Price tier prefers the objective range over the coarse Google enum
   As the price pipeline
   I must derive the served price tier from the objective Google priceRange first,
@@ -15,7 +14,8 @@ Feature: Price tier prefers the objective range over the coarse Google enum
       | 2    | google_enum   |
       | 3    | besttime      |
       | 4    | null          |
-    And the served price tier is an integer 1 to 4 or null and never 0
+    And the served price tier is an integer 1 to 4 or null
+    And the served price tier is never 0
 
   Scenario: When both Google signals are present the objective range wins over the enum
     Given a price-relevant venue whose Google details carry both a priceLevel enum of PRICE_LEVEL_MODERATE and a priceRange of BRL 80 to 160
@@ -32,13 +32,14 @@ Feature: Price tier prefers the objective range over the coarse Google enum
     And both venues have a price_level_source of "google_range"
 
   Scenario: A venue with an enum but no usable range is tiered from the enum
-    Given a price-relevant venue whose Google details carry a priceLevel enum of PRICE_LEVEL_MODERATE and no priceRange
+    Given a price-relevant venue whose Google details carry a priceLevel enum of PRICE_LEVEL_MODERATE
+    And the venue has no usable Google priceRange
     When the venue is enriched
     Then its served price_level is derived from the enum
     And its price_level_source is recorded as "google_enum"
 
   Scenario: A venue with no Google price signal falls back to BestTime
-    Given a price-relevant venue with no Google priceLevel enum and no priceRange
+    Given a price-relevant venue with no Google price signal
     And the venue has a BestTime price tier of 2
     When the venue is enriched
     Then its served price_level is tier 2 from BestTime
@@ -51,7 +52,8 @@ Feature: Price tier prefers the objective range over the coarse Google enum
     And its price_level_source is null
 
   Scenario: An enum-less range with an unbounded upper bound buckets from the lower bound
-    Given a price-relevant venue whose Google priceRange has a startPrice of BRL 90 and no endPrice and no priceLevel enum
+    Given a price-relevant venue whose Google priceRange has a startPrice of BRL 90 and no endPrice
+    And the venue has no usable Google priceLevel enum
     When the venue is enriched
     Then its served price_level is derived from the range lower bound
     And its price_level_source is recorded as "google_range"
