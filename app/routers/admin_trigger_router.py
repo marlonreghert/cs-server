@@ -56,6 +56,12 @@ class TriggerResponse(BaseModel):
 # trigger). Triggering it now returns the standard 404 "Unknown job". The refresher
 # method (`refresh_venues_by_filter_for_default_locations`) remains for future reuse
 # but has no reachable trigger path.
+#
+# `photos` (catalog-wide photo pre-bake) is likewise ABSENT: photos are resolved
+# ON DEMAND per venue (POST /internal/venues/{id}/photos/resolve → fresh, keyless
+# URLs), so the catalog pre-bake is retired. Triggering `photos` returns 404.
+# PhotoEnrichmentService.refresh_photos_for_venues remains for compatibility but
+# has no reachable trigger path.
 JOB_REGISTRY = {
     "live_forecast": {
         "label": "Live Forecast Refresh",
@@ -74,11 +80,6 @@ JOB_REGISTRY = {
         "label": "Google Places Pending Backfill",
         "description": "One-time, idempotent Google-only enrichment of PENDING venues "
         "(active, no vibe attributes). Skips enriched + no-match venues; no BestTime call.",
-    },
-    "photos": {
-        "label": "Photo Enrichment",
-        "description": "Fetch venue photos from Google Places API",
-        "default_config": {"limit": 200, "photos_per_venue": 5},
     },
     "instagram": {
         "label": "Instagram Discovery",
@@ -120,7 +121,6 @@ async def _run_job(job_name: str, config: Optional[dict] = None):
     c = _container
     cfg = config or {}
     force = cfg.get("force_refresh", False)
-    limit = cfg.get("limit")
     start = time.perf_counter()
 
     if job_name == "inventory_sync":
@@ -146,13 +146,6 @@ async def _run_job(job_name: str, config: Optional[dict] = None):
             limit=cfg.get("limit")
         )
         logger.info(f"[AdminTrigger] google_places_backfill summary: {summary}")
-    elif job_name == "photos":
-        if c.photo_enrichment_service is None:
-            raise ValueError("Photo enrichment not configured (missing Google Places API key)")
-        await c.photo_enrichment_service.refresh_photos_for_venues(
-            limit=limit,
-            max_photos_per_venue=cfg.get("photos_per_venue"),
-        )
     elif job_name == "instagram":
         if c.instagram_enrichment_service is None:
             raise ValueError("Instagram enrichment not configured (missing Apify API token)")
@@ -195,8 +188,6 @@ async def list_jobs():
         # Check if service is available
         available = True
         if name in ("google_places", "google_places_backfill") and _container.google_places_enrichment_service is None:
-            available = False
-        elif name == "photos" and _container.photo_enrichment_service is None:
             available = False
         elif name == "instagram" and _container.instagram_enrichment_service is None:
             available = False

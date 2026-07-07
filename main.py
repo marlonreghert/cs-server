@@ -20,7 +20,7 @@ from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
 
 from app.config import Settings
 from app.container import Container
-from app.routers import venue_router, set_venue_handler, debug_router, set_debug_dependencies, admin_trigger_router, set_admin_container, engagement_router, set_engagement_service
+from app.routers import venue_router, set_venue_handler, debug_router, set_debug_dependencies, admin_trigger_router, set_admin_container, engagement_router, set_engagement_service, internal_router, set_internal_container
 from app.middleware import PrometheusMiddleware
 from app.services.refresh_interval_watch import (
     WATCH_INTERVAL_SECONDS,
@@ -444,24 +444,16 @@ def start_background_jobs(settings: Settings):
             "(missing API key or disabled in config)"
         )
 
-    # Job 5: Photo enrichment (only if enabled and configured)
-    if settings.photo_enrichment_enabled and settings.google_places_api_key:
-        scheduler.add_job(
-            run_photo_enrichment_job,
-            trigger=CronTrigger.from_crontab(settings.google_places_enrichment_cron),  # Same schedule as enrichment
-            id="photo_enrichment",
-            name=f"Photo Enrichment (limit={settings.photo_enrichment_limit})",
-            replace_existing=True,
-        )
-        logger.info(
-            f"[Scheduler] Scheduled photo enrichment with limit={settings.photo_enrichment_limit}, "
-            f"photos_per_venue={settings.photos_per_venue}"
-        )
-    else:
-        logger.info(
-            "[Scheduler] Photo enrichment disabled "
-            "(PHOTO_ENRICHMENT_ENABLED=false or missing API key)"
-        )
+    # Job 5 (RETIRED): the catalog-wide photo pre-bake is intentionally NOT
+    # scheduled. Photos are now resolved ON DEMAND per venue (fresh, keyless CDN
+    # URLs cached briefly under venue_photos_fresh_v1:*) via
+    # POST /internal/venues/{id}/photos/resolve. Pre-baking key-bearing /media
+    # URLs for the whole catalog produced blank photos once Google rotated the
+    # token faster than the ~5-day TTL. `run_photo_enrichment_job` and
+    # PhotoEnrichmentService.refresh_photos_for_venues remain intact but dormant
+    # (no scheduled/startup/admin trigger), mirroring the dormant-discovery
+    # pattern. The legacy venue_photos_v1:* key + projection stay for Redis
+    # compatibility.
 
     # Job 6: Instagram enrichment (only if enabled and configured)
     if settings.instagram_enrichment_enabled and settings.apify_api_token:
@@ -607,6 +599,9 @@ async def startup_essential(settings: Settings):
     # Inject engagement service (favorites/hot_likes write-through API)
     set_engagement_service(container.engagement_service)
 
+    # Inject container for the internal on-demand photo-resolve router.
+    set_internal_container(container)
+
     # Rebuild the eligibility serving mirror from its rows so a Redis flush before
     # this start does not leave filtering on the hardcoded defaults. Runs OFF the
     # event loop (blocking SQLAlchemy read, same pattern as the projector) so it
@@ -699,6 +694,7 @@ app.include_router(venue_router)
 app.include_router(debug_router)
 app.include_router(admin_trigger_router)
 app.include_router(engagement_router)
+app.include_router(internal_router)
 
 
 # Health check endpoint

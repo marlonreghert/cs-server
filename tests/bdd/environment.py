@@ -17,6 +17,7 @@ import fakeredis
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from app.config import settings
 from app.dao import RedisVenueDAO, VenueBudgetDao
 from app.db.geo_redis_client import GeoRedisClient
 from app.handlers import AddVenueHandler
@@ -107,6 +108,20 @@ def _build_test_app(context) -> None:
         # is called there once context.engagement_service exists.
         app.include_router(engagement_router)
 
+        # Internal photo-resolve router (POST /internal/venues/{id}/photos/resolve).
+        # May not exist yet during true-RED; tolerate ImportError so the endpoint
+        # 404s (a meaningful assertion failure) instead of crashing the harness.
+        try:
+            from app.routers.internal_router import (
+                router as internal_router,
+                set_container as set_internal_container,
+            )
+
+            app.include_router(internal_router)
+            context._set_internal_container = set_internal_container
+        except ImportError:
+            context._set_internal_container = None
+
         # Pin year_month deterministically so scenarios can write counters
         # under a specific key.
         def _year_month_provider():
@@ -153,6 +168,11 @@ def _build_test_app(context) -> None:
             set_admin_container(container)
         except Exception:
             pass
+        if getattr(context, "_set_internal_container", None) is not None:
+            try:
+                context._set_internal_container(container)
+            except Exception:
+                pass
         context.container = container
     except ImportError:
         pass
@@ -203,6 +223,28 @@ def _build_rds_layer(context) -> None:
         google_places_client=getattr(context, "google_places_client", None),
         venue_dao=context.repository,
     )
+
+    # On-demand photo resolver: reads google_place_id from the RDS system of
+    # record (context.repository) with a Redis fallback (context.redis_only_dao),
+    # and writes the fresh keyless-URL cache to Redis. Wired onto the shared
+    # container so the internal resolve endpoint reaches it.
+    from app.services.photo_enrichment_service import PhotoEnrichmentService
+
+    try:
+        context.photo_enrichment_service = PhotoEnrichmentService(
+            google_places_client=getattr(context, "google_places_client", None),
+            venue_dao=context.repository,
+            serving_dao=context.redis_only_dao,
+        )
+    except TypeError:
+        # serving_dao kwarg not added yet (true-RED): use the current signature.
+        context.photo_enrichment_service = PhotoEnrichmentService(
+            google_places_client=getattr(context, "google_places_client", None),
+            venue_dao=context.repository,
+        )
+    if getattr(context, "container", None) is not None:
+        context.container.photo_enrichment_service = context.photo_enrichment_service
+
     context.redis_projection_service = RedisProjectionService(
         redis_only_dao=context.redis_only_dao,
         rds_store=context.rds_store,
@@ -268,5 +310,11 @@ def after_scenario(context, scenario):
     # starts clean. We only need to drop the admin router module because
     # that's the one we re-inject container state into per scenario.
     for mod_name in list(sys.modules):
-        if mod_name.startswith("app.routers.admin_trigger_router"):
+        if mod_name.startswith("app.routers.admin_trigger_router") or mod_name.startswith(
+            "app.routers.internal_router"
+        ):
             importlib.reload(sys.modules[mod_name])
+    # Restore any per-scenario global settings overrides (e.g. photos_per_venue,
+    # photo_fresh_cache_ttl_hours) so they never leak into the next scenario.
+    for name, value in getattr(context, "_settings_overrides", {}).items():
+        setattr(settings, name, value)

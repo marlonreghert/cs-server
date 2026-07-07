@@ -504,18 +504,35 @@ class GooglePlacesAPIClient:
         max_photos: int = 5,
         max_width: int = 800,
     ) -> list[dict]:
-        """Fetch photo URLs with author attribution for a place.
+        """Resolve FRESH, KEYLESS photo URLs (with author attribution) for a place.
 
-        Uses the Google Places API (New) to get photo references and
-        author attributions (required for copyright compliance).
+        Two-step, per the Google Places API (New):
+          1. Place Details (photos field mask) -> photo resource `name`s +
+             author attributions (required for copyright compliance).
+          2. For each `name`, call the photo media endpoint with
+             `skipHttpRedirect=true` and the API key in the `X-Goog-Api-Key`
+             HEADER (never the URL) to read the KEYLESS `photoUri`
+             (https://lh3.googleusercontent.com/...).
+
+        The returned/stored URL therefore carries no `key=` parameter and is not
+        a `places.googleapis.com/.../media` redirect URL, so it does not die when
+        Google rotates the photo token.
 
         Args:
-            place_id: Google Place ID (can be full resource name like 'places/ChIJ...' or just 'ChIJ...')
-            max_photos: Maximum number of photos to fetch (default 5)
-            max_width: Maximum width in pixels for the photos (default 800)
+            place_id: Google Place ID ('places/ChIJ...' or bare 'ChIJ...')
+            max_photos: Maximum number of photos to resolve (default 5)
+            max_width: Requested max width in pixels (maxWidthPx, default 800)
 
         Returns:
-            List of dicts: [{url: str, author_name: str | None}, ...]
+            List of dicts: [{url: <keyless photoUri>, author_name: str | None}, ...],
+            capped at max_photos. A photo whose media call fails is skipped (the
+            venue is not failed).
+
+        Raises:
+            httpx.HTTPStatusError / httpx.TimeoutException / httpx.RequestError:
+            when the Place Details call itself fails, so the on-demand resolver
+            can distinguish a hard failure (do not cache) from a genuine
+            zero-photos result (cache empty).
         """
         # Handle both formats: 'places/ChIJ...' or just 'ChIJ...'
         if place_id.startswith("places/"):
@@ -534,47 +551,83 @@ class GooglePlacesAPIClient:
 
         start_time = time.perf_counter()
 
+        # Step 1: Place Details -> photo resource names. A hard error here is
+        # propagated (metrics recorded first) so the caller can avoid caching.
         try:
             response = await self.client.get(url, headers=headers)
             response.raise_for_status()
-
             data = response.json()
-            photos = data.get("photos", [])
-
             duration = time.perf_counter() - start_time
             GOOGLE_PLACES_API_CALL_DURATION_SECONDS.labels(endpoint="place_photos").observe(duration)
             GOOGLE_PLACES_API_CALLS_TOTAL.labels(endpoint="place_photos", status="success").inc()
-
-            # Extract photo URLs with author attribution (limit to max_photos)
-            result = []
-            for photo in photos[:max_photos]:
-                photo_name = photo.get("name")
-                if photo_name:
-                    photo_url = f"{GOOGLE_PLACES_API_BASE}/{photo_name}/media?maxWidthPx={max_width}&key={self.api_key}"
-                    # Extract first author attribution (if available)
-                    author_name = None
-                    attributions = photo.get("authorAttributions", [])
-                    if attributions:
-                        author_name = attributions[0].get("displayName")
-                    result.append({"url": photo_url, "author_name": author_name})
-
-            logger.debug(f"[GooglePlacesAPIClient] Found {len(result)} photos for {place_id}")
-            return result
-
         except httpx.HTTPStatusError as e:
-            duration = time.perf_counter() - start_time
-            GOOGLE_PLACES_API_CALL_DURATION_SECONDS.labels(endpoint="place_photos").observe(duration)
+            GOOGLE_PLACES_API_CALL_DURATION_SECONDS.labels(endpoint="place_photos").observe(time.perf_counter() - start_time)
             GOOGLE_PLACES_API_CALLS_TOTAL.labels(endpoint="place_photos", status="error").inc()
             GOOGLE_PLACES_API_ERRORS_TOTAL.labels(endpoint="place_photos", error_type="http_error").inc()
-            logger.error(f"[GooglePlacesAPIClient] Photo fetch error for {place_id}: {e}")
-            return []
-
-        except Exception as e:
-            duration = time.perf_counter() - start_time
-            GOOGLE_PLACES_API_CALL_DURATION_SECONDS.labels(endpoint="place_photos").observe(duration)
+            logger.error(f"[GooglePlacesAPIClient] Photo details error for {place_id}: {e}")
+            raise
+        except httpx.TimeoutException as e:
+            GOOGLE_PLACES_API_CALL_DURATION_SECONDS.labels(endpoint="place_photos").observe(time.perf_counter() - start_time)
             GOOGLE_PLACES_API_CALLS_TOTAL.labels(endpoint="place_photos", status="error").inc()
-            logger.error(f"[GooglePlacesAPIClient] Photo fetch exception for {place_id}: {e}")
-            return []
+            GOOGLE_PLACES_API_ERRORS_TOTAL.labels(endpoint="place_photos", error_type="timeout").inc()
+            logger.error(f"[GooglePlacesAPIClient] Photo details timeout for {place_id}: {e}")
+            raise
+        except httpx.RequestError as e:
+            GOOGLE_PLACES_API_CALL_DURATION_SECONDS.labels(endpoint="place_photos").observe(time.perf_counter() - start_time)
+            GOOGLE_PLACES_API_CALLS_TOTAL.labels(endpoint="place_photos", status="error").inc()
+            GOOGLE_PLACES_API_ERRORS_TOTAL.labels(endpoint="place_photos", error_type="connection_error").inc()
+            logger.error(f"[GooglePlacesAPIClient] Photo details request error for {place_id}: {e}")
+            raise
+
+        photos = data.get("photos", []) or []
+
+        # Step 2: resolve each photo `name` to its keyless media URI (skip a
+        # photo whose media call fails rather than failing the whole venue).
+        result: list[dict] = []
+        for photo in photos[:max_photos]:
+            photo_name = photo.get("name")
+            if not photo_name:
+                continue
+            keyless_uri = await self._resolve_photo_media_uri(photo_name, max_width)
+            if not keyless_uri:
+                continue
+            author_name = None
+            attributions = photo.get("authorAttributions", [])
+            if attributions:
+                author_name = attributions[0].get("displayName")
+            result.append({"url": keyless_uri, "author_name": author_name})
+
+        logger.debug(f"[GooglePlacesAPIClient] Resolved {len(result)} keyless photos for {place_id}")
+        return result
+
+    async def _resolve_photo_media_uri(
+        self, photo_name: str, max_width: int
+    ) -> Optional[str]:
+        """Call the Google photo media endpoint with `skipHttpRedirect=true` and
+        the API key in the `X-Goog-Api-Key` HEADER, returning the KEYLESS
+        `photoUri`. The key never appears in the request URL or the returned URL.
+
+        Returns None on any failure so the caller skips this one photo.
+        """
+        url = f"{GOOGLE_PLACES_API_BASE}/{photo_name}/media"
+        headers = {"X-Goog-Api-Key": self.api_key}
+        params = {"maxWidthPx": max_width, "skipHttpRedirect": "true"}
+        start_time = time.perf_counter()
+        try:
+            response = await self.client.get(url, headers=headers, params=params)
+            response.raise_for_status()
+            uri = (response.json() or {}).get("photoUri")
+            GOOGLE_PLACES_API_CALL_DURATION_SECONDS.labels(endpoint="place_photo_media").observe(time.perf_counter() - start_time)
+            GOOGLE_PLACES_API_CALLS_TOTAL.labels(endpoint="place_photo_media", status="success").inc()
+            if not uri:
+                logger.warning(f"[GooglePlacesAPIClient] media response for {photo_name} had no photoUri")
+            return uri
+        except Exception as e:  # noqa: BLE001 — one bad photo must not fail the venue
+            GOOGLE_PLACES_API_CALL_DURATION_SECONDS.labels(endpoint="place_photo_media").observe(time.perf_counter() - start_time)
+            GOOGLE_PLACES_API_CALLS_TOTAL.labels(endpoint="place_photo_media", status="error").inc()
+            GOOGLE_PLACES_API_ERRORS_TOTAL.labels(endpoint="place_photo_media", error_type="http_error").inc()
+            logger.warning(f"[GooglePlacesAPIClient] media call failed for {photo_name}: {type(e).__name__}: {e}")
+            return None
 
 
 def _money_units(money: Optional[dict]) -> Optional[float]:

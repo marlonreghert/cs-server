@@ -130,6 +130,23 @@ VIBE_ATTRIBUTES_FETCH_RESULTS = Counter(
     ["result"],  # result: cached, skipped_no_place_id, error
 )
 
+# On-demand venue photo resolution (POST /internal/venues/{id}/photos/resolve):
+# resolves a single venue's Google photos to FRESH, KEYLESS googleusercontent.com
+# URLs and caches them under venue_photos_fresh_v1:*. The Google Place Details +
+# per-photo media calls also emit GOOGLE_PLACES_API_* under
+# endpoint="place_photos" / endpoint="place_photo_media".
+VENUE_PHOTO_RESOLVE_TOTAL = Counter(
+    "venue_photo_resolve_total",
+    "Outcomes of on-demand venue photo resolution",
+    ["result"],  # resolved (>=1 photo) | empty (no place_id or zero photos) | error
+)
+
+VENUE_PHOTO_RESOLVE_DURATION_SECONDS = Histogram(
+    "venue_photo_resolve_duration_seconds",
+    "Latency of on-demand venue photo resolution (Google fetch + cache write)",
+    buckets=(0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0),
+)
+
 # Venues with vibe attributes
 VENUES_WITH_VIBE_ATTRIBUTES = Gauge(
     "venues_with_vibe_attributes",
