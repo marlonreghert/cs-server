@@ -27,6 +27,15 @@ VENUE_PHOTOS_KEY_FORMAT = "venue_photos_v1:{}"
 # Live admin override for the venue_photos TTL (vibesadmin writes this).
 # Stored as JSON: an integer number of days (e.g. `5`).
 ADMIN_CONFIG_PHOTOS_TTL_KEY = "admin_config:venue_photos_cache_ttl_days"
+# ON-DEMAND fresh keyless-URL cache: holds FRESH, KEYLESS
+# googleusercontent.com URLs resolved per-venue on demand, as JSON
+# [{"url", "author_name"}, ...]. cs-server is the SOLE writer. Distinct from the
+# legacy VENUE_PHOTOS_KEY_FORMAT (key-bearing /media URLs, ~5-day TTL) which
+# stays intact but dormant for Redis compatibility.
+VENUE_PHOTOS_FRESH_KEY_FORMAT = "venue_photos_fresh_v1:{}"
+# Live admin override for the fresh-photo TTL (vibesadmin writes this).
+# Stored as JSON: an integer number of HOURS (e.g. `6`).
+ADMIN_CONFIG_FRESH_PHOTOS_TTL_KEY = "admin_config:photo_fresh_cache_ttl_hours"
 OPENING_HOURS_KEY_FORMAT = "opening_hours_v1:{}"
 VENUE_INSTAGRAM_KEY_FORMAT = "venue_instagram_v1:{}"
 VENUE_REVIEWS_KEY_FORMAT = "venue_reviews_v1:{}"
@@ -589,6 +598,93 @@ class RedisVenueDAO:
             return data
         except redis.RedisError as e:
             logger.error(f"Failed to get venue photos from Redis: {e}")
+            return None
+
+    # =========================================================================
+    # FRESH ON-DEMAND VENUE PHOTOS (keyless URLs, short TTL — cs-server SOLE writer)
+    # =========================================================================
+
+    def _resolve_fresh_photos_cache_ttl_seconds(self) -> int:
+        """Return the live TTL (seconds) for the venue_photos_fresh_v1 cache.
+
+        Order of precedence:
+          1. `admin_config:photo_fresh_cache_ttl_hours` in Redis (live,
+             hot-tunable via vibesadmin), stored as an integer number of HOURS.
+          2. `settings.photo_fresh_cache_ttl_hours` (env-var-backed default, 6h).
+
+        Invalid or non-positive overrides fall back to the settings default so a
+        bad admin write can never disable eviction or push a negative TTL into
+        Redis. Mirrors `_resolve_photos_cache_ttl_seconds` (the legacy day-based
+        resolver) so the two cannot desync in behavior.
+        """
+        default_hours = settings.photo_fresh_cache_ttl_hours
+        try:
+            raw = self.client.get(ADMIN_CONFIG_FRESH_PHOTOS_TTL_KEY)
+        except Exception as e:
+            logger.warning(
+                f"[RedisVenueDAO] Failed to read {ADMIN_CONFIG_FRESH_PHOTOS_TTL_KEY}, "
+                f"using default {default_hours}h: {e}"
+            )
+            return default_hours * 3600
+
+        if raw is None:
+            return default_hours * 3600
+
+        try:
+            override_hours = int(json.loads(raw))
+        except (ValueError, TypeError, json.JSONDecodeError):
+            logger.warning(
+                f"[RedisVenueDAO] {ADMIN_CONFIG_FRESH_PHOTOS_TTL_KEY}={raw!r} is not "
+                f"an int, using default {default_hours}h"
+            )
+            return default_hours * 3600
+
+        if override_hours <= 0:
+            logger.warning(
+                f"[RedisVenueDAO] {ADMIN_CONFIG_FRESH_PHOTOS_TTL_KEY}={override_hours} "
+                f"<= 0, using default {default_hours}h"
+            )
+            return default_hours * 3600
+
+        return override_hours * 3600
+
+    def set_venue_photos_fresh(self, venue_id: str, photos: list[dict]) -> None:
+        """Cache FRESH, KEYLESS photo URLs for a venue under the short-TTL fresh
+        key (venue_photos_fresh_v1:{venue_id}). cs-server is the sole writer.
+
+        Always writes with a finite TTL from
+        `_resolve_fresh_photos_cache_ttl_seconds` so a rotated Google token can
+        never linger past the window. An empty list is a valid cached value
+        (deterministic "no photos" within the window). Kept separate from the
+        legacy `set_venue_photos` so the legacy key/format/TTL are untouched.
+
+        Args:
+            venue_id: Venue identifier
+            photos: List of photo dicts: [{url: str, author_name: str | None}, ...]
+        """
+        key = VENUE_PHOTOS_FRESH_KEY_FORMAT.format(venue_id)
+        ttl_seconds = self._resolve_fresh_photos_cache_ttl_seconds()
+        self.client.setex(key, ttl_seconds, json.dumps(photos))
+        logger.debug(
+            f"[RedisVenueDAO] Cached {len(photos)} fresh photos for {venue_id} "
+            f"(TTL {ttl_seconds}s)"
+        )
+
+    def get_venue_photos_fresh(self, venue_id: str) -> Optional[list[dict]]:
+        """Retrieve the fresh keyless photo list for a venue.
+
+        Returns:
+            List of photo dicts [{url, author_name}] (possibly empty), or None
+            when nothing is cached / on a Redis error.
+        """
+        key = VENUE_PHOTOS_FRESH_KEY_FORMAT.format(venue_id)
+        try:
+            json_str = self.client.get(key)
+            if json_str is None:
+                return None
+            return json.loads(json_str)
+        except redis.RedisError as e:
+            logger.error(f"Failed to get fresh venue photos from Redis: {e}")
             return None
 
     def list_cached_venue_photos_ids(self) -> list[str]:

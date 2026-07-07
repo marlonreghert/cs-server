@@ -139,11 +139,16 @@ class Container:
             )
             logger.info("[Container] Google Places Enrichment service initialized")
 
-            # Initialize Photo Enrichment service
+            # Initialize Photo Enrichment service. On-demand resolution reads the
+            # google_place_id from the RDS system of record (redis_venue_dao) with
+            # a Redis fallback (redis_only_dao), and writes the fresh keyless-URL
+            # cache to Redis (the fresh key is Redis-only, so the RDS repository's
+            # inherited base method lands it in Redis — cs-server sole writer).
             self.photo_enrichment_service = PhotoEnrichmentService(
                 self.google_places_api,
                 self.redis_venue_dao,
                 enrichment_limit=_capped(settings.photo_enrichment_limit),
+                serving_dao=self.redis_only_dao,
             )
             logger.info("[Container] Photo Enrichment service initialized")
         else:

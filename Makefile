@@ -49,6 +49,7 @@ test-unit:
 		tests/test_price_signal.py \
 		tests/test_google_places_review_signal_backfill.py \
 		tests/test_live_freshness.py \
+		tests/test_photo_resolve.py \
 		-v
 
 test-integration:

@@ -1,4 +1,3 @@
-@wip
 Feature: On-demand venue photo resolution with fresh keyless CDN URLs
   As the venue photo pipeline
   I must resolve a single venue's Google Places photos on demand, cache fresh

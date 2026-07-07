@@ -209,6 +209,13 @@ class Settings(BaseSettings):
     # tokens. Can be overridden live via the vibesadmin
     # `admin_config:venue_photos_cache_ttl_days` key.
     photo_cache_ttl_days: int = 5
+    # TTL (hours) for the ON-DEMAND `venue_photos_fresh_v1:*` Redis cache, which
+    # holds FRESH, KEYLESS googleusercontent.com URLs resolved per-venue on
+    # demand (POST /internal/venues/{id}/photos/resolve). Kept short because
+    # Google rotates the photo token; a few hours amortizes repeated opens
+    # without serving a rotated/dead URL. Admin-tunable live via the vibesadmin
+    # `admin_config:photo_fresh_cache_ttl_hours` key.
+    photo_fresh_cache_ttl_hours: int = 6
 
     # Instagram Discovery (Apify) Configuration
     apify_api_token: str = ""
