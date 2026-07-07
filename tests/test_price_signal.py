@@ -1,7 +1,7 @@
 """Unit tests for the shared price-tier derivation + Google priceRange parsing.
 
-Covers the single never-0 rule (enum > range > besttime > null), per-currency
-midpoint bucketing for the enum-less fallback, FREE/UNSPECIFIED -> NULL, unknown
+Covers the single never-0 rule (range > enum > besttime > null), per-currency
+midpoint bucketing as the primary signal, FREE/UNSPECIFIED -> NULL, unknown
 currency fall-through, unbounded endPrice, the legacy 0 -> NULL rule, the Google
 `priceRange` parser, and the promoted-column round-trip through the RDS store.
 """
@@ -33,21 +33,22 @@ class TestDeriveOrderAndSources:
             ("PRICE_LEVEL_VERY_EXPENSIVE", 4),
         ],
     )
-    def test_enum_is_primary(self, enum, tier):
+    def test_enum_used_when_no_range(self, enum, tier):
         sig = derive_price_signal(enum, None, None, thresholds=BRL)
         assert sig == (tier, SOURCE_GOOGLE_ENUM)
 
-    def test_enum_wins_over_range(self):
-        # Enum says VERY_EXPENSIVE (4); range midpoint would bucket to 3.
+    def test_range_wins_over_enum(self):
+        # Both present: the objective range wins. Enum MODERATE would be tier 2;
+        # range 80-200 midpoint 140 buckets to tier 3 under BRL.
         sig = derive_price_signal(
-            "PRICE_LEVEL_VERY_EXPENSIVE",
+            "PRICE_LEVEL_MODERATE",
             PriceRange(currency="BRL", min=80, max=200),
             None,
             thresholds=BRL,
         )
-        assert sig == (4, SOURCE_GOOGLE_ENUM)
+        assert sig == (3, SOURCE_GOOGLE_RANGE)
 
-    def test_range_fallback_when_enum_absent(self):
+    def test_enum_fills_the_gap_when_no_range(self):
         sig = derive_price_signal(
             None, PriceRange(currency="BRL", min=80, max=200), None, thresholds=BRL
         )
@@ -213,3 +214,78 @@ class TestRdsRoundTrip:
         assert rebuilt.price_level is None
         assert rebuilt.price_range is None
         assert rebuilt.price_level_source is None
+
+
+class TestTunedThresholds:
+    """The production BRL default is tuned to the local market so venues spread
+    across tiers and the field-reported venues separate."""
+
+    def test_default_brl_thresholds_are_tuned(self):
+        from app.config import settings
+
+        assert settings.price_range_tier_thresholds["BRL"] == [40.0, 70.0, 110.0]
+
+    def test_field_reported_venues_separate_under_default(self):
+        from app.config import settings
+
+        thr = settings.price_range_tier_thresholds
+        giro = bucket_price_range(PriceRange(currency="BRL", min=40, max=120), thr)       # mid 80
+        tasquinha = bucket_price_range(PriceRange(currency="BRL", min=80, max=160), thr)  # mid 120
+        assert giro is not None and tasquinha is not None
+        assert giro < tasquinha
+
+
+class TestBackfillScript:
+    """The backfill re-derives every venue range-first from stored signals, changes
+    only what differs, and is idempotent (uses the tuned default config)."""
+
+    def _seed(self, store, vid, **price):
+        store.upsert_venue(
+            Venue(
+                venue_id=vid,
+                venue_name=vid,
+                venue_address="Rua Teste, Recife",
+                venue_lat=-8.05,
+                venue_lng=-34.88,
+                **price,
+            )
+        )
+
+    def test_recomputes_range_first_and_skips_signalless(self):
+        from scripts.backfill_price_tiers import compute_backfill
+
+        store = InMemoryRdsVenueStore()
+        # Stored under the old enum-first result (MODERATE -> 2 / google_enum),
+        # but it carries a range that now wins.
+        self._seed(
+            store, "v1",
+            google_price_level="PRICE_LEVEL_MODERATE",
+            price_range=PriceRange(currency="BRL", min=80, max=160),
+            price_level=2, price_level_source=SOURCE_GOOGLE_ENUM,
+        )
+        self._seed(store, "v2", price_level=None, price_level_source=None)  # no signal
+
+        changes, _bs, _as, _bl, _al = compute_backfill(store)
+        by_id = {c[0]: (c[1], c[2]) for c in changes}
+        assert "v2" not in by_id
+        # 80-160 midpoint 120 under tuned [40,70,110] -> tier 4, google_range.
+        assert by_id["v1"] == (4, SOURCE_GOOGLE_RANGE)
+
+    def test_idempotent_after_apply(self):
+        from app.dao.venue_row import venue_from_row
+        from scripts.backfill_price_tiers import compute_backfill
+
+        store = InMemoryRdsVenueStore()
+        self._seed(
+            store, "v1",
+            google_price_level="PRICE_LEVEL_MODERATE",
+            price_range=PriceRange(currency="BRL", min=80, max=160),
+            price_level=2, price_level_source=SOURCE_GOOGLE_ENUM,
+        )
+        changes, *_ = compute_backfill(store)
+        for vid, pl, src in changes:
+            v = venue_from_row(store.get_venue(vid))
+            v.price_level, v.price_level_source = pl, src
+            store.upsert_venue(v)
+        again, *_ = compute_backfill(store)
+        assert again == []

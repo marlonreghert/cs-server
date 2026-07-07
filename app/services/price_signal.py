@@ -5,10 +5,13 @@ their price signals through `derive_price_signal` so the served `price_level` is
 int 1..4 or NULL (never 0) and the chosen source is recorded consistently. See
 plans/260625_price-signal-google-source.md.
 
-Derivation order (priceLevel enum PRIMARY; objective range fills enum-less gaps):
-  1. Google `priceLevel` enum  -> 1..4  (source "google_enum")
-  2. else bucket Google `priceRange` by per-currency thresholds -> 1..4 ("google_range")
-  3. else BestTime price        -> 1..4  (source "besttime")
+Derivation order (objective priceRange PRIMARY; the coarse enum fills range-less
+gaps). Google's `priceLevel` enum lumps distinct prices into four broad bands and
+is assigned loosely (most venues land on MODERATE), so the objective `priceRange`
+is the more faithful signal whenever it is present:
+  1. bucket Google `priceRange` by per-currency thresholds -> 1..4  (source "google_range")
+  2. else Google `priceLevel` enum -> 1..4  (source "google_enum")
+  3. else BestTime price           -> 1..4  (source "besttime")
   4. else NULL
 `PRICE_LEVEL_FREE` / `PRICE_LEVEL_UNSPECIFIED` carry no enum tier (the map omits
 them) so they fall through — a free/unknown venue renders no price pip.
@@ -104,7 +107,7 @@ def derive_price_signal(
     besttime_price: Optional[int],
     thresholds: Optional[dict] = None,
 ) -> PriceSignal:
-    """Derive the served (tier, source) following enum > range > besttime > null.
+    """Derive the served (tier, source) following range > enum > besttime > null.
 
     Never returns 0. `thresholds` defaults to the per-currency table in settings.
     """
@@ -113,13 +116,13 @@ def derive_price_signal(
 
         thresholds = settings.price_range_tier_thresholds
 
-    tier = price_level_from_enum(google_enum)
-    if tier is not None:
-        return PriceSignal(tier, SOURCE_GOOGLE_ENUM)
-
     tier = bucket_price_range(price_range, thresholds)
     if tier is not None:
         return PriceSignal(tier, SOURCE_GOOGLE_RANGE)
+
+    tier = price_level_from_enum(google_enum)
+    if tier is not None:
+        return PriceSignal(tier, SOURCE_GOOGLE_ENUM)
 
     tier = _normalize_besttime(besttime_price)
     if tier is not None:
