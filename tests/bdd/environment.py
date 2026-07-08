@@ -274,6 +274,7 @@ def _build_rds_layer(context) -> None:
     from app.services.admin_config_service import AdminConfigService
     from app.services.force_update import validate_force_update_config
     from app.services.venue_eligibility import EligibilityConfig
+    from app.services.vibe_modes_config import validate_vibe_modes_config
 
     def _validate_eligibility(value):
         # Validate (raise on invalid) but persist the RAW body, byte-compatible
@@ -287,8 +288,14 @@ def _build_rds_layer(context) -> None:
         validators={
             "venue_eligibility": _validate_eligibility,
             "force_update": validate_force_update_config,
+            "vibe_modes": validate_vibe_modes_config,
         },
     )
+    # The generic PUT/GET /admin/config/{key} routes read the service off the
+    # shared container at request time; expose the real one so HTTP-driven
+    # scenarios exercise the true validate-before-write path (not a MagicMock).
+    if getattr(context, "container", None) is not None:
+        context.container.admin_config_service = context.admin_config_service
 
     from app.services.eligibility_rules import EligibilityRuleService
 
