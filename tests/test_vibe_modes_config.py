@@ -481,3 +481,24 @@ def test_corrected_production_payload_is_accepted_unchanged():
     corrected = _production_with_role_calmo_bug()
     next(m for m in corrected if m["id"] == "role_calmo")["filter"]["quality_gates"] = []
     assert validate_vibe_modes_config(corrected) is corrected
+
+
+def test_disabled_default_mode_is_rejected():
+    # A disabled default is unservable: clients filter to enabled modes before
+    # resolving the default, so the flagged default would silently fall back to
+    # whatever mode is first in the array.
+    with pytest.raises(ValueError) as exc:
+        validate_vibe_modes_config(_modes(
+            _mode("explorar", is_default=True, enabled=False),
+            _mode("jantar", enabled=True),
+        ))
+    message = str(exc.value)
+    assert "explorar" in message and "default" in message and "enabled" in message
+
+
+def test_enabled_default_mode_is_accepted():
+    payload = _modes(
+        _mode("explorar", is_default=True, enabled=True),
+        _mode("jantar", enabled=False),
+    )
+    assert validate_vibe_modes_config(payload) is payload

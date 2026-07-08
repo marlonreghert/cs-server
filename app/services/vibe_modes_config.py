@@ -44,6 +44,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from app.services.config_validation import is_int, is_number, is_string_list
+
 SORT_STRATEGIES = ("combined_score_desc", "busyness_desc", "rating_desc")
 BUSYNESS_MIN = 0
 BUSYNESS_MAX = 4
@@ -75,19 +77,6 @@ FILTER_STRING_ARRAYS = (
 )
 
 
-def _is_number(value: Any) -> bool:
-    """A JSON number (int or float) but not a bool (``bool`` subclasses ``int``)."""
-    return isinstance(value, (int, float)) and not isinstance(value, bool)
-
-
-def _is_int(value: Any) -> bool:
-    return isinstance(value, int) and not isinstance(value, bool)
-
-
-def _is_string_list(value: Any) -> bool:
-    return isinstance(value, list) and all(isinstance(item, str) for item in value)
-
-
 def _mode_ref(mode: Any, index: int) -> str:
     """A human-readable reference to a mode: its id when usable, else its index."""
     if isinstance(mode, dict):
@@ -99,7 +88,7 @@ def _mode_ref(mode: Any, index: int) -> str:
 
 def _validate_busyness_range(ref: str, mode: dict) -> None:
     rng = mode["busyness_range"]
-    if not isinstance(rng, list) or len(rng) != 2 or not all(_is_int(v) for v in rng):
+    if not isinstance(rng, list) or len(rng) != 2 or not all(is_int(v) for v in rng):
         raise ValueError(
             f"vibe_modes {ref} field 'busyness_range' must be [min, max] integers, "
             f"got {rng!r}"
@@ -119,7 +108,7 @@ def _validate_affinity(ref: str, mode: dict) -> None:
     for key, weight in affinity.items():
         if not isinstance(key, str):
             raise ValueError(f"vibe_modes {ref} field 'affinity' keys must be strings")
-        if not _is_number(weight):
+        if not is_number(weight):
             raise ValueError(
                 f"vibe_modes {ref} field 'affinity.{key}' must be a number, "
                 f"got {weight!r}"
@@ -135,15 +124,15 @@ def _validate_quality_gates(ref: str, gates: Any) -> None:
         field = f"filter.quality_gates[{i}]"
         if not isinstance(gate, dict):
             raise ValueError(f"vibe_modes {ref} field '{field}' must be an object")
-        if not _is_string_list(gate.get("types")):
+        if not is_string_list(gate.get("types")):
             raise ValueError(
                 f"vibe_modes {ref} field '{field}.types' must be an array of strings"
             )
-        if not _is_number(gate.get("min_rating")):
+        if not is_number(gate.get("min_rating")):
             raise ValueError(
                 f"vibe_modes {ref} field '{field}.min_rating' must be a number"
             )
-        if not _is_int(gate.get("min_reviews")):
+        if not is_int(gate.get("min_reviews")):
             raise ValueError(
                 f"vibe_modes {ref} field '{field}.min_reviews' must be an integer"
             )
@@ -163,7 +152,7 @@ def _validate_vibe_label_matchers(ref: str, matchers: Any) -> None:
             raise ValueError(
                 f"vibe_modes {ref} field '{field}.category' must be a non-empty string"
             )
-        if not _is_string_list(matcher.get("labels")):
+        if not is_string_list(matcher.get("labels")):
             raise ValueError(
                 f"vibe_modes {ref} field '{field}.labels' must be an array of strings"
             )
@@ -179,7 +168,7 @@ def _validate_filter(ref: str, mode: dict) -> None:
                 f"vibe_modes {ref} is missing required field 'filter.{field}'"
             )
     for field in FILTER_STRING_ARRAYS:
-        if not _is_string_list(filt[field]):
+        if not is_string_list(filt[field]):
             raise ValueError(
                 f"vibe_modes {ref} field 'filter.{field}' must be an array of strings"
             )
@@ -236,7 +225,7 @@ def _validate_mode(mode: Any, index: int, seen_ids: set[str]) -> tuple[bool, boo
     # Optional but reader-consumed: the evaluator runs float(trajectory_weight)
     # for every enabled mode, so a non-numeric value (string, null, list) is a
     # write-time crash vector even though it is not a required field.
-    if "trajectory_weight" in mode and not _is_number(mode["trajectory_weight"]):
+    if "trajectory_weight" in mode and not is_number(mode["trajectory_weight"]):
         raise ValueError(
             f"vibe_modes {ref} field 'trajectory_weight' must be a number "
             f"when present"
@@ -268,6 +257,14 @@ def validate_vibe_modes_config(value: Any) -> Any:
         is_default, enabled = _validate_mode(mode, index, seen_ids)
         default_count += int(is_default)
         enabled_count += int(enabled)
+        # A disabled default is unservable: every client filters to enabled
+        # modes before resolving the default, so the flagged default would be
+        # silently replaced by whatever mode happens to be first in the array.
+        if is_default and not enabled:
+            raise ValueError(
+                f"vibe_modes {_mode_ref(mode, index)} is the default mode and "
+                f"must be enabled"
+            )
 
     if enabled_count == 0:
         raise ValueError("vibe_modes must contain at least one enabled mode")

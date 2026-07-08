@@ -185,6 +185,15 @@ def step_put_two_defaults(context):
     _put(context, modes)
 
 
+@when("the admin PUTs a vibe_modes array where the default mode has enabled set to false")
+def step_put_disabled_default(context):
+    modes = _valid_modes()
+    modes[0]["is_default"] = True
+    modes[0]["enabled"] = False
+    modes[1]["enabled"] = True
+    _put(context, modes)
+
+
 @when("the admin PUTs a vibe_modes array where one mode has busyness_range [3, 1]")
 def step_put_bad_busyness_range(context):
     modes = _valid_modes()

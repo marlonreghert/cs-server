@@ -32,6 +32,7 @@ from dataclasses import dataclass, field
 from typing import Optional, Protocol
 
 from app.models.venue_category import resolve_category
+from app.services.config_validation import is_number
 
 logger = logging.getLogger(__name__)
 
@@ -551,7 +552,7 @@ def validate_geo_fence(data: dict) -> dict:
             raise ValueError(f"duplicate capital slug: {slug}")
         seen.add(slug)
         radius = entry.get("radius_km")
-        if isinstance(radius, bool) or not isinstance(radius, (int, float)):
+        if not is_number(radius):
             raise ValueError(f"radius_km for {slug} must be a number")
         if not (MIN_RADIUS_KM <= float(radius) <= MAX_RADIUS_KM):
             raise ValueError(

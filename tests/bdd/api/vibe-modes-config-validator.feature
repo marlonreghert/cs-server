@@ -84,3 +84,8 @@ Feature: Vibe modes admin config write validation
     Then the response status is 400
     And the error detail names field "requires_family_signal"
     And the stored vibe_modes value is unchanged
+
+  Scenario: A disabled default mode is rejected
+    When the admin PUTs a vibe_modes array where the default mode has enabled set to false
+    Then the response status is 400
+    And the stored vibe_modes value is unchanged
