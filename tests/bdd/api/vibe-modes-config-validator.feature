@@ -1,4 +1,3 @@
-@wip
 Feature: Vibe modes admin config write validation
   The admin config endpoint must reject malformed vibe_modes payloads before
   any write, so the RDS truth and the Redis mirror only ever hold mode configs
@@ -72,4 +71,16 @@ Feature: Vibe modes admin config write validation
   Scenario: Malformed quality gate entry is rejected
     When the admin PUTs a vibe_modes array where one quality gate has no "min_rating"
     Then the response status is 400
+    And the stored vibe_modes value is unchanged
+
+  Scenario: Non-numeric trajectory_weight is rejected
+    When the admin PUTs a vibe_modes array where one mode has a non-numeric "trajectory_weight"
+    Then the response status is 400
+    And the error detail names field "trajectory_weight"
+    And the stored vibe_modes value is unchanged
+
+  Scenario: Non-boolean requires_family_signal is rejected
+    When the admin PUTs a vibe_modes array where one mode filter has a non-boolean "requires_family_signal"
+    Then the response status is 400
+    And the error detail names field "requires_family_signal"
     And the stored vibe_modes value is unchanged

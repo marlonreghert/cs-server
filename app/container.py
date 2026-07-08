@@ -345,6 +345,7 @@ class Container:
         from app.services.admin_config_service import AdminConfigService
         from app.services.force_update import validate_force_update_config
         from app.services.venue_eligibility import EligibilityConfig
+        from app.services.vibe_modes_config import validate_vibe_modes_config
 
         def _validate_eligibility_config(value):
             EligibilityConfig.from_dict(value, from_admin_override=True)  # raises on invalid
@@ -356,6 +357,7 @@ class Container:
             validators={
                 "venue_eligibility": _validate_eligibility_config,
                 "force_update": validate_force_update_config,
+                "vibe_modes": validate_vibe_modes_config,
             },
         )
         # The serve handler resolves the live-busyness freshness window through the
