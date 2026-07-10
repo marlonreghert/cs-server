@@ -11,31 +11,6 @@ logger = logging.getLogger(__name__)
 class GeoRedisClient:
     """Redis client with geospatial indexing support."""
 
-    def __init__(self, host: str = "redis", port: int = 6379, password: str = "", db: int = 0):
-        """Initialize Redis client.
-
-        Args:
-            host: Redis server host
-            port: Redis server port
-            password: Redis password (empty for no password)
-            db: Redis database number
-        """
-        self.client = redis.StrictRedis(
-            host=host,
-            port=port,
-            password=password if password else None,
-            db=db,
-            decode_responses=True,  # Automatically decode responses to strings
-        )
-
-        # Test connection
-        try:
-            self.ping()
-            logger.info("Connected to Redis")
-        except redis.ConnectionError as e:
-            logger.error(f"Could not connect to Redis: {e}")
-            raise
-
     def __init__(self, client):
         """Initialize Redis client.
         

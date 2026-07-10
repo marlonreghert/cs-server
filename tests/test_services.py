@@ -2,7 +2,7 @@
 import pytest
 from unittest.mock import Mock, AsyncMock, patch
 
-from app.services import VenueService, VenuesRefresherService
+from app.services import VenuesRefresherService
 from app.models import (
     Venue,
     VenueFilterResponse,
@@ -46,28 +46,6 @@ def mock_besttime_api():
 def refresher_service(mock_venue_dao, mock_besttime_api):
     """Create VenuesRefresherService with mocked dependencies."""
     return VenuesRefresherService(mock_venue_dao, mock_besttime_api)
-
-
-@pytest.fixture
-def venue_service(mock_venue_dao, mock_besttime_api):
-    """Create VenueService with mocked dependencies."""
-    return VenueService(mock_venue_dao, mock_besttime_api)
-
-
-class TestVenueService:
-    """Test VenueService (simple wrapper)."""
-
-    def test_get_venues_nearby(self, venue_service, mock_venue_dao):
-        """Test get_venues_nearby delegates to DAO."""
-        mock_venue_dao.get_nearby_venues.return_value = [
-            Venue(venue_id="v1", venue_lat=-8.0, venue_lng=-34.9)
-        ]
-
-        result = venue_service.get_venues_nearby(lat=-8.0, lon=-34.9, radius=5.0)
-
-        assert len(result) == 1
-        assert result[0].venue_id == "v1"
-        mock_venue_dao.get_nearby_venues.assert_called_once_with(-8.0, -34.9, 5.0)
 
 
 class TestVenuesRefresherService:

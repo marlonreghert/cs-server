@@ -316,56 +316,6 @@ class GooglePlacesEnrichmentService:
             VIBE_ATTRIBUTES_FETCH_RESULTS.labels(result="error").inc()
             return None
 
-    async def enrich_venues(
-        self,
-        venue_id_to_place_id: dict[str, str],
-        batch_size: int = 50,
-    ) -> int:
-        """Enrich multiple venues with Google Places data.
-
-        Args:
-            venue_id_to_place_id: Mapping of our venue IDs to Google Place IDs
-            batch_size: Number of venues to process in parallel
-
-        Returns:
-            Number of venues successfully enriched
-        """
-        logger.info(
-            f"[GooglePlacesEnrichment] Starting enrichment for "
-            f"{len(venue_id_to_place_id)} venues"
-        )
-
-        successful = 0
-        venue_items = list(venue_id_to_place_id.items())
-
-        # Process in batches to avoid overwhelming the API
-        for i in range(0, len(venue_items), batch_size):
-            batch = venue_items[i:i + batch_size]
-
-            for venue_id, place_id in batch:
-                result = await self.enrich_venue(venue_id, place_id)
-                if result:
-                    successful += 1
-
-                # Rate limiting
-                await asyncio.sleep(REQUEST_DELAY)
-
-            logger.info(
-                f"[GooglePlacesEnrichment] Processed batch {i // batch_size + 1}, "
-                f"successful so far: {successful}"
-            )
-
-        # Update metrics
-        count = self.venue_dao.count_venues_with_vibe_attributes()
-        VENUES_WITH_VIBE_ATTRIBUTES.set(count)
-
-        logger.info(
-            f"[GooglePlacesEnrichment] Enrichment complete: "
-            f"{successful}/{len(venue_id_to_place_id)} venues enriched"
-        )
-
-        return successful
-
     async def enrich_all_venues(
         self, force_refresh: bool = False, google_only_price: bool = False
     ) -> int:

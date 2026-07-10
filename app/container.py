@@ -10,7 +10,7 @@ from app.dao import RedisVenueDAO, VenueBudgetDao
 from app.dao.venue_repository import VenueRepository
 from app.api import BestTimeAPIClient
 from app.api.google_places_client import GooglePlacesAPIClient
-from app.services import VenueService, VenuesRefresherService, VenueBudgetService
+from app.services import VenuesRefresherService, VenueBudgetService
 from app.handlers import AddVenueHandler
 from app.services.batch_add_service import BatchAddService
 from app.services.google_places_enrichment_service import GooglePlacesEnrichmentService
@@ -311,7 +311,6 @@ class Container:
         # Initialize services. Serving reads the Redis-only DAO (serving_dao) so
         # public serving is independent of RDS at request time (an RDS outage
         # cannot break nearby serving) and unaffected by the pipeline RDS reads.
-        self.venue_service = VenueService(self.redis_only_dao, self.besttime_api)
         self.venues_refresher_service = VenuesRefresherService(
             self.redis_venue_dao,
             self.besttime_api,
