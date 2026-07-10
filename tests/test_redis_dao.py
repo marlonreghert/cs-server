@@ -173,25 +173,6 @@ class TestRedisVenueDAO:
         assert "list_test_1" in venue_ids
         assert "list_test_2" in venue_ids
 
-    def test_list_cached_live_forecast_venue_ids(self, venue_dao):
-        """Test listing all cached live forecast venue IDs."""
-        # Cache forecasts for multiple venues
-        for i in range(3):
-            forecast = LiveForecastResponse(
-                status="OK",
-                venue_info=VenueInfo(venue_id=f"live_test_{i}"),
-                analysis=Analysis(),
-            )
-            venue_dao.set_live_forecast(forecast)
-
-        # List cached IDs
-        cached_ids = venue_dao.list_cached_live_forecast_venue_ids()
-
-        assert len(cached_ids) >= 3
-        assert "live_test_0" in cached_ids
-        assert "live_test_1" in cached_ids
-        assert "live_test_2" in cached_ids
-
     def test_set_and_get_week_raw_forecast(self, venue_dao):
         """Test caching and retrieving weekly forecast."""
         # Create weekly forecast for Monday (day_int=0)

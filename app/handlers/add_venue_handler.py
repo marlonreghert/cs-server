@@ -453,14 +453,19 @@ class AddVenueHandler:
         except Exception as e:
             logger.warning(f"[AddVenueHandler] geo lookup failed: {e}")
             return None
-        folded = venue_name.strip().lower()
+        # Accent-fold both sides with the same normalization as the geo-fallback
+        # matcher (_find_name_match). A bare `.strip().lower()` left accented
+        # re-adds (e.g. "LAÇA, Pina" vs cataloged "Laca Pina") to miss the free
+        # local geo hit and burn a paid BestTime create. _fold_text is a superset
+        # normalization, so every pair that matched before still matches.
+        folded = _fold_text(venue_name)
         for venue in nearby:
             # Skip deprecated venues so a re-add of an undone geo link is not
             # short-circuited to the dead row — it falls through to BestTime,
             # which reactivates it.
             if not venue.is_active():
                 continue
-            name = (venue.venue_name or "").strip().lower()
+            name = _fold_text(venue.venue_name or "")
             if not name:
                 continue
             if folded == name or folded in name or name in folded:
@@ -687,22 +692,22 @@ class AddVenueHandler:
         info = response.venue_info if hasattr(response, "venue_info") else None
         if info is None and isinstance(response, dict):
             info = response.get("venue_info") or {}
-        venue_id = _get(info, "venue_id")
-        venue_lat = _get(info, "venue_lat") or 0.0
-        venue_lng = _get(info, "venue_lng")
+        venue_id = _field(info, "venue_id")
+        venue_lat = _field(info, "venue_lat") or 0.0
+        venue_lng = _field(info, "venue_lng")
         if venue_lng is None:
-            venue_lng = _get(info, "venue_lon") or 0.0
+            venue_lng = _field(info, "venue_lon") or 0.0
         venue = Venue(
             processed=True,
             forecast=True,
             venue_id=venue_id,
-            venue_name=_get(info, "venue_name") or "",
-            venue_address=_get(info, "venue_address") or "",
+            venue_name=_field(info, "venue_name") or "",
+            venue_address=_field(info, "venue_address") or "",
             venue_lat=float(venue_lat or 0.0),
             venue_lng=float(venue_lng or 0.0),
-            rating=_get(info, "rating"),
-            reviews=_get(info, "reviews"),
-            besttime_price_level=_get(info, "price_level"),
+            rating=_field(info, "rating"),
+            reviews=_field(info, "reviews"),
+            besttime_price_level=_field(info, "price_level"),
         )
         # When inline enrichment is wired, it owns the single Google Details fetch;
         # set only the BestTime baseline here (place_id=None -> no Google call) to
@@ -835,16 +840,6 @@ def _response_ok(response) -> bool:
             and bool(info.get("venue_id"))
         )
     return False
-
-
-def _get(source, key):
-    if source is None:
-        return None
-    if hasattr(source, key):
-        return getattr(source, key)
-    if isinstance(source, dict):
-        return source.get(key)
-    return None
 
 
 def _find_name_match(venues: list, venue_name: str, venue_address: str = ""):

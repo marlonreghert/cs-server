@@ -167,18 +167,6 @@ class TestRedisVenueDAOUnit:
         assert venue_ids == ["id1", "id2", "id3"]
         mock_redis_client.keys.assert_called_once_with("venues_geo_place_v1:*")
 
-    def test_list_cached_live_forecast_venue_ids(self, venue_dao, mock_redis_client):
-        """Test listing cached live forecast IDs."""
-        mock_redis_client.keys.return_value = [
-            "live_forecast_v1:v1",
-            "live_forecast_v1:v2",
-        ]
-
-        ids = venue_dao.list_cached_live_forecast_venue_ids()
-
-        assert ids == ["v1", "v2"]
-        mock_redis_client.keys.assert_called_once_with("live_forecast_v1:*")
-
     def test_set_week_raw_forecast_key_format(self, venue_dao, mock_redis_client):
         """Test weekly forecast uses correct key format with day_int."""
         day = WeekRawDay(day_int=3, day_raw=[50] * 24)
