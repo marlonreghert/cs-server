@@ -1,4 +1,3 @@
-@wip
 Feature: Admin venue-type breakdown and accent-folded add-venue geo short-circuit
   Operators must be able to read the catalog's venue-type breakdown, and a
   re-add of a venue whose submitted name differs from the cataloged name only

@@ -453,14 +453,19 @@ class AddVenueHandler:
         except Exception as e:
             logger.warning(f"[AddVenueHandler] geo lookup failed: {e}")
             return None
-        folded = venue_name.strip().lower()
+        # Accent-fold both sides with the same normalization as the geo-fallback
+        # matcher (_find_name_match). A bare `.strip().lower()` left accented
+        # re-adds (e.g. "LAÇA, Pina" vs cataloged "Laca Pina") to miss the free
+        # local geo hit and burn a paid BestTime create. _fold_text is a superset
+        # normalization, so every pair that matched before still matches.
+        folded = _fold_text(venue_name)
         for venue in nearby:
             # Skip deprecated venues so a re-add of an undone geo link is not
             # short-circuited to the dead row — it falls through to BestTime,
             # which reactivates it.
             if not venue.is_active():
                 continue
-            name = (venue.venue_name or "").strip().lower()
+            name = _fold_text(venue.venue_name or "")
             if not name:
                 continue
             if folded == name or folded in name or name in folded:

@@ -18,6 +18,7 @@ import pytest
 from app.dao import RedisVenueDAO, VenueBudgetDao
 from app.db.geo_redis_client import GeoRedisClient
 from app.handlers.add_venue_handler import (
+    DEFAULT_FALLBACK_RADIUS_M,
     AddVenueByAddressRequest,
     AddVenueHandler,
 )
@@ -196,6 +197,94 @@ async def test_geo_cache_short_circuits_without_address_match(handler, besttime,
     assert outcome.body["status"] == "already_exists"
     assert outcome.body["venue_id"] == "ven_inventory"
     assert besttime.add_venue_to_account.await_count == 0
+
+
+def test_geo_lookup_matches_accented_submission_against_plain_stored_name(
+    handler, venue_dao
+):
+    # Stored name is plain; submitted name is accented/punctuated. Bare
+    # .strip().lower() would miss this pair — _fold_text must not.
+    venue_dao.upsert_venue(
+        Venue(
+            processed=True,
+            forecast=True,
+            venue_id="ven_folded_plain",
+            venue_name="Laca Pina",
+            venue_address="addr",
+            venue_lat=-8.05,
+            venue_lng=-34.88,
+        )
+    )
+    hit = handler._geo_lookup("LAÇA, Pina", -8.05, -34.88, DEFAULT_FALLBACK_RADIUS_M)
+    assert hit is not None
+    assert hit.venue_id == "ven_folded_plain"
+
+
+def test_geo_lookup_matches_plain_submission_against_accented_stored_name(
+    handler, venue_dao
+):
+    # Reverse direction: stored name carries the accents/punctuation, submitted
+    # name is plain.
+    venue_dao.upsert_venue(
+        Venue(
+            processed=True,
+            forecast=True,
+            venue_id="ven_folded_accented",
+            venue_name="LAÇA, Pina",
+            venue_address="addr",
+            venue_lat=-8.05,
+            venue_lng=-34.88,
+        )
+    )
+    hit = handler._geo_lookup("Laca Pina", -8.05, -34.88, DEFAULT_FALLBACK_RADIUS_M)
+    assert hit is not None
+    assert hit.venue_id == "ven_folded_accented"
+
+
+def test_geo_lookup_still_skips_deprecated_venue_despite_folded_name_match(
+    handler, monkeypatch
+):
+    # A geo-link-undo re-add must still fall through to BestTime even though
+    # the folded names match — the deprecated skip is unchanged by folding.
+    # get_nearby_venues excludes deprecated venues by default (DAO-level
+    # `include_deprecated=False`), which would make this pass trivially on an
+    # empty `nearby` list without ever reaching the loop's `is_active()`
+    # guard. Stub it to return the deprecated venue directly so the assertion
+    # exercises _geo_lookup's own guard, not just the upstream DAO filter.
+    deprecated = Venue(
+        processed=True,
+        forecast=True,
+        venue_id="ven_deprecated",
+        venue_name="Laca Pina",
+        venue_address="addr",
+        venue_lat=-8.05,
+        venue_lng=-34.88,
+        lifecycle_status="deprecated",
+        deprecated_source="admin_geo_link_undo",
+    )
+    monkeypatch.setattr(
+        handler.venue_dao, "get_nearby_venues", lambda *a, **kw: [deprecated]
+    )
+    hit = handler._geo_lookup("LAÇA, Pina", -8.05, -34.88, DEFAULT_FALLBACK_RADIUS_M)
+    assert hit is None
+
+
+def test_geo_lookup_misses_on_genuinely_different_name(handler, venue_dao):
+    venue_dao.upsert_venue(
+        Venue(
+            processed=True,
+            forecast=True,
+            venue_id="ven_other",
+            venue_name="Bar do Joao",
+            venue_address="addr",
+            venue_lat=-8.05,
+            venue_lng=-34.88,
+        )
+    )
+    hit = handler._geo_lookup(
+        "Restaurante Maria", -8.05, -34.88, DEFAULT_FALLBACK_RADIUS_M
+    )
+    assert hit is None
 
 
 @pytest.mark.asyncio

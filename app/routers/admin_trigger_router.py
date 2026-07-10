@@ -789,29 +789,32 @@ async def recount_discovery_points():
 @router.get("/venue-type-breakdown")
 async def venue_type_breakdown():
     """Get a breakdown of all venues by BestTime type and Google Places type."""
-    if _container is None:
-        raise HTTPException(status_code=503, detail="Container not initialized")
+    # Resolve the DAO through the shared helper (raises 503 when the container is
+    # not initialized). The container exposes the RDS-backed repository as
+    # `redis_venue_dao`, not `venue_dao`, so the previous direct access always
+    # AttributeError'd into a 500. Kept OUTSIDE the try below so the helper's 503
+    # is not laundered into a 500 by the blanket handler.
+    venue_dao = _get_venue_dao_from_container()
 
     try:
-        venue_dao = _container.venue_dao
-        all_ids = venue_dao.list_all_venue_ids()
-
         besttime_types: dict[str, int] = {}
         google_types: dict[str, int] = {}
         total = 0
         with_google_type = 0
 
-        for vid in all_ids:
-            venue = venue_dao.get_venue(vid)
-            if not venue:
-                continue
+        # One bulk RDS row read (the pattern the inventory endpoint uses) instead
+        # of list_all_venue_ids() + a per-id get_venue. The per-venue
+        # get_vibe_attributes read stays for now — this is an admin-only,
+        # low-traffic endpoint; the performance batch's bulk per-table readers
+        # can later serve it in one query.
+        for venue in venue_dao.list_all_venues():
             total += 1
 
             bt = venue.venue_type or "unknown"
             besttime_types[bt] = besttime_types.get(bt, 0) + 1
 
             # Check Google Places type from vibe attributes
-            vibe_attrs = venue_dao.get_vibe_attributes(vid)
+            vibe_attrs = venue_dao.get_vibe_attributes(venue.venue_id)
             if vibe_attrs and vibe_attrs.google_primary_type:
                 gt = vibe_attrs.google_primary_type
                 google_types[gt] = google_types.get(gt, 0) + 1
