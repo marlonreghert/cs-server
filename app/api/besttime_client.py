@@ -423,45 +423,6 @@ class BestTimeAPIClient:
 
         return WeekRawResponse(**response_data)
 
-    # Legacy methods (kept for compatibility, but venue_filter is preferred)
-
-    async def get_venues_nearby(
-        self, lat: float, lng: float
-    ) -> dict:  # SearchVenuesResponse not implemented yet
-        """Kick off background venue search (legacy endpoint).
-
-        Note: This is a legacy endpoint. Use venue_filter() instead for direct results.
-
-        Args:
-            lat: Latitude
-            lng: Longitude
-
-        Returns:
-            Search job response with job_id and collection_id
-        """
-        query_params = {
-            "api_key_private": self.api_key_private,
-            "q": "most popular bars, nightclubs or pubs to party and dance in recife and are open now",
-            "num": "20",
-            "lat": str(lat),
-            "lng": str(lng),
-            "opened": "now",
-            "radius": "10000",
-            "live": "true",
-        }
-
-        logger.warning(
-            "[BestTimeAPIClient] get_venues_nearby is a legacy method. "
-            "Consider using venue_filter() instead."
-        )
-
-        await self._search_limiter.acquire("/venues/search")
-        response_data = await self._request(
-            "POST", "/venues/search", params=query_params, retry_429=True
-        )
-
-        return response_data
-
     async def add_venue_to_account(
         self, venue_name: str, venue_address: str
     ) -> NewVenueResponse:
@@ -637,26 +598,3 @@ class BestTimeAPIClient:
             if len(data) < page_size:
                 return
             page += 1
-
-    async def get_venue_search_progress(
-        self, job_id: str, collection_id: Optional[str] = None
-    ) -> dict:  # SearchProgressResponse not implemented yet
-        """Poll background search job progress (legacy endpoint).
-
-        Args:
-            job_id: Job identifier from get_venues_nearby()
-            collection_id: Collection identifier (optional)
-
-        Returns:
-            Progress response with venues when job_finished=true
-        """
-        query_params = {"job_id": job_id}
-        if collection_id:
-            query_params["collection_id"] = collection_id
-
-        await self._search_limiter.acquire("/venues/progress")
-        response_data = await self._request(
-            "GET", "/venues/progress", params=query_params, retry_429=True
-        )
-
-        return response_data

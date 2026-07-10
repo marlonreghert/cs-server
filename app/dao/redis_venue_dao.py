@@ -313,20 +313,6 @@ class RedisVenueDAO:
         self.client.del_(key)
         logger.info(f"[RedisVenueDAO] Deleted live forecast cache for {venue_id}")
 
-    def list_cached_live_forecast_venue_ids(self) -> list[str]:
-        """Return venue IDs for all cached live forecasts.
-
-        Returns:
-            List of venue IDs
-        """
-        pattern = "live_forecast_v1:*"
-        keys = self.client.keys(pattern)
-
-        # Strip prefix to get raw venue IDs
-        prefix = "live_forecast_v1:"
-        venue_ids = [key.replace(prefix, "", 1) for key in keys]
-        return venue_ids
-
     def list_active_venue_ids(self) -> list[str]:
         """Return venue IDs that are not deprecated."""
         return [venue.venue_id for venue in self.list_active_venues()]
@@ -467,20 +453,6 @@ class RedisVenueDAO:
         key = VIBE_ATTRIBUTES_KEY_FORMAT.format(venue_id)
         self.client.del_(key)
         logger.info(f"[RedisVenueDAO] Deleted vibe attributes cache for {venue_id}")
-
-    def list_cached_vibe_attributes_venue_ids(self) -> list[str]:
-        """Return venue IDs for all cached vibe attributes.
-
-        Returns:
-            List of venue IDs
-        """
-        pattern = "vibe_attributes_v1:*"
-        keys = self.client.keys(pattern)
-
-        # Strip prefix to get raw venue IDs
-        prefix = "vibe_attributes_v1:"
-        venue_ids = [key.replace(prefix, "", 1) for key in keys]
-        return venue_ids
 
     def count_venues_with_vibe_attributes(self) -> int:
         """Count venues with cached vibe attributes.
