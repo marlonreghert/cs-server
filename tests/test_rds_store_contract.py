@@ -286,11 +286,34 @@ def test_live_forecast_reupsert_via_on_conflict_still_reports_written(store):
 
 
 def test_favorite_and_hot_like_event(store):
+    from datetime import date
+
     vid = _vid()
     store.upsert_venue(_venue(vid))
     store.upsert_favorite("pseudo-abc", vid)
     store.soft_delete_favorite("pseudo-abc", vid)  # un-favorite -> soft delete
-    store.add_hot_like_event("pseudo-abc", vid)    # append-only, no error
+    assert store.add_hot_like_event("pseudo-abc", vid, date.today()) is True  # first write
+
+
+def test_hot_like_event_idempotent_per_business_period(store):
+    """A retried write (vibes_bot retries on a 5xx per the engagement_router
+    contract) for the same (user, venue, Recife day) must not persist a second
+    row -- unique index (migration 0016) + ON CONFLICT DO NOTHING. A genuinely
+    different business_period (a different calendar day) is a new event."""
+    from datetime import date, timedelta
+
+    vid = _vid()
+    store.upsert_venue(_venue(vid))
+    today = date.today()
+    yesterday = today - timedelta(days=1)
+
+    # The boolean return is the shared contract (both fake and real store):
+    # True on a genuinely new (user, venue, business_period) row, False when
+    # an existing row already covers it (conflict-suppressed retry).
+    assert store.add_hot_like_event("pseudo-xyz", vid, today) is True      # new row
+    assert store.add_hot_like_event("pseudo-xyz", vid, today) is False     # retried: suppressed
+    assert store.add_hot_like_event("pseudo-xyz", vid, yesterday) is True  # different day: new row
+    assert store.add_hot_like_event("pseudo-xyz", vid, today) is False     # still suppressed
 
 
 def test_app_session_idempotent_and_window_counts(store):

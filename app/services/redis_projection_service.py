@@ -14,6 +14,7 @@ from typing import Optional
 
 from app.dao.venue_row import venue_from_row
 from app.metrics import (
+    REDIS_PROJECTION_ENTITY_DELETES_TOTAL,
     REDIS_PROJECTION_REMOVED_TOTAL,
     REDIS_PROJECTION_VENUES,
     SERVING_VIEW_VENUES,
@@ -54,17 +55,23 @@ def _age_seconds(updated_at) -> Optional[float]:
     return (datetime.now(timezone.utc) - ts).total_seconds()
 
 
-# RDS enrichment table_key -> (model class, redis-only setter name) for rebuild.
+# RDS enrichment table_key -> (model class, redis-only setter name, redis-only
+# deleter name) for rebuild. When the bulk-prefetched record for a servable
+# venue is absent (soft-deleted or never written in RDS -- get_enrichment_bulk
+# already filters `deleted_at IS NULL`), the deleter propagates that absence
+# to Redis so a stale key never outlives its RDS row.
 _REBUILD_MODELS = {
-    "google_places.vibe_attributes": (VibeAttributes, "set_vibe_attributes"),
-    "google_places.opening_hours": (OpeningHours, "set_opening_hours"),
-    "google_places.reviews": (VenueReviews, "set_venue_reviews"),
-    "instagram.handle": (VenueInstagram, "set_venue_instagram"),
-    "instagram.posts": (VenueInstagramPosts, "set_venue_ig_posts"),
-    "venues.menu_photos": (VenueMenuPhotos, "set_venue_menu_photos"),
-    "venues.menu_data": (VenueMenuData, "set_venue_menu_data"),
-    "venues.vibe_profile": (VenueVibeProfile, "set_venue_vibe_profile"),
+    "google_places.vibe_attributes": (VibeAttributes, "set_vibe_attributes", "delete_vibe_attributes"),
+    "google_places.opening_hours": (OpeningHours, "set_opening_hours", "delete_opening_hours"),
+    "google_places.reviews": (VenueReviews, "set_venue_reviews", "delete_venue_reviews"),
+    "instagram.handle": (VenueInstagram, "set_venue_instagram", "delete_venue_instagram"),
+    "instagram.posts": (VenueInstagramPosts, "set_venue_ig_posts", "delete_venue_ig_posts"),
+    "venues.menu_photos": (VenueMenuPhotos, "set_venue_menu_photos", "delete_venue_menu_photos"),
+    "venues.menu_data": (VenueMenuData, "set_venue_menu_data", "delete_venue_menu_data"),
+    "venues.vibe_profile": (VenueVibeProfile, "set_venue_vibe_profile", "delete_venue_vibe_profile"),
 }
+
+_WEEK_DAYS = range(7)
 
 
 class RedisProjectionService:
@@ -78,7 +85,13 @@ class RedisProjectionService:
 
     # ── rebuild: RDS -> Redis (incl. geo index + live busyness) ───────────────
     def rebuild_redis_from_rds(self) -> dict:
-        summary = {"venues": 0, "enrichment": 0, "live": 0, "removed": 0, "errors": 0}
+        summary = {
+            "venues": 0, "enrichment": 0, "live": 0, "removed": 0, "errors": 0,
+            # Venue ids that hit an isolated per-venue exception this cycle
+            # (observability: "the run summary must report at least one error
+            # naming <venue>" -- the log line carries the failing stage too).
+            "error_venues": [],
+        }
         # Serving source = the eligibility view (active AND eligible under the live
         # block-list). A failed view read must NOT blanket-delete the serving set —
         # abort the cycle and leave Redis intact (fail-safe).
@@ -118,33 +131,60 @@ class RedisProjectionService:
         live_map = self.rds_store.get_live_bulk(servable_ids)
 
         for venue_id in servable_ids:
-            row = venue_rows.get(venue_id)
+            # Isolation boundary: any exception while reading/projecting this ONE
+            # venue's row, enrichment, photos, weekly, or live data must not abort
+            # the run for other venues or skip the reconcile/removal pass below.
+            # `stage` tags the log line with where it failed; the try wraps every
+            # per-entity stage (widened from the old venue-read-only try) so a
+            # single poisoned row (e.g. a payload that fails Pydantic validation)
+            # degrades to "this venue's remaining stages wait for next cycle"
+            # instead of killing the whole projection run.
+            stage = "venue"
             try:
+                row = venue_rows.get(venue_id)
                 venue = venue_from_row(row)  # Ex1: columns + residual, not payload
                 self.redis_only_dao.upsert_venue(venue)  # GEOADD + JSON
                 summary["venues"] += 1
+
+                stage = "enrichment"
+                for table_key, (model_cls, setter, deleter) in _REBUILD_MODELS.items():
+                    rec = enrichment_maps[table_key].get(venue_id)
+                    if rec is not None:
+                        obj = model_cls.model_validate(rec["payload"])
+                        getattr(self.redis_only_dao, setter)(obj)
+                        summary["enrichment"] += 1
+                    elif getattr(self.redis_only_dao, deleter)(venue_id):
+                        REDIS_PROJECTION_ENTITY_DELETES_TOTAL.labels(entity=table_key).inc()
+
+                stage = "photos"
+                self._project_photos(venue_id, photos_map.get(venue_id))
+
+                # weekly (RDS composite key "<venue_id>#<day_int>"; Redis key per day)
+                stage = "weekly"
+                present_days = weekly_map.get(venue_id, {})
+                for day_int, wk in present_days.items():
+                    self.redis_only_dao.set_week_raw_forecast(
+                        venue_id, WeekRawDay.model_validate(wk["payload"])
+                    )
+                for day_int in _WEEK_DAYS:
+                    if day_int not in present_days:
+                        if self.redis_only_dao.delete_week_raw_forecast(venue_id, day_int):
+                            REDIS_PROJECTION_ENTITY_DELETES_TOTAL.labels(entity="weekly").inc()
+
+                stage = "live"
+                live = live_map.get(venue_id)
+                if live is not None:
+                    self.redis_only_dao.set_live_forecast(
+                        LiveForecastResponse.model_validate(live["payload"])
+                    )
+                    summary["live"] += 1
+                elif self.redis_only_dao.delete_live_forecast(venue_id):
+                    REDIS_PROJECTION_ENTITY_DELETES_TOTAL.labels(entity="live").inc()
             except Exception as e:
                 summary["errors"] += 1
-                logger.warning(f"[Rebuild] venue {venue_id} failed: {e}")
+                summary["error_venues"].append(venue_id)
+                logger.warning(f"[Rebuild] venue {venue_id} failed at stage={stage}: {e}")
                 continue
-            for table_key, (model_cls, setter) in _REBUILD_MODELS.items():
-                rec = enrichment_maps[table_key].get(venue_id)
-                if rec is not None:
-                    obj = model_cls.model_validate(rec["payload"])
-                    getattr(self.redis_only_dao, setter)(obj)
-                    summary["enrichment"] += 1
-            self._project_photos(venue_id, photos_map.get(venue_id))
-            # weekly (keys stored as "<venue_id>#<day_int>")
-            for day_int, wk in weekly_map.get(venue_id, {}).items():
-                self.redis_only_dao.set_week_raw_forecast(
-                    venue_id, WeekRawDay.model_validate(wk["payload"])
-                )
-            live = live_map.get(venue_id)
-            if live is not None:
-                self.redis_only_dao.set_live_forecast(
-                    LiveForecastResponse.model_validate(live["payload"])
-                )
-                summary["live"] += 1
         REDIS_PROJECTION_VENUES.set(summary["venues"])
         # Reconcile: remove from Redis any venue that has an RDS row but is not in
         # the serving view — deprecated OR active-but-ineligible. Editing the

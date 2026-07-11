@@ -90,13 +90,18 @@ class GeoRedisClient:
         """
         self.client.setex(key, ttl_seconds, value)
 
-    def del_(self, key: str) -> None:
+    def del_(self, key: str) -> int:
         """Delete a key from Redis.
 
         Args:
             key: Redis key to delete
+
+        Returns:
+            Number of keys actually removed (0 or 1 for a single key) so
+            callers can distinguish a real removal from a no-op delete of an
+            already-absent key.
         """
-        self.client.delete(key)
+        return self.client.delete(key)
 
     def zrem(self, name: str, *values: str) -> int:
         """Remove members from a sorted set (including geo sets).

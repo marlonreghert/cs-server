@@ -1,4 +1,3 @@
-@wip
 Feature: Projection and persistence integrity
   The Redis projection must converge to the RDS system of record in both
   directions every cycle: one bad row must never abort a run, deletions in

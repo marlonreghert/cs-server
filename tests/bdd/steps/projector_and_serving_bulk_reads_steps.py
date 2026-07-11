@@ -344,7 +344,7 @@ def step_projection_matches_rds(context):
         assert projected.venue_address == store.get_address(vid)["raw_text"]
 
     for vid in _FULL_VENUE_IDS:
-        for table_key, (model_cls, _setter) in _REBUILD_MODELS.items():
+        for table_key, (model_cls, _setter, _deleter) in _REBUILD_MODELS.items():
             rec = store.get_enrichment(table_key, vid)
             assert rec is not None and rec["deleted_at"] is None
             expected = model_cls.model_validate(rec["payload"])

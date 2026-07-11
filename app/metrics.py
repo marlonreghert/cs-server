@@ -469,6 +469,20 @@ REDIS_PROJECTION_REMOVED_TOTAL = Counter(
     "because they are not in the serving view (deprecated OR active-but-ineligible)",
 )
 
+# Per-entity delete propagation: for a servable venue, when an enrichment /
+# weekly-day / live record is absent or soft-deleted in RDS, the projector
+# deletes the matching Redis key so Redis converges to RDS in both directions.
+# Counts REAL removals only (Redis DEL's own removed-count, zero extra
+# round-trips) -- a venue that simply never had a sparse enrichment type
+# (menu_data, instagram, ...) does not inflate this counter, so a sustained
+# rise is a genuine signal of a deletion storm, not baseline noise.
+REDIS_PROJECTION_ENTITY_DELETES_TOTAL = Counter(
+    "redis_projection_entity_deletes_total",
+    "Total Redis keys actually removed by the projector because the matching "
+    "RDS row is absent or soft-deleted, labeled by entity",
+    ["entity"],
+)
+
 # Venues flipped active again (deprecated_* cleared). Emitted by the one-time
 # eligibility-serving-view migration that reactivates eligibility_filter-deprecated
 # venues so the view governs them; `source` is the prior deprecated_source.
@@ -697,6 +711,17 @@ ENGAGEMENT_SESSION_TOTAL = Counter(
     "engagement_session_total",
     "Outcomes of POST /v1/sessions app-activity recordings",
     ["result"],  # success | error
+)
+
+# A retried hot-like write (vibes_bot retries on 5xx per the engagement_router
+# contract) is deduped by the RDS unique index on
+# (user_pseudo, venue_id, business_period) + ON CONFLICT DO NOTHING. Counts
+# conflict-suppressed inserts so a retry storm is visible without inflating
+# the durable hot_like_event row count.
+ENGAGEMENT_HOT_LIKE_DEDUP_TOTAL = Counter(
+    "engagement_hot_like_dedup_total",
+    "Total hot-like writes suppressed as duplicates of an existing "
+    "(user, venue, business_period) row via ON CONFLICT DO NOTHING",
 )
 
 # =============================================================================
