@@ -386,7 +386,13 @@ class RedisVenueDAO:
         """
         key = LIVE_FORECAST_KEY_FORMAT.format(venue_id)
         removed = bool(self.client.del_(key))
-        logger.info(f"[RedisVenueDAO] Deleted live forecast cache for {venue_id}")
+        # DEBUG + only-on-real-removal: the projector calls this every ~2-min
+        # cycle for every servable venue that has no live row (~most of the
+        # catalog), so an unconditional INFO here is misleading ("Deleted ..."
+        # when nothing was) and a multi-MB/day log-volume risk on the hot
+        # projection path.
+        if removed:
+            logger.debug(f"[RedisVenueDAO] Deleted live forecast cache for {venue_id}")
         return removed
 
     def list_active_venue_ids(self) -> list[str]:
@@ -553,7 +559,11 @@ class RedisVenueDAO:
         """
         key = VIBE_ATTRIBUTES_KEY_FORMAT.format(venue_id)
         removed = bool(self.client.del_(key))
-        logger.info(f"[RedisVenueDAO] Deleted vibe attributes cache for {venue_id}")
+        # DEBUG + only-on-real-removal (see delete_live_forecast): the projector
+        # calls this every cycle for every venue missing vibe attributes, so an
+        # unconditional INFO is misleading + a log-volume risk on the hot path.
+        if removed:
+            logger.debug(f"[RedisVenueDAO] Deleted vibe attributes cache for {venue_id}")
         return removed
 
     def count_venues_with_vibe_attributes(self) -> int:
@@ -834,7 +844,10 @@ class RedisVenueDAO:
         """
         key = OPENING_HOURS_KEY_FORMAT.format(venue_id)
         removed = bool(self.client.del_(key))
-        logger.info(f"[RedisVenueDAO] Deleted opening hours cache for {venue_id}")
+        # DEBUG + only-on-real-removal (see delete_live_forecast): projector hot
+        # path, called every cycle for every venue missing opening hours.
+        if removed:
+            logger.debug(f"[RedisVenueDAO] Deleted opening hours cache for {venue_id}")
         return removed
 
     # =========================================================================
@@ -894,7 +907,10 @@ class RedisVenueDAO:
         """
         key = VENUE_INSTAGRAM_KEY_FORMAT.format(venue_id)
         removed = bool(self.client.del_(key))
-        logger.info(f"[RedisVenueDAO] Deleted Instagram cache for {venue_id}")
+        # DEBUG + only-on-real-removal (see delete_live_forecast): projector hot
+        # path, called every cycle for every venue missing an Instagram handle.
+        if removed:
+            logger.debug(f"[RedisVenueDAO] Deleted Instagram cache for {venue_id}")
         return removed
 
     def list_cached_instagram_venue_ids(self) -> list[str]:
