@@ -88,6 +88,42 @@ class RedisVenueDAO:
                 continue
         return out
 
+    # ── single-item accessor generics (spec-table-driven) ───────────────────
+    # The model-backed enrichment caches all follow the same shape
+    # (format key → JSON (de)serialize → try/except → log). These private
+    # generics own that shape once; the named public methods survive as
+    # one-line delegates so VenueRepository's per-method overrides keep working
+    # unchanged. Behavior (keys, by_alias serialization, error tolerance, and
+    # log wording) is byte-identical to the hand-rolled accessors.
+    def _get_model(self, key: str, model_cls, log_name: str):
+        """GET `key` and parse it with `model_cls.model_validate_json`, or None
+        on a cache miss / Redis error (logging ``Failed to get <log_name> from
+        Redis`` exactly as the original getters did)."""
+        try:
+            json_str = self.client.get(key)
+            if json_str is None:
+                return None
+            return model_cls.model_validate_json(json_str)
+        except redis.RedisError as e:
+            logger.error(f"Failed to get {log_name} from Redis: {e}")
+            return None
+
+    def _set_model(self, key: str, model) -> None:
+        """SET `key` to ``model.model_dump_json(by_alias=True)`` — the shared
+        serialize+write behind every model-backed setter (callers add their own
+        debug log)."""
+        self.client.set(key, model.model_dump_json(by_alias=True))
+
+    def _count_keys(self, pattern: str) -> int:
+        """Count keys matching `pattern` (SCAN via ``client.keys``)."""
+        return len(self.client.keys(pattern))
+
+    def _scan_venue_ids(self, prefix: str) -> list[str]:
+        """Return the venue ids embedded in every key under `prefix` (SCAN via
+        ``client.keys``, then strip the prefix)."""
+        keys = self.client.keys(f"{prefix}*")
+        return [key.replace(prefix, "", 1) for key in keys]
+
     def upsert_venue(self, venue: Venue) -> None:
         """Store venue as a geolocation with JSON data.
 
@@ -312,9 +348,7 @@ class RedisVenueDAO:
         Args:
             forecast: LiveForecastResponse object
         """
-        key = LIVE_FORECAST_KEY_FORMAT.format(forecast.venue_info.venue_id)
-        json_data = forecast.model_dump_json(by_alias=True)
-        self.client.set(key, json_data)
+        self._set_model(LIVE_FORECAST_KEY_FORMAT.format(forecast.venue_info.venue_id), forecast)
 
     def get_live_forecast(self, venue_id: str) -> Optional[LiveForecastResponse]:
         """Retrieve cached live forecast for a venue by its ID.
@@ -325,15 +359,9 @@ class RedisVenueDAO:
         Returns:
             LiveForecastResponse or None if not found
         """
-        key = LIVE_FORECAST_KEY_FORMAT.format(venue_id)
-        try:
-            json_str = self.client.get(key)
-            if json_str is None:
-                return None
-            return LiveForecastResponse.model_validate_json(json_str)
-        except redis.RedisError as e:
-            logger.error(f"Failed to get live forecast from Redis: {e}")
-            return None
+        return self._get_model(
+            LIVE_FORECAST_KEY_FORMAT.format(venue_id), LiveForecastResponse, "live forecast"
+        )
 
     def get_live_forecasts_bulk(self, venue_ids: list[str]) -> dict[str, LiveForecastResponse]:
         """MGET live forecasts for an id set, keyed by venue_id (P2/P3). The
@@ -372,13 +400,7 @@ class RedisVenueDAO:
         Returns:
             List of venue IDs
         """
-        pattern = VENUES_GEO_PLACE_MEMBER_FORMAT_V1.format("*")
-        keys = self.client.keys(pattern)
-
-        # Strip prefix to get raw venue IDs
-        prefix = "venues_geo_place_v1:"
-        venue_ids = [key.replace(prefix, "", 1) for key in keys]
-        return venue_ids
+        return self._scan_venue_ids("venues_geo_place_v1:")
 
     def list_all_venues(self) -> list[Venue]:
         """Return all venues from the geo index.
@@ -432,9 +454,7 @@ class RedisVenueDAO:
             venue_id: Venue identifier
             day: WeekRawDay object containing forecast for one day
         """
-        key = WEEKLY_FORECAST_KEY_FORMAT.format(venue_id, day.day_int)
-        json_data = day.model_dump_json(by_alias=True)
-        self.client.set(key, json_data)
+        self._set_model(WEEKLY_FORECAST_KEY_FORMAT.format(venue_id, day.day_int), day)
 
     def get_week_raw_forecast(self, venue_id: str, day_int: int) -> Optional[WeekRawDay]:
         """Retrieve cached raw weekly forecast for a venue and day.
@@ -478,9 +498,7 @@ class RedisVenueDAO:
         Args:
             vibe_attrs: VibeAttributes object
         """
-        key = VIBE_ATTRIBUTES_KEY_FORMAT.format(vibe_attrs.venue_id)
-        json_data = vibe_attrs.model_dump_json(by_alias=True)
-        self.client.set(key, json_data)
+        self._set_model(VIBE_ATTRIBUTES_KEY_FORMAT.format(vibe_attrs.venue_id), vibe_attrs)
         logger.debug(f"[RedisVenueDAO] Cached vibe attributes for {vibe_attrs.venue_id}")
 
     def get_vibe_attributes(self, venue_id: str) -> Optional[VibeAttributes]:
@@ -492,15 +510,9 @@ class RedisVenueDAO:
         Returns:
             VibeAttributes or None if not found
         """
-        key = VIBE_ATTRIBUTES_KEY_FORMAT.format(venue_id)
-        try:
-            json_str = self.client.get(key)
-            if json_str is None:
-                return None
-            return VibeAttributes.model_validate_json(json_str)
-        except redis.RedisError as e:
-            logger.error(f"Failed to get vibe attributes from Redis: {e}")
-            return None
+        return self._get_model(
+            VIBE_ATTRIBUTES_KEY_FORMAT.format(venue_id), VibeAttributes, "vibe attributes"
+        )
 
     def get_vibe_attributes_bulk(self, venue_ids: list[str]) -> dict[str, VibeAttributes]:
         """MGET vibe attributes for an id set, keyed by venue_id (P2/P4) — the
@@ -523,9 +535,7 @@ class RedisVenueDAO:
         Returns:
             Number of venues with vibe attributes
         """
-        pattern = "vibe_attributes_v1:*"
-        keys = self.client.keys(pattern)
-        return len(keys)
+        return self._count_keys("vibe_attributes_v1:*")
 
     # =========================================================================
     # VENUE PHOTOS METHODS
@@ -754,13 +764,7 @@ class RedisVenueDAO:
         Returns:
             List of venue IDs
         """
-        pattern = "venue_photos_v1:*"
-        keys = self.client.keys(pattern)
-
-        # Strip prefix to get raw venue IDs
-        prefix = "venue_photos_v1:"
-        venue_ids = [key.replace(prefix, "", 1) for key in keys]
-        return venue_ids
+        return self._scan_venue_ids("venue_photos_v1:")
 
     def count_venues_with_photos(self) -> int:
         """Count venues with cached photos.
@@ -768,9 +772,7 @@ class RedisVenueDAO:
         Returns:
             Number of venues with photos
         """
-        pattern = "venue_photos_v1:*"
-        keys = self.client.keys(pattern)
-        return len(keys)
+        return self._count_keys("venue_photos_v1:*")
 
     # =========================================================================
     # OPENING HOURS METHODS
@@ -782,9 +784,7 @@ class RedisVenueDAO:
         Args:
             opening_hours: OpeningHours object
         """
-        key = OPENING_HOURS_KEY_FORMAT.format(opening_hours.venue_id)
-        json_data = opening_hours.model_dump_json(by_alias=True)
-        self.client.set(key, json_data)
+        self._set_model(OPENING_HOURS_KEY_FORMAT.format(opening_hours.venue_id), opening_hours)
         logger.debug(f"[RedisVenueDAO] Cached opening hours for {opening_hours.venue_id}")
 
     def get_opening_hours(self, venue_id: str) -> Optional[OpeningHours]:
@@ -796,15 +796,9 @@ class RedisVenueDAO:
         Returns:
             OpeningHours or None if not found
         """
-        key = OPENING_HOURS_KEY_FORMAT.format(venue_id)
-        try:
-            json_str = self.client.get(key)
-            if json_str is None:
-                return None
-            return OpeningHours.model_validate_json(json_str)
-        except redis.RedisError as e:
-            logger.error(f"Failed to get opening hours from Redis: {e}")
-            return None
+        return self._get_model(
+            OPENING_HOURS_KEY_FORMAT.format(venue_id), OpeningHours, "opening hours"
+        )
 
     def get_opening_hours_bulk(self, venue_ids: list[str]) -> dict[str, OpeningHours]:
         """MGET opening hours for an id set, keyed by venue_id (P2/P4) — the
@@ -858,15 +852,9 @@ class RedisVenueDAO:
         Returns:
             VenueInstagram or None if not cached / expired
         """
-        key = VENUE_INSTAGRAM_KEY_FORMAT.format(venue_id)
-        try:
-            json_str = self.client.get(key)
-            if json_str is None:
-                return None
-            return VenueInstagram.model_validate_json(json_str)
-        except redis.RedisError as e:
-            logger.error(f"Failed to get venue Instagram from Redis: {e}")
-            return None
+        return self._get_model(
+            VENUE_INSTAGRAM_KEY_FORMAT.format(venue_id), VenueInstagram, "venue Instagram"
+        )
 
     def get_venue_instagram_bulk(self, venue_ids: list[str]) -> dict[str, VenueInstagram]:
         """MGET Instagram data for an id set, keyed by venue_id (P2/P4) — the
@@ -891,10 +879,7 @@ class RedisVenueDAO:
         set is exactly the "instagram is still fresh — skip re-search" gate used by
         the enrichment loop (equivalent to get_venue_instagram(...) is not None).
         """
-        pattern = "venue_instagram_v1:*"
-        keys = self.client.keys(pattern)
-        prefix = "venue_instagram_v1:"
-        return [key.replace(prefix, "", 1) for key in keys]
+        return self._scan_venue_ids("venue_instagram_v1:")
 
     # =========================================================================
     # VENUE REVIEWS METHODS
@@ -906,9 +891,7 @@ class RedisVenueDAO:
         Args:
             reviews: VenueReviews object
         """
-        key = VENUE_REVIEWS_KEY_FORMAT.format(reviews.venue_id)
-        json_data = reviews.model_dump_json(by_alias=True)
-        self.client.set(key, json_data)
+        self._set_model(VENUE_REVIEWS_KEY_FORMAT.format(reviews.venue_id), reviews)
         logger.debug(f"[RedisVenueDAO] Cached {len(reviews.reviews)} reviews for {reviews.venue_id}")
 
     def get_venue_reviews(self, venue_id: str) -> Optional[VenueReviews]:
@@ -920,15 +903,9 @@ class RedisVenueDAO:
         Returns:
             VenueReviews or None if not found
         """
-        key = VENUE_REVIEWS_KEY_FORMAT.format(venue_id)
-        try:
-            json_str = self.client.get(key)
-            if json_str is None:
-                return None
-            return VenueReviews.model_validate_json(json_str)
-        except redis.RedisError as e:
-            logger.error(f"Failed to get venue reviews from Redis: {e}")
-            return None
+        return self._get_model(
+            VENUE_REVIEWS_KEY_FORMAT.format(venue_id), VenueReviews, "venue reviews"
+        )
 
     def get_venue_reviews_bulk(self, venue_ids: list[str]) -> dict[str, VenueReviews]:
         """MGET reviews for an id set, keyed by venue_id (P4) — the bulk
@@ -1006,15 +983,9 @@ class RedisVenueDAO:
         Returns:
             VenueInstagramPosts or None if not cached / expired
         """
-        key = VENUE_IG_POSTS_KEY_FORMAT.format(venue_id)
-        try:
-            json_str = self.client.get(key)
-            if json_str is None:
-                return None
-            return VenueInstagramPosts.model_validate_json(json_str)
-        except redis.RedisError as e:
-            logger.error(f"Failed to get venue IG posts from Redis: {e}")
-            return None
+        return self._get_model(
+            VENUE_IG_POSTS_KEY_FORMAT.format(venue_id), VenueInstagramPosts, "venue IG posts"
+        )
 
     def delete_venue_ig_posts(self, venue_id: str) -> None:
         """Delete cached Instagram posts for a venue.
@@ -1031,10 +1002,7 @@ class RedisVenueDAO:
         Returns:
             List of venue IDs
         """
-        pattern = "venue_ig_posts_v1:*"
-        keys = self.client.keys(pattern)
-        prefix = "venue_ig_posts_v1:"
-        return [key.replace(prefix, "", 1) for key in keys]
+        return self._scan_venue_ids("venue_ig_posts_v1:")
 
     # =========================================================================
     # VENUE MENU PHOTOS METHODS
@@ -1046,9 +1014,7 @@ class RedisVenueDAO:
         Args:
             menu_photos: VenueMenuPhotos object
         """
-        key = VENUE_MENU_PHOTOS_KEY_FORMAT.format(menu_photos.venue_id)
-        json_data = menu_photos.model_dump_json(by_alias=True)
-        self.client.set(key, json_data)
+        self._set_model(VENUE_MENU_PHOTOS_KEY_FORMAT.format(menu_photos.venue_id), menu_photos)
         logger.debug(
             f"[RedisVenueDAO] Cached {len(menu_photos.photos)} menu photos for {menu_photos.venue_id}"
         )
@@ -1062,15 +1028,9 @@ class RedisVenueDAO:
         Returns:
             VenueMenuPhotos or None if not found
         """
-        key = VENUE_MENU_PHOTOS_KEY_FORMAT.format(venue_id)
-        try:
-            json_str = self.client.get(key)
-            if json_str is None:
-                return None
-            return VenueMenuPhotos.model_validate_json(json_str)
-        except redis.RedisError as e:
-            logger.error(f"Failed to get venue menu photos from Redis: {e}")
-            return None
+        return self._get_model(
+            VENUE_MENU_PHOTOS_KEY_FORMAT.format(venue_id), VenueMenuPhotos, "venue menu photos"
+        )
 
     def get_venue_menu_photos_bulk(self, venue_ids: list[str]) -> dict[str, VenueMenuPhotos]:
         """MGET menu photos for an id set, keyed by venue_id (P4) — the bulk
@@ -1092,10 +1052,7 @@ class RedisVenueDAO:
         Returns:
             List of venue IDs
         """
-        pattern = "venue_menu_photos_v1:*"
-        keys = self.client.keys(pattern)
-        prefix = "venue_menu_photos_v1:"
-        return [key.replace(prefix, "", 1) for key in keys]
+        return self._scan_venue_ids("venue_menu_photos_v1:")
 
     def count_venues_with_menu_photos(self) -> int:
         """Count venues with cached menu photos.
@@ -1103,9 +1060,7 @@ class RedisVenueDAO:
         Returns:
             Number of venues with menu photos
         """
-        pattern = "venue_menu_photos_v1:*"
-        keys = self.client.keys(pattern)
-        return len(keys)
+        return self._count_keys("venue_menu_photos_v1:*")
 
     # =========================================================================
     # VENUE MENU DATA (EXTRACTION) METHODS
@@ -1117,9 +1072,7 @@ class RedisVenueDAO:
         Args:
             menu_data: VenueMenuData object
         """
-        key = VENUE_MENU_RAW_DATA_KEY_FORMAT.format(menu_data.venue_id)
-        json_data = menu_data.model_dump_json(by_alias=True)
-        self.client.set(key, json_data)
+        self._set_model(VENUE_MENU_RAW_DATA_KEY_FORMAT.format(menu_data.venue_id), menu_data)
         logger.debug(
             f"[RedisVenueDAO] Cached menu data ({len(menu_data.sections)} sections) for {menu_data.venue_id}"
         )
@@ -1133,15 +1086,9 @@ class RedisVenueDAO:
         Returns:
             VenueMenuData or None if not found
         """
-        key = VENUE_MENU_RAW_DATA_KEY_FORMAT.format(venue_id)
-        try:
-            json_str = self.client.get(key)
-            if json_str is None:
-                return None
-            return VenueMenuData.model_validate_json(json_str)
-        except redis.RedisError as e:
-            logger.error(f"Failed to get venue menu data from Redis: {e}")
-            return None
+        return self._get_model(
+            VENUE_MENU_RAW_DATA_KEY_FORMAT.format(venue_id), VenueMenuData, "venue menu data"
+        )
 
     def get_venue_menu_data_bulk(self, venue_ids: list[str]) -> dict[str, VenueMenuData]:
         """MGET extracted menu data for an id set, keyed by venue_id (P4) — the
@@ -1167,9 +1114,7 @@ class RedisVenueDAO:
         Args:
             profile: VenueVibeProfile object
         """
-        key = VENUE_VIBE_PROFILE_KEY_FORMAT.format(profile.venue_id)
-        json_data = profile.model_dump_json(by_alias=True)
-        self.client.set(key, json_data)
+        self._set_model(VENUE_VIBE_PROFILE_KEY_FORMAT.format(profile.venue_id), profile)
         logger.debug(
             f"[RedisVenueDAO] Cached vibe profile for {profile.venue_id} "
             f"(confidence={profile.overall_confidence:.2f})"
@@ -1184,15 +1129,9 @@ class RedisVenueDAO:
         Returns:
             VenueVibeProfile or None if not found
         """
-        key = VENUE_VIBE_PROFILE_KEY_FORMAT.format(venue_id)
-        try:
-            json_str = self.client.get(key)
-            if json_str is None:
-                return None
-            return VenueVibeProfile.model_validate_json(json_str)
-        except redis.RedisError as e:
-            logger.error(f"Failed to get venue vibe profile from Redis: {e}")
-            return None
+        return self._get_model(
+            VENUE_VIBE_PROFILE_KEY_FORMAT.format(venue_id), VenueVibeProfile, "venue vibe profile"
+        )
 
     def get_venue_vibe_profile_bulk(self, venue_ids: list[str]) -> dict[str, VenueVibeProfile]:
         """MGET AI vibe profiles for an id set, keyed by venue_id (P2/P4) — the
@@ -1214,10 +1153,7 @@ class RedisVenueDAO:
         Returns:
             List of venue IDs
         """
-        pattern = "venue_vibe_profile_v2:*"
-        keys = self.client.keys(pattern)
-        prefix = "venue_vibe_profile_v2:"
-        return [key.replace(prefix, "", 1) for key in keys]
+        return self._scan_venue_ids("venue_vibe_profile_v2:")
 
     def count_venues_with_vibe_profile(self) -> int:
         """Count venues with cached vibe profiles.
@@ -1225,6 +1161,4 @@ class RedisVenueDAO:
         Returns:
             Number of venues with vibe profiles
         """
-        pattern = "venue_vibe_profile_v2:*"
-        keys = self.client.keys(pattern)
-        return len(keys)
+        return self._count_keys("venue_vibe_profile_v2:*")
