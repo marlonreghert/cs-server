@@ -1,6 +1,7 @@
 """Google Places API (New) client for fetching venue vibe attributes and photos."""
 import logging
 import time
+from contextlib import asynccontextmanager
 from typing import Optional
 import httpx
 
@@ -104,6 +105,38 @@ class GooglePlacesAPIClient:
         """Close the HTTP client and clean up resources."""
         await self.client.aclose()
 
+    @asynccontextmanager
+    async def _instrumented(self, endpoint: str):
+        """Time one Google Places API call and emit its metrics uniformly.
+
+        On clean exit: DURATION(endpoint) + CALLS(endpoint, success). On failure:
+        DURATION(endpoint) + CALLS(endpoint, error) + — for the three known
+        transport failures — ERRORS(endpoint, http_error|timeout|connection_error),
+        then the exception re-raises so the caller keeps its own per-exception
+        logging and return/raise. One consistent error taxonomy across all five
+        endpoints; metric + label names are unchanged and error_type values stay
+        within the existing {http_error, timeout, connection_error} set.
+        """
+        start_time = time.perf_counter()
+        try:
+            yield
+        except BaseException as e:
+            GOOGLE_PLACES_API_CALL_DURATION_SECONDS.labels(endpoint=endpoint).observe(
+                time.perf_counter() - start_time
+            )
+            GOOGLE_PLACES_API_CALLS_TOTAL.labels(endpoint=endpoint, status="error").inc()
+            error_type = _classify_google_error(e)
+            if error_type is not None:
+                GOOGLE_PLACES_API_ERRORS_TOTAL.labels(
+                    endpoint=endpoint, error_type=error_type
+                ).inc()
+            raise
+        else:
+            GOOGLE_PLACES_API_CALL_DURATION_SECONDS.labels(endpoint=endpoint).observe(
+                time.perf_counter() - start_time
+            )
+            GOOGLE_PLACES_API_CALLS_TOTAL.labels(endpoint=endpoint, status="success").inc()
+
     async def search_place_id(
         self,
         venue_name: str,
@@ -151,18 +184,12 @@ class GooglePlacesAPIClient:
 
         logger.debug(f"[GooglePlacesAPIClient] Searching for: {query}")
 
-        start_time = time.perf_counter()
-
         try:
-            response = await self.client.post(url, headers=headers, json=body)
-            response.raise_for_status()
-
-            data = response.json()
-            places = data.get("places", [])
-
-            duration = time.perf_counter() - start_time
-            GOOGLE_PLACES_API_CALL_DURATION_SECONDS.labels(endpoint="text_search").observe(duration)
-            GOOGLE_PLACES_API_CALLS_TOTAL.labels(endpoint="text_search", status="success").inc()
+            async with self._instrumented("text_search"):
+                response = await self.client.post(url, headers=headers, json=body)
+                response.raise_for_status()
+                data = response.json()
+                places = data.get("places", [])
 
             if places:
                 # Return the first (best match) place ID
@@ -174,17 +201,10 @@ class GooglePlacesAPIClient:
             return None
 
         except httpx.HTTPStatusError as e:
-            duration = time.perf_counter() - start_time
-            GOOGLE_PLACES_API_CALL_DURATION_SECONDS.labels(endpoint="text_search").observe(duration)
-            GOOGLE_PLACES_API_CALLS_TOTAL.labels(endpoint="text_search", status="error").inc()
-            GOOGLE_PLACES_API_ERRORS_TOTAL.labels(endpoint="text_search", error_type="http_error").inc()
             logger.error(f"[GooglePlacesAPIClient] Text search error: {e}")
             return None
 
         except Exception as e:
-            duration = time.perf_counter() - start_time
-            GOOGLE_PLACES_API_CALL_DURATION_SECONDS.labels(endpoint="text_search").observe(duration)
-            GOOGLE_PLACES_API_CALLS_TOTAL.labels(endpoint="text_search", status="error").inc()
             logger.error(f"[GooglePlacesAPIClient] Text search exception: {e}")
             return None
 
@@ -203,28 +223,16 @@ class GooglePlacesAPIClient:
             "X-Goog-Api-Key": self.api_key,
             "X-Goog-FieldMask": "location",
         }
-        start_time = time.perf_counter()
         try:
-            response = await self.client.get(url, headers=headers)
-            response.raise_for_status()
-            loc = (response.json() or {}).get("location") or {}
-            lat, lng = loc.get("latitude"), loc.get("longitude")
-            GOOGLE_PLACES_API_CALL_DURATION_SECONDS.labels(
-                endpoint="place_location"
-            ).observe(time.perf_counter() - start_time)
-            GOOGLE_PLACES_API_CALLS_TOTAL.labels(
-                endpoint="place_location", status="success"
-            ).inc()
+            async with self._instrumented("place_location"):
+                response = await self.client.get(url, headers=headers)
+                response.raise_for_status()
+                loc = (response.json() or {}).get("location") or {}
+                lat, lng = loc.get("latitude"), loc.get("longitude")
             if lat is None or lng is None:
                 return None
             return float(lat), float(lng)
         except Exception as e:  # noqa: BLE001
-            GOOGLE_PLACES_API_CALL_DURATION_SECONDS.labels(
-                endpoint="place_location"
-            ).observe(time.perf_counter() - start_time)
-            GOOGLE_PLACES_API_CALLS_TOTAL.labels(
-                endpoint="place_location", status="error"
-            ).inc()
             logger.warning(
                 f"[GooglePlacesAPIClient] get_place_location failed for "
                 f"{place_id}: {type(e).__name__}: {e}"
@@ -288,30 +296,16 @@ class GooglePlacesAPIClient:
 
         logger.debug(f"[GooglePlacesAPIClient] GET {endpoint}")
 
-        start_time = time.perf_counter()
-
         try:
-            response = await self.client.get(url, headers=headers, params=params)
-
-            logger.debug(f"[GooglePlacesAPIClient] Response status: {response.status_code}")
-
-            response.raise_for_status()
-
-            data = response.json()
-
-            # Record successful call metrics
-            duration = time.perf_counter() - start_time
-            GOOGLE_PLACES_API_CALL_DURATION_SECONDS.labels(endpoint="place_details").observe(duration)
-            GOOGLE_PLACES_API_CALLS_TOTAL.labels(endpoint="place_details", status="success").inc()
+            async with self._instrumented("place_details"):
+                response = await self.client.get(url, headers=headers, params=params)
+                logger.debug(f"[GooglePlacesAPIClient] Response status: {response.status_code}")
+                response.raise_for_status()
+                data = response.json()
 
             return self._parse_place_details(place_id, data)
 
         except httpx.HTTPStatusError as e:
-            duration = time.perf_counter() - start_time
-            GOOGLE_PLACES_API_CALL_DURATION_SECONDS.labels(endpoint="place_details").observe(duration)
-            GOOGLE_PLACES_API_CALLS_TOTAL.labels(endpoint="place_details", status="error").inc()
-            GOOGLE_PLACES_API_ERRORS_TOTAL.labels(endpoint="place_details", error_type="http_error").inc()
-
             # Handle specific errors gracefully
             if e.response.status_code == 404:
                 logger.warning(f"[GooglePlacesAPIClient] Place not found: {place_id}")
@@ -322,18 +316,10 @@ class GooglePlacesAPIClient:
             return None
 
         except httpx.TimeoutException as e:
-            duration = time.perf_counter() - start_time
-            GOOGLE_PLACES_API_CALL_DURATION_SECONDS.labels(endpoint="place_details").observe(duration)
-            GOOGLE_PLACES_API_CALLS_TOTAL.labels(endpoint="place_details", status="error").inc()
-            GOOGLE_PLACES_API_ERRORS_TOTAL.labels(endpoint="place_details", error_type="timeout").inc()
             logger.error(f"[GooglePlacesAPIClient] Timeout for {place_id}: {e}")
             return None
 
         except httpx.RequestError as e:
-            duration = time.perf_counter() - start_time
-            GOOGLE_PLACES_API_CALL_DURATION_SECONDS.labels(endpoint="place_details").observe(duration)
-            GOOGLE_PLACES_API_CALLS_TOTAL.labels(endpoint="place_details", status="error").inc()
-            GOOGLE_PLACES_API_ERRORS_TOTAL.labels(endpoint="place_details", error_type="connection_error").inc()
             logger.error(f"[GooglePlacesAPIClient] Request error for {place_id}: {e}")
             return None
 
@@ -549,33 +535,20 @@ class GooglePlacesAPIClient:
 
         logger.debug(f"[GooglePlacesAPIClient] Fetching photos for place: {place_id}")
 
-        start_time = time.perf_counter()
-
         # Step 1: Place Details -> photo resource names. A hard error here is
         # propagated (metrics recorded first) so the caller can avoid caching.
         try:
-            response = await self.client.get(url, headers=headers)
-            response.raise_for_status()
-            data = response.json()
-            duration = time.perf_counter() - start_time
-            GOOGLE_PLACES_API_CALL_DURATION_SECONDS.labels(endpoint="place_photos").observe(duration)
-            GOOGLE_PLACES_API_CALLS_TOTAL.labels(endpoint="place_photos", status="success").inc()
+            async with self._instrumented("place_photos"):
+                response = await self.client.get(url, headers=headers)
+                response.raise_for_status()
+                data = response.json()
         except httpx.HTTPStatusError as e:
-            GOOGLE_PLACES_API_CALL_DURATION_SECONDS.labels(endpoint="place_photos").observe(time.perf_counter() - start_time)
-            GOOGLE_PLACES_API_CALLS_TOTAL.labels(endpoint="place_photos", status="error").inc()
-            GOOGLE_PLACES_API_ERRORS_TOTAL.labels(endpoint="place_photos", error_type="http_error").inc()
             logger.error(f"[GooglePlacesAPIClient] Photo details error for {place_id}: {e}")
             raise
         except httpx.TimeoutException as e:
-            GOOGLE_PLACES_API_CALL_DURATION_SECONDS.labels(endpoint="place_photos").observe(time.perf_counter() - start_time)
-            GOOGLE_PLACES_API_CALLS_TOTAL.labels(endpoint="place_photos", status="error").inc()
-            GOOGLE_PLACES_API_ERRORS_TOTAL.labels(endpoint="place_photos", error_type="timeout").inc()
             logger.error(f"[GooglePlacesAPIClient] Photo details timeout for {place_id}: {e}")
             raise
         except httpx.RequestError as e:
-            GOOGLE_PLACES_API_CALL_DURATION_SECONDS.labels(endpoint="place_photos").observe(time.perf_counter() - start_time)
-            GOOGLE_PLACES_API_CALLS_TOTAL.labels(endpoint="place_photos", status="error").inc()
-            GOOGLE_PLACES_API_ERRORS_TOTAL.labels(endpoint="place_photos", error_type="connection_error").inc()
             logger.error(f"[GooglePlacesAPIClient] Photo details request error for {place_id}: {e}")
             raise
 
@@ -612,22 +585,31 @@ class GooglePlacesAPIClient:
         url = f"{GOOGLE_PLACES_API_BASE}/{photo_name}/media"
         headers = {"X-Goog-Api-Key": self.api_key}
         params = {"maxWidthPx": max_width, "skipHttpRedirect": "true"}
-        start_time = time.perf_counter()
         try:
-            response = await self.client.get(url, headers=headers, params=params)
-            response.raise_for_status()
-            uri = (response.json() or {}).get("photoUri")
-            GOOGLE_PLACES_API_CALL_DURATION_SECONDS.labels(endpoint="place_photo_media").observe(time.perf_counter() - start_time)
-            GOOGLE_PLACES_API_CALLS_TOTAL.labels(endpoint="place_photo_media", status="success").inc()
+            async with self._instrumented("place_photo_media"):
+                response = await self.client.get(url, headers=headers, params=params)
+                response.raise_for_status()
+                uri = (response.json() or {}).get("photoUri")
             if not uri:
                 logger.warning(f"[GooglePlacesAPIClient] media response for {photo_name} had no photoUri")
             return uri
         except Exception as e:  # noqa: BLE001 — one bad photo must not fail the venue
-            GOOGLE_PLACES_API_CALL_DURATION_SECONDS.labels(endpoint="place_photo_media").observe(time.perf_counter() - start_time)
-            GOOGLE_PLACES_API_CALLS_TOTAL.labels(endpoint="place_photo_media", status="error").inc()
-            GOOGLE_PLACES_API_ERRORS_TOTAL.labels(endpoint="place_photo_media", error_type="http_error").inc()
             logger.warning(f"[GooglePlacesAPIClient] media call failed for {photo_name}: {type(e).__name__}: {e}")
             return None
+
+
+def _classify_google_error(e: BaseException) -> Optional[str]:
+    """Map a raised exception to the API error_type label, or None when it is not
+    one of the three known transport failures (in which case only CALLS(error) is
+    recorded, no ERRORS_TOTAL). Order matters: TimeoutException is a RequestError,
+    so it is checked first; HTTPStatusError is not a RequestError."""
+    if isinstance(e, httpx.HTTPStatusError):
+        return "http_error"
+    if isinstance(e, httpx.TimeoutException):
+        return "timeout"
+    if isinstance(e, httpx.RequestError):
+        return "connection_error"
+    return None
 
 
 def _money_units(money: Optional[dict]) -> Optional[float]:
