@@ -245,10 +245,22 @@ def test_fresh_instagram_status_aware_gating(store):
 def test_delete_live_forecast_round_trip(store):
     vid = _vid()
     store.upsert_venue(_venue(vid))
-    store.upsert_live_forecast(vid, {"status": "OK"})
+    assert store.upsert_live_forecast(vid, {"status": "OK"}) is True
     assert store.get_live_forecast(vid) is not None
     store.delete_live_forecast(vid)
     assert store.get_live_forecast(vid) is None
+
+
+def test_live_forecast_skipped_when_venue_absent_from_catalog(store):
+    """live_forecast.venue_id FK-references venues.venue(venue_id). BestTime can
+    echo a venue_id (used as the write key) that no longer matches our catalog —
+    e.g. a stale/mismatched id in the live-forecast payload, or the row having
+    been removed out-of-band. Either way this must be a benign no-op: no
+    exception, no row written, and the caller can tell it was skipped (return
+    False) rather than mistake it for a real write."""
+    ghost_vid = _vid()  # never upserted via store.upsert_venue
+    assert store.upsert_live_forecast(ghost_vid, {"status": "OK"}) is False
+    assert store.get_live_forecast(ghost_vid) is None
 
 
 def test_live_forecast_current_state(store):
@@ -258,6 +270,19 @@ def test_live_forecast_current_state(store):
                               analysis=Analysis(venue_live_busyness=7, venue_live_busyness_available=True))
     store.upsert_live_forecast(vid, lf.model_dump(mode="json"))
     assert store.get_live_forecast(vid) is not None
+
+
+def test_live_forecast_reupsert_via_on_conflict_still_reports_written(store):
+    """The steady-state refresh path: re-upserting an already-cached venue's
+    live forecast hits ON CONFLICT DO UPDATE, not the bare INSERT. This must
+    still be reported as written (True), not miscounted as the absent-venue
+    skip — a regression here would silently reclassify nearly every routine
+    refresh as 'skipped_venue_absent'."""
+    vid = _vid()
+    store.upsert_venue(_venue(vid))
+    assert store.upsert_live_forecast(vid, {"status": "OK", "n": 1}) is True
+    assert store.upsert_live_forecast(vid, {"status": "OK", "n": 2}) is True  # re-upsert
+    assert store.get_live_forecast(vid)["payload"]["n"] == 2
 
 
 def test_favorite_and_hot_like_event(store):

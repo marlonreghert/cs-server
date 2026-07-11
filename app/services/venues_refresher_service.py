@@ -635,16 +635,38 @@ class VenuesRefresherService:
                 f"[VenuesRefresherService] Caching live forecast for venue_id={vid}"
             )
             try:
-                self.venue_dao.set_live_forecast(lf)
-                LIVE_FORECAST_FETCH_RESULTS.labels(result="cached").inc()
-                logger.debug(
-                    f"[VenuesRefresherService] Live forecast cached for venue_id={vid}"
-                )
+                cached = self.venue_dao.set_live_forecast(lf)
             except Exception as e:
                 logger.error(
                     f"[VenuesRefresherService] SetLiveForecast failed for {vid}: {e}"
                 )
                 LIVE_FORECAST_FETCH_RESULTS.labels(result="error").inc()
+                continue
+
+            if cached:
+                LIVE_FORECAST_FETCH_RESULTS.labels(result="cached").inc()
+                logger.debug(
+                    f"[VenuesRefresherService] Live forecast cached for venue_id={vid}"
+                )
+            else:
+                # Benign, non-error outcome: the write is keyed off the BestTime
+                # payload's own venue_info.venue_id (not necessarily == vid), and
+                # RdsVenueStore.upsert_live_forecast no-ops instead of raising
+                # ForeignKeyViolation when that id has no row in venues.venue.
+                # Log both ids — equal means the requested venue itself is no
+                # longer in the catalog; different means BestTime echoed back a
+                # venue_id that never matched ours — to tell the two apart in prod.
+                LIVE_FORECAST_FETCH_RESULTS.labels(result="skipped_venue_absent").inc()
+                # INFO (not DEBUG): this is the only signal that tells the two
+                # possible causes apart in prod (equal ids -> requested venue
+                # itself left the catalog; different ids -> BestTime echoed a
+                # venue_id that never matched ours), so it must survive at the
+                # log level the refresher normally runs at.
+                logger.info(
+                    f"[VenuesRefresherService] Live forecast skipped for "
+                    f"requested vid={vid}, payload venue_id="
+                    f"{lf.venue_info.venue_id!r}: not present in venues catalog"
+                )
 
     # ---- Discovery Points (admin-configurable locations) ----
 

@@ -342,13 +342,20 @@ class RedisVenueDAO:
         )
         return len(results)
 
-    def set_live_forecast(self, forecast: LiveForecastResponse) -> None:
+    def set_live_forecast(self, forecast: LiveForecastResponse) -> Optional[bool]:
         """Cache live forecast for a venue by its ID.
 
         Args:
             forecast: LiveForecastResponse object
+
+        Returns:
+            None here (the Redis-only path has no absent-venue concept). The
+            RDS-backed VenueRepository override narrows this to bool: True when
+            written, False when skipped because the venue is absent from
+            venues.venue (see VenueRepository.set_live_forecast).
         """
         self._set_model(LIVE_FORECAST_KEY_FORMAT.format(forecast.venue_info.venue_id), forecast)
+        return None
 
     def get_live_forecast(self, venue_id: str) -> Optional[LiveForecastResponse]:
         """Retrieve cached live forecast for a venue by its ID.

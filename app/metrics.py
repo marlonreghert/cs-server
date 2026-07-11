@@ -573,7 +573,11 @@ REFRESH_DUPLICATES_SKIPPED = Counter(
 LIVE_FORECAST_FETCH_RESULTS = Counter(
     "live_forecast_fetch_results_total",
     "Results of live forecast fetch operations",
-    ["result"],  # result: cached, deleted_not_ok, deleted_not_available, error
+    # result: cached, deleted_not_ok, deleted_not_available, error,
+    # skipped_venue_absent (benign: the live-forecast payload's venue_id has no
+    # row in venues.venue — RdsVenueStore.upsert_live_forecast no-ops instead of
+    # raising ForeignKeyViolation; see venues_refresher_service.py)
+    ["result"],
 )
 
 # Weekly forecast fetch results
