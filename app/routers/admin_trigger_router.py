@@ -43,6 +43,25 @@ def set_container(container):
     logger.info("[AdminTriggerRouter] Container injected")
 
 
+def require(attr: Optional[str] = None, *, detail: Optional[str] = None):
+    """Return a required container attribute (or the container itself when
+    ``attr`` is None), raising the same 503s the pasted preambles did.
+
+    Collapses the ~13 copies of ``if _container is None: raise
+    HTTPException(503, "Container not initialized")`` and the per-endpoint
+    ``if getattr(_container, X) is None: raise HTTPException(503, "...")``
+    service guards. The detail strings are unchanged.
+    """
+    if _container is None:
+        raise HTTPException(status_code=503, detail="Container not initialized")
+    if attr is None:
+        return _container
+    value = getattr(_container, attr, None)
+    if value is None:
+        raise HTTPException(status_code=503, detail=detail or f"{attr} not configured")
+    return value
+
+
 class TriggerResponse(BaseModel):
     status: str
     job: str
@@ -62,116 +81,132 @@ class TriggerResponse(BaseModel):
 # URLs), so the catalog pre-bake is retired. Triggering `photos` returns 404.
 # PhotoEnrichmentService.refresh_photos_for_venues remains for compatibility but
 # has no reachable trigger path.
+async def _run_google_places_backfill(c, cfg: dict) -> None:
+    """google_places_backfill runner: Google-only PENDING backfill + summary log
+    (kept out of the lambda table so its extra summary log survives)."""
+    summary = await c.google_places_enrichment_service.enrich_pending_venues(
+        limit=cfg.get("limit")
+    )
+    logger.info(f"[AdminTrigger] google_places_backfill summary: {summary}")
+
+
+def _rebuild_redis_offloop(c, cfg: dict):
+    """rebuild_redis runner. Off-loop (B0): the projection body is synchronous +
+    blocking; running it inline would stall /v1/venues/nearby and /health for the
+    whole run. Returns the awaitable executor future."""
+    return asyncio.get_event_loop().run_in_executor(
+        None, c.redis_projection_service.rebuild_redis_from_rds
+    )
+
+
+# Each entry carries its own dispatch (`runner`: async ``(container, cfg)``) and,
+# when it depends on an optional service, the container attribute to guard on
+# (`service_attr`) plus the exact ValueError detail (`unavailable_detail`). This
+# is the single source of truth for both `_run_job` dispatch and the `list_jobs`
+# availability listing — replacing the two parallel if/elif ladders.
 JOB_REGISTRY = {
     "live_forecast": {
         "label": "Live Forecast Refresh",
         "description": "Refresh live busyness forecasts for all cached venues",
+        "runner": lambda c, cfg: c.venues_refresher_service.refresh_live_forecasts_for_all_venues(),
     },
     "weekly_forecast": {
         "label": "Weekly Forecast Refresh",
         "description": "Refresh weekly forecast data for all cached venues",
+        "runner": lambda c, cfg: c.venues_refresher_service.refresh_weekly_forecasts_for_all_venues(),
     },
     "google_places": {
         "label": "Google Places Enrichment",
         "description": "Enrich venues with Google Places vibe attributes and business status",
         "default_config": {"force_refresh": False},
+        "service_attr": "google_places_enrichment_service",
+        "unavailable_detail": "Google Places API not configured",
+        "runner": lambda c, cfg: c.google_places_enrichment_service.enrich_all_venues(
+            force_refresh=cfg.get("force_refresh", False)
+        ),
     },
     "google_places_backfill": {
         "label": "Google Places Pending Backfill",
         "description": "One-time, idempotent Google-only enrichment of PENDING venues "
         "(active, no vibe attributes). Skips enriched + no-match venues; no BestTime call.",
+        "service_attr": "google_places_enrichment_service",
+        "unavailable_detail": "Google Places API not configured",
+        "runner": _run_google_places_backfill,
     },
     "instagram": {
         "label": "Instagram Discovery",
         "description": "Discover Instagram handles for venues via Google Places + Apify",
+        "service_attr": "instagram_enrichment_service",
+        "unavailable_detail": "Instagram enrichment not configured (missing Apify API token)",
+        "runner": lambda c, cfg: c.instagram_enrichment_service.enrich_all_venues(),
     },
     "instagram_posts": {
         "label": "Instagram Posts Scraping",
         "description": "Scrape recent Instagram posts for venues with IG handles",
+        "service_attr": "instagram_posts_enrichment_service",
+        "unavailable_detail": "IG posts enrichment not configured (missing Apify API token)",
+        "runner": lambda c, cfg: c.instagram_posts_enrichment_service.enrich_all_venues(),
     },
     "menu_photos": {
         "label": "Menu Photo Enrichment",
         "description": "Fetch menu photos from Instagram highlights and Google Maps",
+        "service_attr": "menu_photo_enrichment_service",
+        "unavailable_detail": "Menu photo enrichment not configured (missing S3/Apify)",
+        "runner": lambda c, cfg: c.menu_photo_enrichment_service.enrich_all_venues(),
     },
     "menu_extraction": {
         "label": "Menu Extraction (GPT-4o)",
         "description": "Extract structured menu data from photos using OpenAI vision",
+        "service_attr": "menu_extraction_service",
+        "unavailable_detail": "Menu extraction not configured (missing OpenAI/S3)",
+        "runner": lambda c, cfg: c.menu_extraction_service.extract_all_venues(),
     },
     "vibe_classifier": {
         "label": "Vibe Classifier (AI)",
         "description": "Classify venue vibes from photos using 2-stage GPT pipeline",
+        "service_attr": "vibe_classifier_service",
+        "unavailable_detail": "Vibe classifier not configured (missing OpenAI API key)",
+        "runner": lambda c, cfg: c.vibe_classifier_service.classify_all_venues(),
     },
     "instagram_validate": {
         "label": "Instagram Handle Validation",
         "description": "Check all cached Instagram handles and remove invalid ones (404 profiles)",
+        "service_attr": "google_places_enrichment_service",
+        "unavailable_detail": "Google Places enrichment not configured",
+        "runner": lambda c, cfg: c.google_places_enrichment_service.validate_cached_instagram_handles(),
     },
     "inventory_sync": {
         "label": "BestTime Inventory Sync",
         "description": "Pull every venue in our BestTime account inventory into Redis. Free — does not spend the monthly new-venue budget.",
+        "runner": lambda c, cfg: c.venues_refresher_service.sync_account_inventory_to_redis(),
     },
     "rebuild_redis": {
         "label": "Rebuild Redis from RDS",
         "description": "Reconstruct the Redis serving projection (incl. the geo index and live busyness) from RDS. Disaster recovery / Redis warm.",
+        "runner": _rebuild_redis_offloop,
     },
 }
 
 
 async def _run_job(job_name: str, config: Optional[dict] = None):
-    """Execute an enrichment job by name with optional config overrides."""
+    """Execute an enrichment job by name with optional config overrides.
+
+    Dispatch and the optional-service guard both derive from JOB_REGISTRY: an
+    unknown job or an unconfigured service raises the same ValueError as before.
+    """
     c = _container
     cfg = config or {}
-    force = cfg.get("force_refresh", False)
     start = time.perf_counter()
 
-    if job_name == "inventory_sync":
-        await c.venues_refresher_service.sync_account_inventory_to_redis()
-    elif job_name == "rebuild_redis":
-        # Off-loop (B0): the projection body is synchronous + blocking; running it
-        # inline would stall /v1/venues/nearby and /health for the whole run.
-        await asyncio.get_event_loop().run_in_executor(
-            None, c.redis_projection_service.rebuild_redis_from_rds
-        )
-    elif job_name == "live_forecast":
-        await c.venues_refresher_service.refresh_live_forecasts_for_all_venues()
-    elif job_name == "weekly_forecast":
-        await c.venues_refresher_service.refresh_weekly_forecasts_for_all_venues()
-    elif job_name == "google_places":
-        if c.google_places_enrichment_service is None:
-            raise ValueError("Google Places API not configured")
-        await c.google_places_enrichment_service.enrich_all_venues(force_refresh=force)
-    elif job_name == "google_places_backfill":
-        if c.google_places_enrichment_service is None:
-            raise ValueError("Google Places API not configured")
-        summary = await c.google_places_enrichment_service.enrich_pending_venues(
-            limit=cfg.get("limit")
-        )
-        logger.info(f"[AdminTrigger] google_places_backfill summary: {summary}")
-    elif job_name == "instagram":
-        if c.instagram_enrichment_service is None:
-            raise ValueError("Instagram enrichment not configured (missing Apify API token)")
-        await c.instagram_enrichment_service.enrich_all_venues()
-    elif job_name == "instagram_posts":
-        if c.instagram_posts_enrichment_service is None:
-            raise ValueError("IG posts enrichment not configured (missing Apify API token)")
-        await c.instagram_posts_enrichment_service.enrich_all_venues()
-    elif job_name == "menu_photos":
-        if c.menu_photo_enrichment_service is None:
-            raise ValueError("Menu photo enrichment not configured (missing S3/Apify)")
-        await c.menu_photo_enrichment_service.enrich_all_venues()
-    elif job_name == "menu_extraction":
-        if c.menu_extraction_service is None:
-            raise ValueError("Menu extraction not configured (missing OpenAI/S3)")
-        await c.menu_extraction_service.extract_all_venues()
-    elif job_name == "vibe_classifier":
-        if c.vibe_classifier_service is None:
-            raise ValueError("Vibe classifier not configured (missing OpenAI API key)")
-        await c.vibe_classifier_service.classify_all_venues()
-    elif job_name == "instagram_validate":
-        if c.google_places_enrichment_service is None:
-            raise ValueError("Google Places enrichment not configured")
-        await c.google_places_enrichment_service.validate_cached_instagram_handles()
-    else:
+    entry = JOB_REGISTRY.get(job_name)
+    if entry is None:
         raise ValueError(f"Unknown job: {job_name}")
+
+    service_attr = entry.get("service_attr")
+    if service_attr is not None and getattr(c, service_attr) is None:
+        raise ValueError(entry["unavailable_detail"])
+
+    await entry["runner"](c, cfg)
 
     duration = time.perf_counter() - start
     logger.info(f"[AdminTrigger] Job '{job_name}' completed in {duration:.1f}s (config={cfg})")
@@ -180,27 +215,15 @@ async def _run_job(job_name: str, config: Optional[dict] = None):
 @router.get("/jobs")
 async def list_jobs():
     """List all available enrichment jobs and their current status."""
-    if _container is None:
-        raise HTTPException(status_code=503, detail="Container not initialized")
+    require()
 
     jobs = []
     for name, info in JOB_REGISTRY.items():
-        # Check if service is available
-        available = True
-        if name in ("google_places", "google_places_backfill") and _container.google_places_enrichment_service is None:
-            available = False
-        elif name == "instagram" and _container.instagram_enrichment_service is None:
-            available = False
-        elif name == "instagram_posts" and _container.instagram_posts_enrichment_service is None:
-            available = False
-        elif name == "menu_photos" and _container.menu_photo_enrichment_service is None:
-            available = False
-        elif name == "menu_extraction" and _container.menu_extraction_service is None:
-            available = False
-        elif name == "vibe_classifier" and _container.vibe_classifier_service is None:
-            available = False
-        elif name == "instagram_validate" and _container.google_places_enrichment_service is None:
-            available = False
+        # Availability derives from the registry's `service_attr`: a job with no
+        # optional service is always available; otherwise it is available when
+        # that container service is wired.
+        service_attr = info.get("service_attr")
+        available = service_attr is None or getattr(_container, service_attr) is not None
 
         # Check if currently running
         task = _running_jobs.get(name)
@@ -226,8 +249,7 @@ async def trigger_job(job_name: str, config: Optional[dict] = None):
     - {"force_refresh": true} — re-process already cached venues
     - {"limit": 50} — override the default venue limit
     """
-    if _container is None:
-        raise HTTPException(status_code=503, detail="Container not initialized")
+    require()
 
     if job_name not in JOB_REGISTRY:
         # `venue_catalog` (discovery) is intentionally absent from JOB_REGISTRY and
@@ -269,14 +291,9 @@ async def add_venue_by_address(request: AddVenueByAddressRequest, response: Resp
     Body: AddVenueByAddressRequest. See app/handlers/add_venue_handler.py for
     the full status-code matrix.
     """
-    if _container is None:
-        raise HTTPException(status_code=503, detail="Container not initialized")
-    if getattr(_container, "add_venue_handler", None) is None:
-        raise HTTPException(
-            status_code=503,
-            detail="add-venue handler not configured",
-        )
-    handler: AddVenueHandler = _container.add_venue_handler
+    handler: AddVenueHandler = require(
+        "add_venue_handler", detail="add-venue handler not configured"
+    )
     outcome = await handler.add(request)
     response.status_code = outcome.status_code
     return outcome.body
@@ -293,11 +310,7 @@ async def batch_add_venues(request: BatchAddRequest, response: Response):
     GET /venues/batch-add/{job_id} for progress + the final per-row results.
     See app/services/batch_add_service.py.
     """
-    if _container is None:
-        raise HTTPException(status_code=503, detail="Container not initialized")
-    service = getattr(_container, "batch_add_service", None)
-    if service is None:
-        raise HTTPException(status_code=503, detail="batch-add service not configured")
+    service = require("batch_add_service", detail="batch-add service not configured")
     accepted = service.start_job(request)
     response.status_code = 202
     return accepted
@@ -306,11 +319,7 @@ async def batch_add_venues(request: BatchAddRequest, response: Response):
 @router.get("/venues/batch-add/{job_id}")
 async def get_batch_add_job(job_id: str):
     """Poll a batch-add job: {status, processed, total, summary, results, budget}."""
-    if _container is None:
-        raise HTTPException(status_code=503, detail="Container not initialized")
-    service = getattr(_container, "batch_add_service", None)
-    if service is None:
-        raise HTTPException(status_code=503, detail="batch-add service not configured")
+    service = require("batch_add_service", detail="batch-add service not configured")
     job = service.get_job(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="job not found")
@@ -330,14 +339,9 @@ async def undo_geo_link(request: GeoLinkUndoRequest, response: Response):
     (older than 24h or deprecated by something other than a prior undo). See
     app/handlers/add_venue_handler.py:undo_geo_link for the full matrix.
     """
-    if _container is None:
-        raise HTTPException(status_code=503, detail="Container not initialized")
-    handler: Optional[AddVenueHandler] = getattr(_container, "add_venue_handler", None)
-    if handler is None:
-        raise HTTPException(
-            status_code=503,
-            detail="add-venue handler not configured",
-        )
+    handler: AddVenueHandler = require(
+        "add_venue_handler", detail="add-venue handler not configured"
+    )
     outcome = await handler.undo_geo_link(request.venue_id)
     response.status_code = outcome.status_code
     return outcome.body
@@ -346,14 +350,7 @@ async def undo_geo_link(request: GeoLinkUndoRequest, response: Response):
 @router.get("/venues/monthly-budget")
 async def get_monthly_budget():
     """Return the current state of the monthly new-venue budget."""
-    if _container is None:
-        raise HTTPException(status_code=503, detail="Container not initialized")
-    budget = getattr(_container, "venue_budget_service", None)
-    if budget is None:
-        raise HTTPException(
-            status_code=503,
-            detail="venue budget service not configured",
-        )
+    budget = require("venue_budget_service", detail="venue budget service not configured")
     snap = budget.get_snapshot()
     return {
         "quota": snap.quota,
@@ -366,14 +363,11 @@ async def get_monthly_budget():
 
 
 def _get_venue_dao_from_container():
-    if _container is None:
-        raise HTTPException(status_code=503, detail="Container not initialized")
-    venue_dao = getattr(_container, "venue_dao", None) or getattr(
-        _container, "redis_venue_dao", None
-    )
-    if venue_dao is None:
-        raise HTTPException(status_code=503, detail="venue DAO not configured")
-    return venue_dao
+    # The container exposes the RDS-backed repository as `pipeline_repository`
+    # (renamed from the misleading `redis_venue_dao`). Read it directly — the old
+    # fuzzy `venue_dao`-or-`redis_venue_dao` getattr fallback is gone with the
+    # rename.
+    return require("pipeline_repository", detail="venue DAO not configured")
 
 
 def _eligibility_rule_service() -> Optional[EligibilityRuleService]:
@@ -499,10 +493,8 @@ async def remove_eligibility_rule(
 # in admin.admin_config instead of the geo-fence tables — where the SQL view never
 # sees it. The geo-fence lives in typed tables because the serving view reads them.
 def _geo_fence_store():
-    if _container is None:
-        raise HTTPException(status_code=503, detail="Container not initialized")
-    store = getattr(_container, "rds_store", None)
-    if store is None or not hasattr(store, "get_geo_fence"):
+    store = require("rds_store", detail="geo-fence store not configured")
+    if not hasattr(store, "get_geo_fence"):
         raise HTTPException(status_code=503, detail="geo-fence store not configured")
     return store
 
@@ -510,9 +502,7 @@ def _geo_fence_store():
 def _geo_fence_redis_client():
     """The Redis client used to mirror admin_config:venue_geofence (admin GET +
     parity reads). Best-effort: a missing client just skips the mirror."""
-    venue_dao = getattr(_container, "venue_dao", None) or getattr(
-        _container, "redis_venue_dao", None
-    )
+    venue_dao = getattr(_container, "pipeline_repository", None)
     return getattr(venue_dao, "client", None)
 
 
@@ -600,12 +590,7 @@ async def put_geo_fence(fence: dict = Body(...)):
 
 # ── generic admin config (RDS system of record, Redis mirror) ────────────────
 def _admin_config_service():
-    if _container is None:
-        raise HTTPException(status_code=503, detail="Container not initialized")
-    svc = getattr(_container, "admin_config_service", None)
-    if svc is None:
-        raise HTTPException(status_code=503, detail="admin config service not configured")
-    return svc
+    return require("admin_config_service", detail="admin config service not configured")
 
 
 @router.get("/config")
@@ -782,8 +767,7 @@ async def user_activity_counts():
     """Distinct-user counts for the admin dashboard: total plus trailing 1d/7d/30d
     active windows. "Active" means the user made an authenticated app request that
     Recife day (the closest backend-observable proxy for a login)."""
-    if _container is None:
-        raise HTTPException(status_code=503, detail="Container not initialized")
+    require()
     try:
         return _container.engagement_service.activity_counts()
     except Exception as e:
@@ -794,8 +778,7 @@ async def user_activity_counts():
 @router.post("/recount-discovery-points")
 async def recount_discovery_points():
     """Recount venues per discovery point using GEORADIUS and update counters."""
-    if _container is None:
-        raise HTTPException(status_code=503, detail="Container not initialized")
+    require()
 
     try:
         points = _container.venues_refresher_service.recount_discovery_points()
@@ -814,9 +797,9 @@ def venue_type_breakdown():
     """Get a breakdown of all venues by BestTime type and Google Places type."""
     # Resolve the DAO through the shared helper (raises 503 when the container is
     # not initialized). The container exposes the RDS-backed repository as
-    # `redis_venue_dao`, not `venue_dao`, so the previous direct access always
-    # AttributeError'd into a 500. Kept OUTSIDE the try below so the helper's 503
-    # is not laundered into a 500 by the blanket handler.
+    # `pipeline_repository`, so the previous direct `_container.venue_dao` access
+    # always AttributeError'd into a 500. Kept OUTSIDE the try below so the
+    # helper's 503 is not laundered into a 500 by the blanket handler.
     venue_dao = _get_venue_dao_from_container()
 
     try:

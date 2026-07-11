@@ -12,7 +12,7 @@ import logging
 import re
 from typing import Optional
 
-from app.api.google_places_client import GooglePlacesAPIClient, search_for_lgbtq_indicators
+from app.api.google_places_client import GooglePlacesAPIClient
 from app.config import settings
 from app.dao.redis_venue_dao import RedisVenueDAO
 from app.models.vibe_attributes import VibeAttributes
@@ -46,6 +46,34 @@ REQUEST_DELAY = 1.0 / REQUESTS_PER_SECOND
 # `_price_level_to_int` for backward-compatible importers/tests.
 _price_level_to_int = price_level_from_enum
 
+# Keywords that indicate LGBTQ+ friendliness in a venue summary.
+_LGBTQ_KEYWORDS = [
+    "lgbtq",
+    "lgbt",
+    "gay",
+    "lesbian",
+    "queer",
+    "pride",
+    "drag",
+    "inclusive",
+    "welcoming to all",
+    "diverse crowd",
+    "rainbow",
+]
+
+
+def contains_lgbtq_keywords(summary: Optional[str]) -> bool:
+    """Return True when the summary text contains an LGBTQ+ friendliness keyword.
+
+    A local keyword scan over already-fetched summary text — no awaits, no I/O
+    (it is business logic, not an API-client concern, so it lives here in
+    app/services/). Renamed from the misleading async ``search_for_lgbtq_indicators``.
+    """
+    if not summary:
+        return False
+    summary_lower = summary.lower()
+    return any(keyword in summary_lower for keyword in _LGBTQ_KEYWORDS)
+
 
 class GooglePlacesEnrichmentService:
     """Service for enriching venues with Google Places API data.
@@ -75,7 +103,7 @@ class GooglePlacesEnrichmentService:
         self._permanently_closed_in_run = 0
         self._temporarily_closed_in_run = 0
 
-    def _backfill_venue_review_signal(
+    def _backfill_rating_reviews_and_price(
         self, venue_id: str, details, google_only_price: bool = False
     ) -> None:
         """Write Google's rating/userRatingCount and the derived price signal onto
@@ -260,7 +288,7 @@ class GooglePlacesEnrichmentService:
             # Check for LGBTQ+ indicators in the summary
             if details.generative_summary or details.editorial_summary:
                 summary = details.generative_summary or details.editorial_summary
-                vibe_attrs.lgbtq_friendly = await search_for_lgbtq_indicators(summary)
+                vibe_attrs.lgbtq_friendly = contains_lgbtq_keywords(summary)
 
             # Cache the results
             self.venue_dao.set_vibe_attributes(vibe_attrs)
@@ -296,7 +324,7 @@ class GooglePlacesEnrichmentService:
             # venues with these fields null; without this step they stay null
             # forever and the mobile card has no stars or price indicator
             # even though Google has the data.
-            self._backfill_venue_review_signal(
+            self._backfill_rating_reviews_and_price(
                 venue_id, details, google_only_price=google_only_price
             )
 
@@ -315,6 +343,41 @@ class GooglePlacesEnrichmentService:
             logger.error(f"[GooglePlacesEnrichment] Error enriching venue {venue_id}: {e}")
             VIBE_ATTRIBUTES_FETCH_RESULTS.labels(result="error").inc()
             return None
+
+    async def _search_and_enrich_servable(self, venue, google_only_price: bool) -> str:
+        """Resolve a servable venue's Google place_id and enrich it, or write the
+        empty no-match marker. Paces identically to both callers (REQUEST_DELAY on
+        a no-match, REQUEST_DELAY*2 after an enrich). Returns ``"no_google_match"``,
+        ``"enriched"``, or ``"error"``; the caller maps that to its own metric
+        label + log + bookkeeping.
+
+        Shared per-venue body of enrich_all_venues and enrich_pending_venues so
+        their marker + pacing policy cannot drift. The caller has already decided
+        the venue is not cache-skipped (presence check / force_refresh).
+        """
+        google_place_id = await self.google_places_client.search_place_id(
+            venue_name=venue.venue_name,
+            venue_address=venue.venue_address,
+            lat=venue.venue_lat,
+            lng=venue.venue_lng,
+        )
+        if not google_place_id:
+            # No Google match: write the empty marker so re-runs skip this venue.
+            self.venue_dao.set_vibe_attributes(
+                VibeAttributes(venue_id=venue.venue_id, google_place_id="")
+            )
+            await asyncio.sleep(REQUEST_DELAY)
+            return "no_google_match"
+
+        result = await self.enrich_venue(
+            venue_id=venue.venue_id,
+            google_place_id=google_place_id,
+            force_refresh=True,  # the caller already checked the cache above
+            google_only_price=google_only_price,
+        )
+        # Two Google calls per venue (search + details): pace accordingly.
+        await asyncio.sleep(REQUEST_DELAY * 2)
+        return "enriched" if result is not None else "error"
 
     async def enrich_all_venues(
         self, force_refresh: bool = False, google_only_price: bool = False
@@ -377,39 +440,15 @@ class GooglePlacesEnrichmentService:
                 VIBE_ATTRIBUTES_FETCH_RESULTS.labels(result="skipped_no_venue").inc()
                 continue
 
-            # Search Google Places by venue name/address to get Place ID
-            google_place_id = await self.google_places_client.search_place_id(
-                venue_name=venue.venue_name,
-                venue_address=venue.venue_address,
-                lat=venue.venue_lat,
-                lng=venue.venue_lng,
-            )
-
-            if not google_place_id:
+            # Search Google Places + enrich (or mark no-match) via the shared body.
+            outcome = await self._search_and_enrich_servable(venue, google_only_price)
+            if outcome == "no_google_match":
                 logger.warning(f"[GooglePlacesEnrichment] Could not find Google Place ID for {venue.venue_name}")
                 VIBE_ATTRIBUTES_FETCH_RESULTS.labels(result="skipped_no_place_id").inc()
-                # Cache empty attributes so we don't retry this venue every run
-                self.venue_dao.set_vibe_attributes(VibeAttributes(
-                    venue_id=venue_id,
-                    google_place_id="",
-                ))
-                await asyncio.sleep(REQUEST_DELAY)
-                continue
-
-            # Enrich venue using the Google Place ID
-            result = await self.enrich_venue(
-                venue_id=venue_id,
-                google_place_id=google_place_id,
-                force_refresh=True,  # We already checked cache above
-                google_only_price=google_only_price,
-            )
-
-            if result:
+            elif outcome == "enriched":
                 successful += 1
+            # "error": tracked via enrich_venue's own metrics.
             # Note: Closure tracking is done via instance counters in enrich_venue()
-
-            # Rate limiting (extra delay since we make 2 API calls per venue)
-            await asyncio.sleep(REQUEST_DELAY * 2)
 
         # Update metrics
         count = self.venue_dao.count_venues_with_vibe_attributes()
@@ -469,39 +508,20 @@ class GooglePlacesEnrichmentService:
                 continue
 
             summary["seen"] += 1
-            google_place_id = await self.google_places_client.search_place_id(
-                venue_name=venue.venue_name,
-                venue_address=venue.venue_address,
-                lat=venue.venue_lat,
-                lng=venue.venue_lng,
-            )
-
-            if not google_place_id:
-                # No Google match: write the empty marker so re-runs skip this venue.
+            # Search Google Places + enrich (or mark no-match) via the shared body
+            # (google-only price: no BestTime fallback for the backfill).
+            outcome = await self._search_and_enrich_servable(venue, google_only_price=True)
+            if outcome == "no_google_match":
                 logger.info(
                     f"[GooglePlacesEnrichment] Backfill: no Google match for "
                     f"{venue.venue_name} ({venue_id}); marking attempted"
                 )
-                self.venue_dao.set_vibe_attributes(
-                    VibeAttributes(venue_id=venue_id, google_place_id="")
-                )
                 summary["no_google_match"] += 1
                 VIBE_ATTRIBUTES_FETCH_RESULTS.labels(result="no_google_match").inc()
-                await asyncio.sleep(REQUEST_DELAY)
-                continue
-
-            result = await self.enrich_venue(
-                venue_id=venue_id,
-                google_place_id=google_place_id,
-                force_refresh=True,
-                google_only_price=True,
-            )
-            if result is not None:
+            elif outcome == "enriched":
                 summary["enriched"] += 1
-            else:
+            else:  # "error"
                 summary["error"] += 1
-            # Two Google calls per venue (search + details): pace accordingly.
-            await asyncio.sleep(REQUEST_DELAY * 2)
 
         count = self.venue_dao.count_venues_with_vibe_attributes()
         VENUES_WITH_VIBE_ATTRIBUTES.set(count)

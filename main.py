@@ -51,296 +51,237 @@ container: Container = None
 scheduler: AsyncIOScheduler = None
 
 
-async def run_venue_catalog_refresh_job():
-    """Background job: Refresh venue catalog for default locations."""
-    job_name = "venue_catalog_refresh"
-    logger.info("[Scheduler] Running VenueFilterMultiLocationJob")
-    start_time = time.perf_counter()
-    try:
-        await container.venues_refresher_service.refresh_venues_by_filter_for_default_locations(
-            fetch_and_cache_live=True
-        )
-        duration = time.perf_counter() - start_time
-        BACKGROUND_JOB_DURATION_SECONDS.labels(job_name=job_name).observe(duration)
-        BACKGROUND_JOB_RUNS_TOTAL.labels(job_name=job_name, status="success").inc()
-        BACKGROUND_JOB_LAST_RUN_TIMESTAMP.labels(job_name=job_name).set_to_current_time()
-        logger.info("[Scheduler] VenueFilterMultiLocationJob completed")
-    except Exception as e:
-        duration = time.perf_counter() - start_time
-        BACKGROUND_JOB_DURATION_SECONDS.labels(job_name=job_name).observe(duration)
-        BACKGROUND_JOB_RUNS_TOTAL.labels(job_name=job_name, status="error").inc()
-        logger.error(f"[Scheduler] VenueFilterMultiLocationJob failed: {e}")
+def make_job(
+    job_name: str,
+    *,
+    start_log: str,
+    done_log,
+    error_label: str,
+    run,
+    service_attr: "str | None" = None,
+    disabled_log: "str | None" = None,
+    require_container: bool = False,
+    on_success=None,
+):
+    """Build a scheduler-job coroutine with the shared instrumentation skeleton.
 
+    Every produced job logs a start line, starts a perf timer, optionally skips
+    (warn + return) when its backing service is absent, awaits the work, and
+    records the same three background-job metrics with its own ``job_name`` on
+    both success and error — so a new job cannot silently forget a metric or a
+    guard. Behavior-preserving collapse of the eleven hand-rolled ``run_*_job``
+    wrappers: metric names/labels, APScheduler job ids, and every log message
+    are byte-identical to the originals.
 
-async def run_live_forecast_refresh_job():
-    """Background job: Refresh live forecasts for all venues."""
-    job_name = "live_forecast_refresh"
-    logger.info("[Scheduler] Running LiveForecastRefreshJob")
-    start_time = time.perf_counter()
-    try:
-        await container.venues_refresher_service.refresh_live_forecasts_for_all_venues()
-        duration = time.perf_counter() - start_time
-        BACKGROUND_JOB_DURATION_SECONDS.labels(job_name=job_name).observe(duration)
-        BACKGROUND_JOB_RUNS_TOTAL.labels(job_name=job_name, status="success").inc()
-        BACKGROUND_JOB_LAST_RUN_TIMESTAMP.labels(job_name=job_name).set_to_current_time()
-        logger.info("[Scheduler] LiveForecastRefreshJob completed")
-    except Exception as e:
-        duration = time.perf_counter() - start_time
-        BACKGROUND_JOB_DURATION_SECONDS.labels(job_name=job_name).observe(duration)
-        BACKGROUND_JOB_RUNS_TOTAL.labels(job_name=job_name, status="error").inc()
-        logger.error(f"[Scheduler] LiveForecastRefreshJob failed: {e}")
-
-
-async def run_weekly_forecast_refresh_job():
-    """Background job: Refresh weekly forecasts for all venues."""
-    job_name = "weekly_forecast_refresh"
-    logger.info("[Scheduler] Running WeeklyForecastRefreshJob (Cron: Sunday 00:00)")
-    start_time = time.perf_counter()
-    try:
-        await container.venues_refresher_service.refresh_weekly_forecasts_for_all_venues()
-        duration = time.perf_counter() - start_time
-        BACKGROUND_JOB_DURATION_SECONDS.labels(job_name=job_name).observe(duration)
-        BACKGROUND_JOB_RUNS_TOTAL.labels(job_name=job_name, status="success").inc()
-        BACKGROUND_JOB_LAST_RUN_TIMESTAMP.labels(job_name=job_name).set_to_current_time()
-        logger.info("[Scheduler] WeeklyForecastRefreshJob completed")
-    except Exception as e:
-        duration = time.perf_counter() - start_time
-        BACKGROUND_JOB_DURATION_SECONDS.labels(job_name=job_name).observe(duration)
-        BACKGROUND_JOB_RUNS_TOTAL.labels(job_name=job_name, status="error").inc()
-        logger.error(f"[Scheduler] WeeklyForecastRefreshJob failed: {e}")
-
-
-async def run_google_places_enrichment_job():
-    """Background job: Enrich venues with data from Google Places API.
-
-    This includes:
-    - Vibe attributes (pet friendly, outdoor seating, etc.)
-    - Business status checks (operational, temporarily/permanently closed)
-    - Soft-deprecation of permanently closed venues
+    Args:
+        job_name: the ``job_name`` metric label value (unchanged from before).
+        start_log: INFO line emitted before the timer starts.
+        done_log: INFO success line; a callable ``(result) -> str`` when the
+            message embeds the run summary (``redis_projection``).
+        error_label: names the job in the ERROR line
+            ``[Scheduler] <error_label> failed: {e}``.
+        run: ``async (container) -> result`` performing the actual work.
+        service_attr: when set, skip (warn + return) if
+            ``getattr(container, service_attr) is None`` — evaluated after the
+            start log + timer start, matching the originals.
+        disabled_log: WARNING line emitted when the ``service_attr`` guard trips.
+        require_container: when True, return immediately (no log, no metric) if
+            the global ``container`` is None — the ``redis_projection`` guard.
+        on_success: optional ``(result) -> None`` hook for extra success-path
+            metrics (``redis_projection``'s projection gauges), fired after the
+            three job metrics and before the done log.
     """
-    job_name = "google_places_enrichment"
-    logger.info("[Scheduler] Running GooglePlacesEnrichmentJob")
-    start_time = time.perf_counter()
+    async def _job():
+        if require_container and container is None:
+            return
+        logger.info(start_log)
+        start_time = time.perf_counter()
+        if service_attr is not None and getattr(container, service_attr) is None:
+            logger.warning(disabled_log)
+            return
+        try:
+            result = await run(container)
+            duration = time.perf_counter() - start_time
+            BACKGROUND_JOB_DURATION_SECONDS.labels(job_name=job_name).observe(duration)
+            BACKGROUND_JOB_RUNS_TOTAL.labels(job_name=job_name, status="success").inc()
+            BACKGROUND_JOB_LAST_RUN_TIMESTAMP.labels(job_name=job_name).set_to_current_time()
+            if on_success is not None:
+                on_success(result)
+            logger.info(done_log(result) if callable(done_log) else done_log)
+        except Exception as e:
+            duration = time.perf_counter() - start_time
+            BACKGROUND_JOB_DURATION_SECONDS.labels(job_name=job_name).observe(duration)
+            BACKGROUND_JOB_RUNS_TOTAL.labels(job_name=job_name, status="error").inc()
+            logger.error(f"[Scheduler] {error_label} failed: {e}")
 
-    # Check if vibe attributes service is available
-    if container.google_places_enrichment_service is None:
-        logger.warning(
-            "[Scheduler] GooglePlacesEnrichmentJob skipped: "
-            "Google Places API not configured"
-        )
-        return
-
-    try:
-        await container.google_places_enrichment_service.enrich_all_venues()
-        duration = time.perf_counter() - start_time
-        BACKGROUND_JOB_DURATION_SECONDS.labels(job_name=job_name).observe(duration)
-        BACKGROUND_JOB_RUNS_TOTAL.labels(job_name=job_name, status="success").inc()
-        BACKGROUND_JOB_LAST_RUN_TIMESTAMP.labels(job_name=job_name).set_to_current_time()
-        logger.info("[Scheduler] GooglePlacesEnrichmentJob completed")
-    except Exception as e:
-        duration = time.perf_counter() - start_time
-        BACKGROUND_JOB_DURATION_SECONDS.labels(job_name=job_name).observe(duration)
-        BACKGROUND_JOB_RUNS_TOTAL.labels(job_name=job_name, status="error").inc()
-        logger.error(f"[Scheduler] GooglePlacesEnrichmentJob failed: {e}")
-
-
-async def run_photo_enrichment_job():
-    """Background job: Enrich venues with photos from Google Places API."""
-    job_name = "photo_enrichment"
-    logger.info("[Scheduler] Running PhotoEnrichmentJob")
-    start_time = time.perf_counter()
-
-    # Check if photo enrichment service is available
-    if container.photo_enrichment_service is None:
-        logger.warning(
-            "[Scheduler] PhotoEnrichmentJob skipped: "
-            "Google Places API not configured"
-        )
-        return
-
-    try:
-        await container.photo_enrichment_service.refresh_photos_for_venues()
-        duration = time.perf_counter() - start_time
-        BACKGROUND_JOB_DURATION_SECONDS.labels(job_name=job_name).observe(duration)
-        BACKGROUND_JOB_RUNS_TOTAL.labels(job_name=job_name, status="success").inc()
-        BACKGROUND_JOB_LAST_RUN_TIMESTAMP.labels(job_name=job_name).set_to_current_time()
-        logger.info("[Scheduler] PhotoEnrichmentJob completed")
-    except Exception as e:
-        duration = time.perf_counter() - start_time
-        BACKGROUND_JOB_DURATION_SECONDS.labels(job_name=job_name).observe(duration)
-        BACKGROUND_JOB_RUNS_TOTAL.labels(job_name=job_name, status="error").inc()
-        logger.error(f"[Scheduler] PhotoEnrichmentJob failed: {e}")
+    return _job
 
 
-async def run_instagram_enrichment_job():
-    """Background job: Discover Instagram handles for venues using Apify."""
-    job_name = "instagram_enrichment"
-    logger.info("[Scheduler] Running InstagramEnrichmentJob")
-    start_time = time.perf_counter()
-
-    if container.instagram_enrichment_service is None:
-        logger.warning(
-            "[Scheduler] InstagramEnrichmentJob skipped: "
-            "Apify API not configured"
-        )
-        return
-
-    try:
-        await container.instagram_enrichment_service.enrich_all_venues()
-        duration = time.perf_counter() - start_time
-        BACKGROUND_JOB_DURATION_SECONDS.labels(job_name=job_name).observe(duration)
-        BACKGROUND_JOB_RUNS_TOTAL.labels(job_name=job_name, status="success").inc()
-        BACKGROUND_JOB_LAST_RUN_TIMESTAMP.labels(job_name=job_name).set_to_current_time()
-        logger.info("[Scheduler] InstagramEnrichmentJob completed")
-    except Exception as e:
-        duration = time.perf_counter() - start_time
-        BACKGROUND_JOB_DURATION_SECONDS.labels(job_name=job_name).observe(duration)
-        BACKGROUND_JOB_RUNS_TOTAL.labels(job_name=job_name, status="error").inc()
-        logger.error(f"[Scheduler] InstagramEnrichmentJob failed: {e}")
+def schedule(
+    scheduler,
+    *,
+    enabled: bool,
+    func,
+    trigger,
+    id: str,
+    name: str,
+    enabled_log: str,
+    disabled_log: "str | None" = None,
+) -> None:
+    """Add a scheduled job or log why it stayed off — the add-or-log-disabled
+    block repeated for every optional pipeline. Always-on jobs pass
+    ``enabled=True`` and omit ``disabled_log`` (it is never emitted). The job
+    id/name and log messages are unchanged from the inline blocks."""
+    if enabled:
+        scheduler.add_job(func, trigger=trigger, id=id, name=name, replace_existing=True)
+        logger.info(enabled_log)
+    else:
+        logger.info(disabled_log)
 
 
-async def run_ig_posts_enrichment_job():
-    """Background job: Scrape recent Instagram posts for venues with IG handles."""
-    job_name = "ig_posts_enrichment"
-    logger.info("[Scheduler] Running IGPostsEnrichmentJob")
-    start_time = time.perf_counter()
-
-    if container.instagram_posts_enrichment_service is None:
-        logger.warning(
-            "[Scheduler] IGPostsEnrichmentJob skipped: "
-            "Apify API not configured"
-        )
-        return
-
-    try:
-        await container.instagram_posts_enrichment_service.enrich_all_venues()
-        duration = time.perf_counter() - start_time
-        BACKGROUND_JOB_DURATION_SECONDS.labels(job_name=job_name).observe(duration)
-        BACKGROUND_JOB_RUNS_TOTAL.labels(job_name=job_name, status="success").inc()
-        BACKGROUND_JOB_LAST_RUN_TIMESTAMP.labels(job_name=job_name).set_to_current_time()
-        logger.info("[Scheduler] IGPostsEnrichmentJob completed")
-    except Exception as e:
-        duration = time.perf_counter() - start_time
-        BACKGROUND_JOB_DURATION_SECONDS.labels(job_name=job_name).observe(duration)
-        BACKGROUND_JOB_RUNS_TOTAL.labels(job_name=job_name, status="error").inc()
-        logger.error(f"[Scheduler] IGPostsEnrichmentJob failed: {e}")
+run_venue_catalog_refresh_job = make_job(
+    "venue_catalog_refresh",
+    start_log="[Scheduler] Running VenueFilterMultiLocationJob",
+    done_log="[Scheduler] VenueFilterMultiLocationJob completed",
+    error_label="VenueFilterMultiLocationJob",
+    run=lambda c: c.venues_refresher_service.refresh_venues_by_filter_for_default_locations(
+        fetch_and_cache_live=True
+    ),
+)
 
 
-async def run_menu_photo_enrichment_job():
-    """Background job: Fetch menu photos from Google Maps via Apify and store on S3."""
-    job_name = "menu_photo_enrichment"
-    logger.info("[Scheduler] Running MenuPhotoEnrichmentJob")
-    start_time = time.perf_counter()
-
-    if container.menu_photo_enrichment_service is None:
-        logger.warning(
-            "[Scheduler] MenuPhotoEnrichmentJob skipped: "
-            "Menu photo enrichment not configured"
-        )
-        return
-
-    try:
-        await container.menu_photo_enrichment_service.enrich_all_venues()
-        duration = time.perf_counter() - start_time
-        BACKGROUND_JOB_DURATION_SECONDS.labels(job_name=job_name).observe(duration)
-        BACKGROUND_JOB_RUNS_TOTAL.labels(job_name=job_name, status="success").inc()
-        BACKGROUND_JOB_LAST_RUN_TIMESTAMP.labels(job_name=job_name).set_to_current_time()
-        logger.info("[Scheduler] MenuPhotoEnrichmentJob completed")
-    except Exception as e:
-        duration = time.perf_counter() - start_time
-        BACKGROUND_JOB_DURATION_SECONDS.labels(job_name=job_name).observe(duration)
-        BACKGROUND_JOB_RUNS_TOTAL.labels(job_name=job_name, status="error").inc()
-        logger.error(f"[Scheduler] MenuPhotoEnrichmentJob failed: {e}")
+run_live_forecast_refresh_job = make_job(
+    "live_forecast_refresh",
+    start_log="[Scheduler] Running LiveForecastRefreshJob",
+    done_log="[Scheduler] LiveForecastRefreshJob completed",
+    error_label="LiveForecastRefreshJob",
+    run=lambda c: c.venues_refresher_service.refresh_live_forecasts_for_all_venues(),
+)
 
 
-async def run_menu_extraction_job():
-    """Background job: Extract structured menu data from photos using OpenAI GPT-4o."""
-    job_name = "menu_extraction"
-    logger.info("[Scheduler] Running MenuExtractionJob")
-    start_time = time.perf_counter()
-
-    if container.menu_extraction_service is None:
-        logger.warning(
-            "[Scheduler] MenuExtractionJob skipped: "
-            "Menu extraction not configured"
-        )
-        return
-
-    try:
-        await container.menu_extraction_service.extract_all_venues()
-        duration = time.perf_counter() - start_time
-        BACKGROUND_JOB_DURATION_SECONDS.labels(job_name=job_name).observe(duration)
-        BACKGROUND_JOB_RUNS_TOTAL.labels(job_name=job_name, status="success").inc()
-        BACKGROUND_JOB_LAST_RUN_TIMESTAMP.labels(job_name=job_name).set_to_current_time()
-        logger.info("[Scheduler] MenuExtractionJob completed")
-    except Exception as e:
-        duration = time.perf_counter() - start_time
-        BACKGROUND_JOB_DURATION_SECONDS.labels(job_name=job_name).observe(duration)
-        BACKGROUND_JOB_RUNS_TOTAL.labels(job_name=job_name, status="error").inc()
-        logger.error(f"[Scheduler] MenuExtractionJob failed: {e}")
+run_weekly_forecast_refresh_job = make_job(
+    "weekly_forecast_refresh",
+    start_log="[Scheduler] Running WeeklyForecastRefreshJob (Cron: Sunday 00:00)",
+    done_log="[Scheduler] WeeklyForecastRefreshJob completed",
+    error_label="WeeklyForecastRefreshJob",
+    run=lambda c: c.venues_refresher_service.refresh_weekly_forecasts_for_all_venues(),
+)
 
 
-async def run_vibe_classifier_job():
-    """Background job: Classify venue vibes from photos using OpenAI Vision."""
-    job_name = "vibe_classifier"
-    logger.info("[Scheduler] Running VibeClassifierJob")
-    start_time = time.perf_counter()
-
-    if container.vibe_classifier_service is None:
-        logger.warning(
-            "[Scheduler] VibeClassifierJob skipped: "
-            "Vibe classifier not configured"
-        )
-        return
-
-    try:
-        await container.vibe_classifier_service.classify_all_venues()
-        duration = time.perf_counter() - start_time
-        BACKGROUND_JOB_DURATION_SECONDS.labels(job_name=job_name).observe(duration)
-        BACKGROUND_JOB_RUNS_TOTAL.labels(job_name=job_name, status="success").inc()
-        BACKGROUND_JOB_LAST_RUN_TIMESTAMP.labels(job_name=job_name).set_to_current_time()
-        logger.info("[Scheduler] VibeClassifierJob completed")
-    except Exception as e:
-        duration = time.perf_counter() - start_time
-        BACKGROUND_JOB_DURATION_SECONDS.labels(job_name=job_name).observe(duration)
-        BACKGROUND_JOB_RUNS_TOTAL.labels(job_name=job_name, status="error").inc()
-        logger.error(f"[Scheduler] VibeClassifierJob failed: {e}")
+run_google_places_enrichment_job = make_job(
+    # Enriches vibe attributes + business status, soft-deprecating permanently
+    # closed venues.
+    "google_places_enrichment",
+    start_log="[Scheduler] Running GooglePlacesEnrichmentJob",
+    done_log="[Scheduler] GooglePlacesEnrichmentJob completed",
+    error_label="GooglePlacesEnrichmentJob",
+    service_attr="google_places_enrichment_service",
+    disabled_log="[Scheduler] GooglePlacesEnrichmentJob skipped: "
+    "Google Places API not configured",
+    run=lambda c: c.google_places_enrichment_service.enrich_all_venues(),
+)
 
 
-async def run_redis_projection_job():
-    """Background job: re-assert the Redis serving projection from RDS.
+run_photo_enrichment_job = make_job(
+    "photo_enrichment",
+    start_log="[Scheduler] Running PhotoEnrichmentJob",
+    done_log="[Scheduler] PhotoEnrichmentJob completed",
+    error_label="PhotoEnrichmentJob",
+    service_attr="photo_enrichment_service",
+    disabled_log="[Scheduler] PhotoEnrichmentJob skipped: "
+    "Google Places API not configured",
+    run=lambda c: c.photo_enrichment_service.refresh_photos_for_venues(),
+)
 
-    B0 — runs OFF the serving event loop via run_in_executor. The projection body
-    is synchronous + blocking (SQLAlchemy + Redis); running it inline on the
-    AsyncIOScheduler loop would stall GET /v1/venues/nearby and /health for the
-    whole run (observed when a blocking projection stalled serving). The projector
-    removes venues deprecated in RDS (B1) and counts the photo cache TTL down
-    (B2). Runs whenever RDS is enabled (it is the sole Redis writer for pipeline
-    data).
-    """
-    job_name = "redis_projection"
-    if container is None:
-        return
-    logger.info("[Scheduler] Running RedisProjectionJob (off-loop)")
-    start_time = time.perf_counter()
-    try:
-        loop = asyncio.get_event_loop()
-        summary = await loop.run_in_executor(
-            None, container.redis_projection_service.rebuild_redis_from_rds
-        )
-        duration = time.perf_counter() - start_time
-        BACKGROUND_JOB_DURATION_SECONDS.labels(job_name=job_name).observe(duration)
-        BACKGROUND_JOB_RUNS_TOTAL.labels(job_name=job_name, status="success").inc()
-        BACKGROUND_JOB_LAST_RUN_TIMESTAMP.labels(job_name=job_name).set_to_current_time()
-        REDIS_PROJECTION_VENUES.set(summary.get("venues", 0))
-        if summary.get("removed"):
-            REDIS_PROJECTION_DEPRECATED_REMOVED_TOTAL.inc(summary["removed"])
-        logger.info(f"[Scheduler] RedisProjectionJob completed: {summary}")
-    except Exception as e:
-        duration = time.perf_counter() - start_time
-        BACKGROUND_JOB_DURATION_SECONDS.labels(job_name=job_name).observe(duration)
-        BACKGROUND_JOB_RUNS_TOTAL.labels(job_name=job_name, status="error").inc()
-        logger.error(f"[Scheduler] RedisProjectionJob failed: {e}")
+
+run_instagram_enrichment_job = make_job(
+    "instagram_enrichment",
+    start_log="[Scheduler] Running InstagramEnrichmentJob",
+    done_log="[Scheduler] InstagramEnrichmentJob completed",
+    error_label="InstagramEnrichmentJob",
+    service_attr="instagram_enrichment_service",
+    disabled_log="[Scheduler] InstagramEnrichmentJob skipped: "
+    "Apify API not configured",
+    run=lambda c: c.instagram_enrichment_service.enrich_all_venues(),
+)
+
+
+run_ig_posts_enrichment_job = make_job(
+    "ig_posts_enrichment",
+    start_log="[Scheduler] Running IGPostsEnrichmentJob",
+    done_log="[Scheduler] IGPostsEnrichmentJob completed",
+    error_label="IGPostsEnrichmentJob",
+    service_attr="instagram_posts_enrichment_service",
+    disabled_log="[Scheduler] IGPostsEnrichmentJob skipped: "
+    "Apify API not configured",
+    run=lambda c: c.instagram_posts_enrichment_service.enrich_all_venues(),
+)
+
+
+run_menu_photo_enrichment_job = make_job(
+    "menu_photo_enrichment",
+    start_log="[Scheduler] Running MenuPhotoEnrichmentJob",
+    done_log="[Scheduler] MenuPhotoEnrichmentJob completed",
+    error_label="MenuPhotoEnrichmentJob",
+    service_attr="menu_photo_enrichment_service",
+    disabled_log="[Scheduler] MenuPhotoEnrichmentJob skipped: "
+    "Menu photo enrichment not configured",
+    run=lambda c: c.menu_photo_enrichment_service.enrich_all_venues(),
+)
+
+
+run_menu_extraction_job = make_job(
+    "menu_extraction",
+    start_log="[Scheduler] Running MenuExtractionJob",
+    done_log="[Scheduler] MenuExtractionJob completed",
+    error_label="MenuExtractionJob",
+    service_attr="menu_extraction_service",
+    disabled_log="[Scheduler] MenuExtractionJob skipped: "
+    "Menu extraction not configured",
+    run=lambda c: c.menu_extraction_service.extract_all_venues(),
+)
+
+
+run_vibe_classifier_job = make_job(
+    "vibe_classifier",
+    start_log="[Scheduler] Running VibeClassifierJob",
+    done_log="[Scheduler] VibeClassifierJob completed",
+    error_label="VibeClassifierJob",
+    service_attr="vibe_classifier_service",
+    disabled_log="[Scheduler] VibeClassifierJob skipped: "
+    "Vibe classifier not configured",
+    run=lambda c: c.vibe_classifier_service.classify_all_venues(),
+)
+
+
+async def _project_redis_from_rds(c) -> dict:
+    """Run the projection body OFF the serving event loop (B0): it is synchronous
+    + blocking (SQLAlchemy + Redis); running it inline on the AsyncIOScheduler
+    loop would stall GET /v1/venues/nearby and /health for the whole run. The
+    projector removes venues deprecated in RDS (B1) and counts the photo cache
+    TTL down (B2). It is the sole Redis writer for pipeline data."""
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(
+        None, c.redis_projection_service.rebuild_redis_from_rds
+    )
+
+
+def _record_projection_metrics(summary: dict) -> None:
+    """Emit the projection-specific gauges after the shared job metrics (B1/B2)."""
+    REDIS_PROJECTION_VENUES.set(summary.get("venues", 0))
+    if summary.get("removed"):
+        REDIS_PROJECTION_DEPRECATED_REMOVED_TOTAL.inc(summary["removed"])
+
+
+run_redis_projection_job = make_job(
+    "redis_projection",
+    start_log="[Scheduler] Running RedisProjectionJob (off-loop)",
+    done_log=lambda summary: f"[Scheduler] RedisProjectionJob completed: {summary}",
+    error_label="RedisProjectionJob",
+    run=_project_redis_from_rds,
+    require_container=True,
+    on_success=_record_projection_metrics,
+)
 
 
 def register_refresh_jobs(scheduler, settings: Settings):
@@ -353,48 +294,49 @@ def register_refresh_jobs(scheduler, settings: Settings):
     # Job 1: Venue catalog refresh (discovery) — only when discovery is enabled.
     # Discovery spends BestTime's monthly unique-venue cap, so it is off by
     # default (see settings.discovery_enabled).
-    if settings.discovery_enabled:
-        scheduler.add_job(
-            run_venue_catalog_refresh_job,
-            trigger=IntervalTrigger(minutes=settings.venues_catalog_refresh_minutes),
-            id="venue_catalog_refresh",
-            name="Venue Catalog Refresh (Multi-Location VenueFilter)",
-            replace_existing=True,
-        )
-        logger.info(
+    schedule(
+        scheduler,
+        enabled=settings.discovery_enabled,
+        func=run_venue_catalog_refresh_job,
+        trigger=IntervalTrigger(minutes=settings.venues_catalog_refresh_minutes),
+        id="venue_catalog_refresh",
+        name="Venue Catalog Refresh (Multi-Location VenueFilter)",
+        enabled_log=(
             f"[Scheduler] Scheduled venue catalog refresh every "
             f"{settings.venues_catalog_refresh_minutes} minutes"
-        )
-    else:
-        logger.info(
+        ),
+        disabled_log=(
             "[Scheduler] Venue catalog discovery disabled "
             "(discovery_enabled=false); Job 1 not scheduled"
-        )
+        ),
+    )
 
-    # Job 2: Live forecast refresh
-    scheduler.add_job(
-        run_live_forecast_refresh_job,
+    # Job 2: Live forecast refresh (always scheduled)
+    schedule(
+        scheduler,
+        enabled=True,
+        func=run_live_forecast_refresh_job,
         trigger=IntervalTrigger(minutes=settings.venues_live_refresh_minutes),
         id="live_forecast_refresh",
         name="Live Forecast Refresh",
-        replace_existing=True,
-    )
-    logger.info(
-        f"[Scheduler] Scheduled live forecast refresh every "
-        f"{settings.venues_live_refresh_minutes} minutes"
+        enabled_log=(
+            f"[Scheduler] Scheduled live forecast refresh every "
+            f"{settings.venues_live_refresh_minutes} minutes"
+        ),
     )
 
-    # Job 3: Weekly forecast refresh
-    scheduler.add_job(
-        run_weekly_forecast_refresh_job,
+    # Job 3: Weekly forecast refresh (always scheduled)
+    schedule(
+        scheduler,
+        enabled=True,
+        func=run_weekly_forecast_refresh_job,
         trigger=CronTrigger.from_crontab(settings.weekly_forecast_cron),
         id="weekly_forecast_refresh",
         name="Weekly Forecast Refresh (Sunday 00:00)",
-        replace_existing=True,
-    )
-    logger.info(
-        f"[Scheduler] Scheduled weekly forecast refresh with cron: "
-        f"{settings.weekly_forecast_cron}"
+        enabled_log=(
+            f"[Scheduler] Scheduled weekly forecast refresh with cron: "
+            f"{settings.weekly_forecast_cron}"
+        ),
     )
 
 
@@ -413,36 +355,36 @@ def start_background_jobs(settings: Settings):
         scheduler=scheduler,
         default_minutes=settings.venues_live_refresh_minutes,
     )
-    scheduler.add_job(
-        refresh_interval_watcher.run,
+    schedule(
+        scheduler,
+        enabled=True,
+        func=refresh_interval_watcher.run,
         trigger=IntervalTrigger(seconds=WATCH_INTERVAL_SECONDS),
         id="refresh_interval_watch",
         name="Live Refresh Interval Watch",
-        replace_existing=True,
-    )
-    logger.info(
-        f"[Scheduler] Scheduled live refresh interval watch every "
-        f"{WATCH_INTERVAL_SECONDS} seconds"
+        enabled_log=(
+            f"[Scheduler] Scheduled live refresh interval watch every "
+            f"{WATCH_INTERVAL_SECONDS} seconds"
+        ),
     )
 
     # Job 4: Google Places enrichment (only if enabled and configured)
-    if settings.google_places_enrichment_enabled and settings.google_places_api_key:
-        scheduler.add_job(
-            run_google_places_enrichment_job,
-            trigger=CronTrigger.from_crontab(settings.google_places_enrichment_cron),
-            id="google_places_enrichment",
-            name="Google Places Enrichment (Daily 3 AM)",
-            replace_existing=True,
-        )
-        logger.info(
+    schedule(
+        scheduler,
+        enabled=bool(settings.google_places_enrichment_enabled and settings.google_places_api_key),
+        func=run_google_places_enrichment_job,
+        trigger=CronTrigger.from_crontab(settings.google_places_enrichment_cron),
+        id="google_places_enrichment",
+        name="Google Places Enrichment (Daily 3 AM)",
+        enabled_log=(
             f"[Scheduler] Scheduled Google Places enrichment with cron: "
             f"{settings.google_places_enrichment_cron}"
-        )
-    else:
-        logger.info(
+        ),
+        disabled_log=(
             "[Scheduler] Google Places enrichment disabled "
             "(missing API key or disabled in config)"
-        )
+        ),
+    )
 
     # Job 5 (RETIRED): the catalog-wide photo pre-bake is intentionally NOT
     # scheduled. Photos are now resolved ON DEMAND per venue (fresh, keyless CDN
@@ -456,114 +398,119 @@ def start_background_jobs(settings: Settings):
     # compatibility.
 
     # Job 6: Instagram enrichment (only if enabled and configured)
-    if settings.instagram_enrichment_enabled and settings.apify_api_token:
-        scheduler.add_job(
-            run_instagram_enrichment_job,
-            trigger=CronTrigger.from_crontab(settings.instagram_enrichment_cron),
-            id="instagram_enrichment",
-            name="Instagram Enrichment (Weekly)",
-            replace_existing=True,
-        )
-        logger.info(
+    schedule(
+        scheduler,
+        enabled=bool(settings.instagram_enrichment_enabled and settings.apify_api_token),
+        func=run_instagram_enrichment_job,
+        trigger=CronTrigger.from_crontab(settings.instagram_enrichment_cron),
+        id="instagram_enrichment",
+        name="Instagram Enrichment (Weekly)",
+        enabled_log=(
             f"[Scheduler] Scheduled Instagram enrichment with cron: "
             f"{settings.instagram_enrichment_cron}"
-        )
-    else:
-        logger.info(
+        ),
+        disabled_log=(
             "[Scheduler] Instagram enrichment disabled "
             "(INSTAGRAM_ENRICHMENT_ENABLED=false or missing Apify API token)"
-        )
+        ),
+    )
 
     # Job 10: IG posts enrichment (only if enabled and configured)
-    if settings.ig_posts_enrichment_enabled and settings.apify_api_token:
-        scheduler.add_job(
-            run_ig_posts_enrichment_job,
-            trigger=CronTrigger.from_crontab(settings.ig_posts_enrichment_cron),
-            id="ig_posts_enrichment",
-            name="Instagram Posts Enrichment (Weekly)",
-            replace_existing=True,
-        )
-        logger.info(
+    schedule(
+        scheduler,
+        enabled=bool(settings.ig_posts_enrichment_enabled and settings.apify_api_token),
+        func=run_ig_posts_enrichment_job,
+        trigger=CronTrigger.from_crontab(settings.ig_posts_enrichment_cron),
+        id="ig_posts_enrichment",
+        name="Instagram Posts Enrichment (Weekly)",
+        enabled_log=(
             f"[Scheduler] Scheduled IG posts enrichment with cron: "
             f"{settings.ig_posts_enrichment_cron}"
-        )
-    else:
-        logger.info(
+        ),
+        disabled_log=(
             "[Scheduler] IG posts enrichment disabled "
             "(IG_POSTS_ENRICHMENT_ENABLED=false or missing Apify API token)"
-        )
+        ),
+    )
 
     # Job 7: Menu photo enrichment (only if enabled and configured)
-    if settings.menu_enrichment_enabled and container.menu_photo_enrichment_service is not None:
-        scheduler.add_job(
-            run_menu_photo_enrichment_job,
-            trigger=CronTrigger.from_crontab(settings.menu_enrichment_cron),
-            id="menu_photo_enrichment",
-            name=f"Menu Photo Enrichment (limit={settings.menu_enrichment_limit})",
-            replace_existing=True,
-        )
-        logger.info(
+    schedule(
+        scheduler,
+        enabled=bool(
+            settings.menu_enrichment_enabled
+            and container.menu_photo_enrichment_service is not None
+        ),
+        func=run_menu_photo_enrichment_job,
+        trigger=CronTrigger.from_crontab(settings.menu_enrichment_cron),
+        id="menu_photo_enrichment",
+        name=f"Menu Photo Enrichment (limit={settings.menu_enrichment_limit})",
+        enabled_log=(
             f"[Scheduler] Scheduled menu photo enrichment with cron: "
             f"{settings.menu_enrichment_cron}"
-        )
-    else:
-        logger.info(
+        ),
+        disabled_log=(
             "[Scheduler] Menu photo enrichment disabled "
             "(MENU_ENRICHMENT_ENABLED=false or missing dependencies)"
-        )
+        ),
+    )
 
     # Job 8: Menu extraction (only if enabled and configured)
-    if settings.menu_extraction_enabled and container.menu_extraction_service is not None:
-        scheduler.add_job(
-            run_menu_extraction_job,
-            trigger=CronTrigger.from_crontab(settings.menu_extraction_cron),
-            id="menu_extraction",
-            name="Menu Data Extraction (OpenAI GPT-4o)",
-            replace_existing=True,
-        )
-        logger.info(
+    schedule(
+        scheduler,
+        enabled=bool(
+            settings.menu_extraction_enabled
+            and container.menu_extraction_service is not None
+        ),
+        func=run_menu_extraction_job,
+        trigger=CronTrigger.from_crontab(settings.menu_extraction_cron),
+        id="menu_extraction",
+        name="Menu Data Extraction (OpenAI GPT-4o)",
+        enabled_log=(
             f"[Scheduler] Scheduled menu extraction with cron: "
             f"{settings.menu_extraction_cron}"
-        )
-    else:
-        logger.info(
+        ),
+        disabled_log=(
             "[Scheduler] Menu extraction disabled "
             "(MENU_EXTRACTION_ENABLED=false or missing dependencies)"
-        )
+        ),
+    )
 
     # Job 9: Vibe classifier (only if enabled and configured)
-    if settings.vibe_classifier_enabled and container.vibe_classifier_service is not None:
-        scheduler.add_job(
-            run_vibe_classifier_job,
-            trigger=CronTrigger.from_crontab(settings.vibe_classifier_cron),
-            id="vibe_classifier",
-            name="Vibe Classifier (AI Photo Analysis)",
-            replace_existing=True,
-        )
-        logger.info(
+    schedule(
+        scheduler,
+        enabled=bool(
+            settings.vibe_classifier_enabled
+            and container.vibe_classifier_service is not None
+        ),
+        func=run_vibe_classifier_job,
+        trigger=CronTrigger.from_crontab(settings.vibe_classifier_cron),
+        id="vibe_classifier",
+        name="Vibe Classifier (AI Photo Analysis)",
+        enabled_log=(
             f"[Scheduler] Scheduled vibe classifier with cron: "
             f"{settings.vibe_classifier_cron}"
-        )
-    else:
-        logger.info(
+        ),
+        disabled_log=(
             "[Scheduler] Vibe classifier disabled "
             "(VIBE_CLASSIFIER_ENABLED=false or missing dependencies)"
-        )
+        ),
+    )
 
     # Job 11: Redis projection (decoupling) — off-loop projector that re-asserts
     # the Redis serving projection from RDS, removes venues deprecated in RDS (B1),
     # and counts the photo cache TTL down (B2). It is the sole Redis writer for
-    # pipeline data.
-    scheduler.add_job(
-        run_redis_projection_job,
+    # pipeline data. Always scheduled.
+    schedule(
+        scheduler,
+        enabled=True,
+        func=run_redis_projection_job,
         trigger=IntervalTrigger(minutes=settings.redis_projection_minutes),
         id="redis_projection",
         name="Redis Projection (RDS -> Redis, off-loop)",
-        replace_existing=True,
-    )
-    logger.info(
-        f"[Scheduler] Scheduled Redis projection every "
-        f"{settings.redis_projection_minutes} minutes (off-loop)"
+        enabled_log=(
+            f"[Scheduler] Scheduled Redis projection every "
+            f"{settings.redis_projection_minutes} minutes (off-loop)"
+        ),
     )
 
     # Start scheduler
@@ -591,7 +538,7 @@ async def startup_essential(settings: Settings):
     logger.info("[Main] Handler injected successfully")
 
     # Inject dependencies for debug router
-    set_debug_dependencies(container.redis_venue_dao, container.google_places_api)
+    set_debug_dependencies(container.pipeline_repository, container.google_places_api)
 
     # Inject container for admin trigger router
     set_admin_container(container)

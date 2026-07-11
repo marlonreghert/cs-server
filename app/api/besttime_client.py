@@ -195,6 +195,83 @@ class BestTimeAPIClient:
                 pass
         return float(2**attempt)
 
+    async def _send_with_retry(
+        self,
+        method: str,
+        url: str,
+        *,
+        params: Optional[dict],
+        endpoint: str,
+        json_body: Optional[dict] = None,
+        timeout: Optional[float] = None,
+        retry_429: bool = False,
+        stop_retry_on: Optional[Callable[[httpx.Response], bool]] = None,
+        retry_log_suffix: str = "",
+    ) -> httpx.Response:
+        """Send the request, applying the bounded, Retry-After-aware 429 retry.
+
+        The single retry loop shared by `_request` (search-family reads, via
+        ``retry_429``) and `add_venue_to_account` (the create, via ``timeout`` +
+        ``stop_retry_on``), so the two can no longer drift. Returns the final
+        `httpx.Response`; the caller owns all response parsing, ``raise_for_status``,
+        and success/error result metrics + logs. Transport errors from
+        ``client.request`` propagate to the caller's own except blocks unchanged.
+
+        Args:
+            timeout: per-call timeout passed to ``client.request`` (omitted when
+                None so read calls inherit the client-wide default).
+            retry_429: retry HTTP 429 answers (bounded, Retry-After-aware).
+            stop_retry_on: predicate on a 429 response that, when true, breaks the
+                loop and surfaces that response as terminal (never retried) — the
+                monthly-cap 429 for the create.
+            retry_log_suffix: appended after ``<method> <endpoint>`` in the retry
+                warning (e.g. " (create)"), preserving the original messages.
+
+        Raises:
+            BestTimeRateLimitedError: bounded 429 retries were exhausted.
+        """
+        request_kwargs: dict = {
+            "method": method,
+            "url": url,
+            "params": params,
+            "json": json_body,
+            "headers": {"Content-Type": "application/json"},
+        }
+        if timeout is not None:
+            request_kwargs["timeout"] = timeout
+
+        attempt = 0
+        waited = 0.0
+        while True:
+            response = await self.client.request(**request_kwargs)
+            if not (retry_429 and response.status_code == 429):
+                break
+            # A 429 the predicate claims as terminal (e.g. the monthly-cap body)
+            # flows to the caller's normal parse path — never retried.
+            if stop_retry_on is not None and stop_retry_on(response):
+                break
+            wait = self._retry_after_seconds(response, attempt)
+            if attempt >= 2 or waited + wait > self.rate_max_wait_seconds:
+                BESTTIME_SEARCH_RATE_LIMIT_TOTAL.labels(
+                    endpoint=endpoint, event="rejected"
+                ).inc()
+                BESTTIME_API_CALLS_TOTAL.labels(endpoint=endpoint, status="error").inc()
+                raise BestTimeRateLimitedError(
+                    f"BestTime kept answering 429 on {method} {endpoint}"
+                )
+            BESTTIME_SEARCH_RATE_LIMIT_TOTAL.labels(
+                endpoint=endpoint, event="retry_429"
+            ).inc()
+            logger.warning(
+                f"[BestTimeAPIClient] 429 on {method} {endpoint}{retry_log_suffix}; "
+                f"retrying in {wait:.1f}s (attempt {attempt + 1}/3)"
+            )
+            await asyncio.sleep(wait)
+            waited += wait
+            attempt += 1
+
+        return response
+
     async def _request(
         self,
         method: str,
@@ -229,39 +306,14 @@ class BestTimeAPIClient:
         start_time = time.perf_counter()
 
         try:
-            attempt = 0
-            waited = 0.0
-            while True:
-                response = await self.client.request(
-                    method=method,
-                    url=url,
-                    params=params,
-                    json=json_body,
-                    headers={"Content-Type": "application/json"},
-                )
-                if not (retry_429 and response.status_code == 429):
-                    break
-                wait = self._retry_after_seconds(response, attempt)
-                if attempt >= 2 or waited + wait > self.rate_max_wait_seconds:
-                    BESTTIME_SEARCH_RATE_LIMIT_TOTAL.labels(
-                        endpoint=endpoint, event="rejected"
-                    ).inc()
-                    BESTTIME_API_CALLS_TOTAL.labels(
-                        endpoint=endpoint, status="error"
-                    ).inc()
-                    raise BestTimeRateLimitedError(
-                        f"BestTime kept answering 429 on {method} {endpoint}"
-                    )
-                BESTTIME_SEARCH_RATE_LIMIT_TOTAL.labels(
-                    endpoint=endpoint, event="retry_429"
-                ).inc()
-                logger.warning(
-                    f"[BestTimeAPIClient] 429 on {method} {endpoint}; "
-                    f"retrying in {wait:.1f}s (attempt {attempt + 1}/3)"
-                )
-                await asyncio.sleep(wait)
-                waited += wait
-                attempt += 1
+            response = await self._send_with_retry(
+                method,
+                url,
+                params=params,
+                endpoint=endpoint,
+                json_body=json_body,
+                retry_429=retry_429,
+            )
 
             logger.debug(f"[BestTimeAPIClient] Response status: {response.status_code}")
 
@@ -451,44 +503,20 @@ class BestTimeAPIClient:
         await self._search_limiter.acquire(endpoint)
         start_time = time.perf_counter()
         try:
-            attempt = 0
-            waited = 0.0
-            while True:
-                response = await self.client.request(
-                    method="POST",
-                    url=url,
-                    params=query_params,
-                    headers={"Content-Type": "application/json"},
-                    timeout=self.add_venue_timeout,
-                )
-                if response.status_code != 429:
-                    break
-                # A 429 carrying the monthly-cap message is a terminal quota
-                # state, not a transient rate limit: let it flow to the normal
-                # parse path so the handler surfaces the cap legibly.
-                if _looks_like_monthly_cap_body(response):
-                    break
-                wait = self._retry_after_seconds(response, attempt)
-                if attempt >= 2 or waited + wait > self.rate_max_wait_seconds:
-                    BESTTIME_SEARCH_RATE_LIMIT_TOTAL.labels(
-                        endpoint=endpoint, event="rejected"
-                    ).inc()
-                    BESTTIME_API_CALLS_TOTAL.labels(
-                        endpoint=endpoint, status="error"
-                    ).inc()
-                    raise BestTimeRateLimitedError(
-                        f"BestTime kept answering 429 on POST {endpoint}"
-                    )
-                BESTTIME_SEARCH_RATE_LIMIT_TOTAL.labels(
-                    endpoint=endpoint, event="retry_429"
-                ).inc()
-                logger.warning(
-                    f"[BestTimeAPIClient] 429 on POST {endpoint} (create); "
-                    f"retrying in {wait:.1f}s (attempt {attempt + 1}/3)"
-                )
-                await asyncio.sleep(wait)
-                waited += wait
-                attempt += 1
+            # Same bounded 429 retry as the reads (shared _send_with_retry), plus
+            # two create-specific deltas: the per-call add-venue timeout, and the
+            # monthly-cap 429 treated as terminal (never retried) so it flows to
+            # the parse path below and the handler can surface the cap legibly.
+            response = await self._send_with_retry(
+                "POST",
+                url,
+                params=query_params,
+                endpoint=endpoint,
+                timeout=self.add_venue_timeout,
+                retry_429=True,
+                stop_retry_on=_looks_like_monthly_cap_body,
+                retry_log_suffix=" (create)",
+            )
             duration = time.perf_counter() - start_time
             BESTTIME_API_CALL_DURATION_SECONDS.labels(endpoint=endpoint).observe(duration)
 
