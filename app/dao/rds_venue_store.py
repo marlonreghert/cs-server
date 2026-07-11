@@ -16,7 +16,7 @@ import logging
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import create_engine, text
+from sqlalchemy import bindparam, create_engine, text
 
 from app.dao.venue_row import split_venue_for_storage
 
@@ -269,6 +269,75 @@ class RdsVenueStore:
         with self.engine.connect() as conn:
             return [dict(r) for r in conn.execute(text(_VENUE_SELECT)).mappings()]
 
+    # ── bulk per-table readers (projector rebuild, P1) ─────────────────────────
+    # Replace the projector's former per-venue read loop (~18 SQL queries per
+    # venue per cycle) with one query per table for the whole servable id set.
+    # Same row shape as the single-row readers (get_venue / get_enrichment /
+    # get_live_forecast) so the projector's per-venue projection logic is
+    # unchanged — only the source of each `row`/`rec` moves from a per-call
+    # SELECT to a dict lookup on a prefetched map.
+    def get_venues_by_ids(self, venue_ids: list[str]) -> dict[str, dict]:
+        """Venue rows (scalars + address + residual `extra`) for an id set, keyed
+        by venue_id — the bulk counterpart of `get_venue`. Empty input short-
+        circuits without a query."""
+        if not venue_ids:
+            return {}
+        stmt = text(_VENUE_SELECT + " WHERE v.venue_id IN :ids").bindparams(
+            bindparam("ids", expanding=True)
+        )
+        with self.engine.connect() as conn:
+            rows = conn.execute(stmt, {"ids": list(venue_ids)}).mappings()
+            return {row["venue_id"]: dict(row) for row in rows}
+
+    def get_enrichment_bulk(self, table_key: str, venue_ids: list[str]) -> dict[str, dict]:
+        """Non-deleted enrichment rows of `table_key` for an id set, keyed by
+        venue_id — the bulk counterpart of `get_enrichment` for the (non-weekly)
+        enrichment tables. Soft-deleted rows are excluded (a caller checking
+        `bulk_map.get(venue_id)` sees the same "absent" result as the single-row
+        reader's `rec.get("deleted_at") is None` gate). Empty input short-
+        circuits without a query."""
+        if not venue_ids:
+            return {}
+        schema, table, _ = _ENRICHMENT[table_key]
+        stmt = text(
+            f"SELECT venue_id, payload, deleted_at, updated_at FROM {schema}.{table} "
+            "WHERE deleted_at IS NULL AND venue_id IN :ids"
+        ).bindparams(bindparam("ids", expanding=True))
+        with self.engine.connect() as conn:
+            rows = conn.execute(stmt, {"ids": list(venue_ids)}).mappings()
+            return {row["venue_id"]: dict(row) for row in rows}
+
+    def get_weekly_bulk(self, venue_ids: list[str]) -> dict[str, dict[int, dict]]:
+        """All 7 non-deleted weekly-forecast rows for an id set, keyed by
+        venue_id -> day_int -> {payload, deleted_at, updated_at} — the bulk
+        counterpart of 7x `get_enrichment(besttime.weekly_forecast, "id#day")`.
+        Empty input short-circuits without a query."""
+        if not venue_ids:
+            return {}
+        stmt = text(
+            "SELECT venue_id, day_int, payload, deleted_at, updated_at "
+            "FROM besttime.weekly_forecast "
+            "WHERE deleted_at IS NULL AND venue_id IN :ids"
+        ).bindparams(bindparam("ids", expanding=True))
+        out: dict[str, dict[int, dict]] = {}
+        with self.engine.connect() as conn:
+            for row in conn.execute(stmt, {"ids": list(venue_ids)}).mappings():
+                out.setdefault(row["venue_id"], {})[row["day_int"]] = dict(row)
+        return out
+
+    def get_live_bulk(self, venue_ids: list[str]) -> dict[str, dict]:
+        """Live-forecast rows for an id set, keyed by venue_id — the bulk
+        counterpart of `get_live_forecast`. Empty input short-circuits without a
+        query."""
+        if not venue_ids:
+            return {}
+        stmt = text(
+            "SELECT venue_id, payload FROM besttime.live_forecast WHERE venue_id IN :ids"
+        ).bindparams(bindparam("ids", expanding=True))
+        with self.engine.connect() as conn:
+            rows = conn.execute(stmt, {"ids": list(venue_ids)}).mappings()
+            return {row["venue_id"]: dict(row) for row in rows}
+
     # ── pipeline cache-freshness gating from RDS ───────────────────────────────
     def list_fresh_enrichment_venue_ids(self, table_key, max_age_seconds=None) -> list[str]:
         """Venue ids whose enrichment of `table_key` is present (not soft-deleted)
@@ -341,6 +410,8 @@ class RdsVenueStore:
                 self._history(conn, "besttime", "weekly_forecast", venue_id, payload, "upsert")
 
     def soft_delete_enrichment(self, table_key, venue_id, *, history) -> None:
+        if table_key == _WEEKLY:
+            return self._soft_delete_weekly(venue_id, history)
         schema, table, _ = _ENRICHMENT[table_key]
         with self.engine.begin() as conn:
             conn.execute(text(
@@ -348,6 +419,23 @@ class RdsVenueStore:
             ), {"v": venue_id})
             if history:
                 self._history(conn, schema, table, venue_id, {}, "soft_delete")
+
+    def _soft_delete_weekly(self, composite_id, history) -> None:
+        # Weekly forecast is keyed by the composite (venue_id, day_int) and is
+        # NOT in _ENRICHMENT, so it needs the same "<venue_id>#<day>" split that
+        # _upsert_weekly / get_enrichment use — without this branch a weekly
+        # table_key KeyErrors on _ENRICHMENT[table_key]. No production caller
+        # currently soft-deletes a weekly row (VenueRepository._DELETE_TABLE has
+        # no weekly entry), so this closes a latent gap rather than fixing a live
+        # crash, and keeps the three weekly special-cases symmetric.
+        venue_id, _, day = composite_id.partition("#")
+        with self.engine.begin() as conn:
+            conn.execute(text(
+                "UPDATE besttime.weekly_forecast SET deleted_at=now() "
+                "WHERE venue_id=:v AND day_int=:d"
+            ), {"v": venue_id, "d": int(day)})
+            if history:
+                self._history(conn, "besttime", "weekly_forecast", venue_id, {}, "soft_delete")
 
     def get_enrichment(self, table_key, venue_id) -> Optional[dict]:
         if table_key == _WEEKLY:

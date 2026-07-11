@@ -45,7 +45,7 @@ def _svc():
 
 
 @router.post("/favorites")
-async def add_favorite(req: EngagementRequest):
+def add_favorite(req: EngagementRequest):
     try:
         _svc().add_favorite(req.user_id, req.venue_id)
     except HTTPException:
@@ -57,7 +57,7 @@ async def add_favorite(req: EngagementRequest):
 
 
 @router.delete("/favorites")
-async def remove_favorite(req: EngagementRequest):
+def remove_favorite(req: EngagementRequest):
     try:
         _svc().remove_favorite(req.user_id, req.venue_id)
     except HTTPException:
@@ -69,7 +69,7 @@ async def remove_favorite(req: EngagementRequest):
 
 
 @router.post("/hot-likes")
-async def add_hot_like(req: EngagementRequest):
+def add_hot_like(req: EngagementRequest):
     try:
         _svc().add_hot_like(req.user_id, req.venue_id, ttl_seconds=req.ttl_seconds)
     except HTTPException:
@@ -81,7 +81,7 @@ async def add_hot_like(req: EngagementRequest):
 
 
 @router.post("/sessions")
-async def record_session(req: SessionRequest):
+def record_session(req: SessionRequest):
     try:
         _svc().record_session(req.user_id)
     except HTTPException:
@@ -97,7 +97,7 @@ async def record_session(req: SessionRequest):
 
 
 @router.delete("/hot-likes")
-async def remove_hot_like(req: EngagementRequest):
+def remove_hot_like(req: EngagementRequest):
     try:
         _svc().remove_hot_like(req.user_id, req.venue_id)
     except HTTPException:

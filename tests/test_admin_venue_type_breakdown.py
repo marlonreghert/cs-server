@@ -53,8 +53,9 @@ def _reset_container():
     admin_trigger_router.set_container(None)
 
 
-@pytest.mark.asyncio
-async def test_breakdown_counts_and_sorts_descending_via_redis_venue_dao_fallback():
+# P4: venue_type_breakdown is now a plain `def` (FastAPI threadpool), not a
+# coroutine — call it directly rather than awaiting it.
+def test_breakdown_counts_and_sorts_descending_via_redis_venue_dao_fallback():
     # Production container shape: only `redis_venue_dao` is set, never
     # `venue_dao`. A regression to the old `_container.venue_dao` access would
     # AttributeError here (SimpleNamespace has no such attribute).
@@ -72,7 +73,7 @@ async def test_breakdown_counts_and_sorts_descending_via_redis_venue_dao_fallbac
     )
     admin_trigger_router.set_container(SimpleNamespace(redis_venue_dao=dao))
 
-    response = await admin_trigger_router.venue_type_breakdown()
+    response = admin_trigger_router.venue_type_breakdown()
 
     assert response["total_venues"] == 4
     assert response["with_google_type"] == 2
@@ -82,23 +83,21 @@ async def test_breakdown_counts_and_sorts_descending_via_redis_venue_dao_fallbac
     assert response["google_places_types"] == {"bar": 2}
 
 
-@pytest.mark.asyncio
-async def test_breakdown_buckets_missing_venue_type_as_unknown():
+def test_breakdown_buckets_missing_venue_type_as_unknown():
     dao = _BreakdownDao(venues=[_venue("ven_untyped", venue_type=None)])
     admin_trigger_router.set_container(SimpleNamespace(redis_venue_dao=dao))
 
-    response = await admin_trigger_router.venue_type_breakdown()
+    response = admin_trigger_router.venue_type_breakdown()
 
     assert response["besttime_types"] == {"unknown": 1}
     assert response["with_google_type"] == 0
     assert response["google_places_types"] == {}
 
 
-@pytest.mark.asyncio
-async def test_breakdown_raises_503_when_container_not_initialized():
+def test_breakdown_raises_503_when_container_not_initialized():
     admin_trigger_router.set_container(None)
 
     with pytest.raises(HTTPException) as exc_info:
-        await admin_trigger_router.venue_type_breakdown()
+        admin_trigger_router.venue_type_breakdown()
 
     assert exc_info.value.status_code == 503

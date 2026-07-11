@@ -2,8 +2,6 @@
 import importlib
 from types import SimpleNamespace
 
-import pytest
-
 from app.models import Venue
 
 admin_trigger_router = importlib.import_module("app.routers.admin_trigger_router")
@@ -33,43 +31,48 @@ class _InventoryDao:
     def list_all_venues(self):
         return [self.active, self.deprecated]
 
-    def get_live_forecast(self, venue_id):
-        return object() if venue_id == "closed" else None
+    # Bulk (P4) methods: list_venue_inventory computes cache flags from a
+    # single bulk presence lookup per key family for the whole page, so the
+    # test double implements the bulk shape directly (dict keyed by the ids
+    # that are "present"), matching RedisVenueDAO's real bulk getters.
+    def get_live_forecasts_bulk(self, venue_ids):
+        return {vid: object() for vid in venue_ids if vid == "closed"}
 
-    def get_week_raw_forecast(self, venue_id, day_int):
-        return object() if venue_id == "closed" and day_int == 0 else None
+    def get_week_raw_forecasts_bulk(self, venue_ids, day_int):
+        return {vid: object() for vid in venue_ids if vid == "closed" and day_int == 0}
 
-    def get_vibe_attributes(self, venue_id):
-        return object() if venue_id == "closed" else None
+    def get_vibe_attributes_bulk(self, venue_ids):
+        return {vid: object() for vid in venue_ids if vid == "closed"}
 
-    def get_venue_photos(self, venue_id):
-        return [{"url": "x"}] if venue_id == "closed" else None
+    def get_venue_photos_bulk(self, venue_ids):
+        return {vid: [{"url": "x"}] for vid in venue_ids if vid == "closed"}
 
-    def get_opening_hours(self, venue_id):
-        return object() if venue_id == "closed" else None
+    def get_opening_hours_bulk(self, venue_ids):
+        return {vid: object() for vid in venue_ids if vid == "closed"}
 
-    def get_venue_instagram(self, venue_id):
-        return object() if venue_id == "closed" else None
+    def get_venue_instagram_bulk(self, venue_ids):
+        return {vid: object() for vid in venue_ids if vid == "closed"}
 
-    def get_venue_reviews(self, venue_id):
-        return object() if venue_id == "closed" else None
+    def get_venue_reviews_bulk(self, venue_ids):
+        return {vid: object() for vid in venue_ids if vid == "closed"}
 
-    def get_venue_menu_photos(self, venue_id):
-        return object() if venue_id == "closed" else None
+    def get_venue_menu_photos_bulk(self, venue_ids):
+        return {vid: object() for vid in venue_ids if vid == "closed"}
 
-    def get_venue_menu_data(self, venue_id):
-        return object() if venue_id == "closed" else None
+    def get_venue_menu_data_bulk(self, venue_ids):
+        return {vid: object() for vid in venue_ids if vid == "closed"}
 
-    def get_venue_vibe_profile(self, venue_id):
-        return object() if venue_id == "closed" else None
+    def get_venue_vibe_profile_bulk(self, venue_ids):
+        return {vid: object() for vid in venue_ids if vid == "closed"}
 
 
-@pytest.mark.asyncio
-async def test_admin_inventory_lists_deprecated_with_cache_flags():
+def test_admin_inventory_lists_deprecated_with_cache_flags():
     dao = _InventoryDao()
     admin_trigger_router.set_container(SimpleNamespace(venue_dao=dao))
 
-    response = await admin_trigger_router.list_venue_inventory(
+    # P4: list_venue_inventory is now a plain `def` (FastAPI threadpool), not
+    # a coroutine — call it directly rather than awaiting it.
+    response = admin_trigger_router.list_venue_inventory(
         status="deprecated",
         q=None,
         limit=50,

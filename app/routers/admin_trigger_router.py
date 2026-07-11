@@ -655,32 +655,49 @@ async def delete_admin_config(key: str):
     return {"status": "ok", "key": key}
 
 
-def _venue_cache_flags(venue_dao, venue_id: str) -> dict[str, bool]:
-    weekly_forecast = False
+def _venue_cache_flags_bulk(venue_dao, venue_ids: list[str]) -> dict[str, dict[str, bool]]:
+    """Cache-presence flags for a whole page of venues (P4): one round-trip per
+    key family for the whole page instead of ~16 reads PER venue.
+
+    `weekly_forecast` keeps its original "any of the 7 days" semantics (a
+    7-MGET union) — distinct from `update_data_quality_metrics`'s Monday-only
+    gauge, which must not be unified with this one."""
+    if not venue_ids:
+        return {}
+
+    weekly_present: set[str] = set()
     for day_int in range(7):
-        try:
-            if venue_dao.get_week_raw_forecast(venue_id, day_int) is not None:
-                weekly_forecast = True
-                break
-        except Exception:
-            continue
+        weekly_present |= set(venue_dao.get_week_raw_forecasts_bulk(venue_ids, day_int))
+
+    live_map = venue_dao.get_live_forecasts_bulk(venue_ids)
+    vibe_map = venue_dao.get_vibe_attributes_bulk(venue_ids)
+    photos_map = venue_dao.get_venue_photos_bulk(venue_ids)
+    hours_map = venue_dao.get_opening_hours_bulk(venue_ids)
+    ig_map = venue_dao.get_venue_instagram_bulk(venue_ids)
+    reviews_map = venue_dao.get_venue_reviews_bulk(venue_ids)
+    menu_photos_map = venue_dao.get_venue_menu_photos_bulk(venue_ids)
+    menu_data_map = venue_dao.get_venue_menu_data_bulk(venue_ids)
+    vibe_profile_map = venue_dao.get_venue_vibe_profile_bulk(venue_ids)
 
     return {
-        "live_forecast": venue_dao.get_live_forecast(venue_id) is not None,
-        "weekly_forecast": weekly_forecast,
-        "vibe_attributes": venue_dao.get_vibe_attributes(venue_id) is not None,
-        "photos": bool(venue_dao.get_venue_photos(venue_id)),
-        "opening_hours": venue_dao.get_opening_hours(venue_id) is not None,
-        "instagram": venue_dao.get_venue_instagram(venue_id) is not None,
-        "reviews": venue_dao.get_venue_reviews(venue_id) is not None,
-        "menu_photos": venue_dao.get_venue_menu_photos(venue_id) is not None,
-        "menu_data": venue_dao.get_venue_menu_data(venue_id) is not None,
-        "vibe_profile": venue_dao.get_venue_vibe_profile(venue_id) is not None,
+        vid: {
+            "live_forecast": vid in live_map,
+            "weekly_forecast": vid in weekly_present,
+            "vibe_attributes": vid in vibe_map,
+            "photos": bool(photos_map.get(vid)),
+            "opening_hours": vid in hours_map,
+            "instagram": vid in ig_map,
+            "reviews": vid in reviews_map,
+            "menu_photos": vid in menu_photos_map,
+            "menu_data": vid in menu_data_map,
+            "vibe_profile": vid in vibe_profile_map,
+        }
+        for vid in venue_ids
     }
 
 
 @router.get("/venues/inventory")
-async def list_venue_inventory(
+def list_venue_inventory(
     status: str = Query("active", pattern="^(active|deprecated|all)$"),
     q: Optional[str] = Query(None, description="Case-insensitive venue name/address search"),
     limit: int = Query(50, ge=1, le=250),
@@ -720,6 +737,12 @@ async def list_venue_inventory(
         next_offset = offset + limit
         next_cursor = str(next_offset) if next_offset < len(venues) else None
 
+        # P4: one bulk presence lookup per key family for the whole page,
+        # instead of ~16 reads PER page venue.
+        cache_flags_by_id = _venue_cache_flags_bulk(
+            venue_dao, [venue.venue_id for venue in page]
+        )
+
         return {
             "items": [
                 {
@@ -735,7 +758,7 @@ async def list_venue_inventory(
                         venue.deprecated_at.isoformat() if venue.deprecated_at else None
                     ),
                     "google_business_status": venue.google_business_status,
-                    "cache_flags": _venue_cache_flags(venue_dao, venue.venue_id),
+                    "cache_flags": cache_flags_by_id.get(venue.venue_id, {}),
                 }
                 for venue in page
             ],
@@ -787,7 +810,7 @@ async def recount_discovery_points():
 
 
 @router.get("/venue-type-breakdown")
-async def venue_type_breakdown():
+def venue_type_breakdown():
     """Get a breakdown of all venues by BestTime type and Google Places type."""
     # Resolve the DAO through the shared helper (raises 503 when the container is
     # not initialized). The container exposes the RDS-backed repository as
