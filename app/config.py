@@ -139,6 +139,16 @@ class Settings(BaseSettings):
     live_freshness_refresh_factor: float = 2.0
     live_freshness_min_minutes: int = 5
 
+    # Serve-time attachment of the previous business day's weekly forecast
+    # (plans/260710_prev-day-weekly-forecast.md). Under the BestTime day_raw
+    # convention, day index 0 is 6 AM of that calendar day, so a moment between
+    # 00:00-05:59 lives in the PREVIOUS day's array. When enabled, /v1/venues/
+    # nearby additionally attaches `weekly_forecast_prev` (besttime_day_int - 1
+    # mod 7) so readers can select by the 6 AM anchor. Additive and ignored by
+    # readers that don't know about it; the flag exists purely as an instant
+    # rollback lever, default on.
+    weekly_forecast_prev_day_enabled: bool = True
+
     # Venue discovery (catalog refresh + venue-filter). Disabled by default so
     # discovery does not spend BestTime's scarce monthly unique-venue cap; the
     # bounded live/weekly refresh and the manual add-venue flow are the only

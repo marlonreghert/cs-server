@@ -1,4 +1,3 @@
-@wip
 Feature: Attach the previous business day's weekly forecast for nighttime serving
   Readers of /v1/venues/nearby must be able to resolve busyness correctly
   between 00:00 and 05:59 local time. Under the BestTime day_raw convention,

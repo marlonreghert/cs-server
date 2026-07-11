@@ -5,6 +5,7 @@ from typing import Optional
 
 import pytz
 
+from app.config import settings
 from app.dao import RedisVenueDAO
 from app.models.venue_category import resolve_venue_display
 
@@ -224,11 +225,18 @@ class VenueHandler:
         # forward offset (0=today) and wrap modulo 7 — the weekly forecast is
         # weekly-periodic, so an out-of-week offset resolves to the same weekday.
         besttime_day_int = (python_weekday + (target_day_offset or 0)) % 7
+        # Previous business day under the BestTime 6 AM day anchor (day_raw
+        # index 0 = 6 AM of besttime_day_int's day; indices 18-23 = the
+        # following calendar morning). Cheap to compute unconditionally so the
+        # log line always shows it regardless of the flag.
+        prev_day_int = (besttime_day_int - 1) % 7
 
         logger.info(
             f"[VenueHandler] Current Recife time: {recife_time.strftime('%Y-%m-%d %H:%M:%S %Z')}, "
             f"Python weekday: {python_weekday}, target_day_offset: {target_day_offset}, "
-            f"BestTime day_int: {besttime_day_int}"
+            f"BestTime day_int: {besttime_day_int}, prev_day_int: {prev_day_int} "
+            f"(weekly_forecast_prev "
+            f"{'enabled' if settings.weekly_forecast_prev_day_enabled else 'disabled'})"
         )
 
         # P2: one MGET for every venue's live forecast + one MGET for every
@@ -245,15 +253,30 @@ class VenueHandler:
             logger.debug(f"[VenueHandler] Bulk weekly forecast fetch failed: {e}")
             weekly_map = {}
 
+        # Previous-day weekly forecast, fetched the same bulk way and gated by
+        # the rollback flag. Flag off skips the fetch entirely (no DAO call) so
+        # disabling it is a true no-op, not just a response no-op.
+        weekly_prev_map: dict[str, WeekRawDay] = {}
+        if settings.weekly_forecast_prev_day_enabled:
+            try:
+                weekly_prev_map = self.venue_dao.get_week_raw_forecasts_bulk(
+                    ids, prev_day_int
+                )
+            except Exception as e:
+                logger.debug(f"[VenueHandler] Bulk weekly-forecast-prev fetch failed: {e}")
+                weekly_prev_map = {}
+
         for v in venues:
             lf: Optional[LiveForecastResponse] = live_map.get(v.venue_id)
             raw_day: Optional[WeekRawDay] = weekly_map.get(v.venue_id)
+            raw_prev_day: Optional[WeekRawDay] = weekly_prev_map.get(v.venue_id)
 
             out.append(
                 VenueWithLive(
                     venue=v,
                     live_forecast=lf,
                     weekly_forecast=raw_day,
+                    weekly_forecast_prev=raw_prev_day,
                 )
             )
 
@@ -544,6 +567,7 @@ class VenueHandler:
                     rating=m.venue.rating,
                     reviews=m.venue.reviews,
                     weekly_forecast=m.weekly_forecast,
+                    weekly_forecast_prev=m.weekly_forecast_prev,
                     vibe_labels=vibe_labels,
                     venue_summary=venue_summary,
                     venue_photos=venue_photos,

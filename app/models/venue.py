@@ -161,6 +161,11 @@ class VenueWithLive(BaseModel):
     venue: Venue
     live_forecast: Optional[Any] = None  # LiveForecastResponse type (defined in live_forecast.py)
     weekly_forecast: Optional[Any] = None  # WeekRawDay type (defined in week_raw.py)
+    # Previous business day's WeekRawDay (besttime_day_int - 1 mod 7), attached
+    # when settings.weekly_forecast_prev_day_enabled so readers can resolve
+    # busyness for 00:00-05:59 under the BestTime 6 AM day anchor. Additive;
+    # None when the flag is off or the previous day has no stored forecast.
+    weekly_forecast_prev: Optional[Any] = None
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -190,6 +195,8 @@ class MinifiedVenue(BaseModel):
     venue_foot_traffic_forecast: Optional[list[FootTrafficForecast]] = None
     venue_live_busyness: Optional[int] = None
     weekly_forecast: Optional[Any] = None
+    # See VenueWithLive.weekly_forecast_prev.
+    weekly_forecast_prev: Optional[Any] = None
 
     # Vibe attributes (atmosphere labels)
     vibe_labels: Optional[list[str]] = None

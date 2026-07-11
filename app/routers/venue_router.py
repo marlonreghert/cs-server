@@ -3,7 +3,10 @@ import logging
 from typing import Optional, Union
 
 from fastapi import APIRouter, HTTPException, Query
+from fastapi.encoders import jsonable_encoder
+from fastapi.responses import JSONResponse
 
+from app.config import settings
 from app.models import VenueWithLive, MinifiedVenue
 
 logger = logging.getLogger(__name__)
@@ -56,8 +59,21 @@ def get_venues_nearby(
     """Get nearby venues with live and weekly forecasts."""
     try:
         handler = get_handler()
-        return handler.get_venues_nearby(
+        result = handler.get_venues_nearby(
             lat, lon, radius, verbose, target_day_offset=target_day_offset
+        )
+        if settings.weekly_forecast_prev_day_enabled:
+            return result
+        # Flag off: the handler never attaches weekly_forecast_prev (stays at
+        # its model default of None), but a declared Optional field still
+        # serializes as an explicit `null` by default. Strip the key entirely
+        # here so the response is byte-for-byte identical to the pre-flag
+        # shape (rollback path) rather than merely null-valued.
+        return JSONResponse(
+            content=[
+                jsonable_encoder(item, exclude={"weekly_forecast_prev"})
+                for item in result
+            ]
         )
     except HTTPException:
         raise
