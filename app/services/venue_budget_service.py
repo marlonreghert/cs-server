@@ -209,10 +209,14 @@ class VenueBudgetService:
             manual_add_available=max(0, settings.monthly_quota - new_value),
         )
 
-    def release_manual_slot(self) -> None:
-        """Release a previously reserved slot. Idempotent at the floor."""
-        year_month = self._year_month_provider()
-        self.dao.decrement_month(year_month, 1)
+    def release_manual_slot(self, year_month: Optional[str] = None) -> None:
+        """Release a previously reserved slot. Idempotent at the floor.
+
+        Defaults to the current month (the reserve→release round-trip for a
+        manual add always happens within one request, same month). Pass an
+        explicit `year_month` to release a PRIOR month's slot instead."""
+        ym = year_month or self._year_month_provider()
+        self.dao.decrement_month(ym, 1)
 
     # ----- discovery counter recording -----------------------------------
 
@@ -221,9 +225,16 @@ class VenueBudgetService:
         year_month = self._year_month_provider()
         return self.dao.increment_month(year_month, 1)
 
-    def release_discovery_slot(self) -> None:
+    def release_discovery_slot(self, year_month: Optional[str] = None) -> None:
         """Return one slot recorded via record_new_venue_from_discovery — the
         mirror of release_manual_slot, used when a geo-fallback link is undone.
-        Clamped at the floor by the DAO."""
-        year_month = self._year_month_provider()
-        self.dao.decrement_month(year_month, 1)
+        Clamped at the floor by the DAO.
+
+        Defaults to the current month. `undo_geo_link` passes the venue's
+        RECORDED `geo_linked_year_month` provenance instead — a geo-link
+        created last month must decrement LAST month's counter, not the
+        current one, so an undo across a month rollover still balances the
+        ledger against the month BestTime actually charged.
+        """
+        ym = year_month or self._year_month_provider()
+        self.dao.decrement_month(ym, 1)

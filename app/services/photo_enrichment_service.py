@@ -11,6 +11,7 @@ from app.metrics import (
     VENUE_PHOTO_RESOLVE_TOTAL,
     VENUE_PHOTO_RESOLVE_DURATION_SECONDS,
 )
+from app.services.photo_category import category_for_url
 
 logger = logging.getLogger(__name__)
 
@@ -188,6 +189,7 @@ class PhotoEnrichmentService:
             return []
 
         photos = photos or []
+        self._attach_categories(venue_id, photos)
         self._cache_fresh(venue_id, photos)
         VENUE_PHOTO_RESOLVE_TOTAL.labels(result="resolved" if photos else "empty").inc()
         VENUE_PHOTO_RESOLVE_DURATION_SECONDS.observe(time.perf_counter() - start)
@@ -195,6 +197,23 @@ class PhotoEnrichmentService:
             f"[PhotoEnrichmentService] Resolved {len(photos)} fresh photos for {venue_id}"
         )
         return photos
+
+    def _attach_categories(self, venue_id: str, photos: list[dict]) -> None:
+        """Best-effort: tag each photo with its vibe-profile evidence category
+        (shared derivation with the legacy embedded-photo path — see
+        app/services/photo_category.py). Never raises: a missing/unavailable
+        vibe profile just leaves photos uncategorized (no `category` key)."""
+        try:
+            vibe_profile = self.venue_dao.get_venue_vibe_profile(venue_id)
+        except Exception as e:
+            logger.debug(f"[PhotoEnrichmentService] No vibe profile for {venue_id}: {e}")
+            return
+        if not vibe_profile:
+            return
+        for p in photos:
+            category = category_for_url(vibe_profile, p.get("url"))
+            if category:
+                p["category"] = category
 
     async def refresh_photos_for_venues(
         self,

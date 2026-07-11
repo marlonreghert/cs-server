@@ -8,6 +8,7 @@ import pytz
 from app.config import settings
 from app.dao import RedisVenueDAO
 from app.models.venue_category import resolve_venue_display
+from app.services.photo_category import TYPE_TO_CATEGORY
 
 # BestTime day_int → Portuguese weekday name (BestTime: 0=Mon, 6=Sun)
 _BESTTIME_DAY_NAMES = [
@@ -485,15 +486,10 @@ class VenueHandler:
 
             # Sort venue photos by category priority + vibe_appeal from AI classification
             if venue_photos and vibe_profile and vibe_profile.evidence_photos:
-                # Map AI photo types to user-friendly categories and sort priority
-                _TYPE_TO_CATEGORY = {
-                    "interior": "Ambiente", "exterior": "Ambiente", "crowd": "Ambiente",
-                    "food": "Comida", "drink": "Bebida",
-                    "event": "Evento",
-                    "menu": "Outro", "selfie": "Outro", "other": "Outro",
-                    # Backward compat for old food_drink type
-                    "food_drink": "Comida",
-                }
+                # Map AI photo types to user-friendly categories (shared with the
+                # on-demand fresh-photos path — app/services/photo_category.py)
+                # and sort priority.
+                _TYPE_TO_CATEGORY = TYPE_TO_CATEGORY
                 _CATEGORY_PRIORITY = {
                     "Ambiente": 4, "Comida": 3, "Bebida": 2,
                     "Evento": 1, "Outro": 0,

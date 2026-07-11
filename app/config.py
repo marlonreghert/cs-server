@@ -211,6 +211,20 @@ class Settings(BaseSettings):
     # remain active so live busyness can continue to refresh.
     remove_temporarily_closed_venues: bool = True  # Enabled by default when enrichment runs
 
+    # Business-status recheck for ALREADY-enriched venues: a cheap, status-only
+    # Google Details call (fields mask "businessStatus" only — no vibe/opening
+    # hours/reviews refetch) so a venue that has gone CLOSED_PERMANENTLY /
+    # CLOSED_TEMPORARILY since its first enrichment is detected (and, when
+    # remove_permanently_closed_venues is set, deprecated + dropped from live
+    # refresh selection) without waiting for an explicit force_refresh sweep.
+    # LOCKED DEFAULT: False. Flipping this on spends one Details call per
+    # already-enriched venue on the FIRST recheck-enabled nightly run (and every
+    # run thereafter) — a deliberate, human-approved decision, never a silent
+    # side effect of deploying this code. business_status_recheck_limit bounds
+    # how many venues one run rechecks (0 = no bound, i.e. the full catalog).
+    business_status_recheck_enabled: bool = False
+    business_status_recheck_limit: int = 0
+
     # Photo enrichment configuration (uses Google Places API)
     photo_enrichment_enabled: bool = False  # Disabled by default, set PHOTO_ENRICHMENT_ENABLED=true to enable
     photo_enrichment_on_startup: bool = False  # If True, fetch photos on startup

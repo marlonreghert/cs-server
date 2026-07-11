@@ -31,6 +31,11 @@ class VenuePhoto(BaseModel):
     """A single resolved venue photo: a fresh, keyless CDN URL + optional author."""
     url: str
     author_name: Optional[str] = None
+    # Vibe-classifier category tag (Ambiente/Comida/Bebida/Evento/Outro), when
+    # the vibe profile has a matching evidence photo for this URL. Additive:
+    # absent for photos with no known category, so existing readers are
+    # unaffected until they opt in.
+    category: Optional[str] = None
 
 
 class ResolvePhotosResponse(BaseModel):
@@ -40,6 +45,13 @@ class ResolvePhotosResponse(BaseModel):
 @router.post(
     "/venues/{venue_id}/photos/resolve",
     response_model=ResolvePhotosResponse,
+    # Omit unset fields so `category` appears ONLY when the vibe profile
+    # supplied one — the response then stays byte-identical to the cached
+    # fresh-photo list (which carries `category` only when present), and the
+    # additive field never surfaces as `category: null` noise for readers that
+    # do not consume it. url/author_name are always explicitly set below, so
+    # they are unaffected.
+    response_model_exclude_unset=True,
     summary="Resolve a venue's photos on demand",
     description=(
         "Resolve a single venue's Google Places photos on demand into FRESH, "
@@ -67,6 +79,12 @@ async def resolve_venue_photos(venue_id: str) -> ResolvePhotosResponse:
     photos = await service.resolve_and_cache_fresh_photos(venue_id)
     return ResolvePhotosResponse(
         venue_photos=[
-            VenuePhoto(url=p["url"], author_name=p.get("author_name")) for p in photos
+            # Pass `category` only when present so response_model_exclude_unset
+            # drops it otherwise (keeping the response == the cache).
+            VenuePhoto(
+                url=p["url"], author_name=p.get("author_name"),
+                **({"category": p["category"]} if p.get("category") else {}),
+            )
+            for p in photos
         ]
     )

@@ -22,6 +22,10 @@ test-unit:
 		tests/test_services.py \
 		tests/test_handlers.py \
 		tests/test_google_places_soft_delete.py \
+		tests/test_google_places_instagram_validation.py \
+		tests/test_google_places_search_place_id.py \
+		tests/test_job_lock.py \
+		tests/test_batch_add_service.py \
 		tests/test_admin_venue_inventory.py \
 		tests/test_instagram_enrichment_service.py \
 		tests/test_instagram_validator.py \
