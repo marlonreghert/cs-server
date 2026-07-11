@@ -456,13 +456,23 @@ class RdsVenueStore:
             return dict(row) if row else None
 
     # ── live busyness (current-state) ─────────────────────────────────────────
-    def upsert_live_forecast(self, venue_id, payload) -> None:
+    def upsert_live_forecast(self, venue_id, payload) -> bool:
+        """Upsert the live-forecast snapshot, no-op when `venue_id` is absent
+        from venues.venue instead of raising ForeignKeyViolation
+        (live_forecast_venue_id_fkey). The write is keyed off the live-forecast
+        payload's own venue_id (see VenueRepository.set_live_forecast), which is
+        not always guaranteed to match a currently-cataloged venue — an
+        INSERT...SELECT...WHERE EXISTS guard makes the write conditional so a
+        missing venue is a benign no-op rather than an exception. Returns True
+        when a row was written (inserted or updated), False when skipped."""
         with self.engine.begin() as conn:
-            conn.execute(text(
+            result = conn.execute(text(
                 "INSERT INTO besttime.live_forecast (venue_id, payload, updated_at) "
-                "VALUES (:v, CAST(:p AS jsonb), now()) "
+                "SELECT :v, CAST(:p AS jsonb), now() "
+                "WHERE EXISTS (SELECT 1 FROM venues.venue WHERE venue_id = :v) "
                 "ON CONFLICT (venue_id) DO UPDATE SET payload=excluded.payload, updated_at=now()"
             ), {"v": venue_id, "p": json.dumps(payload)})
+            return result.rowcount > 0
 
     def get_live_forecast(self, venue_id) -> Optional[dict]:
         with self.engine.connect() as conn:

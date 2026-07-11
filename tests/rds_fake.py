@@ -389,9 +389,15 @@ class InMemoryRdsVenueStore:
         )
 
     # ── live busyness (current-state, no history) ─────────────────────────────
-    def upsert_live_forecast(self, venue_id, payload) -> None:
+    def upsert_live_forecast(self, venue_id, payload) -> bool:
+        """Mirrors the real store's FK guard: no-op (return False) when
+        venue_id has no row in self.venues, instead of writing an orphaned
+        entry the real store's live_forecast_venue_id_fkey would reject."""
         self._guard()
+        if venue_id not in self.venues:
+            return False
         self.live_forecast[venue_id] = {"payload": copy.deepcopy(payload), "updated_at": _now()}
+        return True
 
     def get_live_forecast(self, venue_id) -> Optional[dict]:
         return self.live_forecast.get(venue_id)

@@ -3,6 +3,7 @@ import pytest
 from unittest.mock import Mock, AsyncMock, patch
 
 from app.services import VenuesRefresherService
+from app.metrics import LIVE_FORECAST_FETCH_RESULTS
 from app.models import (
     Venue,
     VenueFilterResponse,
@@ -288,11 +289,83 @@ class TestVenuesRefresherService:
             ),
         )
 
+        mock_venue_dao.set_live_forecast.return_value = True
+
+        cached_before = LIVE_FORECAST_FETCH_RESULTS.labels(result="cached")._value.get()
+
         await refresher_service._fetch_and_cache_live_forecasts(["v1"])
 
         # Should cache because status OK and available
         mock_venue_dao.set_live_forecast.assert_called_once()
         mock_venue_dao.delete_live_forecast.assert_not_called()
+        assert (
+            LIVE_FORECAST_FETCH_RESULTS.labels(result="cached")._value.get()
+            == cached_before + 1
+        )
+
+    @pytest.mark.asyncio
+    async def test_live_forecast_skipped_when_venue_dao_reports_absent(
+        self, refresher_service, mock_besttime_api, mock_venue_dao
+    ):
+        """FK-race guard: RdsVenueStore.upsert_live_forecast no-ops (returns
+        False) instead of raising when the venue is absent from venues.venue.
+        This must be counted as the benign 'skipped_venue_absent' outcome, NOT
+        'error', and must not raise."""
+        mock_besttime_api.get_live_forecast.return_value = LiveForecastResponse(
+            status="OK",
+            venue_info=VenueInfo(venue_id="v1"),
+            analysis=Analysis(
+                venue_live_busyness=75,
+                venue_live_busyness_available=True,
+            ),
+        )
+        mock_venue_dao.set_live_forecast.return_value = False
+
+        skipped_before = LIVE_FORECAST_FETCH_RESULTS.labels(
+            result="skipped_venue_absent"
+        )._value.get()
+        error_before = LIVE_FORECAST_FETCH_RESULTS.labels(result="error")._value.get()
+        cached_before = LIVE_FORECAST_FETCH_RESULTS.labels(result="cached")._value.get()
+
+        await refresher_service._fetch_and_cache_live_forecasts(["v1"])
+
+        mock_venue_dao.set_live_forecast.assert_called_once()
+        assert (
+            LIVE_FORECAST_FETCH_RESULTS.labels(result="skipped_venue_absent")._value.get()
+            == skipped_before + 1
+        )
+        assert LIVE_FORECAST_FETCH_RESULTS.labels(result="error")._value.get() == error_before
+        assert LIVE_FORECAST_FETCH_RESULTS.labels(result="cached")._value.get() == cached_before
+
+    @pytest.mark.asyncio
+    async def test_live_forecast_set_failure_still_counts_as_error(
+        self, refresher_service, mock_besttime_api, mock_venue_dao
+    ):
+        """A genuine SetLiveForecast failure (not the benign FK no-op) must keep
+        surfacing as the 'error' outcome — the FK-race fix must not swallow real
+        exceptions."""
+        mock_besttime_api.get_live_forecast.return_value = LiveForecastResponse(
+            status="OK",
+            venue_info=VenueInfo(venue_id="v1"),
+            analysis=Analysis(
+                venue_live_busyness=75,
+                venue_live_busyness_available=True,
+            ),
+        )
+        mock_venue_dao.set_live_forecast.side_effect = RuntimeError("boom")
+
+        error_before = LIVE_FORECAST_FETCH_RESULTS.labels(result="error")._value.get()
+        skipped_before = LIVE_FORECAST_FETCH_RESULTS.labels(
+            result="skipped_venue_absent"
+        )._value.get()
+
+        await refresher_service._fetch_and_cache_live_forecasts(["v1"])  # must not raise
+
+        assert LIVE_FORECAST_FETCH_RESULTS.labels(result="error")._value.get() == error_before + 1
+        assert (
+            LIVE_FORECAST_FETCH_RESULTS.labels(result="skipped_venue_absent")._value.get()
+            == skipped_before
+        )
 
     @pytest.mark.asyncio
     async def test_live_forecast_delete_when_status_not_ok(

@@ -141,8 +141,11 @@ class VenueRepository(RedisVenueDAO):
             _json(day), history=_HISTORY,
         )
 
-    def set_live_forecast(self, forecast) -> None:
-        self.rds_store.upsert_live_forecast(forecast.venue_info.venue_id, _json(forecast))
+    def set_live_forecast(self, forecast) -> bool:
+        """Returns True when the RDS row was written, False when the store
+        skipped the write because forecast.venue_info.venue_id has no row in
+        venues.venue (see RdsVenueStore.upsert_live_forecast)."""
+        return self.rds_store.upsert_live_forecast(forecast.venue_info.venue_id, _json(forecast))
 
     def delete_live_forecast(self, venue_id):
         self.rds_store.delete_live_forecast(venue_id)
