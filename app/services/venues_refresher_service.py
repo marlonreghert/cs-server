@@ -706,6 +706,30 @@ class VenuesRefresherService:
         logger.info(f"[VenuesRefresherService] Recount complete for {len(points)} points")
         return points
 
+    async def _discover_venues_at(
+        self, lat, lng, radius, effective_limit: int, fetch_and_cache_live: bool
+    ) -> int:
+        """Upsert the venues one VenueFilter discovery call returns at a point,
+        returning the count. Builds the standard discovery params (busy_min=0,
+        foot_traffic=both, own_venues_only=False, VENUE_TYPES). Raises on failure
+        so the caller records its own zero gauge + context-specific error log.
+
+        Shared inner body of the discovery-point and location refresh loops; each
+        caller keeps its distinct budget bookkeeping and log wording.
+        """
+        params = VenueFilterParams(
+            busy_min=0,
+            lat=lat,
+            lng=lng,
+            radius=radius,
+            foot_traffic="both",
+            limit=effective_limit,
+            own_venues_only=False,
+            types=VENUE_TYPES,
+        )
+        ids = await self.refresh_venues_data_by_venues_filter(params, fetch_and_cache_live)
+        return len(ids)
+
     async def _refresh_with_discovery_points(
         self,
         points: list[dict],
@@ -747,23 +771,11 @@ class VenuesRefresherService:
                 f"current={current}/{limit}, fetching up to {effective_limit}"
             )
 
-            params = VenueFilterParams(
-                busy_min=0,
-                lat=lat,
-                lng=lng,
-                radius=radius,
-                foot_traffic="both",
-                limit=effective_limit,
-                own_venues_only=False,
-                types=VENUE_TYPES,
-            )
-
             location_label = f"{lat:.4f},{lng:.4f}"
             try:
-                ids = await self.refresh_venues_data_by_venues_filter(
-                    params, fetch_and_cache_live
+                fetched_count = await self._discover_venues_at(
+                    lat, lng, radius, effective_limit, fetch_and_cache_live
                 )
-                fetched_count = len(ids)
                 logger.info(
                     f"[VenuesRefresherService] Discovery point '{point_id}': "
                     f"upserted {fetched_count} venues"
@@ -816,30 +828,19 @@ class VenuesRefresherService:
                 f"(Radius={loc.radius}, Limit={effective_limit})"
             )
 
-            params = VenueFilterParams(
-                busy_min=0,
-                lat=loc.lat,
-                lng=loc.lng,
-                radius=loc.radius,
-                foot_traffic="both",
-                limit=effective_limit,
-                own_venues_only=False,
-                types=VENUE_TYPES,
-            )
-
             location_label = f"{loc.lat:.4f},{loc.lng:.4f}"
             try:
-                ids = await self.refresh_venues_data_by_venues_filter(
-                    params, fetch_and_cache_live
+                fetched_count = await self._discover_venues_at(
+                    loc.lat, loc.lng, loc.radius, effective_limit, fetch_and_cache_live
                 )
                 logger.info(
-                    f"[VenuesRefresherService] Successfully upserted {len(ids)} venues "
+                    f"[VenuesRefresherService] Successfully upserted {fetched_count} venues "
                     f"for lat={loc.lat:.6f}, lng={loc.lng:.6f}"
                 )
-                REFRESH_VENUES_DISCOVERED.labels(location=location_label).set(len(ids))
-                total_inserted += len(ids)
+                REFRESH_VENUES_DISCOVERED.labels(location=location_label).set(fetched_count)
+                total_inserted += fetched_count
                 if remaining_budget >= 0:
-                    remaining_budget -= len(ids)
+                    remaining_budget -= fetched_count
             except Exception as e:
                 logger.error(
                     f"[VenuesRefresherService] VenueFilter refresh failed for "
