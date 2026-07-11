@@ -17,6 +17,47 @@ from app.models import (
 )
 
 
+def _bulk_from_single(single_mock):
+    """Adapter: bulk(ids) -> {id: value}, calling the per-item mock for each id
+    and skipping ids whose call raises or returns None.
+
+    VenueHandler calls the bulk (P2) DAO methods, not the single-item ones —
+    this lets each test keep configuring `dao.get_live_forecast.side_effect =
+    ...` / `.return_value = ...` per venue_id exactly as before the refactor
+    (including call_args_list assertions on the single-item mock), while the
+    handler transparently gets bulk dicts. The per-item try/except mirrors the
+    real bulk getters' per-item error tolerance (one bad item is dropped, not
+    fatal to the whole request).
+    """
+    def _call(ids):
+        out = {}
+        for vid in ids:
+            try:
+                val = single_mock(vid)
+            except Exception:
+                continue
+            if val is not None:
+                out[vid] = val
+        return out
+    return _call
+
+
+def _bulk_weekly_from_single(single_mock):
+    """Same adapter as `_bulk_from_single`, for the two-arg (venue_id, day_int)
+    weekly-forecast getter: bulk(ids, day_int) -> {id: value}."""
+    def _call(ids, day_int):
+        out = {}
+        for vid in ids:
+            try:
+                val = single_mock(vid, day_int)
+            except Exception:
+                continue
+            if val is not None:
+                out[vid] = val
+        return out
+    return _call
+
+
 @pytest.fixture
 def mock_venue_dao():
     """Create mock venue DAO."""
@@ -29,6 +70,18 @@ def mock_venue_dao():
     dao.get_venue_reviews.return_value = None
     dao.get_venue_vibe_profile.return_value = None
     dao.get_venue_menu_data.return_value = None
+    # Bulk (P2) methods: thin adapters over the single-item mocks above (and
+    # the per-venue ones tests configure directly), so VenueHandler's actual
+    # bulk DAO calls resolve the same way the old per-venue calls did.
+    dao.get_live_forecasts_bulk.side_effect = _bulk_from_single(dao.get_live_forecast)
+    dao.get_week_raw_forecasts_bulk.side_effect = _bulk_weekly_from_single(
+        dao.get_week_raw_forecast
+    )
+    dao.get_vibe_attributes_bulk.side_effect = _bulk_from_single(dao.get_vibe_attributes)
+    dao.get_venue_photos_bulk.side_effect = _bulk_from_single(dao.get_venue_photos)
+    dao.get_opening_hours_bulk.side_effect = _bulk_from_single(dao.get_opening_hours)
+    dao.get_venue_instagram_bulk.side_effect = _bulk_from_single(dao.get_venue_instagram)
+    dao.get_venue_vibe_profile_bulk.side_effect = _bulk_from_single(dao.get_venue_vibe_profile)
     return dao
 
 

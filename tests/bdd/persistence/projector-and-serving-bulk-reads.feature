@@ -1,4 +1,3 @@
-@wip
 Feature: Projector and serving bulk reads preserve outputs with bounded round-trips
   The Redis projection rebuild and the nearby-venues serving path must produce
   exactly the outputs they produce today while reading their inputs in bulk:

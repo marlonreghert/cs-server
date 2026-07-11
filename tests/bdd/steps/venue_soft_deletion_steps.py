@@ -331,13 +331,13 @@ def step_jobs_run(context):
 def step_admin_inventory(context, status):
     admin_trigger_router = importlib.import_module("app.routers.admin_trigger_router")
 
-    body = asyncio.run(
-        admin_trigger_router.list_venue_inventory(
-            status=status,
-            q=None,
-            limit=50,
-            cursor=None,
-        )
+    # P4: list_venue_inventory is now a plain `def` (FastAPI threadpool), not
+    # a coroutine — call it directly rather than via asyncio.run.
+    body = admin_trigger_router.list_venue_inventory(
+        status=status,
+        q=None,
+        limit=50,
+        cursor=None,
     )
     context.response = _BDDResponse(200, body)
 
@@ -592,13 +592,13 @@ def step_deprecated_hidden(context, venue_id):
 def step_deprecated_visible_admin(context, venue_id):
     admin_trigger_router = importlib.import_module("app.routers.admin_trigger_router")
 
-    body = asyncio.run(
-        admin_trigger_router.list_venue_inventory(
-            status="deprecated",
-            q=None,
-            limit=50,
-            cursor=None,
-        )
+    # P4: list_venue_inventory is now a plain `def` (FastAPI threadpool), not
+    # a coroutine — call it directly rather than via asyncio.run.
+    body = admin_trigger_router.list_venue_inventory(
+        status="deprecated",
+        q=None,
+        limit=50,
+        cursor=None,
     )
     response = _BDDResponse(200, body)
     assert response.status_code == 200, response.text

@@ -99,8 +99,26 @@ class RedisProjectionService:
             summary["geo_excluded"] = geo_excluded_count
         except Exception as e:
             logger.warning(f"[Rebuild] geo-excluded count failed: {e}")
+        # Bulk-prefetch every input the per-venue loop below needs, once per
+        # cycle (P1): 1 venue-rows query + 9 enrichment-table queries (the 8
+        # _REBUILD_MODELS tables + photos) + 1 weekly query + 1 live query = 12
+        # bulk reads total, independent of how many servable venues exist —
+        # replacing what was ~18 SQL queries PER VENUE. The per-venue projection
+        # logic below is unchanged; only the source of each row/rec moves from a
+        # per-call SELECT to a dict lookup on these prefetched maps.
+        venue_rows = self.rds_store.get_venues_by_ids(servable_ids)
+        enrichment_maps = {
+            table_key: self.rds_store.get_enrichment_bulk(table_key, servable_ids)
+            for table_key in _REBUILD_MODELS
+        }
+        photos_map = self.rds_store.get_enrichment_bulk(
+            "google_places.photos", servable_ids
+        )
+        weekly_map = self.rds_store.get_weekly_bulk(servable_ids)
+        live_map = self.rds_store.get_live_bulk(servable_ids)
+
         for venue_id in servable_ids:
-            row = self.rds_store.get_venue(venue_id)
+            row = venue_rows.get(venue_id)
             try:
                 venue = venue_from_row(row)  # Ex1: columns + residual, not payload
                 self.redis_only_dao.upsert_venue(venue)  # GEOADD + JSON
@@ -110,22 +128,18 @@ class RedisProjectionService:
                 logger.warning(f"[Rebuild] venue {venue_id} failed: {e}")
                 continue
             for table_key, (model_cls, setter) in _REBUILD_MODELS.items():
-                rec = self.rds_store.get_enrichment(table_key, venue_id)
-                if rec and rec.get("deleted_at") is None:
+                rec = enrichment_maps[table_key].get(venue_id)
+                if rec is not None:
                     obj = model_cls.model_validate(rec["payload"])
                     getattr(self.redis_only_dao, setter)(obj)
                     summary["enrichment"] += 1
-            self._project_photos(venue_id)
+            self._project_photos(venue_id, photos_map.get(venue_id))
             # weekly (keys stored as "<venue_id>#<day_int>")
-            for day_int in range(7):
-                wk = self.rds_store.get_enrichment(
-                    "besttime.weekly_forecast", f"{venue_id}#{day_int}"
+            for day_int, wk in weekly_map.get(venue_id, {}).items():
+                self.redis_only_dao.set_week_raw_forecast(
+                    venue_id, WeekRawDay.model_validate(wk["payload"])
                 )
-                if wk and wk.get("deleted_at") is None:
-                    self.redis_only_dao.set_week_raw_forecast(
-                        venue_id, WeekRawDay.model_validate(wk["payload"])
-                    )
-            live = self.rds_store.get_live_forecast(venue_id)
+            live = live_map.get(venue_id)
             if live is not None:
                 self.redis_only_dao.set_live_forecast(
                     LiveForecastResponse.model_validate(live["payload"])
@@ -160,13 +174,17 @@ class RedisProjectionService:
         logger.info(f"[Rebuild] {summary}")
         return summary
 
-    def _project_photos(self, venue_id: str) -> None:
+    def _project_photos(self, venue_id: str, rec: Optional[dict]) -> None:
         """B2: project photos with the REMAINING TTL (full − age) so repeated
         runs count the TTL down instead of re-stamping a fresh full TTL; drop
         photos aged past the TTL so stale Google URLs leave serving and the
-        refetch trigger fires."""
-        rec = self.rds_store.get_enrichment("google_places.photos", venue_id)
-        if not rec or rec.get("deleted_at") is not None:
+        refetch trigger fires.
+
+        `rec` is the prefetched (already deleted_at-IS-NULL-filtered) photos row
+        for this venue from the bulk enrichment map, or None when absent — the
+        same "absent" signal the single-row reader's `not rec or rec.get(...)
+        is not None` gate produced."""
+        if not rec:
             return
         full_ttl = self.redis_only_dao._resolve_photos_cache_ttl_seconds()
         age = _age_seconds(rec.get("updated_at"))

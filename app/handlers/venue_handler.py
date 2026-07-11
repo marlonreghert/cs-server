@@ -55,11 +55,16 @@ class VenueHandler:
         self.venue_dao = venue_dao
         self.admin_config_service = admin_config_service
 
-    def _derive_hours_from_forecast(self, venue_id: str) -> Optional[list[str]]:
+    def _derive_hours_from_forecast_bulk(
+        self, venue_id: str, weekly_by_day: dict[int, Optional[WeekRawDay]]
+    ) -> Optional[list[str]]:
         """Derive opening hours from BestTime weekly forecast data.
 
         Builds Portuguese-formatted hours strings from venue_open_close_v2
-        when Google Places hours are not available.
+        when Google Places hours are not available. Identical logic to the
+        original per-venue reader, but reads each day from a prefetched
+        `{day_int: WeekRawDay | None}` map (P2: bounded to one MGET per day
+        for the whole hours-fallback subset) instead of issuing its own GET.
 
         Returns:
             List of 7 strings like ["segunda-feira: 11:00 – 00:00", ...] or None
@@ -68,7 +73,7 @@ class VenueHandler:
         any_data = False
         try:
             for day_int in range(7):  # 0=Mon .. 6=Sun
-                raw_day = self.venue_dao.get_week_raw_forecast(venue_id, day_int)
+                raw_day = weekly_by_day.get(day_int)
                 day_name = _BESTTIME_DAY_NAMES[day_int]
                 if not raw_day:
                     descriptions.append(f"{day_name}: Fechado")
@@ -226,27 +231,23 @@ class VenueHandler:
             f"BestTime day_int: {besttime_day_int}"
         )
 
-        for v in venues:
-            # 1. Fetch live forecast
-            lf: Optional[LiveForecastResponse] = None
-            try:
-                lf = self.venue_dao.get_live_forecast(v.venue_id)
-            except Exception as e:
-                logger.debug(
-                    f"[VenueHandler] No live forecast for venue_id={v.venue_id}: {e}"
-                )
+        # P2: one MGET for every venue's live forecast + one MGET for every
+        # venue's current-day weekly forecast, instead of 2 GETs per venue.
+        ids = [v.venue_id for v in venues]
+        try:
+            live_map = self.venue_dao.get_live_forecasts_bulk(ids)
+        except Exception as e:
+            logger.debug(f"[VenueHandler] Bulk live forecast fetch failed: {e}")
+            live_map = {}
+        try:
+            weekly_map = self.venue_dao.get_week_raw_forecasts_bulk(ids, besttime_day_int)
+        except Exception as e:
+            logger.debug(f"[VenueHandler] Bulk weekly forecast fetch failed: {e}")
+            weekly_map = {}
 
-            # 2. Fetch weekly raw forecast for current day
-            raw_day: Optional[WeekRawDay] = None
-            try:
-                raw_day = self.venue_dao.get_week_raw_forecast(
-                    v.venue_id, besttime_day_int
-                )
-            except Exception as e:
-                logger.debug(
-                    f"[VenueHandler] No weekly forecast for venue_id={v.venue_id} "
-                    f"day {besttime_day_int}: {e}"
-                )
+        for v in venues:
+            lf: Optional[LiveForecastResponse] = live_map.get(v.venue_id)
+            raw_day: Optional[WeekRawDay] = weekly_map.get(v.venue_id)
 
             out.append(
                 VenueWithLive(
@@ -289,6 +290,58 @@ class VenueHandler:
         if verbose:
             # Verbose mode: return full structure
             return merged
+
+        # P2: bulk-prefetch every per-key-family enrichment this loop needs —
+        # one MGET per family for the whole result set, instead of 5 GETs per
+        # venue. Reviews/menu-data are NOT prefetched here: the code below that
+        # would use them only runs when verbose=True, but this branch is only
+        # reached when verbose=False (see the early return above), so those two
+        # reads are unreachable dead code today — preserved as-is (single-item
+        # calls, never executed) rather than "fixed" here; that's a separate,
+        # out-of-scope cleanup.
+        ids = [m.venue.venue_id for m in merged]
+        vibe_attrs_map = self.venue_dao.get_vibe_attributes_bulk(ids)
+        photos_map = self.venue_dao.get_venue_photos_bulk(ids)
+        opening_hours_map = self.venue_dao.get_opening_hours_bulk(ids)
+        instagram_map = self.venue_dao.get_venue_instagram_bulk(ids)
+        vibe_profile_map = self.venue_dao.get_venue_vibe_profile_bulk(ids)
+
+        # Google-hours pass: compute each venue's opening_hours/special_days/
+        # is_open_now/hours_source from the bulk map using the EXACT original
+        # per-venue logic. The BestTime hours-derivation fallback subset is then
+        # "venues whose computed opening_hours came back falsy" — identical by
+        # construction to the original per-venue `if not opening_hours:` gate,
+        # not a separately-reconstructed predicate that could drift from it
+        # (e.g. `has_hours()` true but `weekday_descriptions` empty still falls
+        # back, exactly as before).
+        google_hours_by_id: dict[str, tuple] = {}
+        for vid in ids:
+            opening_hours: Optional[list[str]] = None
+            special_days: Optional[list[str]] = None
+            is_open_now: Optional[bool] = None
+            hours_source: Optional[str] = None
+            try:
+                hours = opening_hours_map.get(vid)
+                if hours:
+                    opening_hours = hours.weekday_descriptions if hours.has_hours() else None
+                    special_days = hours.special_days
+                    is_open_now = hours.open_now
+                    if opening_hours:
+                        hours_source = "google"
+            except Exception as e:
+                logger.debug(f"[VenueHandler] No opening hours for {vid}: {e}")
+            google_hours_by_id[vid] = (opening_hours, special_days, is_open_now, hours_source)
+
+        # BestTime hours-derivation fallback: bounded to 7 MGETs (one per day)
+        # for the whole fallback subset, not per-venue — instead of up to 7
+        # GETs PER venue lacking Google hours.
+        fallback_ids = [vid for vid in ids if not google_hours_by_id[vid][0]]
+        fallback_weekly_by_day: dict[int, dict] = {}
+        if fallback_ids:
+            for day_int in range(7):
+                fallback_weekly_by_day[day_int] = self.venue_dao.get_week_raw_forecasts_bulk(
+                    fallback_ids, day_int
+                )
 
         # Minified mode: extract essential fields
         minified: list[MinifiedVenue] = []
@@ -337,7 +390,7 @@ class VenueHandler:
             venue_summary: Optional[str] = None
             google_places_type: Optional[str] = None
             try:
-                vibe_attrs = self.venue_dao.get_vibe_attributes(m.venue.venue_id)
+                vibe_attrs = vibe_attrs_map.get(m.venue.venue_id)
                 if vibe_attrs:
                     vibe_labels = vibe_attrs.get_vibe_labels()
                     venue_summary = vibe_attrs.generative_summary
@@ -348,32 +401,29 @@ class VenueHandler:
             # Get venue photos — full set for verbose, first 2 for list (card thumbnail)
             venue_photos: Optional[list[dict]] = None
             try:
-                all_photos = self.venue_dao.get_venue_photos(m.venue.venue_id)
+                all_photos = photos_map.get(m.venue.venue_id)
                 if all_photos:
                     venue_photos = all_photos if verbose else all_photos[:2]
             except Exception as e:
                 logger.debug(f"[VenueHandler] No photos for {m.venue.venue_id}: {e}")
 
-            # Get opening hours if available
-            opening_hours: Optional[list[str]] = None
-            special_days: Optional[list[str]] = None
-            is_open_now: Optional[bool] = None
-            hours_source: Optional[str] = None
-            try:
-                hours = self.venue_dao.get_opening_hours(m.venue.venue_id)
-                if hours:
-                    opening_hours = hours.weekday_descriptions if hours.has_hours() else None
-                    special_days = hours.special_days
-                    is_open_now = hours.open_now
-                    if opening_hours:
-                        hours_source = "google"
-            except Exception as e:
-                logger.debug(f"[VenueHandler] No opening hours for {m.venue.venue_id}: {e}")
+            # Opening hours: computed in the bulk pre-pass above (same logic,
+            # same try/except semantics); the BestTime fallback below reuses the
+            # bounded per-day maps prefetched for the whole fallback subset.
+            opening_hours, special_days, is_open_now, hours_source = google_hours_by_id[
+                m.venue.venue_id
+            ]
 
             # Fallback: derive opening hours from BestTime weekly forecast
             # These are estimated from foot traffic, NOT reliable for open/closed checks
             if not opening_hours:
-                opening_hours = self._derive_hours_from_forecast(m.venue.venue_id)
+                weekly_by_day = {
+                    day_int: fallback_weekly_by_day[day_int].get(m.venue.venue_id)
+                    for day_int in range(7)
+                }
+                opening_hours = self._derive_hours_from_forecast_bulk(
+                    m.venue.venue_id, weekly_by_day
+                )
                 if opening_hours:
                     hours_source = "besttime"
 
@@ -381,7 +431,7 @@ class VenueHandler:
             instagram_handle: Optional[str] = None
             instagram_url: Optional[str] = None
             try:
-                ig_data = self.venue_dao.get_venue_instagram(m.venue.venue_id)
+                ig_data = instagram_map.get(m.venue.venue_id)
                 if ig_data and ig_data.has_instagram():
                     instagram_handle = ig_data.instagram_handle
                     instagram_url = ig_data.instagram_url
@@ -402,7 +452,7 @@ class VenueHandler:
             vibe_profile_data: Optional[dict] = None
             vibe_profile = None
             try:
-                vibe_profile = self.venue_dao.get_venue_vibe_profile(m.venue.venue_id)
+                vibe_profile = vibe_profile_map.get(m.venue.venue_id)
                 if vibe_profile:
                     vibe_profile_data = vibe_profile.model_dump(
                         exclude={"venue_id", "classification_trace", "evidence_photos"}

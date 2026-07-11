@@ -275,6 +275,45 @@ class InMemoryRdsVenueStore:
     def list_all_venue_rows(self) -> list[dict]:
         return [self._row_with_address(row) for row in self.venues.values()]
 
+    # ── bulk per-table readers (projector rebuild, P1) ─────────────────────────
+    # Mirrors RdsVenueStore's bulk readers so the fake stays the behaviour
+    # contract for the projector (pinned by test_rds_store_contract.py).
+    def get_venues_by_ids(self, venue_ids: list[str]) -> dict[str, dict]:
+        wanted = set(venue_ids)
+        return {
+            vid: self._row_with_address(row)
+            for vid, row in self.venues.items()
+            if vid in wanted
+        }
+
+    def get_enrichment_bulk(self, table_key: str, venue_ids: list[str]) -> dict[str, dict]:
+        wanted = set(venue_ids)
+        return {
+            vid: copy.deepcopy(row)
+            for vid, row in self.enrichment.get(table_key, {}).items()
+            if vid in wanted and row.get("deleted_at") is None
+        }
+
+    def get_weekly_bulk(self, venue_ids: list[str]) -> dict[str, dict[int, dict]]:
+        wanted = set(venue_ids)
+        out: dict[str, dict[int, dict]] = {}
+        for composite_id, row in self.enrichment.get("besttime.weekly_forecast", {}).items():
+            if row.get("deleted_at") is not None:
+                continue
+            vid, _, day = composite_id.partition("#")
+            if vid not in wanted:
+                continue
+            out.setdefault(vid, {})[int(day)] = copy.deepcopy(row)
+        return out
+
+    def get_live_bulk(self, venue_ids: list[str]) -> dict[str, dict]:
+        wanted = set(venue_ids)
+        return {
+            vid: copy.deepcopy(row)
+            for vid, row in self.live_forecast.items()
+            if vid in wanted
+        }
+
     # ── pipeline cache-freshness gating from RDS (Pass 2b) ─────────────────────
     def _age_seconds(self, row) -> float:
         ts = _coerce_dt(row.get("updated_at"))

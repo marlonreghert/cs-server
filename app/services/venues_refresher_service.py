@@ -343,30 +343,22 @@ class VenuesRefresherService:
         if reviews_list:
             VENUES_AVERAGE_REVIEWS.set(sum(reviews_list) / len(reviews_list))
 
-        # Count live and weekly forecasts
-        live_count = 0
-        weekly_count = 0
-
-        for venue in venues:
-            venue_id = venue.venue_id
-            if not venue_id:
-                continue
-
-            # Check live forecast
-            try:
-                live = self.venue_dao.get_live_forecast(venue_id)
-                if live is not None:
-                    live_count += 1
-            except Exception:
-                pass
-
-            # Check weekly forecast (check if at least one day exists)
-            try:
-                weekly = self.venue_dao.get_week_raw_forecast(venue_id, 0)  # Check Monday
-                if weekly is not None:
-                    weekly_count += 1
-            except Exception:
-                pass
+        # Count live and weekly forecasts (P3): two bulk MGETs across the active
+        # id set instead of 2 GETs PER venue. MGET-ing exactly the active ids
+        # already intersects "has this key" with "is active" — the map only
+        # contains ids from `venue_ids` that also hit in Redis.
+        venue_ids = [venue.venue_id for venue in venues if venue.venue_id]
+        try:
+            live_count = len(self.venue_dao.get_live_forecasts_bulk(venue_ids))
+        except Exception:
+            live_count = 0
+        try:
+            # Weekly presence is Monday-only (day_int=0), matching the
+            # per-venue loop this replaces — NOT "any of the 7 days" (that
+            # broader any-day presence is a separate P4 cache-flag semantic).
+            weekly_count = len(self.venue_dao.get_week_raw_forecasts_bulk(venue_ids, 0))
+        except Exception:
+            weekly_count = 0
 
         VENUES_WITH_LIVE_FORECAST.set(live_count)
         VENUES_WITH_WEEKLY_FORECAST.set(weekly_count)

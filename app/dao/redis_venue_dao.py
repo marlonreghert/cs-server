@@ -56,6 +56,38 @@ class RedisVenueDAO:
         """
         self.client = client
 
+    # ── bulk MGET helper (P2/P3/P4) ─────────────────────────────────────────
+    def _mget_parsed(self, key_fn, venue_ids: list[str], model_cls) -> dict:
+        """MGET `key_fn(venue_id)` for every id, parsing each hit with
+        `model_cls.model_validate_json`, keyed by venue_id.
+
+        Mirrors the single-item getters' error tolerance at both levels: a
+        per-item parse failure (bad JSON) logs and skips only that item (same
+        as a single getter's `except` returning None for that one venue); a
+        whole-request Redis failure logs and returns {} (every id degrades to
+        "absent", the same aggregate effect a connection error has on N
+        sequential single-item getters). Empty input short-circuits without a
+        round-trip.
+        """
+        if not venue_ids:
+            return {}
+        keys = [key_fn(vid) for vid in venue_ids]
+        try:
+            raw_values = self.client.mget(keys)
+        except redis.RedisError as e:
+            logger.error(f"Bulk get failed for {model_cls.__name__} ({len(keys)} keys): {e}")
+            return {}
+        out = {}
+        for vid, raw in zip(venue_ids, raw_values):
+            if raw is None:
+                continue
+            try:
+                out[vid] = model_cls.model_validate_json(raw)
+            except Exception as e:
+                logger.error(f"Failed to parse bulk {model_cls.__name__} for {vid}: {e}")
+                continue
+        return out
+
     def upsert_venue(self, venue: Venue) -> None:
         """Store venue as a geolocation with JSON data.
 
@@ -303,6 +335,12 @@ class RedisVenueDAO:
             logger.error(f"Failed to get live forecast from Redis: {e}")
             return None
 
+    def get_live_forecasts_bulk(self, venue_ids: list[str]) -> dict[str, LiveForecastResponse]:
+        """MGET live forecasts for an id set, keyed by venue_id (P2/P3). The
+        bulk counterpart of `get_live_forecast`; a missing/unparseable entry is
+        simply absent from the result, matching the single getter's None."""
+        return self._mget_parsed(LIVE_FORECAST_KEY_FORMAT.format, venue_ids, LiveForecastResponse)
+
     def delete_live_forecast(self, venue_id: str) -> None:
         """Delete cached live forecast for a venue.
 
@@ -345,19 +383,30 @@ class RedisVenueDAO:
     def list_all_venues(self) -> list[Venue]:
         """Return all venues from the geo index.
 
+        SCAN for the keys (P5, via `client.keys`), then one MGET for all of
+        their JSON instead of a GET-per-key loop. Per-key parse errors still
+        skip only that key.
+
         Returns:
             List of Venue objects
         """
         pattern = VENUES_GEO_PLACE_MEMBER_FORMAT_V1.format("*")
         keys = self.client.keys(pattern)
+        if not keys:
+            return []
+
+        try:
+            raw_values = self.client.mget(keys)
+        except Exception as e:
+            logger.error(f"Bulk get failed while listing all venues: {e}")
+            return []
 
         venues = []
-        for key in keys:
+        for key, json_str in zip(keys, raw_values):
+            if not json_str:
+                continue
             try:
-                json_str = self.client.get(key)
-                if json_str:
-                    venue = Venue.model_validate_json(json_str)
-                    venues.append(venue)
+                venues.append(Venue.model_validate_json(json_str))
             except Exception as e:
                 logger.error(f"Failed to parse venue from key {key}: {e}")
                 continue
@@ -410,6 +459,15 @@ class RedisVenueDAO:
             logger.error(f"Failed to get weekly raw forecast from Redis: {e}")
             return None
 
+    def get_week_raw_forecasts_bulk(
+        self, venue_ids: list[str], day_int: int
+    ) -> dict[str, WeekRawDay]:
+        """MGET a single day's weekly forecast for an id set, keyed by venue_id
+        (P2/P3/P4) — the bulk counterpart of `get_week_raw_forecast`."""
+        return self._mget_parsed(
+            lambda vid: WEEKLY_FORECAST_KEY_FORMAT.format(vid, day_int), venue_ids, WeekRawDay
+        )
+
     # =========================================================================
     # VIBE ATTRIBUTES METHODS
     # =========================================================================
@@ -443,6 +501,11 @@ class RedisVenueDAO:
         except redis.RedisError as e:
             logger.error(f"Failed to get vibe attributes from Redis: {e}")
             return None
+
+    def get_vibe_attributes_bulk(self, venue_ids: list[str]) -> dict[str, VibeAttributes]:
+        """MGET vibe attributes for an id set, keyed by venue_id (P2/P4) — the
+        bulk counterpart of `get_vibe_attributes`."""
+        return self._mget_parsed(VIBE_ATTRIBUTES_KEY_FORMAT.format, venue_ids, VibeAttributes)
 
     def delete_vibe_attributes(self, venue_id: str) -> None:
         """Delete cached vibe attributes for a venue.
@@ -571,6 +634,32 @@ class RedisVenueDAO:
         except redis.RedisError as e:
             logger.error(f"Failed to get venue photos from Redis: {e}")
             return None
+
+    def get_venue_photos_bulk(self, venue_ids: list[str]) -> dict[str, list[dict]]:
+        """MGET cached photos for an id set, keyed by venue_id (P2/P4) — the
+        bulk counterpart of `get_venue_photos`, including the same legacy
+        bare-URL-string-list normalization and per-item error tolerance."""
+        if not venue_ids:
+            return {}
+        keys = [VENUE_PHOTOS_KEY_FORMAT.format(vid) for vid in venue_ids]
+        try:
+            raw_values = self.client.mget(keys)
+        except redis.RedisError as e:
+            logger.error(f"Bulk get venue photos failed ({len(keys)} keys): {e}")
+            return {}
+        out = {}
+        for vid, raw in zip(venue_ids, raw_values):
+            if raw is None:
+                continue
+            try:
+                data = json.loads(raw)
+                if data and isinstance(data[0], str):
+                    data = [{"url": url, "author_name": None} for url in data]
+                out[vid] = data
+            except Exception as e:
+                logger.error(f"Failed to parse bulk venue photos for {vid}: {e}")
+                continue
+        return out
 
     # =========================================================================
     # FRESH ON-DEMAND VENUE PHOTOS (keyless URLs, short TTL — cs-server SOLE writer)
@@ -717,6 +806,11 @@ class RedisVenueDAO:
             logger.error(f"Failed to get opening hours from Redis: {e}")
             return None
 
+    def get_opening_hours_bulk(self, venue_ids: list[str]) -> dict[str, OpeningHours]:
+        """MGET opening hours for an id set, keyed by venue_id (P2/P4) — the
+        bulk counterpart of `get_opening_hours`."""
+        return self._mget_parsed(OPENING_HOURS_KEY_FORMAT.format, venue_ids, OpeningHours)
+
     def delete_opening_hours(self, venue_id: str) -> None:
         """Delete cached opening hours for a venue.
 
@@ -773,6 +867,11 @@ class RedisVenueDAO:
         except redis.RedisError as e:
             logger.error(f"Failed to get venue Instagram from Redis: {e}")
             return None
+
+    def get_venue_instagram_bulk(self, venue_ids: list[str]) -> dict[str, VenueInstagram]:
+        """MGET Instagram data for an id set, keyed by venue_id (P2/P4) — the
+        bulk counterpart of `get_venue_instagram`."""
+        return self._mget_parsed(VENUE_INSTAGRAM_KEY_FORMAT.format, venue_ids, VenueInstagram)
 
     def delete_venue_instagram(self, venue_id: str) -> None:
         """Delete cached Instagram data for a venue.
@@ -831,6 +930,11 @@ class RedisVenueDAO:
             logger.error(f"Failed to get venue reviews from Redis: {e}")
             return None
 
+    def get_venue_reviews_bulk(self, venue_ids: list[str]) -> dict[str, VenueReviews]:
+        """MGET reviews for an id set, keyed by venue_id (P4) — the bulk
+        counterpart of `get_venue_reviews`."""
+        return self._mget_parsed(VENUE_REVIEWS_KEY_FORMAT.format, venue_ids, VenueReviews)
+
     def delete_venue_reviews(self, venue_id: str) -> None:
         """Delete cached reviews for a venue.
 
@@ -843,19 +947,30 @@ class RedisVenueDAO:
     def count_venues_with_instagram(self) -> int:
         """Count venues with cached Instagram results (found or low_confidence).
 
+        SCAN for the keys (P5), then one MGET for all of their JSON instead of
+        a GET-per-key loop.
+
         Returns:
             Number of venues with Instagram handles
         """
         pattern = "venue_instagram_v1:*"
         keys = self.client.keys(pattern)
+        if not keys:
+            return 0
+
+        try:
+            raw_values = self.client.mget(keys)
+        except Exception:
+            return 0
+
         count = 0
-        for key in keys:
+        for json_str in raw_values:
+            if not json_str:
+                continue
             try:
-                json_str = self.client.get(key)
-                if json_str:
-                    data = VenueInstagram.model_validate_json(json_str)
-                    if data.has_instagram():
-                        count += 1
+                data = VenueInstagram.model_validate_json(json_str)
+                if data.has_instagram():
+                    count += 1
             except Exception:
                 continue
         return count
@@ -957,6 +1072,11 @@ class RedisVenueDAO:
             logger.error(f"Failed to get venue menu photos from Redis: {e}")
             return None
 
+    def get_venue_menu_photos_bulk(self, venue_ids: list[str]) -> dict[str, VenueMenuPhotos]:
+        """MGET menu photos for an id set, keyed by venue_id (P4) — the bulk
+        counterpart of `get_venue_menu_photos`."""
+        return self._mget_parsed(VENUE_MENU_PHOTOS_KEY_FORMAT.format, venue_ids, VenueMenuPhotos)
+
     def delete_venue_menu_photos(self, venue_id: str) -> None:
         """Delete cached menu photos for a venue.
 
@@ -1023,6 +1143,11 @@ class RedisVenueDAO:
             logger.error(f"Failed to get venue menu data from Redis: {e}")
             return None
 
+    def get_venue_menu_data_bulk(self, venue_ids: list[str]) -> dict[str, VenueMenuData]:
+        """MGET extracted menu data for an id set, keyed by venue_id (P4) — the
+        bulk counterpart of `get_venue_menu_data`."""
+        return self._mget_parsed(VENUE_MENU_RAW_DATA_KEY_FORMAT.format, venue_ids, VenueMenuData)
+
     def delete_venue_menu_data(self, venue_id: str) -> None:
         """Delete cached menu data for a venue.
 
@@ -1068,6 +1193,11 @@ class RedisVenueDAO:
         except redis.RedisError as e:
             logger.error(f"Failed to get venue vibe profile from Redis: {e}")
             return None
+
+    def get_venue_vibe_profile_bulk(self, venue_ids: list[str]) -> dict[str, VenueVibeProfile]:
+        """MGET AI vibe profiles for an id set, keyed by venue_id (P2/P4) — the
+        bulk counterpart of `get_venue_vibe_profile`."""
+        return self._mget_parsed(VENUE_VIBE_PROFILE_KEY_FORMAT.format, venue_ids, VenueVibeProfile)
 
     def delete_venue_vibe_profile(self, venue_id: str) -> None:
         """Delete cached vibe profile for a venue.

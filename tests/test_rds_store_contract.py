@@ -142,6 +142,78 @@ def test_weekly_composite_key(store):
     assert rec is not None and rec["payload"]["day_int"] == 0
 
 
+def test_bulk_venue_reader_matches_single_reader(store):
+    """get_venues_by_ids (P1) must return the same row shape as get_venue for
+    every id in the set, and simply omit ids with no row (no KeyError, no
+    placeholder). Empty input returns an empty dict without a query."""
+    a, b = _vid(), _vid()
+    store.upsert_venue(_venue(a, "Bar A"))
+    store.upsert_venue(_venue(b, "Bar B"))
+    missing = _vid()  # never upserted
+
+    bulk = store.get_venues_by_ids([a, b, missing])
+    assert set(bulk) == {a, b}
+    assert bulk[a] == store.get_venue(a)
+    assert bulk[b] == store.get_venue(b)
+    assert store.get_venues_by_ids([]) == {}
+
+
+def test_bulk_enrichment_reader_matches_single_reader_and_excludes_deleted(store):
+    """get_enrichment_bulk (P1) must match get_enrichment's row shape
+    (payload/deleted_at/updated_at) for present ids, and exclude soft-deleted
+    rows entirely (not include them with deleted_at set) — the single-row
+    reader's "rec.get('deleted_at') is None" gate has no bulk-side counterpart
+    to check, so the bulk map itself must already be filtered."""
+    a, b, deleted = _vid(), _vid(), _vid()
+    for vid in (a, b, deleted):
+        store.upsert_venue(_venue(vid))
+    attrs = VibeAttributes(venue_id=a, google_place_id="p", google_primary_type="bar")
+    store.upsert_enrichment(_VA, a, attrs.model_dump(mode="json"), history=False,
+                            promoted={"google_primary_type": "bar", "google_place_id": "p"})
+    store.upsert_enrichment(_VA, deleted, attrs.model_dump(mode="json"), history=False,
+                            promoted={"google_primary_type": "bar", "google_place_id": "p"})
+    store.soft_delete_enrichment(_VA, deleted, history=False)
+
+    bulk = store.get_enrichment_bulk(_VA, [a, b, deleted])
+    assert set(bulk) == {a}  # b has no row; deleted is excluded
+    single = store.get_enrichment(_VA, a)
+    assert bulk[a]["payload"] == single["payload"]
+    assert bulk[a]["deleted_at"] is None
+    assert store.get_enrichment_bulk(_VA, []) == {}
+
+
+def test_bulk_weekly_reader_nests_by_day_and_excludes_deleted(store):
+    """get_weekly_bulk (P1) must return {venue_id: {day_int: row}} for every
+    non-deleted weekly row across the id set — the bulk counterpart of 7x
+    get_enrichment(besttime.weekly_forecast, "id#day")."""
+    vid = _vid()
+    store.upsert_venue(_venue(vid))
+    store.upsert_enrichment(_WEEKLY, f"{vid}#0", {"day_int": 0, "day_raw": [1] * 24}, history=False)
+    store.upsert_enrichment(_WEEKLY, f"{vid}#3", {"day_int": 3, "day_raw": [2] * 24}, history=False)
+    store.upsert_enrichment(_WEEKLY, f"{vid}#5", {"day_int": 5, "day_raw": [3] * 24}, history=False)
+    store.soft_delete_enrichment(_WEEKLY, f"{vid}#5", history=False)
+
+    bulk = store.get_weekly_bulk([vid])
+    assert set(bulk[vid]) == {0, 3}  # day 5 excluded (soft-deleted)
+    assert bulk[vid][0]["payload"] == store.get_enrichment(_WEEKLY, f"{vid}#0")["payload"]
+    assert bulk[vid][3]["payload"]["day_raw"] == [2] * 24
+    assert store.get_weekly_bulk([]) == {}
+
+
+def test_bulk_live_reader_matches_single_reader(store):
+    """get_live_bulk (P1) must match get_live_forecast's payload for present
+    ids and omit ids with no live row."""
+    a, b = _vid(), _vid()
+    store.upsert_venue(_venue(a))
+    store.upsert_venue(_venue(b))
+    store.upsert_live_forecast(a, {"status": "OK"})
+
+    bulk = store.get_live_bulk([a, b])
+    assert set(bulk) == {a}
+    assert bulk[a]["payload"] == store.get_live_forecast(a)["payload"]
+    assert store.get_live_bulk([]) == {}
+
+
 def test_fresh_enrichment_gating(store):
     # Executes the real list_fresh_enrichment_venue_ids SQL (incl. make_interval).
     vid = _vid()

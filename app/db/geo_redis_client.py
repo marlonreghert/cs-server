@@ -48,16 +48,37 @@ class GeoRedisClient:
         """
         return self.client.get(key)
 
+    def mget(self, keys: list[str]) -> list[Optional[str]]:
+        """Get values for multiple keys in one round-trip (P2/P5).
+
+        Args:
+            keys: Redis keys, in the order the caller wants results back
+
+        Returns:
+            Values in the same order as `keys`; a missing key yields None at
+            that position (same per-key absence semantics as `get`). Empty
+            input returns an empty list without a round-trip.
+        """
+        if not keys:
+            return []
+        return self.client.mget(keys)
+
     def keys(self, pattern: str) -> list[str]:
         """Return all keys matching the given pattern.
+
+        Uses SCAN (via `scan_iter`) rather than the blocking O(N) KEYS command
+        (P5) — same return contract (a list of matching key strings), but
+        iterated in small non-blocking batches. SCAN's cursor protocol can
+        revisit a key under concurrent keyspace mutation, so results are
+        de-duplicated to match KEYS' unique-list contract exactly.
 
         Args:
             pattern: Redis key pattern (e.g., "prefix:*")
 
         Returns:
-            List of matching keys
+            List of matching keys (unique, order not guaranteed to match KEYS)
         """
-        return self.client.keys(pattern)
+        return list(dict.fromkeys(self.client.scan_iter(match=pattern)))
 
     def setex(self, key: str, ttl_seconds: int, value: str) -> None:
         """Set a key-value pair with expiration.
@@ -159,17 +180,24 @@ class GeoRedisClient:
             withhash=False,
         )
 
+        if not results:
+            return []
+
+        # P2: one MGET for every member's JSON instead of a GET-per-member loop.
+        # A total MGET failure degrades to "no data" for this radius (never a
+        # 500), the aggregate of what a connection error would have done to
+        # every per-member GET in the old loop.
+        try:
+            values = self.client.mget(results)
+        except redis.RedisError as e:
+            logger.warning(f"Bulk get for {len(results)} members failed: {e}")
+            return []
+
         objects = []
-        for member_name in results:
-            # Fetch JSON data for each location using its member name
-            try:
-                data = self.client.get(member_name)
-                if data:
-                    logger.debug(f"Read: {data}")
-                    objects.append(data)
-            except redis.RedisError as e:
-                logger.warning(f"Skipping member {member_name} due to error: {e}")
-                continue
+        for member_name, data in zip(results, values):
+            if data:
+                logger.debug(f"Read: {data}")
+                objects.append(data)
 
         return objects
 
