@@ -497,11 +497,25 @@ class RdsVenueStore:
                 "WHERE user_pseudo=:u AND venue_id=:v"
             ), {"u": user_pseudo, "v": venue_id})
 
-    def add_hot_like_event(self, user_pseudo, venue_id) -> None:
+    def add_hot_like_event(self, user_pseudo, venue_id, business_period) -> bool:
+        """Idempotent per (user_pseudo, venue_id, business_period): the unique
+        index (migration 0016) + ON CONFLICT DO NOTHING absorb a retried write
+        (vibes_bot retries on a 5xx per the engagement_router contract) instead
+        of persisting a second event row. `business_period` is the caller's
+        Recife calendar day (recife_today()), the same "one row per local day"
+        idempotency key record_app_session uses.
+
+        Returns:
+            True when a new row was inserted, False when an existing row for
+            this (user, venue, day) already covered it (conflict-suppressed).
+        """
         with self.engine.begin() as conn:
-            conn.execute(text(
-                "INSERT INTO engagement.hot_like_event (user_pseudo, venue_id) VALUES (:u, :v)"
-            ), {"u": user_pseudo, "v": venue_id})
+            result = conn.execute(text(
+                "INSERT INTO engagement.hot_like_event (user_pseudo, venue_id, business_period) "
+                "VALUES (:u, :v, :b) "
+                "ON CONFLICT (user_pseudo, venue_id, business_period) DO NOTHING"
+            ), {"u": user_pseudo, "v": venue_id, "b": business_period})
+            return result.rowcount > 0
 
     # ── app activity (one row per user per Recife day) ────────────────────────
     def record_app_session(self, user_pseudo, activity_date) -> None:

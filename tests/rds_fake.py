@@ -50,6 +50,9 @@ class InMemoryRdsVenueStore:
         self.live_forecast: dict[str, dict] = {}
         self.favorites: dict[tuple[str, str], dict] = {}
         self.hot_like_events: list[dict] = []
+        # Dedup set mirroring the real store's unique index on
+        # (user_pseudo, venue_id, business_period) + ON CONFLICT DO NOTHING.
+        self._hot_like_keys: set[tuple] = set()
         # engagement.app_session_day: one row per (user_pseudo, activity_date).
         # Mirrors the real PK + ON CONFLICT DO NOTHING via a de-duplicating set.
         self.app_sessions: set[tuple[str, object]] = set()
@@ -422,11 +425,20 @@ class InMemoryRdsVenueStore:
             if up == user_pseudo and row.get("deleted_at") is None
         ]
 
-    def add_hot_like_event(self, user_pseudo, venue_id) -> None:
+    def add_hot_like_event(self, user_pseudo, venue_id, business_period) -> bool:
+        """Mirrors the real store's unique index + ON CONFLICT DO NOTHING:
+        returns True when this (user, venue, day) tuple is new, False when
+        it's a dedup-suppressed retry."""
         self._guard()
+        key = (user_pseudo, venue_id, business_period)
+        if key in self._hot_like_keys:
+            return False
+        self._hot_like_keys.add(key)
         self.hot_like_events.append({
-            "user_pseudo": user_pseudo, "venue_id": venue_id, "created_at": _now(),
+            "user_pseudo": user_pseudo, "venue_id": venue_id,
+            "business_period": business_period, "created_at": _now(),
         })
+        return True
 
     # ── app activity (one row per user per day; total + active-window counts) ──
     def record_app_session(self, user_pseudo, activity_date) -> None:
@@ -539,5 +551,5 @@ class InMemoryRdsVenueStore:
             "fav": list(self.favorites.keys()),
             "hot": self.hot_like_events,
             "act": [[up, str(d)] for up, d in self.app_sessions],
-        })
+        }, default=str)  # business_period / dates aren't natively JSON-serializable
         return raw in blob

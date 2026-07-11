@@ -253,19 +253,18 @@ class RedisVenueDAO:
 
             # Remove weekly forecasts for all 7 days
             for day_int in range(7):
-                weekly_key = WEEKLY_FORECAST_KEY_FORMAT.format(venue_id, day_int)
-                self.client.del_(weekly_key)
+                self.delete_week_raw_forecast(venue_id, day_int)
 
-            # Remove photos
-            photos_key = VENUE_PHOTOS_KEY_FORMAT.format(venue_id)
-            self.client.del_(photos_key)
+            # Remove photos (legacy key-bearing cache + fresh keyless cache)
+            self.delete_venue_photos(venue_id)
+            self.delete_venue_photos_fresh(venue_id)
 
             # Remove opening hours
             self.delete_opening_hours(venue_id)
 
-            # Remove Instagram cache
-            ig_key = VENUE_INSTAGRAM_KEY_FORMAT.format(venue_id)
-            self.client.del_(ig_key)
+            # Remove Instagram cache (handle + posts)
+            self.delete_venue_instagram(venue_id)
+            self.delete_venue_ig_posts(venue_id)
 
             # Remove reviews
             self.delete_venue_reviews(venue_id)
@@ -376,15 +375,25 @@ class RedisVenueDAO:
         simply absent from the result, matching the single getter's None."""
         return self._mget_parsed(LIVE_FORECAST_KEY_FORMAT.format, venue_ids, LiveForecastResponse)
 
-    def delete_live_forecast(self, venue_id: str) -> None:
+    def delete_live_forecast(self, venue_id: str) -> bool:
         """Delete cached live forecast for a venue.
 
         Args:
             venue_id: Venue identifier
+
+        Returns:
+            True if a key was actually removed, False if it was already absent.
         """
         key = LIVE_FORECAST_KEY_FORMAT.format(venue_id)
-        self.client.del_(key)
-        logger.info(f"[RedisVenueDAO] Deleted live forecast cache for {venue_id}")
+        removed = bool(self.client.del_(key))
+        # DEBUG + only-on-real-removal: the projector calls this every ~2-min
+        # cycle for every servable venue that has no live row (~most of the
+        # catalog), so an unconditional INFO here is misleading ("Deleted ..."
+        # when nothing was) and a multi-MB/day log-volume risk on the hot
+        # projection path.
+        if removed:
+            logger.debug(f"[RedisVenueDAO] Deleted live forecast cache for {venue_id}")
+        return removed
 
     def list_active_venue_ids(self) -> list[str]:
         """Return venue IDs that are not deprecated."""
@@ -495,6 +504,19 @@ class RedisVenueDAO:
             lambda vid: WEEKLY_FORECAST_KEY_FORMAT.format(vid, day_int), venue_ids, WeekRawDay
         )
 
+    def delete_week_raw_forecast(self, venue_id: str, day_int: int) -> bool:
+        """Delete one cached weekly-forecast day for a venue.
+
+        Args:
+            venue_id: Venue identifier
+            day_int: Day of week (0=Monday to 6=Sunday)
+
+        Returns:
+            True if a key was actually removed, False if it was already absent.
+        """
+        key = WEEKLY_FORECAST_KEY_FORMAT.format(venue_id, day_int)
+        return bool(self.client.del_(key))
+
     # =========================================================================
     # VIBE ATTRIBUTES METHODS
     # =========================================================================
@@ -526,15 +548,23 @@ class RedisVenueDAO:
         bulk counterpart of `get_vibe_attributes`."""
         return self._mget_parsed(VIBE_ATTRIBUTES_KEY_FORMAT.format, venue_ids, VibeAttributes)
 
-    def delete_vibe_attributes(self, venue_id: str) -> None:
+    def delete_vibe_attributes(self, venue_id: str) -> bool:
         """Delete cached vibe attributes for a venue.
 
         Args:
             venue_id: Venue identifier
+
+        Returns:
+            True if a key was actually removed, False if it was already absent.
         """
         key = VIBE_ATTRIBUTES_KEY_FORMAT.format(venue_id)
-        self.client.del_(key)
-        logger.info(f"[RedisVenueDAO] Deleted vibe attributes cache for {venue_id}")
+        removed = bool(self.client.del_(key))
+        # DEBUG + only-on-real-removal (see delete_live_forecast): the projector
+        # calls this every cycle for every venue missing vibe attributes, so an
+        # unconditional INFO is misleading + a log-volume risk on the hot path.
+        if removed:
+            logger.debug(f"[RedisVenueDAO] Deleted vibe attributes cache for {venue_id}")
+        return removed
 
     def count_venues_with_vibe_attributes(self) -> int:
         """Count venues with cached vibe attributes.
@@ -629,14 +659,17 @@ class RedisVenueDAO:
             f"(TTL {ttl_seconds}s)"
         )
 
-    def delete_venue_photos(self, venue_id: str) -> None:
+    def delete_venue_photos(self, venue_id: str) -> bool:
         """Remove the cached photos for a venue.
 
         Used by the projector to drop photos whose RDS age has passed the TTL, so
         stale Google URLs leave serving and the refetch trigger fires (B2).
+
+        Returns:
+            True if a key was actually removed, False if it was already absent.
         """
         key = VENUE_PHOTOS_KEY_FORMAT.format(venue_id)
-        self.client.del_(key)
+        return bool(self.client.del_(key))
 
     def get_venue_photos(self, venue_id: str) -> Optional[list[dict]]:
         """Retrieve cached photo data for a venue.
@@ -741,6 +774,18 @@ class RedisVenueDAO:
             logger.error(f"Failed to get fresh venue photos from Redis: {e}")
             return None
 
+    def delete_venue_photos_fresh(self, venue_id: str) -> bool:
+        """Remove the cached fresh (keyless-URL) photos for a venue.
+
+        Args:
+            venue_id: Venue identifier
+
+        Returns:
+            True if a key was actually removed, False if it was already absent.
+        """
+        key = VENUE_PHOTOS_FRESH_KEY_FORMAT.format(venue_id)
+        return bool(self.client.del_(key))
+
     def list_cached_venue_photos_ids(self) -> list[str]:
         """Return venue IDs for all cached venue photos.
 
@@ -788,15 +833,22 @@ class RedisVenueDAO:
         bulk counterpart of `get_opening_hours`."""
         return self._mget_parsed(OPENING_HOURS_KEY_FORMAT.format, venue_ids, OpeningHours)
 
-    def delete_opening_hours(self, venue_id: str) -> None:
+    def delete_opening_hours(self, venue_id: str) -> bool:
         """Delete cached opening hours for a venue.
 
         Args:
             venue_id: Venue identifier
+
+        Returns:
+            True if a key was actually removed, False if it was already absent.
         """
         key = OPENING_HOURS_KEY_FORMAT.format(venue_id)
-        self.client.del_(key)
-        logger.info(f"[RedisVenueDAO] Deleted opening hours cache for {venue_id}")
+        removed = bool(self.client.del_(key))
+        # DEBUG + only-on-real-removal (see delete_live_forecast): projector hot
+        # path, called every cycle for every venue missing opening hours.
+        if removed:
+            logger.debug(f"[RedisVenueDAO] Deleted opening hours cache for {venue_id}")
+        return removed
 
     # =========================================================================
     # VENUE INSTAGRAM METHODS
@@ -844,15 +896,22 @@ class RedisVenueDAO:
         bulk counterpart of `get_venue_instagram`."""
         return self._mget_parsed(VENUE_INSTAGRAM_KEY_FORMAT.format, venue_ids, VenueInstagram)
 
-    def delete_venue_instagram(self, venue_id: str) -> None:
+    def delete_venue_instagram(self, venue_id: str) -> bool:
         """Delete cached Instagram data for a venue.
 
         Args:
             venue_id: Venue identifier
+
+        Returns:
+            True if a key was actually removed, False if it was already absent.
         """
         key = VENUE_INSTAGRAM_KEY_FORMAT.format(venue_id)
-        self.client.del_(key)
-        logger.info(f"[RedisVenueDAO] Deleted Instagram cache for {venue_id}")
+        removed = bool(self.client.del_(key))
+        # DEBUG + only-on-real-removal (see delete_live_forecast): projector hot
+        # path, called every cycle for every venue missing an Instagram handle.
+        if removed:
+            logger.debug(f"[RedisVenueDAO] Deleted Instagram cache for {venue_id}")
+        return removed
 
     def list_cached_instagram_venue_ids(self) -> list[str]:
         """Return venue IDs with a non-expired Instagram cache entry.
@@ -895,14 +954,17 @@ class RedisVenueDAO:
         counterpart of `get_venue_reviews`."""
         return self._mget_parsed(VENUE_REVIEWS_KEY_FORMAT.format, venue_ids, VenueReviews)
 
-    def delete_venue_reviews(self, venue_id: str) -> None:
+    def delete_venue_reviews(self, venue_id: str) -> bool:
         """Delete cached reviews for a venue.
 
         Args:
             venue_id: Venue identifier
+
+        Returns:
+            True if a key was actually removed, False if it was already absent.
         """
         key = VENUE_REVIEWS_KEY_FORMAT.format(venue_id)
-        self.client.del_(key)
+        return bool(self.client.del_(key))
 
     def count_venues_with_instagram(self) -> int:
         """Count venues with cached Instagram results (found or low_confidence).
@@ -970,14 +1032,17 @@ class RedisVenueDAO:
             VENUE_IG_POSTS_KEY_FORMAT.format(venue_id), VenueInstagramPosts, "venue IG posts"
         )
 
-    def delete_venue_ig_posts(self, venue_id: str) -> None:
+    def delete_venue_ig_posts(self, venue_id: str) -> bool:
         """Delete cached Instagram posts for a venue.
 
         Args:
             venue_id: Venue identifier
+
+        Returns:
+            True if a key was actually removed, False if it was already absent.
         """
         key = VENUE_IG_POSTS_KEY_FORMAT.format(venue_id)
-        self.client.del_(key)
+        return bool(self.client.del_(key))
 
     def list_cached_ig_posts_venue_ids(self) -> list[str]:
         """Return venue IDs for all cached Instagram posts.
@@ -1020,14 +1085,17 @@ class RedisVenueDAO:
         counterpart of `get_venue_menu_photos`."""
         return self._mget_parsed(VENUE_MENU_PHOTOS_KEY_FORMAT.format, venue_ids, VenueMenuPhotos)
 
-    def delete_venue_menu_photos(self, venue_id: str) -> None:
+    def delete_venue_menu_photos(self, venue_id: str) -> bool:
         """Delete cached menu photos for a venue.
 
         Args:
             venue_id: Venue identifier
+
+        Returns:
+            True if a key was actually removed, False if it was already absent.
         """
         key = VENUE_MENU_PHOTOS_KEY_FORMAT.format(venue_id)
-        self.client.del_(key)
+        return bool(self.client.del_(key))
 
     def list_cached_menu_photos_venue_ids(self) -> list[str]:
         """Return venue IDs for all cached menu photos.
@@ -1078,14 +1146,17 @@ class RedisVenueDAO:
         bulk counterpart of `get_venue_menu_data`."""
         return self._mget_parsed(VENUE_MENU_RAW_DATA_KEY_FORMAT.format, venue_ids, VenueMenuData)
 
-    def delete_venue_menu_data(self, venue_id: str) -> None:
+    def delete_venue_menu_data(self, venue_id: str) -> bool:
         """Delete cached menu data for a venue.
 
         Args:
             venue_id: Venue identifier
+
+        Returns:
+            True if a key was actually removed, False if it was already absent.
         """
         key = VENUE_MENU_RAW_DATA_KEY_FORMAT.format(venue_id)
-        self.client.del_(key)
+        return bool(self.client.del_(key))
 
     # =========================================================================
     # VENUE VIBE PROFILE METHODS
@@ -1121,14 +1192,17 @@ class RedisVenueDAO:
         bulk counterpart of `get_venue_vibe_profile`."""
         return self._mget_parsed(VENUE_VIBE_PROFILE_KEY_FORMAT.format, venue_ids, VenueVibeProfile)
 
-    def delete_venue_vibe_profile(self, venue_id: str) -> None:
+    def delete_venue_vibe_profile(self, venue_id: str) -> bool:
         """Delete cached vibe profile for a venue.
 
         Args:
             venue_id: Venue identifier
+
+        Returns:
+            True if a key was actually removed, False if it was already absent.
         """
         key = VENUE_VIBE_PROFILE_KEY_FORMAT.format(venue_id)
-        self.client.del_(key)
+        return bool(self.client.del_(key))
 
     def list_cached_vibe_profile_venue_ids(self) -> list[str]:
         """Return venue IDs for all cached vibe profiles.
