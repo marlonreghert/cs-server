@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 
 import pytz
 
+from app.config import settings
 from app.handlers import VenueHandler
 from app.models import (
     Venue,
@@ -471,3 +472,147 @@ class TestVenueHandler:
         # Should still return venue with None weekly_forecast
         assert len(result) == 1
         assert result[0].weekly_forecast is None
+
+    # ── weekly_forecast_prev (plans/260710_prev-day-weekly-forecast.md) ────────
+
+    @patch("app.handlers.venue_handler.datetime")
+    def test_prev_day_forecast_attached_with_correct_day_int(
+        self, mock_datetime, venue_handler, mock_venue_dao
+    ):
+        """_merge attaches the previous day's WeekRawDay at
+        (besttime_day_int - 1) % 7 alongside the current day's entry."""
+        v1 = Venue(venue_id="v1", venue_name="Bar v1", venue_lat=-8.0, venue_lng=-34.9)
+        mock_venue_dao.get_nearby_venues.return_value = [v1]
+        mock_venue_dao.get_live_forecast.return_value = None
+
+        # Wednesday (Python weekday=2) -> besttime_day_int=2, prev_day_int=1.
+        mock_recife_time = datetime(2026, 1, 28, 12, 0, 0)  # Wednesday
+        mock_datetime.now.return_value = mock_recife_time
+
+        mock_venue_dao.get_week_raw_forecast.side_effect = (
+            lambda venue_id, day_int: WeekRawDay(day_int=day_int, day_raw=[day_int] * 24)
+        )
+
+        result = venue_handler.get_venues_nearby(
+            lat=-8.0, lon=-34.9, radius=5.0, verbose=True
+        )
+
+        assert len(result) == 1
+        assert result[0].weekly_forecast.day_int == 2
+        assert result[0].weekly_forecast_prev.day_int == 1
+        assert result[0].weekly_forecast_prev.day_raw == [1] * 24
+
+    @patch("app.handlers.venue_handler.datetime")
+    def test_prev_day_forecast_wraps_modulo_7_for_monday(
+        self, mock_datetime, venue_handler, mock_venue_dao
+    ):
+        """Monday (besttime_day_int=0) wraps the previous day back to Sunday (6)."""
+        v1 = Venue(venue_id="v1", venue_name="Bar v1", venue_lat=-8.0, venue_lng=-34.9)
+        mock_venue_dao.get_nearby_venues.return_value = [v1]
+        mock_venue_dao.get_live_forecast.return_value = None
+
+        mock_recife_time = datetime(2026, 1, 26, 12, 0, 0)  # Monday
+        mock_datetime.now.return_value = mock_recife_time
+
+        mock_venue_dao.get_week_raw_forecast.side_effect = (
+            lambda venue_id, day_int: WeekRawDay(day_int=day_int, day_raw=[day_int] * 24)
+        )
+
+        result = venue_handler.get_venues_nearby(
+            lat=-8.0, lon=-34.9, radius=5.0, verbose=True
+        )
+
+        assert result[0].weekly_forecast.day_int == 0
+        assert result[0].weekly_forecast_prev.day_int == 6
+
+    def test_prev_day_forecast_none_when_bulk_fetch_raises(
+        self, venue_handler, mock_venue_dao
+    ):
+        """A prev-day bulk-fetch failure attaches None without degrading the rest
+        of the venue -- the current day's weekly_forecast is unaffected, mirroring
+        the existing weekly_map try/except in _merge."""
+        v1 = Venue(venue_id="v1", venue_name="Bar v1", venue_lat=-8.0, venue_lng=-34.9)
+        mock_venue_dao.get_nearby_venues.return_value = [v1]
+        mock_venue_dao.get_live_forecast.return_value = None
+
+        mock_recife_time = datetime(2026, 1, 28, 12, 0, 0)  # Wednesday
+        today_day_int = mock_recife_time.weekday()
+        current_day = WeekRawDay(day_int=today_day_int, day_raw=[today_day_int] * 24)
+
+        def bulk_side_effect(ids, day_int):
+            if day_int == today_day_int:
+                return {vid: current_day for vid in ids}
+            raise Exception("Redis unavailable")
+
+        mock_venue_dao.get_week_raw_forecasts_bulk.side_effect = bulk_side_effect
+
+        with patch("app.handlers.venue_handler.datetime") as mock_datetime:
+            mock_datetime.now.return_value = mock_recife_time
+            result = venue_handler.get_venues_nearby(
+                lat=-8.0, lon=-34.9, radius=5.0, verbose=True
+            )
+
+        assert len(result) == 1
+        assert result[0].weekly_forecast.day_int == today_day_int
+        assert result[0].weekly_forecast_prev is None
+
+    def test_prev_day_forecast_flag_off_skips_fetch_entirely(
+        self, venue_handler, mock_venue_dao, monkeypatch
+    ):
+        """Disabling the flag must skip the prev-day bulk fetch entirely (the DAO
+        is never called for it), not just omit the attached value -- a true
+        rollback lever, not an extra unnecessary read."""
+        monkeypatch.setattr(settings, "weekly_forecast_prev_day_enabled", False)
+        v1 = Venue(venue_id="v1", venue_name="Bar v1", venue_lat=-8.0, venue_lng=-34.9)
+        mock_venue_dao.get_nearby_venues.return_value = [v1]
+        mock_venue_dao.get_live_forecast.return_value = None
+        mock_venue_dao.get_week_raw_forecast.return_value = WeekRawDay(
+            day_int=3, day_raw=[3] * 24
+        )
+
+        result = venue_handler.get_venues_nearby(
+            lat=-8.0, lon=-34.9, radius=5.0, verbose=True
+        )
+
+        assert len(result) == 1
+        assert result[0].weekly_forecast_prev is None
+        # Exactly one bulk call (the current-day fetch) -- the prev-day fetch
+        # never happens when the flag is off.
+        assert mock_venue_dao.get_week_raw_forecasts_bulk.call_count == 1
+
+    def test_minified_transform_passes_weekly_forecast_prev_through(
+        self, venue_handler, mock_venue_dao
+    ):
+        """Minified _transform must carry weekly_forecast_prev through unchanged,
+        the same way it already does for weekly_forecast."""
+        v1 = Venue(venue_id="v1", venue_name="Bar v1", venue_lat=-8.0, venue_lng=-34.9)
+        mock_venue_dao.get_nearby_venues.return_value = [v1]
+        mock_venue_dao.get_live_forecast.return_value = None
+
+        mock_recife_time = datetime(2026, 1, 28, 12, 0, 0)  # Wednesday
+        today_day_int = mock_recife_time.weekday()
+        prev_day_int = (today_day_int - 1) % 7
+        current_day = WeekRawDay(day_int=today_day_int, day_raw=[today_day_int] * 24)
+        prev_day = WeekRawDay(day_int=prev_day_int, day_raw=[prev_day_int] * 24)
+
+        def bulk_side_effect(ids, day_int):
+            if day_int == today_day_int:
+                return {vid: current_day for vid in ids}
+            if day_int == prev_day_int:
+                return {vid: prev_day for vid in ids}
+            return {}
+
+        mock_venue_dao.get_week_raw_forecasts_bulk.side_effect = bulk_side_effect
+
+        with patch("app.handlers.venue_handler.datetime") as mock_datetime:
+            mock_datetime.now.return_value = mock_recife_time
+            result = venue_handler.get_venues_nearby(
+                lat=-8.0, lon=-34.9, radius=5.0, verbose=False
+            )
+
+        assert len(result) == 1
+        assert isinstance(result[0], MinifiedVenue)
+        assert result[0].weekly_forecast.day_int == today_day_int
+        assert result[0].weekly_forecast_prev is not None
+        assert result[0].weekly_forecast_prev.day_int == prev_day_int
+        assert result[0].weekly_forecast_prev.day_raw == [prev_day_int] * 24
