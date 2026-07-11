@@ -74,6 +74,13 @@ VIBE_FIELDS_MASK = ",".join([
 LANGUAGE_CODE = "pt-BR"
 
 
+class GooglePlacesSearchError(Exception):
+    """Raised by search_place_id(raise_on_error=True) for a transport/quota
+    failure (HTTP error status, timeout, connection error) — as opposed to a
+    genuine zero-result, which still returns None. A mid-run Places outage
+    must never be treated the same as "Google confirmed no match"."""
+
+
 class GooglePlacesAPIClient:
     """Async HTTP client for Google Places API (New).
 
@@ -143,6 +150,7 @@ class GooglePlacesAPIClient:
         venue_address: str,
         lat: Optional[float] = None,
         lng: Optional[float] = None,
+        raise_on_error: bool = False,
     ) -> Optional[str]:
         """Search for a venue by name/address to get its Google Place ID.
 
@@ -153,9 +161,19 @@ class GooglePlacesAPIClient:
             venue_address: Address of the venue
             lat: Optional latitude for location bias
             lng: Optional longitude for location bias
+            raise_on_error: When True, a transport/quota failure (HTTP error
+                status, timeout, connection error) raises GooglePlacesSearchError
+                instead of being swallowed into a None return — lets a caller
+                distinguish "Google answered: no match" from "Google didn't
+                answer" so it never treats a transient outage as a genuine
+                zero-result. Default False preserves the original
+                swallow-and-return-None contract for every existing caller
+                that does not opt in.
 
         Returns:
-            Google Place ID if found, None otherwise
+            Google Place ID if found, None when Google genuinely returned no
+            match. On a transport/quota failure: None (raise_on_error=False,
+            the default) or GooglePlacesSearchError (raise_on_error=True).
         """
         url = f"{GOOGLE_PLACES_API_BASE}/places:searchText"
 
@@ -202,10 +220,14 @@ class GooglePlacesAPIClient:
 
         except httpx.HTTPStatusError as e:
             logger.error(f"[GooglePlacesAPIClient] Text search error: {e}")
+            if raise_on_error:
+                raise GooglePlacesSearchError(f"text search HTTP error: {e}") from e
             return None
 
         except Exception as e:
             logger.error(f"[GooglePlacesAPIClient] Text search exception: {e}")
+            if raise_on_error:
+                raise GooglePlacesSearchError(f"text search failed: {type(e).__name__}: {e}") from e
             return None
 
     async def get_place_location(

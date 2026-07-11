@@ -49,6 +49,10 @@ RESIDUAL_FIELDS: tuple[str, ...] = (
     "venue_dwell_time_min",
     "venue_dwell_time_max",
     "venue_foot_traffic_forecast",
+    # Geo-link provenance (see Venue.geo_linked docstring) — low-traffic
+    # metadata read only by undo_geo_link, not worth a promoted column.
+    "geo_linked",
+    "geo_linked_year_month",
 )
 
 # Invariant: columns ∪ residual == the full Venue field set, so reconstruction

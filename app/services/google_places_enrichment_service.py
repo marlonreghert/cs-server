@@ -12,7 +12,7 @@ import logging
 import re
 from typing import Optional
 
-from app.api.google_places_client import GooglePlacesAPIClient
+from app.api.google_places_client import GooglePlacesAPIClient, GooglePlacesSearchError
 from app.config import settings
 from app.dao.redis_venue_dao import RedisVenueDAO
 from app.models.vibe_attributes import VibeAttributes
@@ -188,6 +188,95 @@ class GooglePlacesEnrichmentService:
                 f"price_level={new_tier} source={new_source}"
             )
 
+    def _apply_business_status(self, venue_id: str, details) -> bool:
+        """Persist Google's business status and, on closure, run the same
+        deprecation path enrich_venue's full path always applied — soft-delete
+        + counters + metrics on permanent closure (when enabled), or count-only
+        on temporary closure. Shared by full enrichment (enrich_venue) and the
+        cheap status-only recheck (_recheck_business_status) so a closed venue
+        is handled identically whichever path detected it.
+
+        Returns True when the venue was soft-deleted this call (permanently
+        closed AND removal enabled) — the caller should stop further
+        per-venue work for it.
+        """
+        self.venue_dao.set_google_business_status(venue_id, details.business_status)
+
+        if details.is_permanently_closed():
+            if settings.remove_permanently_closed_venues:
+                logger.warning(
+                    f"[GooglePlacesEnrichment] Venue {venue_id} is PERMANENTLY CLOSED, "
+                    "marking as deprecated"
+                )
+                soft_deleted = self.venue_dao.soft_delete_venue(
+                    venue_id=venue_id,
+                    reason="google_places_closed_permanently",
+                    source="google_places",
+                    google_business_status=details.business_status,
+                )
+                self._permanently_closed_in_run += 1
+                if soft_deleted:
+                    VENUES_SOFT_DELETED_TOTAL.labels(
+                        reason="google_places_closed_permanently",
+                        source="google_places",
+                    ).inc()
+                    try:
+                        VENUES_DEPRECATED_TOTAL.set(self.venue_dao.count_deprecated_venues())
+                    except Exception:
+                        pass
+                return True
+            logger.warning(
+                f"[GooglePlacesEnrichment] Venue {venue_id} is PERMANENTLY CLOSED, "
+                f"but removal is disabled by config"
+            )
+            return False
+
+        # Temporarily closed venues remain active so live busyness can keep
+        # refreshing and public clients can show them when data is available.
+        if details.is_temporarily_closed():
+            logger.info(
+                f"[GooglePlacesEnrichment] Venue {venue_id} is temporarily closed; "
+                "keeping active for live busyness"
+            )
+            self._temporarily_closed_in_run += 1
+
+        return False
+
+    async def _recheck_business_status(self, venue_id: str, google_place_id: str) -> str:
+        """Cheap, status-only Google Details call (fields mask: businessStatus
+        alone — no vibe/opening-hours/reviews refetch) for an ALREADY-enriched
+        venue, so closures are detected without re-running full enrichment.
+        Gated by settings.business_status_recheck_enabled (LOCKED default
+        False — see app/config.py); callers must not invoke this unless that
+        flag is on and google_place_id is non-empty (the no-match poison
+        marker's venues carry google_place_id="" and have nothing to recheck).
+
+        Returns:
+            "recheck_closed": permanently closed and removed this call.
+            "recheck_ok": still operational, or temporarily closed (kept active).
+            "recheck_error": the Details call itself failed — the venue is left
+                untouched, to be retried on the next run.
+        """
+        try:
+            details = await self.google_places_client.get_place_details(
+                google_place_id, fields_mask="businessStatus"
+            )
+        except Exception as e:
+            logger.warning(
+                f"[GooglePlacesEnrichment] business-status recheck failed for "
+                f"{venue_id}: {type(e).__name__}: {e}"
+            )
+            return "recheck_error"
+        if details is None:
+            logger.warning(
+                f"[GooglePlacesEnrichment] business-status recheck: no details "
+                f"for {venue_id} ({google_place_id})"
+            )
+            return "recheck_error"
+
+        removed = self._apply_business_status(venue_id, details)
+        return "recheck_closed" if removed else "recheck_ok"
+
     async def enrich_venue(
         self,
         venue_id: str,
@@ -237,48 +326,18 @@ class GooglePlacesEnrichmentService:
             status_label = (details.business_status or "unknown").lower()
             VENUES_BY_BUSINESS_STATUS.labels(status=status_label).inc()
 
-            self.venue_dao.set_google_business_status(venue_id, details.business_status)
-
-            # Check if permanently closed - soft-deprecate venue if enabled
+            # Persist status + apply closure handling (soft-delete on permanent
+            # closure when enabled; count temporary closure) — shared with the
+            # status-only recheck path (_recheck_business_status) so a closed
+            # venue is handled identically whichever path detected it.
+            removed = self._apply_business_status(venue_id, details)
+            if removed:
+                VIBE_ATTRIBUTES_FETCH_RESULTS.labels(result="soft_deleted_permanently_closed").inc()
+                return None
             if details.is_permanently_closed():
-                if settings.remove_permanently_closed_venues:
-                    logger.warning(
-                        f"[GooglePlacesEnrichment] Venue {venue_id} is PERMANENTLY CLOSED, "
-                        "marking as deprecated"
-                    )
-                    soft_deleted = self.venue_dao.soft_delete_venue(
-                        venue_id=venue_id,
-                        reason="google_places_closed_permanently",
-                        source="google_places",
-                        google_business_status=details.business_status,
-                    )
-                    self._permanently_closed_in_run += 1
-                    if soft_deleted:
-                        VENUES_SOFT_DELETED_TOTAL.labels(
-                            reason="google_places_closed_permanently",
-                            source="google_places",
-                        ).inc()
-                        try:
-                            VENUES_DEPRECATED_TOTAL.set(self.venue_dao.count_deprecated_venues())
-                        except Exception:
-                            pass
-                    VIBE_ATTRIBUTES_FETCH_RESULTS.labels(result="soft_deleted_permanently_closed").inc()
-                    return None
-                else:
-                    logger.warning(
-                        f"[GooglePlacesEnrichment] Venue {venue_id} is PERMANENTLY CLOSED, "
-                        f"but removal is disabled by config"
-                    )
-                    VIBE_ATTRIBUTES_FETCH_RESULTS.labels(result="skipped_permanently_closed").inc()
-
-            # Temporarily closed venues remain active so live busyness can keep
-            # refreshing and public clients can show them when data is available.
-            if details.is_temporarily_closed():
-                logger.info(
-                    f"[GooglePlacesEnrichment] Venue {venue_id} is temporarily closed; "
-                    "keeping active for live busyness"
-                )
-                self._temporarily_closed_in_run += 1
+                # Permanently closed but removal is disabled by config — already
+                # logged inside _apply_business_status.
+                VIBE_ATTRIBUTES_FETCH_RESULTS.labels(result="skipped_permanently_closed").inc()
 
             # Convert to our vibe attributes model
             vibe_attrs = self.google_places_client.details_to_vibe_attributes(venue_id, details)
@@ -347,20 +406,38 @@ class GooglePlacesEnrichmentService:
     async def _search_and_enrich_servable(self, venue, google_only_price: bool) -> str:
         """Resolve a servable venue's Google place_id and enrich it, or write the
         empty no-match marker. Paces identically to both callers (REQUEST_DELAY on
-        a no-match, REQUEST_DELAY*2 after an enrich). Returns ``"no_google_match"``,
-        ``"enriched"``, or ``"error"``; the caller maps that to its own metric
-        label + log + bookkeeping.
+        a no-match or search error, REQUEST_DELAY*2 after an enrich). Returns
+        ``"no_google_match"``, ``"enriched"``, ``"error"``, or ``"search_error"``;
+        the caller maps that to its own metric label + log + bookkeeping.
 
         Shared per-venue body of enrich_all_venues and enrich_pending_venues so
         their marker + pacing policy cannot drift. The caller has already decided
         the venue is not cache-skipped (presence check / force_refresh).
+
+        The empty no-match marker is written ONLY on a genuine "Google answered:
+        no match" (search_place_id returns None). A transport/quota failure
+        (search_place_id raises GooglePlacesSearchError, opted into via
+        raise_on_error=True) must never poison the venue with that marker — a
+        mid-run Places outage would otherwise permanently mark every remaining
+        venue in the loop as a dead end with no retry path. ``"search_error"``
+        writes nothing and leaves the venue to be retried on the next run.
         """
-        google_place_id = await self.google_places_client.search_place_id(
-            venue_name=venue.venue_name,
-            venue_address=venue.venue_address,
-            lat=venue.venue_lat,
-            lng=venue.venue_lng,
-        )
+        try:
+            google_place_id = await self.google_places_client.search_place_id(
+                venue_name=venue.venue_name,
+                venue_address=venue.venue_address,
+                lat=venue.venue_lat,
+                lng=venue.venue_lng,
+                raise_on_error=True,
+            )
+        except GooglePlacesSearchError as e:
+            logger.warning(
+                f"[GooglePlacesEnrichment] place search failed for {venue.venue_id} "
+                f"({venue.venue_name!r}); skipping this run, will retry next run: {e}"
+            )
+            await asyncio.sleep(REQUEST_DELAY)
+            return "search_error"
+
         if not google_place_id:
             # No Google match: write the empty marker so re-runs skip this venue.
             self.venue_dao.set_vibe_attributes(
@@ -418,13 +495,39 @@ class GooglePlacesEnrichmentService:
         # Reset closure counters for this run
         self._permanently_closed_in_run = 0
         self._temporarily_closed_in_run = 0
+        # 0 (default) = unbounded; a positive value caps how many already-
+        # enriched venues get a status-only recheck THIS run (config, not a
+        # per-call arg, so the scheduled job and any admin trigger share it).
+        recheck_limit = settings.business_status_recheck_limit
+        recheck_budget = recheck_limit if recheck_limit > 0 else None
 
         for venue_id in all_venue_ids:
             # Check if already cached (skip if not forcing refresh)
             existing = self.venue_dao.get_vibe_attributes(venue_id)
             if existing is not None and not force_refresh:
-                logger.debug(f"[GooglePlacesEnrichment] Already enriched {venue_id}, skipping")
-                VIBE_ATTRIBUTES_FETCH_RESULTS.labels(result="skipped_cached").inc()
+                # Status-only recheck: cheap Details call (businessStatus only)
+                # for an already-enriched venue, so a closure since first
+                # enrichment is detected without a full re-enrichment sweep.
+                # Never attempted for the no-match poison marker
+                # (google_place_id="") — there is nothing to recheck.
+                recheck_eligible = (
+                    settings.business_status_recheck_enabled
+                    and bool(existing.google_place_id)
+                    and (recheck_budget is None or recheck_budget > 0)
+                )
+                if recheck_eligible:
+                    if recheck_budget is not None:
+                        recheck_budget -= 1
+                    outcome = await self._recheck_business_status(
+                        venue_id, existing.google_place_id
+                    )
+                    if outcome == "recheck_error":
+                        VIBE_ATTRIBUTES_FETCH_RESULTS.labels(result="skipped_error").inc()
+                    else:
+                        VIBE_ATTRIBUTES_FETCH_RESULTS.labels(result=outcome).inc()
+                else:
+                    logger.debug(f"[GooglePlacesEnrichment] Already enriched {venue_id}, skipping")
+                    VIBE_ATTRIBUTES_FETCH_RESULTS.labels(result="skipped_cached").inc()
                 continue
 
             # Log when re-checking already enriched venues
@@ -447,6 +550,11 @@ class GooglePlacesEnrichmentService:
                 VIBE_ATTRIBUTES_FETCH_RESULTS.labels(result="skipped_no_place_id").inc()
             elif outcome == "enriched":
                 successful += 1
+            elif outcome == "search_error":
+                # Transport/quota failure, not a genuine no-match: no marker was
+                # written, so the next run retries this venue. Distinct label
+                # (error != no-match) keeps this visible from a real zero-result.
+                VIBE_ATTRIBUTES_FETCH_RESULTS.labels(result="skipped_error").inc()
             # "error": tracked via enrich_venue's own metrics.
             # Note: Closure tracking is done via instance counters in enrich_venue()
 
@@ -520,6 +628,11 @@ class GooglePlacesEnrichmentService:
                 VIBE_ATTRIBUTES_FETCH_RESULTS.labels(result="no_google_match").inc()
             elif outcome == "enriched":
                 summary["enriched"] += 1
+            elif outcome == "search_error":
+                # Transport/quota failure, not a genuine no-match: no marker
+                # written, so a later run retries this venue.
+                summary["error"] += 1
+                VIBE_ATTRIBUTES_FETCH_RESULTS.labels(result="skipped_error").inc()
             else:  # "error"
                 summary["error"] += 1
 
@@ -605,10 +718,18 @@ class GooglePlacesEnrichmentService:
         )
 
     @staticmethod
-    async def _instagram_profile_exists(handle: str) -> bool:
-        """Check if an Instagram profile exists by requesting the page.
+    async def _check_instagram_status(handle: str) -> str:
+        """Check an Instagram profile's existence, returning a tri-state result
+        so callers can distinguish a definitive absence from an ambiguous
+        check:
 
-        Returns True if the profile page returns 200, False for 404 or errors.
+        - ``"found"``: the profile page returned 200.
+        - ``"not_found"``: the profile page returned 404 (Instagram's
+          definitive "no such user").
+        - ``"unknown"``: any other status (429 rate-limit, 403, a redirect to
+          a login wall, etc.) or a network/timeout error. An ambiguous
+          outcome must never be treated as confirmed absence — a mid-sweep
+          rate-limit must not read as "doesn't exist".
         """
         import httpx
         url = f"https://www.instagram.com/{handle}/"
@@ -619,19 +740,35 @@ class GooglePlacesEnrichmentService:
                 headers={"User-Agent": "Mozilla/5.0"},
             ) as client:
                 resp = await client.head(url)
-                exists = resp.status_code == 200
-                if not exists:
-                    logger.debug(
-                        f"[GooglePlacesEnrichment] Instagram @{handle} "
-                        f"returned status {resp.status_code}"
-                    )
-                return exists
+                if resp.status_code == 200:
+                    return "found"
+                if resp.status_code == 404:
+                    return "not_found"
+                logger.debug(
+                    f"[GooglePlacesEnrichment] Instagram @{handle} returned status "
+                    f"{resp.status_code} (ambiguous, treating as unknown)"
+                )
+                return "unknown"
         except Exception as e:
             logger.debug(f"[GooglePlacesEnrichment] Instagram check failed for @{handle}: {e}")
-            return True  # On error, assume exists (don't block enrichment)
+            return "unknown"
+
+    @classmethod
+    async def _instagram_profile_exists(cls, handle: str) -> bool:
+        """Boolean gate for the website-extraction path (a newly-discovered
+        handle is only cached when we are not confident it is absent) —
+        "unknown" outcomes count as existing here (fail open toward caching;
+        the low-stakes side, since the validation sweep below never mass-
+        deletes on an unknown outcome either)."""
+        return await cls._check_instagram_status(handle) != "not_found"
 
     async def validate_cached_instagram_handles(self) -> int:
-        """Check all cached Instagram handles and remove invalid ones.
+        """Check all cached Instagram handles and remove only those confirmed
+        definitively absent (a 404).
+
+        A 429/403/redirect/timeout/other ambiguous outcome KEEPS the handle —
+        a mid-sweep rate-limit must never mass-delete valid handles (each
+        re-discovery costs a paid Apify run).
 
         Returns number of handles removed.
         """
@@ -644,12 +781,18 @@ class GooglePlacesEnrichmentService:
                 continue
 
             handle = ig_data.instagram_handle
-            if not await self._instagram_profile_exists(handle):
+            status = await self._check_instagram_status(handle)
+            if status == "not_found":
                 self.venue_dao.delete_venue_instagram(venue_id)
                 removed += 1
                 logger.info(
                     f"[GooglePlacesEnrichment] Removed invalid Instagram @{handle} "
-                    f"for {venue_id}"
+                    f"for {venue_id} (definitive 404)"
+                )
+            elif status == "unknown":
+                logger.info(
+                    f"[GooglePlacesEnrichment] Instagram @{handle} for {venue_id} "
+                    "check inconclusive; keeping handle"
                 )
             await asyncio.sleep(1)  # Rate limit
 

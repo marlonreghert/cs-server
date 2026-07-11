@@ -1,4 +1,3 @@
-@wip
 Feature: Enrichment and budget hardening
   Google enrichment must detect closures for already-enriched venues without
   re-running full enrichment, must never permanently poison a venue because

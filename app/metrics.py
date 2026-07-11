@@ -430,6 +430,17 @@ BACKGROUND_JOB_LAST_RUN_TIMESTAMP = Gauge(
     ["job_name"],
 )
 
+# The shared scheduler+admin concurrency guard (app/services/job_lock.py):
+# a trigger refused because the OTHER side (scheduler vs admin, or vice
+# versa) already holds the lock for this job_name. Visibility into how often
+# an admin operator races a scheduled paid-refresh cycle.
+JOB_LOCK_REJECTED_TOTAL = Counter(
+    "job_lock_rejected_total",
+    "Total job starts refused because the shared concurrency lock for that "
+    "job_name was already held",
+    ["job_name", "source"],  # source: scheduler | admin
+)
+
 # Redis projection (RDS -> Redis off-loop projector).
 # Run counts/duration use BACKGROUND_JOB_* with job_name="redis_projection";
 # these add projection-specific observability.

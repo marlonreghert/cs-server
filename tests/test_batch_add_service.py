@@ -17,6 +17,17 @@ def _no_real_sleeps(monkeypatch):
     monkeypatch.setattr(bas, "_GOOGLE_PACE_SECONDS", 0.0)
 
 
+@pytest.fixture(autouse=True)
+def _clean_batch_lock():
+    # The batch single-flight lock is module-global (app/services/job_lock).
+    # Reset it around every test so a run that leaves it held (or a crashed
+    # launch) never leaks into the next test.
+    from app.services import job_lock
+    job_lock.release(bas.BATCH_ADD_LOCK)
+    yield
+    job_lock.release(bas.BATCH_ADD_LOCK)
+
+
 # ── outcome classification ───────────────────────────────────────────────────
 @pytest.mark.parametrize("outcome, expected", [
     (AddVenueOutcome(201, {"status": "created", "venue_id": "v1"}), "created"),
@@ -299,3 +310,35 @@ async def test_job_doc_is_persisted_and_readable():
     reread = svc.get_job(job["job_id"])
     assert reread["label"] == "test-run"
     assert reread["results"][0]["venue_id"] == "vA"
+
+
+# ── single-flight: only one batch job at a time ──────────────────────────────
+@pytest.mark.asyncio
+async def test_second_batch_refused_while_one_is_running():
+    from app.services import job_lock
+
+    handler = _Handler({"A": AddVenueOutcome(201, {"status": "created",
+                                                   "venue_id": "vA"})})
+    svc = _service(handler, _Google({"A": (-9.6, -35.7)}))
+    req = BatchAddRequest(venues=[{"venue_name": "A", "venue_address": "a"}])
+
+    first = svc.start_job(req)          # acquires the batch lock
+    assert first["status"] == "running"
+    assert job_lock.is_running(bas.BATCH_ADD_LOCK) is True
+
+    second = svc.start_job(req)         # refused while the first is running
+    assert second["status"] == "already_running"
+    assert "job_id" not in second
+
+    # Drain the first job; the lock must be released when it finishes.
+    for _ in range(200):
+        task = svc._tasks.get(first["job_id"])
+        if task is None or task.done():
+            break
+        await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    assert job_lock.is_running(bas.BATCH_ADD_LOCK) is False
+
+    # A new batch may start now that the first finished.
+    third = svc.start_job(req)
+    assert third["status"] == "running"

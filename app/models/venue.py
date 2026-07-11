@@ -134,6 +134,18 @@ class Venue(BaseModel):
     deprecated_source: Optional[str] = None
     google_business_status: Optional[str] = None
 
+    # Geo-link provenance (RDS residual `extra`): persisted at link time by
+    # AddVenueHandler._geo_fallback when a NEW venue is created via the
+    # geo-fallback path (a BestTime venue_filter match after the direct
+    # POST /forecasts create was rejected). undo_geo_link requires
+    # geo_linked=True before allowing an undo — a normally-created venue
+    # (the direct paid-create path) must never be "undone" — and releases
+    # the RECORDED month's ledger slot (geo_linked_year_month), not
+    # necessarily the current month, so an undo across a month rollover
+    # decrements the month that was actually charged.
+    geo_linked: bool = False
+    geo_linked_year_month: Optional[str] = None
+
     model_config = ConfigDict(populate_by_name=True)
 
     def is_deprecated(self) -> bool:

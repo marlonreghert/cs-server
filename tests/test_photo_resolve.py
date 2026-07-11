@@ -265,6 +265,45 @@ async def test_resolve_exception_returns_empty_without_caching(dao):
     assert dao.get_venue_photos_fresh("v1") is None
 
 
+async def test_resolve_attaches_known_categories_from_vibe_profile(dao):
+    from app.models.vibe_profile import EvidencePhoto, VenueVibeProfile
+
+    _seed_place_id(dao, "v1")
+    photos = [
+        {"url": "https://lh3.googleusercontent.com/interior", "author_name": "Ana"},
+        {"url": "https://lh3.googleusercontent.com/unmatched", "author_name": None},
+    ]
+    dao.set_venue_vibe_profile(VenueVibeProfile(
+        venue_id="v1", top_vibes=["animado"], overall_confidence=0.8,
+        evidence_photos=[
+            EvidencePhoto(photo_url="https://lh3.googleusercontent.com/interior", photo_type="interior"),
+        ],
+    ))
+    google = _FakeGoogle(photos=photos)
+    service = _service(dao, google)
+
+    result = await service.resolve_and_cache_fresh_photos("v1")
+
+    matched = next(p for p in result if p["url"].endswith("interior"))
+    unmatched = next(p for p in result if p["url"].endswith("unmatched"))
+    assert matched["category"] == "Ambiente"
+    assert "category" not in unmatched
+    # The cached value carries the category too (round-trips through Redis).
+    cached = dao.get_venue_photos_fresh("v1")
+    assert next(p for p in cached if p["url"].endswith("interior"))["category"] == "Ambiente"
+
+
+async def test_resolve_no_vibe_profile_leaves_photos_uncategorized(dao):
+    _seed_place_id(dao, "v1")
+    photos = [{"url": "https://lh3.googleusercontent.com/a", "author_name": "Ana"}]
+    google = _FakeGoogle(photos=photos)
+    service = _service(dao, google)
+
+    result = await service.resolve_and_cache_fresh_photos("v1")
+
+    assert result == photos  # unchanged, no "category" key added
+
+
 async def test_resolve_uses_serving_dao_fallback_for_place_id(fake_redis):
     # Primary DAO (system of record) has no vibe attributes; the Redis fallback
     # carries the google_place_id and drives resolution.

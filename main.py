@@ -30,9 +30,11 @@ from app.metrics import (
     BACKGROUND_JOB_RUNS_TOTAL,
     BACKGROUND_JOB_DURATION_SECONDS,
     BACKGROUND_JOB_LAST_RUN_TIMESTAMP,
+    JOB_LOCK_REJECTED_TOTAL,
     REDIS_PROJECTION_VENUES,
     REDIS_PROJECTION_DEPRECATED_REMOVED_TOTAL,
 )
+from app.services import job_lock
 
 # Configure logging
 logging.basicConfig(
@@ -62,6 +64,7 @@ def make_job(
     disabled_log: "str | None" = None,
     require_container: bool = False,
     on_success=None,
+    lock_name: "str | None" = None,
 ):
     """Build a scheduler-job coroutine with the shared instrumentation skeleton.
 
@@ -90,29 +93,46 @@ def make_job(
         on_success: optional ``(result) -> None`` hook for extra success-path
             metrics (``redis_projection``'s projection gauges), fired after the
             three job metrics and before the done log.
+        lock_name: when set, the shared scheduler+admin concurrency guard
+            (app/services/job_lock.py) key for this job. An admin trigger of
+            the same job_name currently running holds this same name; if held,
+            this run is skipped entirely (no log-start, no metrics) instead of
+            doubling the paid BestTime/Google calls for the cycle. Released in
+            a finally so a failed/disabled run never leaves it stuck.
     """
     async def _job():
         if require_container and container is None:
             return
-        logger.info(start_log)
-        start_time = time.perf_counter()
-        if service_attr is not None and getattr(container, service_attr) is None:
-            logger.warning(disabled_log)
+        if lock_name is not None and not job_lock.try_acquire(lock_name):
+            logger.warning(
+                f"[Scheduler] {error_label} skipped: '{lock_name}' already "
+                "running (admin trigger in progress)"
+            )
+            JOB_LOCK_REJECTED_TOTAL.labels(job_name=lock_name, source="scheduler").inc()
             return
         try:
-            result = await run(container)
-            duration = time.perf_counter() - start_time
-            BACKGROUND_JOB_DURATION_SECONDS.labels(job_name=job_name).observe(duration)
-            BACKGROUND_JOB_RUNS_TOTAL.labels(job_name=job_name, status="success").inc()
-            BACKGROUND_JOB_LAST_RUN_TIMESTAMP.labels(job_name=job_name).set_to_current_time()
-            if on_success is not None:
-                on_success(result)
-            logger.info(done_log(result) if callable(done_log) else done_log)
-        except Exception as e:
-            duration = time.perf_counter() - start_time
-            BACKGROUND_JOB_DURATION_SECONDS.labels(job_name=job_name).observe(duration)
-            BACKGROUND_JOB_RUNS_TOTAL.labels(job_name=job_name, status="error").inc()
-            logger.error(f"[Scheduler] {error_label} failed: {e}")
+            logger.info(start_log)
+            start_time = time.perf_counter()
+            if service_attr is not None and getattr(container, service_attr) is None:
+                logger.warning(disabled_log)
+                return
+            try:
+                result = await run(container)
+                duration = time.perf_counter() - start_time
+                BACKGROUND_JOB_DURATION_SECONDS.labels(job_name=job_name).observe(duration)
+                BACKGROUND_JOB_RUNS_TOTAL.labels(job_name=job_name, status="success").inc()
+                BACKGROUND_JOB_LAST_RUN_TIMESTAMP.labels(job_name=job_name).set_to_current_time()
+                if on_success is not None:
+                    on_success(result)
+                logger.info(done_log(result) if callable(done_log) else done_log)
+            except Exception as e:
+                duration = time.perf_counter() - start_time
+                BACKGROUND_JOB_DURATION_SECONDS.labels(job_name=job_name).observe(duration)
+                BACKGROUND_JOB_RUNS_TOTAL.labels(job_name=job_name, status="error").inc()
+                logger.error(f"[Scheduler] {error_label} failed: {e}")
+        finally:
+            if lock_name is not None:
+                job_lock.release(lock_name)
 
     return _job
 
@@ -156,6 +176,7 @@ run_live_forecast_refresh_job = make_job(
     done_log="[Scheduler] LiveForecastRefreshJob completed",
     error_label="LiveForecastRefreshJob",
     run=lambda c: c.venues_refresher_service.refresh_live_forecasts_for_all_venues(),
+    lock_name=job_lock.LIVE_FORECAST,
 )
 
 
@@ -165,6 +186,7 @@ run_weekly_forecast_refresh_job = make_job(
     done_log="[Scheduler] WeeklyForecastRefreshJob completed",
     error_label="WeeklyForecastRefreshJob",
     run=lambda c: c.venues_refresher_service.refresh_weekly_forecasts_for_all_venues(),
+    lock_name=job_lock.WEEKLY_FORECAST,
 )
 
 
@@ -179,6 +201,7 @@ run_google_places_enrichment_job = make_job(
     disabled_log="[Scheduler] GooglePlacesEnrichmentJob skipped: "
     "Google Places API not configured",
     run=lambda c: c.google_places_enrichment_service.enrich_all_venues(),
+    lock_name=job_lock.GOOGLE_PLACES,
 )
 
 
@@ -281,6 +304,7 @@ run_redis_projection_job = make_job(
     run=_project_redis_from_rds,
     require_container=True,
     on_success=_record_projection_metrics,
+    lock_name=job_lock.REBUILD_REDIS,
 )
 
 

@@ -24,6 +24,8 @@ from app.services.venue_eligibility import (
 )
 from app.services.admin_config_service import AdminConfigService
 from app.services.eligibility_rules import EligibilityRuleService
+from app.services import job_lock
+from app.metrics import JOB_LOCK_REJECTED_TOTAL
 
 logger = logging.getLogger(__name__)
 
@@ -256,13 +258,31 @@ async def trigger_job(job_name: str, config: Optional[dict] = None):
         # falls here — discovery has no reachable trigger by design.
         raise HTTPException(status_code=404, detail=f"Unknown job: {job_name}")
 
-    # Check if already running
+    # Check if already running (admin-vs-admin dedup)
     existing = _running_jobs.get(job_name)
     if existing is not None and not existing.done():
         return TriggerResponse(
             status="already_running",
             job=job_name,
             message=f"{JOB_REGISTRY[job_name]['label']} is already running",
+        )
+
+    # Shared scheduler+admin concurrency guard (app/services/job_lock.py) for
+    # the 4 paid-refresh jobs: refuse a trigger while the SCHEDULER holds the
+    # same lock_name, instead of doubling the cycle's BestTime/Google calls.
+    # Acquired here (synchronous, no await before it) rather than inside
+    # _wrapper so a racing scheduler tick cannot slip in between this check
+    # and actually starting the background task.
+    locked = job_name in job_lock.LOCKED_JOB_NAMES
+    if locked and not job_lock.try_acquire(job_name):
+        JOB_LOCK_REJECTED_TOTAL.labels(job_name=job_name, source="admin").inc()
+        return TriggerResponse(
+            status="already_running",
+            job=job_name,
+            message=(
+                f"{JOB_REGISTRY[job_name]['label']} is already running "
+                "(scheduled run in progress)"
+            ),
         )
 
     # Launch as background task
@@ -273,6 +293,8 @@ async def trigger_job(job_name: str, config: Optional[dict] = None):
             logger.error(f"[AdminTrigger] Job '{job_name}' failed: {e}")
         finally:
             _running_jobs.pop(job_name, None)
+            if locked:
+                job_lock.release(job_name)
 
     task = asyncio.create_task(_wrapper())
     _running_jobs[job_name] = task
@@ -312,7 +334,11 @@ async def batch_add_venues(request: BatchAddRequest, response: Response):
     """
     service = require("batch_add_service", detail="batch-add service not configured")
     accepted = service.start_job(request)
-    response.status_code = 202
+    # Single-flight: another batch job is already running (409, not a new job).
+    if accepted.get("status") == "already_running":
+        response.status_code = 409
+    else:
+        response.status_code = 202
     return accepted
 
 

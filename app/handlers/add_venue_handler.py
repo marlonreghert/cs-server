@@ -23,6 +23,7 @@ from app.api.besttime_client import (
     BestTimeRateLimitedError,
 )
 from app.dao.redis_venue_dao import RedisVenueDAO
+from app.dao.venue_row import venue_from_row
 from app.metrics import (
     ADD_VENUE_BY_ADDRESS_TOTAL,
     VENUE_MONTHLY_NEW_COUNT,
@@ -38,6 +39,23 @@ logger = logging.getLogger(__name__)
 
 
 VENUE_LOOKUP_BY_ADDRESS_KEY_V1 = "venue_lookup_by_address_v1:{hash}"
+# Short-TTL single-flight lock for the manual-add reserve→create→persist
+# section, keyed by the same folded name+address hash as the address cache.
+# Two concurrent identical adds otherwise both pass the pre-lock short-circuits
+# (neither is cached yet), both reserve a slot, and both issue a paid BestTime
+# create for one venue. The lock serializes them: the winner creates once; the
+# loser waits for the winner to populate the address cache and returns the same
+# venue (or a clean 409 if the winner never finishes in the wait window).
+VENUE_ADD_LOCK_KEY_V1 = "venue_add_lock_v1:{hash}"
+# TTL is a crash-safety net only (the lock is released explicitly in a finally);
+# it must exceed the worst-case create+persist time so a slow-but-live winner is
+# never evicted mid-flight.
+VENUE_ADD_LOCK_TTL_SECONDS = 120
+# Loser-side bounded wait for the winner to publish the venue via the address
+# cache. Small poll interval so the (fast, in-process) winner is observed
+# promptly; the max wait bounds a genuinely-stuck winner before a 409.
+VENUE_ADD_LOCK_POLL_SECONDS = 0.05
+VENUE_ADD_LOCK_MAX_WAIT_SECONDS = 15.0
 # Geo fallback is a clutter-prone venue_filter; keep its blast radius tight (50m)
 # so a rejected add only matches a venue essentially at the requested point.
 DEFAULT_FALLBACK_RADIUS_M = 50
@@ -122,27 +140,10 @@ class AddVenueHandler:
     async def add(self, request: AddVenueByAddressRequest) -> AddVenueOutcome:
         radius_m = request.fallback_radius_meters or DEFAULT_FALLBACK_RADIUS_M
 
-        # 1. Address-hash short circuit.
-        existing_id = self._lookup_cached_venue_id(
-            request.venue_name, request.venue_address
-        )
-        if existing_id:
-            persisted = self.venue_dao.get_venue(existing_id)
-            # Short-circuit on an ACTIVE hit — and, unchanged from before, on a
-            # venue deprecated for any reason OTHER than a geo-link undo (e.g.
-            # permanently closed): falling through would spend a BestTime create
-            # on a venue _preserve_deprecation keeps hidden anyway. Only the
-            # admin_geo_link_undo source falls through to the BestTime path,
-            # which reactivates it — so a re-add after an undo is never blocked.
-            if persisted is not None and (
-                persisted.is_active()
-                or persisted.deprecated_source != GEO_LINK_UNDO_SOURCE
-            ):
-                ADD_VENUE_BY_ADDRESS_TOTAL.labels(result="already_exists").inc()
-                return AddVenueOutcome(
-                    status_code=200,
-                    body=self._already_exists_body(persisted),
-                )
+        # 1. Address-hash short circuit (cheap, pre-lock: no reserve/create).
+        hit = self._cached_hit_outcome(request)
+        if hit is not None:
+            return hit
 
         # 2. Geo-cache short circuit (handles inventory-sync hits).
         geo_hit = self._geo_lookup(
@@ -158,6 +159,58 @@ class AddVenueHandler:
                 body=self._already_exists_body(geo_hit),
             )
 
+        # Single-flight lock around reserve→create→persist so two concurrent
+        # identical submits cannot both reserve a slot and both issue a paid
+        # BestTime create for one venue. The winner holds the lock; a loser
+        # waits for the winner to publish the venue and returns the same one.
+        lock_key = VENUE_ADD_LOCK_KEY_V1.format(
+            hash=_address_hash(request.venue_name, request.venue_address)
+        )
+        if not self._acquire_add_lock(lock_key):
+            return await self._await_inflight_add(request)
+        try:
+            # Post-lock re-check: the winner may have created + cached the venue
+            # between our step-1 read above and our acquiring the lock.
+            hit = self._cached_hit_outcome(request)
+            if hit is not None:
+                return hit
+            return await self._reserve_create_persist(request, radius_m)
+        finally:
+            self._release_add_lock(lock_key)
+
+    def _cached_hit_outcome(
+        self, request: AddVenueByAddressRequest
+    ) -> Optional[AddVenueOutcome]:
+        """The address-hash short-circuit shared by add()'s pre-lock step 1 and
+        its post-lock re-check. Returns an already_exists outcome for a cached
+        ACTIVE venue (or one deprecated for any reason OTHER than a geo-link
+        undo — falling through there would spend a create on a venue
+        _preserve_deprecation keeps hidden anyway; only admin_geo_link_undo
+        falls through to the BestTime path, which reactivates it). None when
+        there is no usable cached hit and the caller must proceed to create."""
+        existing_id = self._lookup_cached_venue_id(
+            request.venue_name, request.venue_address
+        )
+        if not existing_id:
+            return None
+        persisted = self.venue_dao.get_venue(existing_id)
+        if persisted is not None and (
+            persisted.is_active()
+            or persisted.deprecated_source != GEO_LINK_UNDO_SOURCE
+        ):
+            ADD_VENUE_BY_ADDRESS_TOTAL.labels(result="already_exists").inc()
+            return AddVenueOutcome(
+                status_code=200,
+                body=self._already_exists_body(persisted),
+            )
+        return None
+
+    async def _reserve_create_persist(
+        self, request: AddVenueByAddressRequest, radius_m: int
+    ) -> AddVenueOutcome:
+        """Steps 3-5 of add() (reserve → BestTime create → persist), run under
+        the single-flight lock so the paid create happens at most once per
+        concurrent identical-submit set."""
         # 3. Reserve a monthly slot before calling BestTime.
         granted, snap = self.budget.reserve_manual_slot()
         if not granted:
@@ -400,26 +453,51 @@ class AddVenueHandler:
     ):
         """Search the account inventory (free, paged read) for the submitted
         venue by accent-folded name; disambiguate multiple name matches by
-        address-token overlap."""
+        address-token overlap.
+
+        Guarded the same way as the geo-fallback matcher (_find_name_match):
+        an EXACT folded-name match links regardless of length/overlap, but a
+        containment (substring) match links ONLY when the shorter folded name
+        is at least MIN_CONTAINMENT_MATCH_LEN chars AND shares a non-zero
+        address token with the submission. Without this, a timed-out create
+        for a short folded name ("vila", "casa") could "recover" an unrelated
+        inventory venue whose name merely contains those chars — returning 201
+        with the wrong venue_id and poisoning the address cache so every future
+        add of that address short-circuits to it."""
         target_name = _fold_text(venue_name)
-        candidates = []
+        if not target_name:
+            return None
+        address_tokens = set(_fold_text(venue_address).split())
+
+        def _overlap(row) -> int:
+            return len(address_tokens & set(_fold_text(row.venue_address or "").split()))
+
+        exact: list = []
+        containment: list = []
         async for row in self.besttime.list_account_inventory():
             name = _fold_text(row.venue_name or "")
             if not name:
                 continue
-            if name == target_name or target_name in name or name in target_name:
-                candidates.append(row)
-        if not candidates:
+            if name == target_name:
+                exact.append(row)
+            elif target_name in name or name in target_name:
+                # A short generic folded name must never containment-link.
+                if min(len(target_name), len(name)) < MIN_CONTAINMENT_MATCH_LEN:
+                    continue
+                containment.append(row)
+
+        # Exact folded matches win regardless of address overlap (an exact
+        # name is a strong signal; multiple exact rows disambiguate by overlap).
+        if exact:
+            return max(exact, key=_overlap) if len(exact) > 1 else exact[0]
+
+        # Containment-only: require a non-zero address-token overlap so an
+        # unrelated venue whose name merely contains the folded string is never
+        # linked. Ties/best pick by overlap.
+        scored = [(o, r) for r in containment if (o := _overlap(r)) > 0]
+        if not scored:
             return None
-        if len(candidates) == 1:
-            return candidates[0]
-        address_tokens = set(_fold_text(venue_address).split())
-        return max(
-            candidates,
-            key=lambda row: len(
-                address_tokens & set(_fold_text(row.venue_address or "").split())
-            ),
-        )
+        return max(scored, key=lambda t: t[0])[1]
 
     def _lookup_cached_venue_id(
         self, venue_name: str, venue_address: str
@@ -443,6 +521,61 @@ class AddVenueHandler:
             self.redis.set(key, venue_id)
         except Exception as e:
             logger.warning(f"[AddVenueHandler] address-cache set failed: {e}")
+
+    # ── manual-add single-flight lock ────────────────────────────────────────
+    def _acquire_add_lock(self, lock_key: str) -> bool:
+        """Atomically take the single-flight lock (Redis SET NX EX). Returns
+        True when acquired (caller owns it and MUST release in a finally),
+        False when another identical add already holds it. Fail-OPEN on a Redis
+        error: a lock-store hiccup must never block a legitimate add — it just
+        loses the double-spend protection for that request (degrade-safe)."""
+        try:
+            return bool(
+                self.redis.set(
+                    lock_key, "1", nx=True, ex=VENUE_ADD_LOCK_TTL_SECONDS
+                )
+            )
+        except Exception as e:
+            logger.warning(f"[AddVenueHandler] add-lock acquire failed (fail-open): {e}")
+            return True
+
+    def _release_add_lock(self, lock_key: str) -> None:
+        try:
+            self.redis.delete(lock_key)
+        except Exception as e:
+            logger.warning(f"[AddVenueHandler] add-lock release failed: {e}")
+
+    async def _await_inflight_add(
+        self, request: AddVenueByAddressRequest
+    ) -> AddVenueOutcome:
+        """Loser path: another identical add holds the lock. Poll the address
+        cache (which the winner populates on success) for a bounded window and
+        return the same venue; on exhaustion return a clean 409 so the client
+        can retry (rather than starting a second paid create)."""
+        deadline = time.monotonic() + VENUE_ADD_LOCK_MAX_WAIT_SECONDS
+        while time.monotonic() < deadline:
+            # _cached_hit_outcome already records the already_exists metric when
+            # it returns a hit, so this resolves to the winner's venue without
+            # a second (paid) create by this request.
+            hit = self._cached_hit_outcome(request)
+            if hit is not None:
+                return hit
+            await asyncio.sleep(VENUE_ADD_LOCK_POLL_SECONDS)
+        # Winner never published within the window (crashed / very slow).
+        ADD_VENUE_BY_ADDRESS_TOTAL.labels(result="add_in_progress").inc()
+        logger.warning(
+            f"[AddVenueHandler] concurrent add for {request.venue_name!r} still "
+            "in progress after the wait window; returning 409 for retry"
+        )
+        return AddVenueOutcome(
+            status_code=409,
+            body={
+                "detail": (
+                    "an identical add is already in progress; retry shortly"
+                ),
+                "venue_name": request.venue_name,
+            },
+        )
 
     def _geo_lookup(
         self, venue_name: str, lat: float, lng: float, radius_m: int
@@ -529,6 +662,12 @@ class AddVenueHandler:
         existing = self.venue_dao.get_venue(match.venue_id)
         was_new = existing is None
         if was_new:
+            # Geo-link provenance, persisted at link time: undo_geo_link
+            # requires geo_linked=True (a normally-created venue must never
+            # be "undone") and releases THIS month's slot specifically, so an
+            # undo after a month rollover still decrements the month that
+            # was actually charged.
+            link_year_month = self.budget.current_year_month()
             venue = Venue(
                 processed=True,
                 forecast=True,
@@ -541,6 +680,8 @@ class AddVenueHandler:
                 rating=match.rating,
                 reviews=match.reviews,
                 besttime_price_level=match.price_level,
+                geo_linked=True,
+                geo_linked_year_month=link_year_month,
             )
             await self._derive_and_set_price(venue, request.place_id)
             self.venue_dao.upsert_venue(venue)
@@ -575,14 +716,19 @@ class AddVenueHandler:
     async def undo_geo_link(self, venue_id: str) -> AddVenueOutcome:
         """Reverse a fresh geo-fallback link on the system of record.
 
-        Eligibility (checked in order): the venue must exist (else 404); if it is
-        already deprecated by a prior undo it is a 200 no-op (idempotent, no
-        second counter decrement); if it is deprecated by anything else, or older
-        than the 24h window, it is a 409 (not undo-eligible). An eligible venue is
-        soft-deleted with the geo-link-undo source (the projector then removes it
-        from serving), the discovery slot is returned to the monthly counter, and
-        the address-hash cache entry is dropped so a future re-add is not
-        short-circuited to the now-deprecated row.
+        Eligibility (checked in order): the venue must exist (else 404); it
+        must carry geo-link provenance (else 409 — a venue created through the
+        normal paid-create path was never geo-linked and must never be
+        "undone"); if it is already deprecated by a prior undo it is a 200
+        no-op (idempotent, no second counter decrement); if it is deprecated
+        by anything else, or older than the 24h window, it is a 409 (not
+        undo-eligible). An eligible venue is soft-deleted with the
+        geo-link-undo source (the projector then removes it from serving),
+        the discovery slot for the RECORDED link month is returned to that
+        month's counter (not necessarily the current month — see
+        Venue.geo_linked_year_month), and the address-hash cache entry is
+        dropped so a future re-add is not short-circuited to the
+        now-deprecated row.
         """
         if self.rds_store is None:
             logger.error("[AddVenueHandler] geo-link undo unavailable: no RDS store")
@@ -598,6 +744,23 @@ class AddVenueHandler:
             return AddVenueOutcome(
                 status_code=404,
                 body={"detail": f"venue {venue_id} not found"},
+            )
+
+        venue = venue_from_row(row)
+        if not venue.geo_linked:
+            ADD_VENUE_BY_ADDRESS_TOTAL.labels(result="geo_link_undo_rejected").inc()
+            logger.warning(
+                f"[AddVenueHandler] geo-link undo refused: {venue_id} has no "
+                "geo-link provenance (not created via the geo-fallback path)"
+            )
+            return AddVenueOutcome(
+                status_code=409,
+                body={
+                    "detail": (
+                        f"venue {venue_id} was not created via geo-link "
+                        "fallback; undo is not applicable"
+                    )
+                },
             )
 
         if row.get("lifecycle_status") == "deprecated":
@@ -641,12 +804,14 @@ class AddVenueHandler:
             )
 
         # Eligible: soft-delete on RDS (projector drops it from serving next
-        # cycle), return the discovery slot, drop the address cache. The touch
-        # ledger entry stays — the BestTime interaction really happened.
+        # cycle), return the discovery slot to the month it was recorded
+        # against (not necessarily the current month), drop the address
+        # cache. The touch ledger entry stays — the BestTime interaction
+        # really happened.
         self.rds_store.soft_delete_venue(
             venue_id, reason=GEO_LINK_UNDO_REASON, source=GEO_LINK_UNDO_SOURCE
         )
-        self.budget.release_discovery_slot()
+        self.budget.release_discovery_slot(year_month=venue.geo_linked_year_month)
         self._drop_address_cache(row.get("venue_name") or "", row.get("venue_address") or "")
         VENUE_MONTHLY_NEW_COUNT.set(self.budget.get_snapshot().month_counter)
         ADD_VENUE_BY_ADDRESS_TOTAL.labels(result="geo_link_undone").inc()

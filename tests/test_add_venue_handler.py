@@ -876,6 +876,64 @@ async def test_inventory_match_returns_none_when_absent(
     assert match is None
 
 
+@pytest.mark.asyncio
+async def test_inventory_match_rejects_short_name_containment(
+    venue_dao, besttime, budget, fake
+):
+    """A 4-char folded name ("vila") must not containment-link an unrelated
+    inventory venue whose folded name merely contains those chars
+    ("vila madalena bar") — below MIN_CONTAINMENT_MATCH_LEN (5)."""
+    besttime.list_account_inventory = _inventory([
+        {"venue_id": "ven_unrelated", "venue_name": "Vila Madalena Bar",
+         "venue_address": "Rua Outra, 500, Sao Paulo - SP"},
+    ])
+    handler = _timeout_handler(venue_dao, besttime, budget, fake)
+
+    match = await handler._find_in_account_inventory(
+        "Vila", "Rua das Flores 123, Recife - PE"
+    )
+
+    assert match is None
+
+
+@pytest.mark.asyncio
+async def test_inventory_match_containment_requires_address_overlap(
+    venue_dao, besttime, budget, fake
+):
+    """A long-enough containment match with ZERO shared address tokens must
+    not link — it is likely a different venue that merely shares a word."""
+    besttime.list_account_inventory = _inventory([
+        {"venue_id": "ven_other_city", "venue_name": "Cervejaria Nacional Filial",
+         "venue_address": "Av. Paulista, 1000, Sao Paulo - SP"},
+    ])
+    handler = _timeout_handler(venue_dao, besttime, budget, fake)
+
+    match = await handler._find_in_account_inventory(
+        "Cervejaria Nacional", "Rua das Flores 123, Recife - PE"
+    )
+
+    assert match is None
+
+
+@pytest.mark.asyncio
+async def test_inventory_match_containment_links_with_address_overlap(
+    venue_dao, besttime, budget, fake
+):
+    """A long-enough containment match that DOES share an address token is a
+    legitimate recovery and still links."""
+    besttime.list_account_inventory = _inventory([
+        {"venue_id": "ven_same", "venue_name": "Cervejaria Nacional Recife",
+         "venue_address": "Rua das Flores, 123, Recife - PE"},
+    ])
+    handler = _timeout_handler(venue_dao, besttime, budget, fake)
+
+    match = await handler._find_in_account_inventory(
+        "Cervejaria Nacional", "Rua das Flores 123, Recife - PE"
+    )
+
+    assert match is not None and match.venue_id == "ven_same"
+
+
 # ── geo-fallback matcher ranking (_find_name_match) ───────────────────────────
 from types import SimpleNamespace  # noqa: E402
 
@@ -964,9 +1022,14 @@ _UNDO_NAME = "Bar do Joao"
 _UNDO_ADDRESS = "Rua das Flores 123, Recife - PE"
 
 
-def _seed_linked_venue(rds_store, fake, venue_id="ven_linked", counter=1):
-    """Mirror the post-link state: an RDS row (created just now), the month
-    counter incremented, and the address-hash cache entry present."""
+def _seed_linked_venue(
+    rds_store, fake, venue_id="ven_linked", counter=1, geo_linked=True,
+    geo_linked_year_month="2026-05",
+):
+    """Mirror the post-link state: an RDS row (created just now) carrying
+    geo-link provenance, the month counter incremented, and the address-hash
+    cache entry present. `geo_linked=False` mirrors a venue created through
+    the NORMAL paid-create path (never geo-linked)."""
     rds_store.upsert_venue(
         Venue(
             processed=True,
@@ -976,6 +1039,8 @@ def _seed_linked_venue(rds_store, fake, venue_id="ven_linked", counter=1):
             venue_address=_UNDO_ADDRESS,
             venue_lat=-8.05,
             venue_lng=-34.88,
+            geo_linked=geo_linked,
+            geo_linked_year_month=geo_linked_year_month if geo_linked else None,
         )
     )
     fake.set("venue_add_counter_v1:2026-05", counter)
@@ -1066,6 +1131,47 @@ async def test_undo_geo_link_deprecated_by_other_source_rejected_409(
     assert outcome.status_code == 409
     # Not laundered into an already_undone; the eligibility deprecation stands.
     assert rds_fake_store.get_venue("ven_linked")["deprecated_source"] == "eligibility_filter"
+
+
+@pytest.mark.asyncio
+async def test_undo_geo_link_rejected_without_provenance(
+    undo_handler, rds_fake_store, fake
+):
+    """A venue created through the normal paid-create path (never
+    geo-linked) must never be "undone" -- no record it consumed a
+    geo-fallback discovery slot in the first place."""
+    _seed_linked_venue(rds_fake_store, fake, geo_linked=False)
+
+    outcome = await undo_handler.undo_geo_link("ven_linked")
+
+    assert outcome.status_code == 409
+    assert "not created via geo-link fallback" in outcome.body["detail"]
+    # Counter and lifecycle both untouched.
+    assert int(fake.get("venue_add_counter_v1:2026-05")) == 1
+    assert rds_fake_store.get_venue("ven_linked")["lifecycle_status"] == "active"
+
+
+@pytest.mark.asyncio
+async def test_undo_geo_link_releases_the_recorded_month_not_current(
+    undo_handler, rds_fake_store, fake
+):
+    """A geo-link created LAST month must decrement LAST month's counter when
+    undone THIS month -- the current month's counter (accruing this month's
+    own adds) must be unaffected."""
+    # counter=3 seeds THIS month's (2026-05, the pinned "current" month)
+    # baseline; last month's (2026-04) slot -- consumed at link time -- is
+    # seeded separately below.
+    _seed_linked_venue(
+        rds_fake_store, fake, counter=3, geo_linked_year_month="2026-04",
+    )
+    fake.set("venue_add_counter_v1:2026-04", 1)  # last month's slot, consumed at link time
+
+    outcome = await undo_handler.undo_geo_link("ven_linked")
+
+    assert outcome.status_code == 200
+    assert outcome.body["status"] == "undone"
+    assert int(fake.get("venue_add_counter_v1:2026-04")) == 0  # last month's slot released
+    assert int(fake.get("venue_add_counter_v1:2026-05")) == 3  # this month untouched
 
 
 @pytest.mark.asyncio

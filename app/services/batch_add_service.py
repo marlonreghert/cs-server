@@ -23,11 +23,18 @@ from app.handlers.add_venue_handler import (
     AddVenueOutcome,
 )
 from app.models.batch_add import BatchAddRequest, BatchAddRow
+from app.services import job_lock
 
 logger = logging.getLogger(__name__)
 
 JOB_KEY_FMT = "admin:batch_add_job:{job_id}"
 JOB_TTL_SECONDS = 7 * 24 * 3600
+
+# Single-flight lock name for batch-add (shares app/services/job_lock with the
+# scheduler+admin guard). Two concurrent batch jobs would interleave their
+# reserve→create sequences and race the same paid-add pacing/budget; only one
+# batch runs at a time.
+BATCH_ADD_LOCK = "batch_add"
 
 # Outcomes that end the job early — "stop spending" states.
 _STOP_OUTCOMES = {"quota_exhausted", "besttime_monthly_cap", "besttime_bad_response"}
@@ -143,6 +150,14 @@ class BatchAddService:
 
     # ── lifecycle ────────────────────────────────────────────────────────────
     def start_job(self, request: BatchAddRequest) -> dict:
+        # Single-flight: refuse to start a second batch while one is running.
+        # Acquired synchronously (no await before create_task) so a racing
+        # request cannot slip in between the check and the task launch.
+        if not job_lock.try_acquire(BATCH_ADD_LOCK):
+            logger.warning(
+                "[BatchAddService] batch add refused: another batch job is already running"
+            )
+            return {"status": "already_running", "total": len(request.venues)}
         job_id = uuid.uuid4().hex
         job = {
             "job_id": job_id,
@@ -160,13 +175,19 @@ class BatchAddService:
             "budget_after": None,
         }
         self._save(job)
-        task = asyncio.create_task(self._run_job(job, list(request.venues)))
+        try:
+            task = asyncio.create_task(self._run_job(job, list(request.venues)))
+        except BaseException:
+            # Launch failed — never leave the single-flight lock stuck.
+            job_lock.release(BATCH_ADD_LOCK)
+            raise
         self._tasks[job_id] = task
         task.add_done_callback(lambda t: self._on_done(job_id, t))
         return {"job_id": job_id, "total": job["total"], "status": "running"}
 
     def _on_done(self, job_id: str, task: asyncio.Task) -> None:
         self._tasks.pop(job_id, None)
+        job_lock.release(BATCH_ADD_LOCK)  # release single-flight when the job ends
         exc = task.exception() if not task.cancelled() else None
         if exc is not None:
             logger.error(f"[BatchAddService] job {job_id} crashed: {exc!r}")
