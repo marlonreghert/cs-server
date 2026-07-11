@@ -179,7 +179,7 @@ class TestVenuesRefresherService:
         mock_besttime_api.venue_filter.return_value = mock_response
 
         params = VenueFilterParams(lat=-8.0, lng=-34.9, radius=5000)
-        unique_ids = await refresher_service.refresh_venues_data_by_venues_filter(params)
+        unique_ids = await refresher_service.discover_and_upsert_venues_via_filter(params)
 
         # Should only process 2 unique venue IDs (v1 once, v2 once)
         assert len(unique_ids) == 2
@@ -228,7 +228,7 @@ class TestVenuesRefresherService:
         mock_besttime_api.venue_filter.return_value = mock_response
 
         params = VenueFilterParams(lat=-8.0, lng=-34.9, radius=5000)
-        unique_ids = await refresher_service.refresh_venues_data_by_venues_filter(params)
+        unique_ids = await refresher_service.discover_and_upsert_venues_via_filter(params)
 
         # Should only process 2 unique venues (first "Bar A" kept, duplicate skipped)
         assert len(unique_ids) == 2
@@ -267,7 +267,7 @@ class TestVenuesRefresherService:
         mock_besttime_api.venue_filter.return_value = mock_response
 
         params = VenueFilterParams(lat=-8.0, lng=-34.9, radius=5000)
-        unique_ids = await refresher_service.refresh_venues_data_by_venues_filter(params)
+        unique_ids = await refresher_service.discover_and_upsert_venues_via_filter(params)
 
         # Should only process 1 venue (empty ID/name skipped)
         assert len(unique_ids) == 1
@@ -362,7 +362,7 @@ class TestVenuesRefresherService:
         )
 
         params = VenueFilterParams(lat=-8.0, lng=-34.9, radius=5000)
-        await refresher_service.refresh_venues_data_by_venues_filter(
+        await refresher_service.discover_and_upsert_venues_via_filter(
             params, fetch_and_cache_live=True
         )
 

@@ -4,9 +4,9 @@ Pins two things the BDD feature (tests/bdd/api/admin-breakdown-and-addvenue-fold
 covers at the HTTP layer:
 
 - The handler resolves its DAO through `_get_venue_dao_from_container()`, which
-  falls back to `redis_venue_dao` when `venue_dao` is absent — the actual shape
+  reads `pipeline_repository` (the RDS-backed repository) — the actual shape
   of the production `Container` (app/container.py only ever sets
-  `redis_venue_dao`). A regression back to a direct `_container.venue_dao`
+  `pipeline_repository`). A regression back to a direct `_container.venue_dao`
   access would AttributeError here exactly as it did in production.
 - The per-type/per-Google-type count maps are correct and sorted by descending
   count, and a venue with no BestTime `venue_type` is bucketed as "unknown".
@@ -55,8 +55,8 @@ def _reset_container():
 
 # P4: venue_type_breakdown is now a plain `def` (FastAPI threadpool), not a
 # coroutine — call it directly rather than awaiting it.
-def test_breakdown_counts_and_sorts_descending_via_redis_venue_dao_fallback():
-    # Production container shape: only `redis_venue_dao` is set, never
+def test_breakdown_counts_and_sorts_descending_via_pipeline_repository():
+    # Production container shape: only `pipeline_repository` is set, never
     # `venue_dao`. A regression to the old `_container.venue_dao` access would
     # AttributeError here (SimpleNamespace has no such attribute).
     dao = _BreakdownDao(
@@ -71,7 +71,7 @@ def test_breakdown_counts_and_sorts_descending_via_redis_venue_dao_fallback():
             "ven_bar_1": VibeAttributes(venue_id="ven_bar_1", google_primary_type="bar"),
         },
     )
-    admin_trigger_router.set_container(SimpleNamespace(redis_venue_dao=dao))
+    admin_trigger_router.set_container(SimpleNamespace(pipeline_repository=dao))
 
     response = admin_trigger_router.venue_type_breakdown()
 
@@ -85,7 +85,7 @@ def test_breakdown_counts_and_sorts_descending_via_redis_venue_dao_fallback():
 
 def test_breakdown_buckets_missing_venue_type_as_unknown():
     dao = _BreakdownDao(venues=[_venue("ven_untyped", venue_type=None)])
-    admin_trigger_router.set_container(SimpleNamespace(redis_venue_dao=dao))
+    admin_trigger_router.set_container(SimpleNamespace(pipeline_repository=dao))
 
     response = admin_trigger_router.venue_type_breakdown()
 

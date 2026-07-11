@@ -12,7 +12,7 @@ import logging
 import re
 from typing import Optional
 
-from app.api.google_places_client import GooglePlacesAPIClient, search_for_lgbtq_indicators
+from app.api.google_places_client import GooglePlacesAPIClient
 from app.config import settings
 from app.dao.redis_venue_dao import RedisVenueDAO
 from app.models.vibe_attributes import VibeAttributes
@@ -46,6 +46,34 @@ REQUEST_DELAY = 1.0 / REQUESTS_PER_SECOND
 # `_price_level_to_int` for backward-compatible importers/tests.
 _price_level_to_int = price_level_from_enum
 
+# Keywords that indicate LGBTQ+ friendliness in a venue summary.
+_LGBTQ_KEYWORDS = [
+    "lgbtq",
+    "lgbt",
+    "gay",
+    "lesbian",
+    "queer",
+    "pride",
+    "drag",
+    "inclusive",
+    "welcoming to all",
+    "diverse crowd",
+    "rainbow",
+]
+
+
+def contains_lgbtq_keywords(summary: Optional[str]) -> bool:
+    """Return True when the summary text contains an LGBTQ+ friendliness keyword.
+
+    A local keyword scan over already-fetched summary text — no awaits, no I/O
+    (it is business logic, not an API-client concern, so it lives here in
+    app/services/). Renamed from the misleading async ``search_for_lgbtq_indicators``.
+    """
+    if not summary:
+        return False
+    summary_lower = summary.lower()
+    return any(keyword in summary_lower for keyword in _LGBTQ_KEYWORDS)
+
 
 class GooglePlacesEnrichmentService:
     """Service for enriching venues with Google Places API data.
@@ -75,7 +103,7 @@ class GooglePlacesEnrichmentService:
         self._permanently_closed_in_run = 0
         self._temporarily_closed_in_run = 0
 
-    def _backfill_venue_review_signal(
+    def _backfill_rating_reviews_and_price(
         self, venue_id: str, details, google_only_price: bool = False
     ) -> None:
         """Write Google's rating/userRatingCount and the derived price signal onto
@@ -260,7 +288,7 @@ class GooglePlacesEnrichmentService:
             # Check for LGBTQ+ indicators in the summary
             if details.generative_summary or details.editorial_summary:
                 summary = details.generative_summary or details.editorial_summary
-                vibe_attrs.lgbtq_friendly = await search_for_lgbtq_indicators(summary)
+                vibe_attrs.lgbtq_friendly = contains_lgbtq_keywords(summary)
 
             # Cache the results
             self.venue_dao.set_vibe_attributes(vibe_attrs)
@@ -296,7 +324,7 @@ class GooglePlacesEnrichmentService:
             # venues with these fields null; without this step they stay null
             # forever and the mobile card has no stars or price indicator
             # even though Google has the data.
-            self._backfill_venue_review_signal(
+            self._backfill_rating_reviews_and_price(
                 venue_id, details, google_only_price=google_only_price
             )
 

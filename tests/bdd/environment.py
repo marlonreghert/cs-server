@@ -157,7 +157,7 @@ def _build_test_app(context) -> None:
 
         container = MagicMock()
         container.venue_dao = context.venue_dao
-        container.redis_venue_dao = context.venue_dao
+        container.pipeline_repository = context.venue_dao
         container.besttime_api = context.besttime
         container.fake_redis = context.fake_redis
         container.fixed_year_month = context.fixed_year_month

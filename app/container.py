@@ -89,7 +89,7 @@ class Container:
 
         # Redis-only DAO used by the projection/rebuild path (writes Redis only,
         # never RDS) so a rebuild does not re-write the system of record.
-        self.redis_only_dao = RedisVenueDAO(self.redis_client)
+        self.serving_redis_dao = RedisVenueDAO(self.redis_client)
 
         # RDS system-of-record store. RDS is the durable truth for all venue +
         # admin data; Redis is the serving/geo projection.
@@ -104,8 +104,8 @@ class Container:
         # Pipelines receive this as their venue DAO: it reads its data inputs and
         # cache-freshness gating from RDS (truth) and writes RDS-only — the
         # scheduled projector is the sole Redis writer for pipeline data. Geo reads
-        # stay on Redis. Serving uses redis_only_dao.
-        self.redis_venue_dao = VenueRepository(
+        # stay on Redis. Serving uses serving_redis_dao.
+        self.pipeline_repository = VenueRepository(
             self.redis_client,
             rds_store=self.rds_store,
         )
@@ -135,20 +135,20 @@ class Container:
             # Initialize Google Places Enrichment service
             self.google_places_enrichment_service = GooglePlacesEnrichmentService(
                 self.google_places_api,
-                self.redis_venue_dao,
+                self.pipeline_repository,
             )
             logger.info("[Container] Google Places Enrichment service initialized")
 
             # Initialize Photo Enrichment service. On-demand resolution reads the
-            # google_place_id from the RDS system of record (redis_venue_dao) with
-            # a Redis fallback (redis_only_dao), and writes the fresh keyless-URL
+            # google_place_id from the RDS system of record (pipeline_repository) with
+            # a Redis fallback (serving_redis_dao), and writes the fresh keyless-URL
             # cache to Redis (the fresh key is Redis-only, so the RDS repository's
             # inherited base method lands it in Redis — cs-server sole writer).
             self.photo_enrichment_service = PhotoEnrichmentService(
                 self.google_places_api,
-                self.redis_venue_dao,
+                self.pipeline_repository,
                 enrichment_limit=_capped(settings.photo_enrichment_limit),
-                serving_dao=self.redis_only_dao,
+                serving_dao=self.serving_redis_dao,
             )
             logger.info("[Container] Photo Enrichment service initialized")
         else:
@@ -174,7 +174,7 @@ class Container:
 
             self.instagram_enrichment_service = InstagramEnrichmentService(
                 apify_client=self.apify_instagram_client,
-                venue_dao=self.redis_venue_dao,
+                venue_dao=self.pipeline_repository,
                 validator=validator,
                 search_candidates=settings.instagram_search_candidates,
                 enrichment_limit=_capped(settings.instagram_enrichment_limit),
@@ -193,7 +193,7 @@ class Container:
         if settings.apify_api_token and self.apify_instagram_client:
             self.instagram_posts_enrichment_service = InstagramPostsEnrichmentService(
                 apify_client=self.apify_instagram_client,
-                venue_dao=self.redis_venue_dao,
+                venue_dao=self.pipeline_repository,
                 enrichment_limit=_capped(settings.ig_posts_enrichment_limit),
                 posts_per_venue=settings.ig_posts_per_venue,
                 cache_ttl_days=settings.ig_posts_cache_ttl_days,
@@ -240,7 +240,7 @@ class Container:
                         else None
                     ),
                     s3_client=self.s3_client,
-                    venue_dao=self.redis_venue_dao,
+                    venue_dao=self.pipeline_repository,
                     enrichment_limit=_capped(settings.menu_enrichment_limit),
                     photos_per_venue=settings.menu_photos_per_venue,
                     menu_categories=settings.menu_photo_categories,
@@ -269,7 +269,7 @@ class Container:
             self.menu_extraction_service = MenuExtractionService(
                 openai_client=self.openai_menu_client,
                 s3_client=self.s3_client,
-                venue_dao=self.redis_venue_dao,
+                venue_dao=self.pipeline_repository,
                 extraction_model=settings.menu_extraction_model,
                 photo_filter_enabled=settings.menu_photo_filter_enabled,
                 photo_filter_confidence=settings.menu_photo_filter_confidence,
@@ -289,7 +289,7 @@ class Container:
             self.openai_vibe_client = OpenAIVibeClient(api_key=settings.openai_api_key)
             self.vibe_classifier_service = VibeClassifierService(
                 openai_vibe_client=self.openai_vibe_client,
-                venue_dao=self.redis_venue_dao,
+                venue_dao=self.pipeline_repository,
                 target_photos=settings.vibe_classifier_target_photos,
                 escalation_threshold=settings.vibe_classifier_escalation_threshold,
                 stage_b_photo_count=settings.vibe_classifier_stage_b_photos,
@@ -312,7 +312,7 @@ class Container:
         # public serving is independent of RDS at request time (an RDS outage
         # cannot break nearby serving) and unaffected by the pipeline RDS reads.
         self.venues_refresher_service = VenuesRefresherService(
-            self.redis_venue_dao,
+            self.pipeline_repository,
             self.besttime_api,
             redis_client=redis_internal_client,
             fetch_venue_limit_override=settings.fetch_venue_limit_override,
@@ -324,7 +324,7 @@ class Container:
         )
 
         # Initialize handlers (serving reads the Redis-only DAO — see above).
-        self.venue_handler = VenueHandler(self.redis_only_dao)
+        self.venue_handler = VenueHandler(self.serving_redis_dao)
 
         # Engagement (favorites/hot_likes) write-through API service, and the
         # projection service that rebuilds the Redis serving projection from RDS.
@@ -334,7 +334,7 @@ class Container:
             pseudonymization_key=settings.engagement_pseudonymization_key,
         )
         self.redis_projection_service = RedisProjectionService(
-            redis_only_dao=self.redis_only_dao,
+            redis_only_dao=self.serving_redis_dao,
             rds_store=self.rds_store,
         )
 
@@ -385,7 +385,7 @@ class Container:
         # Add-by-address handler. The optional Google client lets a manual add with
         # a place_id re-source its price tier (enum + range) via the shared helper.
         self.add_venue_handler = AddVenueHandler(
-            venue_dao=self.redis_venue_dao,
+            venue_dao=self.pipeline_repository,
             besttime_api=self.besttime_api,
             budget_service=self.venue_budget_service,
             redis_client=redis_internal_client,

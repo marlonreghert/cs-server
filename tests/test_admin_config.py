@@ -207,14 +207,15 @@ def test_geofence_capitals_catalog_route():
 
 
 def _client_with_redis(svc, redis_client):
-    """A client whose container also exposes a venue_dao.client for the geo-fence
-    Redis mirror (the real container wires the DAO; _svc's SimpleNamespace does not)."""
+    """A client whose container also exposes a pipeline_repository.client for the
+    geo-fence Redis mirror (the real container wires the DAO; _svc's
+    SimpleNamespace does not)."""
     app = FastAPI()
     app.include_router(router)
     set_container(SimpleNamespace(
         admin_config_service=svc,
         rds_store=svc.rds_store,
-        venue_dao=SimpleNamespace(client=redis_client),
+        pipeline_repository=SimpleNamespace(client=redis_client),
     ))
     return TestClient(app)
 
@@ -305,7 +306,7 @@ def test_eligibility_endpoint_falls_back_to_redis_without_service():
     redis_client = fakeredis.FakeRedis(decode_responses=True)
     store = InMemoryRdsVenueStore()  # only to assert it stays untouched
     venue_dao = SimpleNamespace(client=redis_client)
-    client = _elig_client(SimpleNamespace(admin_config_service=None, venue_dao=venue_dao, rds_store=store))
+    client = _elig_client(SimpleNamespace(admin_config_service=None, pipeline_repository=venue_dao, rds_store=store))
     resp = client.post("/admin/venues/eligibility-config", json={"blocked_venue_types": ["DRUGSTORE"]})
     assert resp.status_code == 200
     assert "DRUGSTORE" in load_eligibility_config(redis_client).blocked_venue_types  # Redis written

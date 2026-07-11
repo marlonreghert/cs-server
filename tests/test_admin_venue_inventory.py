@@ -68,7 +68,7 @@ class _InventoryDao:
 
 def test_admin_inventory_lists_deprecated_with_cache_flags():
     dao = _InventoryDao()
-    admin_trigger_router.set_container(SimpleNamespace(venue_dao=dao))
+    admin_trigger_router.set_container(SimpleNamespace(pipeline_repository=dao))
 
     # P4: list_venue_inventory is now a plain `def` (FastAPI threadpool), not
     # a coroutine — call it directly rather than awaiting it.

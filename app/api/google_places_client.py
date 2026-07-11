@@ -645,38 +645,3 @@ def _parse_price_range(price_range: Optional[dict]) -> Optional[PriceRange]:
     if currency is None and pmin is None and pmax is None:
         return None
     return PriceRange(currency=currency, min=pmin, max=pmax)
-
-
-async def search_for_lgbtq_indicators(summary: Optional[str]) -> bool:
-    """Analyze summary text for LGBTQ+ friendliness indicators.
-
-    This is a simple heuristic approach. In production, you might want to use
-    a more sophisticated NLP approach or an LLM to analyze the text.
-
-    Args:
-        summary: AI-generated or editorial summary text
-
-    Returns:
-        True if LGBTQ+ friendly indicators found
-    """
-    if not summary:
-        return False
-
-    summary_lower = summary.lower()
-
-    # Keywords that indicate LGBTQ+ friendliness
-    lgbtq_keywords = [
-        "lgbtq",
-        "lgbt",
-        "gay",
-        "lesbian",
-        "queer",
-        "pride",
-        "drag",
-        "inclusive",
-        "welcoming to all",
-        "diverse crowd",
-        "rainbow",
-    ]
-
-    return any(keyword in summary_lower for keyword in lgbtq_keywords)

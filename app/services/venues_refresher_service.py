@@ -442,7 +442,7 @@ class VenuesRefresherService:
         venue.price_level = derived.price_level
         venue.price_level_source = derived.source
 
-    async def refresh_venues_data_by_venues_filter(
+    async def discover_and_upsert_venues_via_filter(
         self,
         params: VenueFilterParams,
         fetch_and_cache_live: bool = False,
@@ -727,7 +727,7 @@ class VenuesRefresherService:
             own_venues_only=False,
             types=VENUE_TYPES,
         )
-        ids = await self.refresh_venues_data_by_venues_filter(params, fetch_and_cache_live)
+        ids = await self.discover_and_upsert_venues_via_filter(params, fetch_and_cache_live)
         return len(ids)
 
     async def _refresh_with_discovery_points(

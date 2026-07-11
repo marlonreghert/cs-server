@@ -363,14 +363,11 @@ async def get_monthly_budget():
 
 
 def _get_venue_dao_from_container():
-    if _container is None:
-        raise HTTPException(status_code=503, detail="Container not initialized")
-    venue_dao = getattr(_container, "venue_dao", None) or getattr(
-        _container, "redis_venue_dao", None
-    )
-    if venue_dao is None:
-        raise HTTPException(status_code=503, detail="venue DAO not configured")
-    return venue_dao
+    # The container exposes the RDS-backed repository as `pipeline_repository`
+    # (renamed from the misleading `redis_venue_dao`). Read it directly — the old
+    # fuzzy `venue_dao`-or-`redis_venue_dao` getattr fallback is gone with the
+    # rename.
+    return require("pipeline_repository", detail="venue DAO not configured")
 
 
 def _eligibility_rule_service() -> Optional[EligibilityRuleService]:
@@ -505,9 +502,7 @@ def _geo_fence_store():
 def _geo_fence_redis_client():
     """The Redis client used to mirror admin_config:venue_geofence (admin GET +
     parity reads). Best-effort: a missing client just skips the mirror."""
-    venue_dao = getattr(_container, "venue_dao", None) or getattr(
-        _container, "redis_venue_dao", None
-    )
+    venue_dao = getattr(_container, "pipeline_repository", None)
     return getattr(venue_dao, "client", None)
 
 
@@ -802,9 +797,9 @@ def venue_type_breakdown():
     """Get a breakdown of all venues by BestTime type and Google Places type."""
     # Resolve the DAO through the shared helper (raises 503 when the container is
     # not initialized). The container exposes the RDS-backed repository as
-    # `redis_venue_dao`, not `venue_dao`, so the previous direct access always
-    # AttributeError'd into a 500. Kept OUTSIDE the try below so the helper's 503
-    # is not laundered into a 500 by the blanket handler.
+    # `pipeline_repository`, so the previous direct `_container.venue_dao` access
+    # always AttributeError'd into a 500. Kept OUTSIDE the try below so the
+    # helper's 503 is not laundered into a 500 by the blanket handler.
     venue_dao = _get_venue_dao_from_container()
 
     try:

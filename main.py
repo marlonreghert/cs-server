@@ -538,7 +538,7 @@ async def startup_essential(settings: Settings):
     logger.info("[Main] Handler injected successfully")
 
     # Inject dependencies for debug router
-    set_debug_dependencies(container.redis_venue_dao, container.google_places_api)
+    set_debug_dependencies(container.pipeline_repository, container.google_places_api)
 
     # Inject container for admin trigger router
     set_admin_container(container)

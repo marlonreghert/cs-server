@@ -4,10 +4,11 @@ Covers two operator-visible bug fixes:
 
 - GET /admin/venue-type-breakdown must resolve its DAO through the shared
   ``_get_venue_dao_from_container`` helper (the container exposes the RDS-backed
-  repository as ``redis_venue_dao``, not ``venue_dao``). The BDD harness normally
-  wires ``container.venue_dao`` on the MagicMock, which masks the production
-  ``AttributeError``; the breakdown steps below ``del`` that attribute so the
-  scenario reproduces the production container shape (``redis_venue_dao`` only).
+  repository as ``pipeline_repository``, not ``venue_dao``). The BDD harness
+  normally wires ``container.venue_dao`` on the MagicMock, which masks the
+  production ``AttributeError``; the breakdown steps below ``del`` that attribute
+  so the scenario reproduces the production container shape
+  (``pipeline_repository`` only).
 - ``AddVenueHandler._geo_lookup`` must accent-fold names with ``_fold_text`` so an
   accented re-add short-circuits on the free local geo index instead of spending
   a paid BestTime create.
@@ -145,11 +146,11 @@ def step_container_not_initialized(context):
 
 @when('the operator requests the admin venue-type breakdown')
 def step_request_breakdown(context):
-    # Reproduce the production container shape: the real Container exposes only
-    # `redis_venue_dao` (the RDS-backed repository), never `venue_dao`. The
-    # harness wires both on the MagicMock, masking the AttributeError bug; drop
-    # `venue_dao` so a direct `_container.venue_dao` reference 500s (true red)
-    # and the fixed helper resolves `redis_venue_dao` (200).
+    # Reproduce the production container shape: the real Container exposes the
+    # RDS-backed repository as `pipeline_repository`, never `venue_dao`. The
+    # harness wires `venue_dao` too on the MagicMock, which would mask a
+    # regression to a direct `_container.venue_dao` reference; drop it so the
+    # breakdown must resolve `pipeline_repository` (200).
     if not getattr(context, "_container_forced_none", False):
         try:
             del context.container.venue_dao

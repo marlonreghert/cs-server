@@ -553,7 +553,7 @@ def step_slow_admin_listing(context):
     release = threading.Event()
     slow_dao = _SlowVenueDao(context.venue_dao, started, release)
     context.container.venue_dao = slow_dao
-    context.container.redis_venue_dao = slow_dao
+    context.container.pipeline_repository = slow_dao
 
     def _call_inventory():
         context.client.get("/admin/venues/inventory")
