@@ -410,6 +410,8 @@ class RdsVenueStore:
                 self._history(conn, "besttime", "weekly_forecast", venue_id, payload, "upsert")
 
     def soft_delete_enrichment(self, table_key, venue_id, *, history) -> None:
+        if table_key == _WEEKLY:
+            return self._soft_delete_weekly(venue_id, history)
         schema, table, _ = _ENRICHMENT[table_key]
         with self.engine.begin() as conn:
             conn.execute(text(
@@ -417,6 +419,23 @@ class RdsVenueStore:
             ), {"v": venue_id})
             if history:
                 self._history(conn, schema, table, venue_id, {}, "soft_delete")
+
+    def _soft_delete_weekly(self, composite_id, history) -> None:
+        # Weekly forecast is keyed by the composite (venue_id, day_int) and is
+        # NOT in _ENRICHMENT, so it needs the same "<venue_id>#<day>" split that
+        # _upsert_weekly / get_enrichment use — without this branch a weekly
+        # table_key KeyErrors on _ENRICHMENT[table_key]. No production caller
+        # currently soft-deletes a weekly row (VenueRepository._DELETE_TABLE has
+        # no weekly entry), so this closes a latent gap rather than fixing a live
+        # crash, and keeps the three weekly special-cases symmetric.
+        venue_id, _, day = composite_id.partition("#")
+        with self.engine.begin() as conn:
+            conn.execute(text(
+                "UPDATE besttime.weekly_forecast SET deleted_at=now() "
+                "WHERE venue_id=:v AND day_int=:d"
+            ), {"v": venue_id, "d": int(day)})
+            if history:
+                self._history(conn, "besttime", "weekly_forecast", venue_id, {}, "soft_delete")
 
     def get_enrichment(self, table_key, venue_id) -> Optional[dict]:
         if table_key == _WEEKLY:
