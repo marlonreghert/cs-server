@@ -55,3 +55,15 @@ Feature: Attach the previous business day's weekly forecast for nighttime servin
     And weekly forecasts are stored for day_int 5 and day_int 4 for "club-recife"
     When a client requests nearby venues around "club-recife" in verbose mode
     Then the served venue's "weekly_forecast_prev" must have day_int 4
+
+  Scenario: Disabling the flag changes nothing but the removed key (minified)
+    Given the current Recife weekday is Saturday
+    And weekly forecasts are stored for day_int 5 and day_int 4 for "club-recife"
+    When a client requests nearby venues around "club-recife" with the flag enabled and then disabled
+    Then the disabled response equals the enabled response with "weekly_forecast_prev" removed
+
+  Scenario: Disabling the flag changes nothing but the removed key (verbose)
+    Given the current Recife weekday is Saturday
+    And weekly forecasts are stored for day_int 5 and day_int 4 for "club-recife"
+    When a client requests nearby venues around "club-recife" in verbose mode with the flag enabled and then disabled
+    Then the disabled response equals the enabled response with "weekly_forecast_prev" removed

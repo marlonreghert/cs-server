@@ -130,6 +130,12 @@ def step_seed_venue(context, name):
             venue_lng=_LNG,
             forecast=True,
             processed=True,
+            # A few populated (and, by omission, a few null) optional fields so
+            # the byte-for-byte equivalence check below is meaningful rather
+            # than trivially true over an all-null venue.
+            rating=4.5,
+            reviews=120,
+            price_level=2,
         )
     )
 
@@ -185,6 +191,38 @@ def step_request_verbose(context, venue):
     _request(context, {"verbose": True})
 
 
+@when(
+    'a client requests nearby venues around "{venue}" with the flag enabled '
+    'and then disabled'
+)
+def step_request_enabled_then_disabled(context, venue):
+    _override_setting(context, "weekly_forecast_prev_day_enabled", True)
+    _request(context, {})
+    assert context.response.status_code == 200, context.response.text
+    context.response_on_json = context.response.json()
+
+    _override_setting(context, "weekly_forecast_prev_day_enabled", False)
+    _request(context, {})
+    assert context.response.status_code == 200, context.response.text
+    context.response_off_json = context.response.json()
+
+
+@when(
+    'a client requests nearby venues around "{venue}" in verbose mode with the '
+    'flag enabled and then disabled'
+)
+def step_request_verbose_enabled_then_disabled(context, venue):
+    _override_setting(context, "weekly_forecast_prev_day_enabled", True)
+    _request(context, {"verbose": True})
+    assert context.response.status_code == 200, context.response.text
+    context.response_on_json = context.response.json()
+
+    _override_setting(context, "weekly_forecast_prev_day_enabled", False)
+    _request(context, {"verbose": True})
+    assert context.response.status_code == 200, context.response.text
+    context.response_off_json = context.response.json()
+
+
 # ── Then ───────────────────────────────────────────────────────────────────────
 @then('the served venue\'s "{field}" must have day_int {n:d}')
 def step_field_day_int(context, field, n):
@@ -225,3 +263,21 @@ def step_full_field_set(context):
 def step_field_absent(context, field):
     venue = _venue(context)
     assert field not in venue, f"expected {field!r} absent, found {venue[field]!r}"
+
+
+@then('the disabled response equals the enabled response with "{field}" removed')
+def step_flag_off_equals_flag_on_minus_field(context, field):
+    """Proves the byte-for-byte rollback contract by transitivity: the flag-ON
+    response already carries every legacy field verbatim (it's the same
+    response the pre-flag code produced, plus this one additive key), so if
+    flag-OFF equals flag-ON with only that key removed, flag-OFF is provably
+    identical to the pre-flag response -- not merely asserted to be."""
+    expected = [
+        {k: v for k, v in venue.items() if k != field}
+        for venue in context.response_on_json
+    ]
+    assert context.response_off_json == expected, (
+        "flag-off response is not identical to the flag-on response minus "
+        f"{field!r}:\noff={context.response_off_json!r}\n"
+        f"on(minus field)={expected!r}"
+    )
