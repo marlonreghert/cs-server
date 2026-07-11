@@ -541,48 +541,58 @@ class RedisVenueDAO:
     # VENUE PHOTOS METHODS
     # =========================================================================
 
-    def _resolve_photos_cache_ttl_seconds(self) -> int:
-        """Return the live TTL (seconds) to apply to venue_photos cache entries.
+    def _resolve_admin_ttl_seconds(
+        self, admin_key: str, default_value: int, unit_seconds: int, unit_label: str
+    ) -> int:
+        """Resolve a live admin-tunable TTL (in seconds) from a Redis override.
 
         Order of precedence:
-          1. `admin_config:venue_photos_cache_ttl_days` in Redis (live, hot-tunable
-             via vibesadmin)
-          2. `settings.photo_cache_ttl_days` (env-var-backed default)
+          1. `admin_key` in Redis (live, hot-tunable via vibesadmin), an integer
+             number of `unit_label` units.
+          2. `default_value` (env-var-backed default), in the same units.
 
-        Invalid or non-positive values fall back to the settings default so a
-        bad admin write can never disable eviction or push a negative TTL into
-        Redis.
+        Invalid or non-positive overrides fall back to the default so a bad admin
+        write can never disable eviction or push a negative TTL into Redis. The
+        shared body behind the venue_photos (days) and fresh-photos (hours)
+        resolvers; log wording is byte-identical to the former twin methods.
         """
-        default_days = settings.photo_cache_ttl_days
         try:
-            raw = self.client.get(ADMIN_CONFIG_PHOTOS_TTL_KEY)
+            raw = self.client.get(admin_key)
         except Exception as e:
             logger.warning(
-                f"[RedisVenueDAO] Failed to read {ADMIN_CONFIG_PHOTOS_TTL_KEY}, "
-                f"using default {default_days}d: {e}"
+                f"[RedisVenueDAO] Failed to read {admin_key}, "
+                f"using default {default_value}{unit_label}: {e}"
             )
-            return default_days * 24 * 3600
+            return default_value * unit_seconds
 
         if raw is None:
-            return default_days * 24 * 3600
+            return default_value * unit_seconds
 
         try:
-            override_days = int(json.loads(raw))
+            override = int(json.loads(raw))
         except (ValueError, TypeError, json.JSONDecodeError):
             logger.warning(
-                f"[RedisVenueDAO] {ADMIN_CONFIG_PHOTOS_TTL_KEY}={raw!r} is not "
-                f"an int, using default {default_days}d"
+                f"[RedisVenueDAO] {admin_key}={raw!r} is not "
+                f"an int, using default {default_value}{unit_label}"
             )
-            return default_days * 24 * 3600
+            return default_value * unit_seconds
 
-        if override_days <= 0:
+        if override <= 0:
             logger.warning(
-                f"[RedisVenueDAO] {ADMIN_CONFIG_PHOTOS_TTL_KEY}={override_days} "
-                f"<= 0, using default {default_days}d"
+                f"[RedisVenueDAO] {admin_key}={override} "
+                f"<= 0, using default {default_value}{unit_label}"
             )
-            return default_days * 24 * 3600
+            return default_value * unit_seconds
 
-        return override_days * 24 * 3600
+        return override * unit_seconds
+
+    def _resolve_photos_cache_ttl_seconds(self) -> int:
+        """Live TTL (seconds) for venue_photos entries: the
+        `admin_config:venue_photos_cache_ttl_days` override (days) or
+        `settings.photo_cache_ttl_days`."""
+        return self._resolve_admin_ttl_seconds(
+            ADMIN_CONFIG_PHOTOS_TTL_KEY, settings.photo_cache_ttl_days, 24 * 3600, "d"
+        )
 
     def set_venue_photos(
         self, venue_id: str, photos: list[dict], ttl_seconds: Optional[int] = None
@@ -676,48 +686,14 @@ class RedisVenueDAO:
     # =========================================================================
 
     def _resolve_fresh_photos_cache_ttl_seconds(self) -> int:
-        """Return the live TTL (seconds) for the venue_photos_fresh_v1 cache.
-
-        Order of precedence:
-          1. `admin_config:photo_fresh_cache_ttl_hours` in Redis (live,
-             hot-tunable via vibesadmin), stored as an integer number of HOURS.
-          2. `settings.photo_fresh_cache_ttl_hours` (env-var-backed default, 6h).
-
-        Invalid or non-positive overrides fall back to the settings default so a
-        bad admin write can never disable eviction or push a negative TTL into
-        Redis. Mirrors `_resolve_photos_cache_ttl_seconds` (the legacy day-based
-        resolver) so the two cannot desync in behavior.
-        """
-        default_hours = settings.photo_fresh_cache_ttl_hours
-        try:
-            raw = self.client.get(ADMIN_CONFIG_FRESH_PHOTOS_TTL_KEY)
-        except Exception as e:
-            logger.warning(
-                f"[RedisVenueDAO] Failed to read {ADMIN_CONFIG_FRESH_PHOTOS_TTL_KEY}, "
-                f"using default {default_hours}h: {e}"
-            )
-            return default_hours * 3600
-
-        if raw is None:
-            return default_hours * 3600
-
-        try:
-            override_hours = int(json.loads(raw))
-        except (ValueError, TypeError, json.JSONDecodeError):
-            logger.warning(
-                f"[RedisVenueDAO] {ADMIN_CONFIG_FRESH_PHOTOS_TTL_KEY}={raw!r} is not "
-                f"an int, using default {default_hours}h"
-            )
-            return default_hours * 3600
-
-        if override_hours <= 0:
-            logger.warning(
-                f"[RedisVenueDAO] {ADMIN_CONFIG_FRESH_PHOTOS_TTL_KEY}={override_hours} "
-                f"<= 0, using default {default_hours}h"
-            )
-            return default_hours * 3600
-
-        return override_hours * 3600
+        """Live TTL (seconds) for the venue_photos_fresh_v1 cache: the
+        `admin_config:photo_fresh_cache_ttl_hours` override (hours) or
+        `settings.photo_fresh_cache_ttl_hours` (default 6h). Shares
+        `_resolve_admin_ttl_seconds` with the day-based resolver so the two
+        cannot desync in behavior."""
+        return self._resolve_admin_ttl_seconds(
+            ADMIN_CONFIG_FRESH_PHOTOS_TTL_KEY, settings.photo_fresh_cache_ttl_hours, 3600, "h"
+        )
 
     def set_venue_photos_fresh(self, venue_id: str, photos: list[dict]) -> None:
         """Cache FRESH, KEYLESS photo URLs for a venue under the short-TTL fresh
