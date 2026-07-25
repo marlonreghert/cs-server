@@ -20,9 +20,9 @@ Feature: Admin-configurable venue type to category mapping
 
   Scenario: POST with an unknown category value is rejected
     Given no venue category-map override is stored
-    When the operator saves a google type mapping of "bakery" to "FOO"
+    When the operator saves a google type mapping of "hardware_store" to "FOO"
     Then the response status is 400
-    And a subsequent GET /admin/venues/category-map does not map google type "bakery"
+    And a subsequent GET /admin/venues/category-map does not map google type "hardware_store"
 
   Scenario: POST normalizes key casing
     Given no venue category-map override is stored
@@ -31,9 +31,9 @@ Feature: Admin-configurable venue type to category mapping
     And the subsequent GET maps besttime type "JUICE" to category "FOOD_DRINK"
 
   Scenario: A remapped type changes the served category without re-fetching venues
-    Given a stored venue whose google primary type is "bakery" and besttime type is absent
+    Given a stored venue whose google primary type is "hardware_store" and besttime type is absent
     And the served category for that venue is "OTHER"
-    When the operator saves a google type mapping of "bakery" to "FOOD_DRINK"
+    When the operator saves a google type mapping of "hardware_store" to "FOOD_DRINK"
     And nearby venues are served
     Then that venue is served with category "FOOD_DRINK"
 

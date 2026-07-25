@@ -32,6 +32,7 @@ CATEGORIES = {
     "BREWERY":      {"label": "Cervejaria",        "emoji": "🍺", "color": "#B45309"},
     "WINERY":       {"label": "Vinícola",          "emoji": "🍷", "color": "#991B1B"},
     "COFFEE_SHOP":  {"label": "Cafeteria",         "emoji": "☕", "color": "#78350F"},
+    "BAKERY":       {"label": "Padaria",           "emoji": "🥐", "color": "#B7791F"},
     "RESTAURANT":   {"label": "Restaurante",       "emoji": "🍽️", "color": "#DC2626"},
     "BUFFET":       {"label": "Buffet",            "emoji": "🍱", "color": "#DC2626"},
     "FOOD_DRINK":   {"label": "Gastronomia",       "emoji": "🍴", "color": "#10B981"},
@@ -63,6 +64,8 @@ GRANULAR_LABELS = {
     # Coffee
     "coffee_shop":              "Cafeteria",
     "cafe":                     "Café",
+    # Bakery
+    "bakery":                   "Padaria",
     # Restaurants
     "restaurant":               "Restaurante",
     "brazilian_restaurant":     "Restaurante Brasileiro",
@@ -134,6 +137,8 @@ _GOOGLE_TO_CATEGORY = {
     # Coffee
     "coffee_shop":              "COFFEE_SHOP",
     "cafe":                     "COFFEE_SHOP",
+    # Bakery
+    "bakery":                   "BAKERY",
     # Restaurants
     "restaurant":               "RESTAURANT",
     "brazilian_restaurant":     "RESTAURANT",

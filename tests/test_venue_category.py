@@ -109,11 +109,11 @@ class TestGranularLabels:
 
 class TestResolveCategoryWithInjectedMaps:
     def test_injected_google_map_wins(self):
-        # bakery is not a default google type (→ OTHER); an injected map remaps it.
-        assert resolve_category(google_type="bakery") == "OTHER"
+        # hardware_store is not a default google type (→ OTHER); an injected map remaps it.
+        assert resolve_category(google_type="hardware_store") == "OTHER"
         assert (
             resolve_category(
-                google_type="bakery", google_map={"bakery": "FOOD_DRINK"}
+                google_type="hardware_store", google_map={"hardware_store": "FOOD_DRINK"}
             )
             == "FOOD_DRINK"
         )
@@ -150,13 +150,13 @@ class TestLoadCategoryMap:
         google_map, besttime_map = load_category_map(None)
         assert google_map["bar"] == "BAR"
         assert besttime_map["CLUBS"] == "NIGHTCLUB"
-        assert "bakery" not in google_map
+        assert "hardware_store" not in google_map
 
     def test_missing_key_returns_defaults(self):
         r = fakeredis.FakeRedis(decode_responses=True)
         google_map, _ = load_category_map(r)
         assert google_map["bar"] == "BAR"
-        assert "bakery" not in google_map
+        assert "hardware_store" not in google_map
 
     def test_malformed_json_falls_open_to_defaults(self):
         r = fakeredis.FakeRedis(decode_responses=True)
@@ -199,6 +199,29 @@ class TestLoadCategoryMap:
         google_map, _ = load_category_map(r)
         assert google_map["bakery"] == "FOOD_DRINK"
         assert "x" not in google_map
+
+
+class TestBakeryCategory:
+    def test_bakery_is_a_category(self):
+        assert CATEGORIES["BAKERY"]["label"] == "Padaria"
+        assert CATEGORIES["BAKERY"]["emoji"] == "\U0001F950"  # 🥐
+
+    def test_google_bakery_resolves_to_bakery(self):
+        assert resolve_category(google_type="bakery") == "BAKERY"
+
+    def test_bakery_display_full(self):
+        display = resolve_venue_display(google_type="bakery")
+        assert display["category"] == "BAKERY"
+        assert display["label"] == "Padaria"
+        assert display["emoji"] == "\U0001F950"
+        assert display["granular_label"] == "Padaria"
+
+    def test_bakery_granular_label(self):
+        assert get_granular_label("bakery") == "Padaria"
+
+    def test_admin_map_accepts_bakery_target(self):
+        out = validate_category_map_config({"google": {"padaria_artesanal": "BAKERY"}})
+        assert out["google"]["padaria_artesanal"] == "BAKERY"
 
 
 class TestValidateCategoryMapConfig:

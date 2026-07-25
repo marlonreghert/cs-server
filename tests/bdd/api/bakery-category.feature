@@ -1,4 +1,3 @@
-@wip
 Feature: BAKERY ("Padaria") venue category
 
   Google Places "bakery" venues resolve to a dedicated VibeSense category BAKERY
