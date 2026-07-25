@@ -5,13 +5,21 @@ Google types (park, plaza, city_park, historical_landmark) and three BestTime
 types (PARK, PLAZA, CITY_PARK) resolving to PARK, garden/national_park staying
 OTHER, the PARK display tokens, and the granular labels.
 """
+import json
+
+import fakeredis
+import pytest
+
 from app.models.venue_category import (
+    ADMIN_CONFIG_CATEGORY_MAP_KEY,
     CATEGORIES,
     GRANULAR_LABELS,
     get_category_info,
     get_granular_label,
+    load_category_map,
     resolve_category,
     resolve_venue_display,
+    validate_category_map_config,
 )
 
 
@@ -97,3 +105,136 @@ class TestGranularLabels:
     def test_historical_landmark(self):
         assert GRANULAR_LABELS["historical_landmark"] == "Marco Histórico"
         assert get_granular_label("historical_landmark") == "Marco Histórico"
+
+
+class TestResolveCategoryWithInjectedMaps:
+    def test_injected_google_map_wins(self):
+        # bakery is not a default google type (→ OTHER); an injected map remaps it.
+        assert resolve_category(google_type="bakery") == "OTHER"
+        assert (
+            resolve_category(
+                google_type="bakery", google_map={"bakery": "FOOD_DRINK"}
+            )
+            == "FOOD_DRINK"
+        )
+
+    def test_injected_besttime_map_wins(self):
+        assert (
+            resolve_category(
+                besttime_type="JUICE", besttime_map={"JUICE": "FOOD_DRINK"}
+            )
+            == "FOOD_DRINK"
+        )
+
+    def test_special_restaurant_vs_bar_rule_survives_injection(self):
+        # Google=restaurant but BestTime=BAR still resolves to BAR even with maps
+        # injected (the special rule is hardcoded, not table-driven).
+        assert (
+            resolve_category(
+                google_type="restaurant",
+                besttime_type="BAR",
+                google_map={"restaurant": "RESTAURANT"},
+                besttime_map={"BAR": "BAR"},
+            )
+            == "BAR"
+        )
+
+    def test_omitting_maps_preserves_default_behavior(self):
+        assert resolve_category(google_type="bar") == "BAR"
+        assert resolve_category(besttime_type="CLUBS") == "NIGHTCLUB"
+        assert resolve_venue_display(google_type="bar")["category"] == "BAR"
+
+
+class TestLoadCategoryMap:
+    def test_none_redis_returns_defaults(self):
+        google_map, besttime_map = load_category_map(None)
+        assert google_map["bar"] == "BAR"
+        assert besttime_map["CLUBS"] == "NIGHTCLUB"
+        assert "bakery" not in google_map
+
+    def test_missing_key_returns_defaults(self):
+        r = fakeredis.FakeRedis(decode_responses=True)
+        google_map, _ = load_category_map(r)
+        assert google_map["bar"] == "BAR"
+        assert "bakery" not in google_map
+
+    def test_malformed_json_falls_open_to_defaults(self):
+        r = fakeredis.FakeRedis(decode_responses=True)
+        r.set(ADMIN_CONFIG_CATEGORY_MAP_KEY, "not-json{{{")
+        google_map, besttime_map = load_category_map(r)
+        assert google_map["bar"] == "BAR"
+        assert besttime_map["CLUBS"] == "NIGHTCLUB"
+
+    def test_non_object_falls_open_to_defaults(self):
+        r = fakeredis.FakeRedis(decode_responses=True)
+        r.set(ADMIN_CONFIG_CATEGORY_MAP_KEY, json.dumps(["not", "a", "map"]))
+        google_map, _ = load_category_map(r)
+        assert google_map["bar"] == "BAR"
+
+    def test_override_merges_over_defaults(self):
+        r = fakeredis.FakeRedis(decode_responses=True)
+        r.set(
+            ADMIN_CONFIG_CATEGORY_MAP_KEY,
+            json.dumps({"google": {"bakery": "FOOD_DRINK"}, "besttime": {}}),
+        )
+        google_map, _ = load_category_map(r)
+        assert google_map["bakery"] == "FOOD_DRINK"  # added
+        assert google_map["bar"] == "BAR"  # default preserved
+
+    def test_override_can_shadow_a_default(self):
+        r = fakeredis.FakeRedis(decode_responses=True)
+        r.set(
+            ADMIN_CONFIG_CATEGORY_MAP_KEY,
+            json.dumps({"google": {"bar": "PUB"}}),
+        )
+        google_map, _ = load_category_map(r)
+        assert google_map["bar"] == "PUB"
+
+    def test_bad_entries_are_skipped_not_fatal(self):
+        r = fakeredis.FakeRedis(decode_responses=True)
+        r.set(
+            ADMIN_CONFIG_CATEGORY_MAP_KEY,
+            json.dumps({"google": {"bakery": "FOOD_DRINK", "x": 5}}),
+        )
+        google_map, _ = load_category_map(r)
+        assert google_map["bakery"] == "FOOD_DRINK"
+        assert "x" not in google_map
+
+
+class TestValidateCategoryMapConfig:
+    def test_normalizes_key_casing(self):
+        out = validate_category_map_config(
+            {"google": {"BAKERY": "FOOD_DRINK"}, "besttime": {"juice": "FOOD_DRINK"}}
+        )
+        assert out == {
+            "google": {"bakery": "FOOD_DRINK"},
+            "besttime": {"JUICE": "FOOD_DRINK"},
+        }
+
+    def test_rejects_unknown_category(self):
+        with pytest.raises(ValueError):
+            validate_category_map_config({"google": {"bakery": "FOO"}})
+
+    def test_rejects_non_dict_body(self):
+        with pytest.raises(TypeError):
+            validate_category_map_config(["not", "a", "map"])
+
+    def test_rejects_non_dict_side(self):
+        with pytest.raises(TypeError):
+            validate_category_map_config({"google": ["bad"]})
+
+    def test_rejects_non_string_values(self):
+        with pytest.raises(TypeError):
+            validate_category_map_config({"google": {"bakery": 5}})
+
+    def test_accepts_partial_and_empty(self):
+        assert validate_category_map_config({}) == {"google": {}, "besttime": {}}
+        assert validate_category_map_config({"google": {"bakery": "FOOD_DRINK"}}) == {
+            "google": {"bakery": "FOOD_DRINK"},
+            "besttime": {},
+        }
+
+    def test_every_known_category_is_accepted(self):
+        for cat in CATEGORIES:
+            out = validate_category_map_config({"google": {"sometype": cat}})
+            assert out["google"]["sometype"] == cat
