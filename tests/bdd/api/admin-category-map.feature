@@ -1,4 +1,3 @@
-@wip
 Feature: Admin-configurable venue type to category mapping
 
   An operator remaps Google Places or BestTime venue types to VibeSense
@@ -14,27 +13,27 @@ Feature: Admin-configurable venue type to category mapping
 
   Scenario: POST a valid override is persisted and reflected in a later GET
     Given no venue category-map override is stored
-    When the operator posts a category-map override mapping google "bakery" to "FOOD_DRINK"
+    When the operator saves a google type mapping of "bakery" to "FOOD_DRINK"
     Then the response status is 200
     And a subsequent GET /admin/venues/category-map maps google type "bakery" to category "FOOD_DRINK"
     And the subsequent GET still maps google type "bar" to category "BAR"
 
   Scenario: POST with an unknown category value is rejected
     Given no venue category-map override is stored
-    When the operator posts a category-map override mapping google "bakery" to "FOO"
+    When the operator saves a google type mapping of "bakery" to "FOO"
     Then the response status is 400
     And a subsequent GET /admin/venues/category-map does not map google type "bakery"
 
   Scenario: POST normalizes key casing
     Given no venue category-map override is stored
-    When the operator posts a category-map override mapping google "BAKERY" to "FOOD_DRINK" and besttime "juice" to "FOOD_DRINK"
+    When the operator saves both a google mapping "BAKERY" to "FOOD_DRINK" and a besttime mapping "juice" to "FOOD_DRINK"
     Then a subsequent GET /admin/venues/category-map maps google type "bakery" to category "FOOD_DRINK"
     And the subsequent GET maps besttime type "JUICE" to category "FOOD_DRINK"
 
   Scenario: A remapped type changes the served category without re-fetching venues
     Given a stored venue whose google primary type is "bakery" and besttime type is absent
     And the served category for that venue is "OTHER"
-    When the operator posts a category-map override mapping google "bakery" to "FOOD_DRINK"
+    When the operator saves a google type mapping of "bakery" to "FOOD_DRINK"
     And nearby venues are served
     Then that venue is served with category "FOOD_DRINK"
 

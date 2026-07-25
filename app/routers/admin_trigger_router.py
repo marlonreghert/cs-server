@@ -24,6 +24,7 @@ from app.services.venue_eligibility import (
 )
 from app.services.admin_config_service import AdminConfigService
 from app.services.eligibility_rules import EligibilityRuleService
+from app.models.venue_category import effective_category_map
 from app.services import job_lock
 from app.metrics import JOB_LOCK_REJECTED_TOTAL
 
@@ -470,6 +471,44 @@ async def update_eligibility_config(config: dict = Body(...)):
             raise HTTPException(status_code=500, detail="failed to persist eligibility config")
 
     return validated.to_public_dict()
+
+
+# ── venue type → category mapping (admin-tunable, no redeploy) ────────────────
+def _category_map_redis_client():
+    """The raw Redis client used to read the effective category map (same source
+    the serve path uses via load_category_map)."""
+    return getattr(_get_venue_dao_from_container(), "client", None)
+
+
+@router.get("/venues/category-map")
+async def get_category_map():
+    """Return the effective type→category mapping for the admin panel.
+
+    The hardcoded defaults merged with any stored admin override, so the UI
+    pre-populates with the live mapping.
+    """
+    return effective_category_map(_category_map_redis_client())
+
+
+@router.post("/venues/category-map")
+async def update_category_map(config: dict = Body(...)):
+    """Persist an admin override of the Google/BestTime → category mapping.
+
+    Validates that every category value is a known category (400 on unknown),
+    normalizes key casing, writes RDS (system of record) then mirrors the Redis
+    ``admin_config:venue_category_map`` key via AdminConfigService, and returns
+    the resulting effective map. The change applies at serve time on the next
+    request — no venue re-fetch, no re-projection.
+    """
+    svc = _admin_config_service()
+    try:
+        svc.set("venue_category_map", config, updated_by="admin")
+    except (ValueError, TypeError) as e:
+        raise HTTPException(status_code=400, detail=f"invalid category map: {e}")
+    except Exception as e:
+        logger.error(f"[AdminTrigger] Failed to persist category map: {e}")
+        raise HTTPException(status_code=502, detail="failed to persist category map; retry")
+    return effective_category_map(_category_map_redis_client())
 
 
 # ── single eligibility rule edits (Ex2: one-row add/remove) ──────────────────

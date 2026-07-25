@@ -7,7 +7,7 @@ import pytz
 
 from app.config import settings
 from app.dao import RedisVenueDAO
-from app.models.venue_category import resolve_venue_display
+from app.models.venue_category import load_category_map, resolve_venue_display
 from app.services.photo_category import TYPE_TO_CATEGORY
 
 # BestTime day_int → Portuguese weekday name (BestTime: 0=Mon, 6=Sun)
@@ -367,7 +367,13 @@ class VenueHandler:
                     fallback_ids, day_int
                 )
 
-        # Minified mode: extract essential fields
+        # Minified mode: extract essential fields.
+        # Load the effective type→category map ONCE per request batch (admin
+        # override merged over defaults), then inject it per venue — one Redis
+        # read for the whole result set, never one per venue.
+        category_google_map, category_besttime_map = load_category_map(
+            getattr(self.venue_dao, "client", None)
+        )
         minified: list[MinifiedVenue] = []
         for m in merged:
             # Extract live busyness (only if available AND fresh). A cached live
@@ -557,7 +563,13 @@ class VenueHandler:
                     venue_id=m.venue.venue_id,
                     venue_type=m.venue.venue_type,
                     google_places_type=google_places_type,
-                    **resolve_venue_display(google_places_type, m.venue.venue_type, m.venue.venue_name),
+                    **resolve_venue_display(
+                        google_places_type,
+                        m.venue.venue_type,
+                        m.venue.venue_name,
+                        google_map=category_google_map,
+                        besttime_map=category_besttime_map,
+                    ),
                     price_level=m.venue.price_level,
                     price_range=m.venue.price_range,
                     rating=m.venue.rating,
