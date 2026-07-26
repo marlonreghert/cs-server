@@ -10,17 +10,39 @@
 # can add records to the lake and can neither read nor destroy what is there.
 resource "aws_iam_policy" "datalake_writer" {
   name        = "vibesense-datalake-writer"
-  description = "Append-only access to the VibeSense data lake raw/ prefix"
+  description = "Append-only access to the VibeSense data lake raw/ and media/ prefixes"
   tags        = var.tags
 
   policy = jsonencode({
     Version = "2012-10-17"
-    Statement = [{
-      Sid      = "AppendRawObjects"
-      Effect   = "Allow"
-      Action   = ["s3:PutObject"]
-      Resource = "${aws_s3_bucket.lake.arn}/raw/*"
-    }]
+    Statement = [
+      {
+        Sid    = "AppendObjects"
+        Effect = "Allow"
+        Action = ["s3:PutObject"]
+        Resource = [
+          "${aws_s3_bucket.lake.arn}/raw/*",
+          # Venue photo archive. Binary media, same append-only treatment.
+          "${aws_s3_bucket.lake.arn}/media/*",
+        ]
+      },
+      {
+        # The photo archive must LIST to work: it skips venues already archived
+        # in the target day (so a re-run costs nothing at Google) and resolves
+        # the "append to latest day" mode. This is metadata only — GetObject is
+        # still withheld, so the app can see that an object exists and add new
+        # ones, and can never read archived content back.
+        Sid      = "ListMediaPrefix"
+        Effect   = "Allow"
+        Action   = ["s3:ListBucket"]
+        Resource = aws_s3_bucket.lake.arn
+        Condition = {
+          StringLike = {
+            "s3:prefix" = ["media/*", "media/"]
+          }
+        }
+      },
+    ]
   })
 }
 

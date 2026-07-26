@@ -62,6 +62,7 @@ test-unit:
 		tests/test_datalake_redaction.py \
 		tests/test_besttime_client_datalake_tap.py \
 		tests/test_datalake_client_credentials.py \
+		tests/test_venue_photo_archive.py \
 		-v
 
 test-integration:
