@@ -244,6 +244,69 @@ class RdsVenueStore:
                 "SELECT venue_id FROM serving.eligible_venue"
             ))]
 
+    # ── admin.venue_closure_signal ────────────────────────────────────────────
+    # Closure is evidence-derived and reversible: these rows gate
+    # serving.eligible_venue without touching lifecycle_status, so a reopened
+    # venue returns on its own once the detector clears its signal.
+    def set_closure_signal(self, venue_id: str, signal: dict) -> None:
+        with self.engine.begin() as conn:
+            conn.execute(
+                text(
+                    "INSERT INTO admin.venue_closure_signal "
+                    "(venue_id, closed, reason, confidence, evidence_publish_time, "
+                    " matched_phrase, detected_at, updated_at) "
+                    "VALUES (:venue_id, :closed, :reason, :confidence, "
+                    "        :evidence_publish_time, :matched_phrase, now(), now()) "
+                    "ON CONFLICT (venue_id) DO UPDATE SET "
+                    "  closed = EXCLUDED.closed, "
+                    "  reason = EXCLUDED.reason, "
+                    "  confidence = EXCLUDED.confidence, "
+                    "  evidence_publish_time = EXCLUDED.evidence_publish_time, "
+                    "  matched_phrase = EXCLUDED.matched_phrase, "
+                    "  updated_at = now()"
+                ),
+                {
+                    "venue_id": venue_id,
+                    "closed": bool(signal.get("closed")),
+                    "reason": signal.get("reason"),
+                    "confidence": signal.get("confidence", "high"),
+                    "evidence_publish_time": signal.get("evidence_publish_time"),
+                    "matched_phrase": signal.get("matched_phrase"),
+                },
+            )
+
+    def clear_closure_signal(self, venue_id: str) -> None:
+        with self.engine.begin() as conn:
+            conn.execute(
+                text("DELETE FROM admin.venue_closure_signal WHERE venue_id = :venue_id"),
+                {"venue_id": venue_id},
+            )
+
+    def get_closure_signal(self, venue_id: str) -> Optional[dict]:
+        with self.engine.connect() as conn:
+            row = conn.execute(
+                text(
+                    "SELECT venue_id, closed, reason, confidence, "
+                    "       evidence_publish_time, matched_phrase "
+                    "FROM admin.venue_closure_signal WHERE venue_id = :venue_id"
+                ),
+                {"venue_id": venue_id},
+            ).mappings().first()
+            return dict(row) if row else None
+
+    def list_closure_signals(self) -> list[dict]:
+        with self.engine.connect() as conn:
+            return [
+                dict(row)
+                for row in conn.execute(
+                    text(
+                        "SELECT venue_id, closed, reason, confidence, "
+                        "       evidence_publish_time, matched_phrase "
+                        "FROM admin.venue_closure_signal ORDER BY venue_id"
+                    )
+                ).mappings()
+            ]
+
     def list_servable_venue_ids_by_priority(self, limit: int) -> list[str]:
         """The top-`limit` servable venues (the eligibility serving view) ordered
         by refresh priority ascending, tie-broken by reviews desc, rating desc,

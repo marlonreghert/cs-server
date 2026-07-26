@@ -308,6 +308,29 @@ run_redis_projection_job = make_job(
 )
 
 
+async def _detect_closed_venues(c):
+    """Off-loop closure detection: flag venues whose newest review reports them
+    permanently closed so the serving view drops them.
+
+    Reads review text already stored in RDS (no upstream fetch) and writes only
+    admin.venue_closure_signal — never a lifecycle change — so a reopened venue
+    returns to serving on its own once newer evidence clears the signal."""
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, c.closure_detection_service.run)
+
+
+run_closure_detection_job = make_job(
+    "closure_detection",
+    start_log="[Scheduler] Running ClosureDetectionJob (off-loop)",
+    done_log=lambda summary: f"[Scheduler] ClosureDetectionJob completed: {summary}",
+    error_label="ClosureDetectionJob",
+    run=_detect_closed_venues,
+    service_attr="closure_detection_service",
+    require_container=True,
+    disabled_log="[Scheduler] ClosureDetectionJob skipped: service not configured",
+)
+
+
 def register_refresh_jobs(scheduler, settings: Settings):
     """Register the BestTime refresh jobs (catalog discovery, live, weekly).
 
@@ -534,6 +557,27 @@ def start_background_jobs(settings: Settings):
         enabled_log=(
             f"[Scheduler] Scheduled Redis projection every "
             f"{settings.redis_projection_minutes} minutes (off-loop)"
+        ),
+    )
+
+    # Job 12: Closed-venue detection — flags venues whose newest review reports
+    # permanent closure so the serving view drops them. OFF by default: a false
+    # positive removes a live venue from serving, so it is enabled deliberately
+    # after a dry run. Reviews change slowly, so the cadence is hours.
+    schedule(
+        scheduler,
+        enabled=settings.closure_detection_enabled,
+        func=run_closure_detection_job,
+        trigger=IntervalTrigger(hours=settings.closure_detection_hours),
+        id="closure_detection",
+        name="Closed-venue detection (reviews -> serving exclusion)",
+        enabled_log=(
+            f"[Scheduler] Scheduled closed-venue detection every "
+            f"{settings.closure_detection_hours} hours (off-loop)"
+        ),
+        disabled_log=(
+            "[Scheduler] Closed-venue detection disabled "
+            "(closure_detection_enabled=false)"
         ),
     )
 

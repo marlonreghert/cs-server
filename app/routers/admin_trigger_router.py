@@ -417,6 +417,41 @@ async def get_eligibility_config():
     return config.to_public_dict()
 
 
+@router.get("/venues/closed")
+async def get_closed_venues():
+    """List venues excluded from serving because their reviews report closure.
+
+    Read-only operator visibility: closure is derived from review evidence and
+    is reversible, so an operator must be able to see *why* a venue left the
+    serving view and audit a false positive. Low-confidence signals are listed
+    too — they do not affect serving, but they are exactly what an operator
+    should review.
+    """
+    store = require("rds_store", detail="rds_store not configured")
+    try:
+        rows = store.list_closure_signals()
+    except Exception as exc:
+        logging.warning(f"[AdminTriggerRouter] closure signal listing failed: {exc}")
+        raise HTTPException(status_code=503, detail="closure signals unavailable")
+
+    venues = []
+    for row in rows:
+        if not row.get("closed"):
+            continue
+        venues.append(
+            {
+                "venue_id": row.get("venue_id"),
+                "reason": row.get("reason"),
+                "confidence": row.get("confidence"),
+                "evidence_publish_time": row.get("evidence_publish_time"),
+                "matched_phrase": row.get("matched_phrase"),
+                "excluded_from_serving": row.get("confidence") == "high",
+            }
+        )
+    venues.sort(key=lambda v: (v["confidence"] != "high", v["venue_id"] or ""))
+    return {"venues": venues, "count": len(venues)}
+
+
 @router.post("/venues/eligibility-config")
 async def update_eligibility_config(config: dict = Body(...)):
     """Update the venue-eligibility block-lists (admin-tunable, no redeploy).

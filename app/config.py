@@ -113,6 +113,14 @@ class Settings(BaseSettings):
     # the projector runs on (a cadence knob).
     redis_projection_minutes: int = 2
 
+    # Closed-venue detection: derives a closure signal from stored review text
+    # and drops flagged venues from the serving view. OFF by default — a false
+    # positive removes a live venue from serving, so enabling it is deliberate
+    # and should follow a dry run over production data. Reviews change slowly,
+    # so the cadence is hours, not minutes.
+    closure_detection_enabled: bool = False
+    closure_detection_hours: int = 12
+
     @property
     def rds_sqlalchemy_url(self) -> str:
         """SQLAlchemy URL for the RDS Postgres connection (psycopg v3 driver)."""
