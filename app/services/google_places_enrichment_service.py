@@ -188,6 +188,26 @@ class GooglePlacesEnrichmentService:
                 f"price_level={new_tier} source={new_source}"
             )
 
+    def _apply_primary_type(self, venue_id: str, vibe_attrs, incoming_type) -> None:
+        """Set vibe_attrs.google_primary_type, honoring a per-venue type override.
+
+        If the stored row is locked (an operator corrected the type via the
+        per-venue override), preserve the corrected type and keep the lock — do
+        NOT overwrite it with Google's value, even on a force_refresh
+        re-enrichment. Otherwise take Google's incoming type.
+        """
+        existing = self.venue_dao.get_vibe_attributes(venue_id)
+        if existing is not None and getattr(existing, "primary_type_locked", False):
+            vibe_attrs.google_primary_type = existing.google_primary_type
+            vibe_attrs.primary_type_locked = True
+            logger.info(
+                f"[GooglePlacesEnrichment] {venue_id}: primary type locked "
+                f"({existing.google_primary_type}); ignoring Google type "
+                f"{incoming_type}"
+            )
+        else:
+            vibe_attrs.google_primary_type = incoming_type
+
     def _apply_business_status(self, venue_id: str, details) -> bool:
         """Persist Google's business status and, on closure, run the same
         deprecation path enrich_venue's full path always applied — soft-delete
@@ -342,7 +362,7 @@ class GooglePlacesEnrichmentService:
             # Convert to our vibe attributes model
             vibe_attrs = self.google_places_client.details_to_vibe_attributes(venue_id, details)
             vibe_attrs.google_place_id = google_place_id
-            vibe_attrs.google_primary_type = details.primary_type
+            self._apply_primary_type(venue_id, vibe_attrs, details.primary_type)
 
             # Check for LGBTQ+ indicators in the summary
             if details.generative_summary or details.editorial_summary:

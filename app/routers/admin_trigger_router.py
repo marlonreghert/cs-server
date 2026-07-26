@@ -24,7 +24,7 @@ from app.services.venue_eligibility import (
 )
 from app.services.admin_config_service import AdminConfigService
 from app.services.eligibility_rules import EligibilityRuleService
-from app.models.venue_category import effective_category_map
+from app.models.venue_category import effective_category_map, representative_google_type
 from app.services import job_lock
 from app.metrics import JOB_LOCK_REJECTED_TOTAL
 
@@ -509,6 +509,76 @@ async def update_category_map(config: dict = Body(...)):
         logger.error(f"[AdminTrigger] Failed to persist category map: {e}")
         raise HTTPException(status_code=502, detail="failed to persist category map; retry")
     return effective_category_map(_category_map_redis_client())
+
+
+# ── per-venue type override (correct a single mis-typed venue) ────────────────
+async def _trigger_rebuild_redis_nonfatal() -> None:
+    """Kick a re-projection so the override reaches serving fast. Non-fatal: the
+    periodic projector re-asserts RDS→Redis anyway, so a failure here is logged,
+    not surfaced."""
+    c = _container
+    proj = getattr(c, "redis_projection_service", None) if c is not None else None
+    if proj is None:
+        return
+    try:
+        await asyncio.get_event_loop().run_in_executor(None, proj.rebuild_redis_from_rds)
+    except Exception as e:  # pragma: no cover - defensive
+        logger.warning(f"[AdminTrigger] type-override rebuild_redis failed (non-fatal): {e}")
+
+
+@router.post("/venues/{venue_id}/type-override")
+async def set_venue_type_override(venue_id: str, body: dict = Body(...)):
+    """Correct a single venue's type by choosing its real category.
+
+    Stores the representative google_primary_type for the category and locks it
+    (primary_type_locked) so re-enrichment cannot overwrite it. Because category
+    resolution and the eligibility view both key off google_primary_type, this
+    recategorizes AND un-blocks the venue; a re-projection is triggered so it
+    reaches serving without waiting for the periodic projector. 400 on an unknown
+    category (or OTHER, which has no representative type); 404 when the venue has
+    no vibe_attributes record.
+    """
+    category = (body or {}).get("category")
+    if not isinstance(category, str):
+        raise HTTPException(status_code=400, detail="category is required")
+    representative = representative_google_type(category)
+    if representative is None:
+        raise HTTPException(
+            status_code=400, detail=f"unknown or non-overridable category: {category!r}"
+        )
+    venue_dao = _get_venue_dao_from_container()
+    existing = venue_dao.get_vibe_attributes(venue_id)
+    if existing is None:
+        raise HTTPException(status_code=404, detail=f"venue not found: {venue_id}")
+    existing.google_primary_type = representative
+    existing.primary_type_locked = True
+    venue_dao.set_vibe_attributes(existing)
+    logger.info(
+        f"[AdminTrigger] type override: {venue_id} → {category.upper()} "
+        f"(google_primary_type={representative}, locked)"
+    )
+    await _trigger_rebuild_redis_nonfatal()
+    return {
+        "venue_id": venue_id,
+        "google_primary_type": representative,
+        "category": category.upper(),
+    }
+
+
+@router.delete("/venues/{venue_id}/type-override")
+async def clear_venue_type_override(venue_id: str):
+    """Clear a per-venue type override: unlock the venue so a subsequent
+    force_refresh re-enrichment restores Google's value. 404 when the venue has
+    no vibe_attributes record."""
+    venue_dao = _get_venue_dao_from_container()
+    existing = venue_dao.get_vibe_attributes(venue_id)
+    if existing is None:
+        raise HTTPException(status_code=404, detail=f"venue not found: {venue_id}")
+    existing.primary_type_locked = False
+    venue_dao.set_vibe_attributes(existing)
+    logger.info(f"[AdminTrigger] type override cleared: {venue_id} (unlocked)")
+    await _trigger_rebuild_redis_nonfatal()
+    return {"venue_id": venue_id, "status": "unlocked"}
 
 
 # ── single eligibility rule edits (Ex2: one-row add/remove) ──────────────────

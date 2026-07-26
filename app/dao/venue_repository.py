@@ -159,6 +159,7 @@ class VenueRepository(RedisVenueDAO):
             promoted={
                 "google_primary_type": vibe_attrs.google_primary_type,
                 "google_place_id": vibe_attrs.google_place_id,
+                "primary_type_locked": vibe_attrs.primary_type_locked,
             },
         )
 

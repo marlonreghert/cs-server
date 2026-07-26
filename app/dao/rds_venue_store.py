@@ -36,7 +36,8 @@ def _coerce_dt(value):
 # table_key -> (schema, table, [promoted column names])
 _ENRICHMENT = {
     "google_places.vibe_attributes": ("google_places", "vibe_attributes",
-                                       ["google_primary_type", "google_place_id"]),
+                                       ["google_primary_type", "google_place_id",
+                                        "primary_type_locked"]),
     "google_places.opening_hours": ("google_places", "opening_hours", []),
     "google_places.photos": ("google_places", "photos", []),
     "google_places.reviews": ("google_places", "reviews", []),

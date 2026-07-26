@@ -213,6 +213,41 @@ _BESTTIME_TO_CATEGORY = {
     "CITY_PARK":        "PARK",
 }
 
+# ── Category → representative Google type (per-venue type override) ───────────
+# Reverse of _GOOGLE_TO_CATEGORY: the canonical Google primaryType stored when an
+# operator corrects a venue to a given category. Every value is a key in
+# _GOOGLE_TO_CATEGORY, is NOT in the default blocked-google-type list, and is a
+# seeded "good category" token — so storing it un-blocks the venue and resolves
+# to the intended category. OTHER has no representative (you cannot "correct" a
+# venue to OTHER).
+REPRESENTATIVE_GOOGLE_TYPE = {
+    "BAR":           "bar",
+    "PUB":           "pub",
+    "COCKTAIL_BAR":  "cocktail_bar",
+    "NIGHTCLUB":     "night_club",
+    "KARAOKE":       "karaoke",
+    "BREWERY":       "brewery",
+    "WINERY":        "winery",
+    "COFFEE_SHOP":   "coffee_shop",
+    "BAKERY":        "bakery",
+    "RESTAURANT":    "restaurant",
+    "BUFFET":        "buffet_restaurant",
+    "FOOD_DRINK":    "bistro",
+    "EVENT_VENUE":   "event_venue",
+    "LIVE_MUSIC":    "performing_arts_theater",
+    "CASINO":        "casino",
+    "ENTERTAINMENT": "video_arcade",
+    "PARK":          "park",
+}
+
+
+def representative_google_type(category: str):
+    """Return the representative Google primaryType for a category, or None when
+    the category is unknown or has no representative (e.g. OTHER)."""
+    if not category:
+        return None
+    return REPRESENTATIVE_GOOGLE_TYPE.get(category.upper())
+
 
 def resolve_category(
     google_type: str = None,
