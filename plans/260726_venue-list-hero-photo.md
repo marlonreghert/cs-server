@@ -147,20 +147,31 @@ Resolve heroes for ~20 distinct venues, record the returned
 record time-to-first-4xx. Deliverable: p05 and p50 lifetime. Cost ~40 Google
 calls, ~$0.30.
 
-This one number sets `hero_photo_refresh_hours` and therefore the entire
-recurring bill. Using hero-only resolves (1 Place Details + 1 media = $0.012)
-at the **measured** S = 1,725 (see S3 below):
+Under the **probe-then-repair** design (see Implementation Approach) this number
+no longer sets the bill — the ledger does. What it sets is **coverage**: how much
+of the catalog can be kept alive inside the free tier.
 
-| p05 lifetime | Cadence | Google calls/SKU/month | Approx. cost |
+A repair is a **Photo media call only** ($0.007) — the durable `photo_name` is
+already stored, so Place Details is a one-time discovery cost, not a recurring
+one. Free tier is 10,000 calls per SKU per month. At the measured S = 1,725:
+
+| Real URI lifetime | Repairs needed/month | Free-tier coverage | Cost |
 |---|---|---|---|
-| >= 7 days | weekly | ~7,500 | **$0** — inside the 10k/SKU free tier |
-| ~24 h | daily | ~51,750 | **~$501/mo** |
-| ~6 h | 4x/day | ~207,000 | **~$2,364/mo** |
-| < ~4 h | — | — | **Do not build. Ship no list photo.** |
+| >= 7 days | ~7,400 | **100%** | **$0** |
+| ~5 days | ~10,350 | ~97% | ~$2/mo |
+| ~3 days | ~17,250 | ~58% | **$0** (ledger-capped) |
+| ~24 h | ~51,750 | ~19% | **$0** (ledger-capped) |
+| ~6 h | ~207,000 | ~5% | **$0** (ledger-capped) |
 
-**The decision is effectively binary.** At the real catalog size only the weekly
-cadence is free; daily costs ~$501/mo. Treat "does a URI survive 7 days?" as the
-question, not "what is the exact lifetime".
+**Cost is bounded by construction; only coverage varies.** So the go/no-go is a
+*product* question, not a billing one: below roughly **90% coverage** the list
+shows the emoji fallback on a random subset of cards, which reads as broken in a
+way that uniformly-no-photos does not. That threshold lands at a URI lifetime of
+about **5 days** — a sharper and more useful target than the 7 originally stated.
+
+**If S1 reports a lifetime under ~5 days, do not ship the feature** — not because
+it would cost money (it cannot), but because partial coverage is a worse
+experience than no photos.
 
 **Status: baseline captured 2026-07-26.** 20 hero URIs resolved across 20
 distinct Recife venues; an hourly probe is recording liveness per URI. Poller and
@@ -241,17 +252,35 @@ changing what it does:
 `max_photos == photos_per_venue` on the existing path. Those assertions must stay
 green — that is the regression gate for this refactor.
 
-### Phase 3 — Spend ledger (new, and overdue)
+### Phase 3 — Spend ledger (new, overdue, and load-bearing)
 
-`GooglePhotoBudgetService` over a Redis daily counter keyed by date, checked
-against an admin-tunable ceiling. `try_spend(n) -> bool` is called **inside** the
-resolve loop, not once at batch entry, so an exhausted budget stops the run
-mid-flight rather than after it.
+**Hard product constraint: this feature must not increase the Google bill by more
+than $10/month, and nothing may merge that does without explicit user approval.**
+The ledger is what makes that structural rather than aspirational.
 
-Wire it into the **existing** `resolve_and_cache_fresh_photos` path too. That
-path has been unguarded since the on-demand cutover and `/internal` has no
+`GooglePhotoBudgetService` over a Redis counter keyed by **calendar month**
+(a daily counter cannot enforce a monthly ceiling), checked against an
+admin-tunable limit whose default is the **free-tier boundary: 10,000 Photo
+media calls per month**. `try_spend(n) -> bool` is called **inside** the repair
+loop, not once at batch entry, so an exhausted budget stops spending mid-flight.
+
+Two properties make this a real guarantee rather than a hope:
+
+- The ceiling defaults to the free tier, so the steady-state bill is **$0**. An
+  operator must consciously raise it to spend anything at all, and the setting
+  should carry a comment stating the $10 gate.
+- When the ledger cannot cover every dead URI, repairs are spent in **priority
+  order** — highest-ranked / most-recently-viewed venues first — so the calls
+  that are made buy the most visible coverage. The tail degrades to the emoji
+  fallback, which is a designed state, not a failure.
+
+Also emit the projected month-end spend as a gauge, so exceeding the free tier is
+visible before the invoice rather than after.
+
+Wire the ledger into the **existing** `resolve_and_cache_fresh_photos` path too.
+That path has been unguarded since the on-demand cutover and `/internal` has no
 app-level auth — it is a latent unbounded-bill surface independent of this
-feature.
+feature, and the same $10 constraint applies to it.
 
 ### Phase 4 — Hero photo service
 
@@ -262,17 +291,36 @@ feature.
   `photos[0].name` + author attribution, insert the row, immediately resolve the
   URI at `hero_photo_width_px`. No place id → `state='no_place_id'`; zero photos
   → `state='no_photo'`. Both are terminal for the scheduled job.
-- `refresh_stale(limit)` — rows with `state='ok'` and `url_resolved_at` older
-  than `hero_photo_refresh_hours`, oldest first. **Check
-  `venue_photos_fresh_v1:{id}` first**: on a hit, derive the hero by width-suffix
-  rewrite (pending S2) at zero Google cost. Otherwise one media call from the
-  stored `photo_name`. A 4xx on media means the resource name itself rotated →
-  increment `failure_count` and requeue for re-discovery; soft-delete after 3
-  consecutive failures.
-- `canary_probe()` — `HEAD` a handful of already-projected URLs each run and
-  emit a failure counter. This is the early warning that the configured refresh
-  interval has drifted past the real URI lifetime, which is the one failure mode
-  that would otherwise be silent and global.
+- `sweep_liveness()` — **the cost-control core, and it is free.** Issue a 1-byte
+  ranged GET against every stored `photo_url`. These go to
+  `lh3.googleusercontent.com` carrying **no API key**, so they are ordinary CDN
+  reads that Google cannot attribute to the project and does not bill. Verified
+  empirically during the Phase 0 spike: 20 probes plus the width-rewrite matrix
+  ran keyless and succeeded. Mark each row alive or dead. Bandwidth is ~1 byte
+  per venue per sweep; run it as often as is useful.
+
+  This replaces blind periodic re-resolution. **We never pay to refresh a URL
+  that was still working** — which is where essentially all of the projected cost
+  in the original design came from.
+
+- `repair_dead(limit)` — only rows the sweep marked dead, in **priority order**
+  (highest-ranked / most-recently-viewed first), each gated on the monthly
+  ledger. **Check `venue_photos_fresh_v1:{id}` first**: on a hit, derive the hero
+  by width-suffix rewrite at **zero** Google cost — confirmed viable by S2.
+  Otherwise one media call from the stored durable `photo_name` — no second Place
+  Details. A 4xx on the media call means the resource *name* itself rotated (not
+  just the URI token) → increment `failure_count` and requeue for re-discovery;
+  soft-delete after 3 consecutive failures.
+
+  Because the sweep is free and the repair is prioritised and capped, the job
+  self-tunes: it discovers the real URI lifetime from production rather than
+  having it configured, and spends its fixed monthly allowance on the venues most
+  likely to be seen.
+
+- Emit observed URI lifetime (age at first observed death) as a histogram. This
+  is the number Phase 0 measures once; the sweep then measures it forever, so a
+  change in Google's behavior shows up as a metric shift rather than as a silent
+  wall of fallbacks.
 
 Reuse the existing Google pacing constant rather than introducing a new one.
 Gate construction on `settings.google_places_api_key`.
@@ -313,12 +361,21 @@ Backfill is the same job triggered once with a large discover limit. At S=456 an
 - **Persistence:** new table `google_places.hero_photo` (migration 0020). New
   Redis key `venue_hero_photo_v1:{venue_id}`, cs-server sole writer. No change to
   `venues.venue`, to `venue_photos_v1`, or to `venue_photos_fresh_v1`.
-- **New settings:** `hero_photo_cron`, `hero_photo_refresh_hours`,
-  `hero_photo_max_age_hours`, `hero_photo_width_px`, `hero_photo_discover_limit`,
-  `hero_photo_refresh_limit`, `hero_photo_daily_call_budget`. All admin-tunable
-  through the existing `admin_config:` mechanism with a registered validator.
-  `hero_photo_refresh_hours` **must not be set until S1 reports**; ship the job
-  disabled rather than guess it.
+- **New settings:** `hero_photo_cron`, `hero_photo_sweep_cron`,
+  `hero_photo_max_age_hours`, `hero_photo_width` (default `w320`),
+  `hero_photo_discover_limit`, `hero_photo_repair_limit`, and
+  `hero_photo_monthly_call_budget` (**default 10,000 — the free-tier boundary**).
+  All admin-tunable through the existing `admin_config:` mechanism with a
+  registered validator.
+
+  There is deliberately **no `hero_photo_refresh_hours`**. A configured cadence
+  was the thing that made the original design expensive; the free liveness sweep
+  replaces it, so nothing has to be guessed from S1.
+
+  `hero_photo_monthly_call_budget` is a **cost-safety control**. Raising it above
+  10,000 spends real money (each additional 1,000 calls is $7) and is subject to
+  the $10/month approval gate. The validator must reject a value that would
+  exceed the gate without an explicit override.
 - **Feature flag:** none in this repo. Serving the field is unconditional; the
   user-visible gate is vibes_bot's `FEATURE_LIST_HERO_PHOTO`. This is deliberate
   — it lets the data land and be verified before anything renders.
@@ -376,7 +433,9 @@ Manual or integration checks:
 - After backfill, confirm the projected hero count against the serving-view count and confirm the daily call counter matches the expected spend.
 
 ## Acceptance Criteria
-- S1 has reported a p05 keyless-URI lifetime and `hero_photo_refresh_hours` is set from that measurement, not guessed.
+- **The steady-state Google bill increase is $0.** The monthly ledger defaults to the free-tier boundary and no code path can exceed it. Proven by a scenario, not by inspection.
+- **No billed call is made for a URL that was still alive** — the free liveness sweep gates every repair.
+- S1 has reported a keyless-URI lifetime, and the resulting free-tier coverage is at or above the agreed floor (proposed 90%). Coverage below that floor is a decision to not ship, not a reason to raise the budget.
 - Every servable venue with a place id and at least one Google photo has a hero row; venues without are recorded terminally and cost no repeat calls.
 - `GET /v1/venues/nearby` non-verbose returns `venue_photo_url` for a projected venue and `null` otherwise, and never 500s on a photo failure.
 - No Google call is made on any serving path — provable by a scenario asserting zero client invocations across a nearby request.
@@ -386,11 +445,17 @@ Manual or integration checks:
 - No change to `venues.venue`, `Venue`, or `venue_row.py`.
 
 ## Open Questions
-- **Q1 (BLOCKING, go/no-go).** What is the real p05 lifetime of a keyless
-  `lh3.googleusercontent.com` photo URI? Run S1. If it is under ~6 hours this
-  design costs the same as the on-demand path it replaces and only fixes latency
-  — in that case ship no list photo. **Nothing else in this plan may start until
-  this number exists.**
+- **Q1 (BLOCKING, go/no-go — now a coverage question, not a cost one).** What is
+  the real lifetime of a keyless `lh3.googleusercontent.com` photo URI? Run S1.
+  Under probe-then-repair the bill is capped at $0 regardless of the answer, so
+  this decides **how much of the catalog can carry a photo inside the free tier**.
+  Below roughly 5 days, free coverage drops under ~90% and the list shows
+  fallbacks on a random subset of cards — ship no list photo in that case.
+  **Nothing else in this plan may start until this number exists.**
+- **Q1b.** Confirm the free-tier allowance and per-call price for the Place Photo
+  SKU against Google's current rate card. The 10,000/SKU/month figure and $7/1,000
+  are not recorded anywhere in this repo and the whole budget design keys off
+  them. Cheap to verify, expensive to get wrong.
 - ~~**Q2.** Does the CDN suffix rewrite work?~~ **ANSWERED 2026-07-26: yes,
   fully.** One resolved token serves every width. A venue that is both listed and
   opened costs one media call, not two, and warm detail caches seed list heroes
