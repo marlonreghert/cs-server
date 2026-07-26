@@ -1,5 +1,29 @@
 # Venue List Hero Photo
 
+> ## ⛔ BLOCKED — DO NOT EXECUTE (2026-07-26)
+>
+> **Not permitted by Google's Places API policy.** Established from Google's
+> documentation; the S1 lifetime measurement is moot.
+>
+> - *"You must not pre-fetch, cache, or store Places API content beyond the
+>   allowed exceptions."* Only `place_id` is exempt.
+> - *"You cannot cache a photo name. Also, the name can expire."*
+>
+> This plan's core mechanism — storing `photo_name` and a resolved `photoUri` in
+> `google_places.hero_photo` for days, populated by a catalog-wide job — is
+> exactly what those two rules forbid.
+>
+> **Retraction:** this plan claimed `photo_fresh_cache_ttl_hours = 6` was "an
+> unvalidated conservative guess". It is not. `plans/260707_on-demand-venue-photos.md`
+> chose it as a deliberate ToS-compliance window ("only `google_place_id` is
+> stored long-term; no photo bytes cached"). The existing architecture is correct.
+>
+> The Phase 0 findings below are still valid and worth keeping: the token is
+> deterministic and content-addressed, the width suffix is client-rewritable, and
+> the serving set is 1,725. None of that makes the design permissible.
+>
+> See the wrapper coordination plan's *Compliant alternatives* section.
+
 ## Branch
 feature/venue-list-hero-photo
 
