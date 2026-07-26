@@ -9,6 +9,7 @@ Startup is split into two phases for zero-downtime deploys:
 import asyncio
 import logging
 import time
+import uuid
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -20,6 +21,7 @@ from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
 
 from app.config import Settings
 from app.container import Container
+from app.dao.datalake_writer import set_job_context as set_datalake_job_context
 from app.routers import venue_router, set_venue_handler, debug_router, set_debug_dependencies, admin_trigger_router, set_admin_container, engagement_router, set_engagement_service, internal_router, set_internal_container
 from app.middleware import PrometheusMiddleware
 from app.services.refresh_interval_watch import (
@@ -113,6 +115,10 @@ def make_job(
         try:
             logger.info(start_log)
             start_time = time.perf_counter()
+            # Name this run for the data lake: every response archived while it
+            # runs is attributed to (job_name, run_id), so a bad batch can be
+            # traced back to the exact scheduler run that fetched it.
+            set_datalake_job_context(job_name, uuid.uuid4().hex)
             if service_attr is not None and getattr(container, service_attr) is None:
                 logger.warning(disabled_log)
                 return
@@ -656,6 +662,15 @@ async def shutdown_sequence():
         scheduler.shutdown(wait=False)
         logger.info("[Main] Scheduler stopped")
 
+    # Flush buffered archival records before the process goes away — after the
+    # scheduler stops (no new records) and before the container tears down.
+    if container is not None and getattr(container, "datalake_writer", None):
+        logger.info("[Main] Flushing data lake writer")
+        try:
+            await container.datalake_writer.close()
+        except Exception as e:
+            logger.error(f"[Main] Data lake shutdown flush failed: {e}")
+
     if container:
         logger.info("[Main] Shutting down container")
         await container.shutdown()
@@ -676,6 +691,14 @@ async def lifespan(app: FastAPI):
 
     # Phase 1: Essential init (blocking) — server won't accept requests until done
     await startup_essential(settings)
+
+    # Phase 1b: Start the data lake flusher, if archival is enabled. Failing to
+    # start it must not stop the server — the lake is strictly additive.
+    if container is not None and getattr(container, "datalake_writer", None):
+        try:
+            await container.datalake_writer.start()
+        except Exception as e:
+            logger.error(f"[Main] Data lake writer failed to start: {e}")
 
     # Phase 2: Start scheduled background jobs (cron: live/weekly refresh; discovery
     # stays gated off). This is the ONLY on-start scheduling path.

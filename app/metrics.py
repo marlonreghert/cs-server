@@ -359,6 +359,59 @@ S3_UPLOAD_DURATION_SECONDS = Histogram(
     buckets=(0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0),
 )
 
+# =============================================================================
+# Data lake (raw external-API responses archived to S3)
+# =============================================================================
+# Deliberately separate from the S3_UPLOAD_* metrics above: those count menu
+# photo uploads, and folding two unrelated write paths into one series would
+# make both dashboards lie.
+
+DATALAKE_RECORDS_ENQUEUED_TOTAL = Counter(
+    "datalake_records_enqueued_total",
+    "Raw API responses accepted for archival to the data lake",
+    ["source", "dataset"],
+)
+
+DATALAKE_RECORDS_DROPPED_TOTAL = Counter(
+    "datalake_records_dropped_total",
+    "Raw API responses that never reached the data lake",
+    ["source", "dataset", "reason"],  # reason: queue_full, serialize_error,
+                                      # flush_failed, unexpected
+)
+
+DATALAKE_FLUSH_TOTAL = Counter(
+    "datalake_flush_total",
+    "Data lake object uploads",
+    ["dataset", "status"],  # status: success, error
+)
+
+DATALAKE_FLUSH_DURATION_SECONDS = Histogram(
+    "datalake_flush_duration_seconds",
+    "Data lake object upload latency in seconds",
+    ["dataset"],
+    buckets=(0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0),
+)
+
+DATALAKE_FLUSH_BYTES_TOTAL = Counter(
+    "datalake_flush_bytes_total",
+    "Compressed bytes written to the data lake",
+    ["dataset"],
+)
+
+# Queue backlog: rises when the flusher cannot keep up, and a full queue is what
+# turns into datalake_records_dropped_total{reason="queue_full"}.
+DATALAKE_QUEUE_DEPTH = Gauge(
+    "datalake_queue_depth",
+    "Records buffered in the data lake writer queue",
+)
+
+# Staleness alert source: time() - this > 1h while archival is enabled means the
+# lake stopped receiving data even though nothing is visibly erroring.
+DATALAKE_LAST_SUCCESS_TIMESTAMP = Gauge(
+    "datalake_last_success_timestamp",
+    "Unix timestamp of the last successful data lake upload",
+)
+
 # OpenAI API metrics
 OPENAI_API_CALLS_TOTAL = Counter(
     "openai_api_calls_total",

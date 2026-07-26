@@ -8,6 +8,7 @@ from app.config import Settings
 from app.db import GeoRedisClient
 from app.dao import RedisVenueDAO, VenueBudgetDao
 from app.dao.venue_repository import VenueRepository
+from app.dao.datalake_writer import DatalakeWriter
 from app.api import BestTimeAPIClient
 from app.api.google_places_client import GooglePlacesAPIClient
 from app.services import VenuesRefresherService, VenueBudgetService
@@ -110,6 +111,32 @@ class Container:
             rds_store=self.rds_store,
         )
 
+        # Data lake writer (raw BestTime responses -> S3). Built BEFORE the
+        # BestTime client so it can be handed in. Optional and inert unless
+        # explicitly enabled: the client treats a None writer as a no-op, so
+        # nothing about ingestion changes while the lake is off.
+        self.datalake_writer = None
+        if settings.datalake_enabled and settings.datalake_bucket:
+            self.datalake_writer = DatalakeWriter(
+                bucket=settings.datalake_bucket,
+                region=settings.datalake_region,
+                queue_maxsize=settings.datalake_queue_maxsize,
+                flush_max_bytes=settings.datalake_flush_max_bytes,
+                flush_max_seconds=settings.datalake_flush_max_seconds,
+                shutdown_flush_seconds=settings.datalake_shutdown_flush_seconds,
+                access_key_id=settings.datalake_access_key_id or None,
+                secret_access_key=settings.datalake_secret_access_key or None,
+            )
+            logger.info(
+                f"[Container] Data lake writer initialized "
+                f"(bucket={settings.datalake_bucket})"
+            )
+        elif settings.datalake_enabled:
+            logger.warning(
+                "[Container] Data lake enabled but no bucket configured; "
+                "raw BestTime responses will NOT be archived"
+            )
+
         # Initialize BestTime API client
         self.besttime_api = BestTimeAPIClient(
             api_key_public=settings.besttime_public_key,
@@ -119,6 +146,7 @@ class Container:
             search_rate_per_minute=settings.besttime_search_rate_per_minute,
             search_rate_per_hour=settings.besttime_search_rate_per_hour,
             rate_max_wait_seconds=settings.besttime_rate_max_wait_seconds,
+            datalake=self.datalake_writer,
         )
 
         # Initialize Google Places API client (for enrichment and photos)

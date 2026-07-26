@@ -306,6 +306,27 @@ class Settings(BaseSettings):
     s3_access_key_id: str = ""
     s3_secret_access_key: str = ""
 
+    # S3 data lake (raw BestTime responses). Separate bucket from menu photos:
+    # different lifecycle, different access pattern, put-only IAM policy.
+    # Disabled by default — nothing is archived until this is turned on.
+    # Credentials are deliberately absent: the writer resolves the DEFAULT
+    # credential chain (EC2 instance role in prod, SSO profile locally). The
+    # optional key pair below is a local-dev escape hatch only.
+    datalake_enabled: bool = False
+    datalake_bucket: str = ""
+    datalake_region: str = "us-east-1"
+    datalake_access_key_id: str = ""
+    datalake_secret_access_key: str = ""
+    # Bounded queue: when the flusher falls behind, records are DROPPED (counted
+    # in datalake_records_dropped_total) rather than slowing ingestion down.
+    datalake_queue_maxsize: int = 10000
+    # Flush thresholds: whichever hits first. 256KB keeps objects above S3's
+    # 128KB minimum billable size for cold tiers; 15 minutes bounds how much
+    # buffered data a crash can lose.
+    datalake_flush_max_bytes: int = 262144
+    datalake_flush_max_seconds: int = 900
+    datalake_shutdown_flush_seconds: int = 10
+
     # Menu Data Extraction (OpenAI GPT-4o-mini)
     openai_api_key: str = ""
     menu_extraction_enabled: bool = False

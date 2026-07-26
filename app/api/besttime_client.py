@@ -47,6 +47,16 @@ class BestTimeRateLimitedError(Exception):
 _MINUTE_WINDOW_SECONDS = 60.0
 _HOUR_WINDOW_SECONDS = 3600.0
 
+# Data-lake dataset per endpoint. One dataset == one queryable table, so these
+# names are a storage contract: renaming one splits its table's history.
+_DATASET_BY_ENDPOINT = {
+    "/forecasts/live": "live_forecast",
+    "/forecasts/week/raw2": "week_raw_forecast",
+    "/venues/filter": "venue_filter",
+    "/venues": "account_inventory",
+    "/forecasts": "venue_create",
+}
+
 
 def _looks_like_monthly_cap_body(response: httpx.Response) -> bool:
     """True when a 429 body carries BestTime's monthly unique-venue cap message
@@ -143,6 +153,7 @@ class BestTimeAPIClient:
         search_rate_per_minute: int = 30,
         search_rate_per_hour: int = 300,
         rate_max_wait_seconds: float = 75.0,
+        datalake=None,
     ):
         """Initialize BestTime API client.
 
@@ -160,6 +171,9 @@ class BestTimeAPIClient:
                 calls client-side. <=0 disables that window.
             rate_max_wait_seconds: longest total pacing/429 wait per call before
                 failing fast with BestTimeRateLimitedError.
+            datalake: optional data-lake writer. When set, every response —
+                success or failure — is archived verbatim. Archival is
+                fire-and-forget and fully isolated: see `_archive`.
         """
         self.base_url = base_url.rstrip("/")
         self.api_key_public = api_key_public
@@ -167,6 +181,7 @@ class BestTimeAPIClient:
         self.timeout = timeout
         self.add_venue_timeout = add_venue_timeout
         self.rate_max_wait_seconds = rate_max_wait_seconds
+        self._datalake = datalake
         self._search_limiter = _SearchRateLimiter(
             per_minute=search_rate_per_minute,
             per_hour=search_rate_per_hour,
@@ -182,6 +197,47 @@ class BestTimeAPIClient:
     async def close(self):
         """Close the HTTP client and clean up resources."""
         await self.client.aclose()
+
+    def _archive(
+        self,
+        *,
+        endpoint: str,
+        outcome: str,
+        payload=None,
+        http_status: Optional[int] = None,
+        latency_ms: Optional[int] = None,
+        params: Optional[dict] = None,
+        error: Optional[str] = None,
+    ) -> None:
+        """Archive one BestTime response to the data lake.
+
+        Never raises and never awaits. A failure here — including a defect in
+        the writer itself — must not change a single BestTime return value or
+        exception, so everything is swallowed and logged. Credentials in
+        ``params`` are stripped by the writer before anything is serialized.
+        """
+        recorder = self._datalake
+        if recorder is None:
+            return
+        try:
+            dataset = _DATASET_BY_ENDPOINT.get(endpoint)
+            if dataset is None:
+                return
+            recorder.record(
+                dataset=dataset,
+                endpoint=endpoint,
+                payload=payload,
+                outcome=outcome,
+                http_status=http_status,
+                latency_ms=latency_ms,
+                venue_id=(params or {}).get("venue_id"),
+                request_params=params,
+                error=error,
+            )
+        except Exception as e:
+            logger.warning(
+                f"[BestTimeAPIClient] data lake archival failed for {endpoint}: {e}"
+            )
 
     @staticmethod
     def _retry_after_seconds(response: httpx.Response, attempt: int) -> float:
@@ -327,6 +383,15 @@ class BestTimeAPIClient:
             BESTTIME_API_CALL_DURATION_SECONDS.labels(endpoint=endpoint).observe(duration)
             BESTTIME_API_CALLS_TOTAL.labels(endpoint=endpoint, status="success").inc()
 
+            self._archive(
+                endpoint=endpoint,
+                outcome="success",
+                payload=response_json,
+                http_status=response.status_code,
+                latency_ms=int(duration * 1000),
+                params=params,
+            )
+
             return response_json
 
         except httpx.HTTPStatusError as e:
@@ -335,6 +400,14 @@ class BestTimeAPIClient:
             BESTTIME_API_CALLS_TOTAL.labels(endpoint=endpoint, status="error").inc()
             BESTTIME_API_ERRORS_TOTAL.labels(endpoint=endpoint, error_type="http_error").inc()
             logger.error(f"[BestTimeAPIClient] HTTP error on {method} {endpoint}: {e}")
+            self._archive(
+                endpoint=endpoint,
+                outcome="error",
+                http_status=e.response.status_code,
+                latency_ms=int(duration * 1000),
+                params=params,
+                error=f"http_error: {e}",
+            )
             raise
         except httpx.TimeoutException as e:
             duration = time.perf_counter() - start_time
@@ -342,6 +415,13 @@ class BestTimeAPIClient:
             BESTTIME_API_CALLS_TOTAL.labels(endpoint=endpoint, status="error").inc()
             BESTTIME_API_ERRORS_TOTAL.labels(endpoint=endpoint, error_type="timeout").inc()
             logger.error(f"[BestTimeAPIClient] Timeout on {method} {endpoint}: {e}")
+            self._archive(
+                endpoint=endpoint,
+                outcome="error",
+                latency_ms=int(duration * 1000),
+                params=params,
+                error=f"timeout: {e}",
+            )
             raise
         except httpx.RequestError as e:
             duration = time.perf_counter() - start_time
@@ -349,6 +429,13 @@ class BestTimeAPIClient:
             BESTTIME_API_CALLS_TOTAL.labels(endpoint=endpoint, status="error").inc()
             BESTTIME_API_ERRORS_TOTAL.labels(endpoint=endpoint, error_type="connection_error").inc()
             logger.error(f"[BestTimeAPIClient] Request error on {method} {endpoint}: {e}")
+            self._archive(
+                endpoint=endpoint,
+                outcome="error",
+                latency_ms=int(duration * 1000),
+                params=params,
+                error=f"connection_error: {e}",
+            )
             raise
 
     async def venue_filter(self, params: VenueFilterParams) -> VenueFilterResponse:
@@ -566,12 +653,30 @@ class BestTimeAPIClient:
                     f"[BestTimeAPIClient] add_venue_to_account non-OK: "
                     f"status={parsed.status} message={parsed.message!r}"
                 )
+            # Rejections are archived too: a create that BestTime refused (bad
+            # geocode, monthly cap) is exactly the history this lake exists for.
+            self._archive(
+                endpoint=endpoint,
+                outcome="success" if parsed.is_ok() else "error",
+                payload=body,
+                http_status=response.status_code,
+                latency_ms=int(duration * 1000),
+                params=query_params,
+                error=None if parsed.is_ok() else parsed.message,
+            )
             return parsed
         except httpx.HTTPStatusError as e:
             BESTTIME_API_ERRORS_TOTAL.labels(
                 endpoint=endpoint, error_type="http_error"
             ).inc()
             logger.error(f"[BestTimeAPIClient] HTTP error on POST {endpoint}: {e}")
+            self._archive(
+                endpoint=endpoint,
+                outcome="error",
+                http_status=e.response.status_code,
+                params=query_params,
+                error=f"http_error: {e}",
+            )
             raise
         except httpx.TimeoutException as e:
             BESTTIME_API_CALLS_TOTAL.labels(endpoint=endpoint, status="error").inc()
@@ -579,6 +684,12 @@ class BestTimeAPIClient:
                 endpoint=endpoint, error_type="timeout"
             ).inc()
             logger.error(f"[BestTimeAPIClient] Timeout on POST {endpoint}: {e}")
+            self._archive(
+                endpoint=endpoint,
+                outcome="error",
+                params=query_params,
+                error=f"timeout: {e}",
+            )
             raise
         except httpx.RequestError as e:
             BESTTIME_API_CALLS_TOTAL.labels(endpoint=endpoint, status="error").inc()
@@ -586,6 +697,12 @@ class BestTimeAPIClient:
                 endpoint=endpoint, error_type="connection_error"
             ).inc()
             logger.error(f"[BestTimeAPIClient] Request error on POST {endpoint}: {e}")
+            self._archive(
+                endpoint=endpoint,
+                outcome="error",
+                params=query_params,
+                error=f"connection_error: {e}",
+            )
             raise
 
     async def list_account_inventory(
