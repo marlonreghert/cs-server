@@ -1,4 +1,3 @@
-@wip
 Feature: Archive raw BestTime responses to the S3 data lake
   As the venue platform
   I must persist every response BestTime returns as immutable, partitioned raw

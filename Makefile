@@ -57,6 +57,10 @@ test-unit:
 		tests/test_live_freshness.py \
 		tests/test_photo_resolve.py \
 		tests/test_projector_and_serving_bulk_reads.py \
+		tests/test_datalake_writer.py \
+		tests/test_datalake_redaction.py \
+		tests/test_besttime_client_datalake_tap.py \
+		tests/test_datalake_client_credentials.py \
 		-v
 
 test-integration:
