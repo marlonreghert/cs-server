@@ -9,8 +9,16 @@
 # No GetObject, no DeleteObject, no ListBucket. A fully compromised cs-server
 # can add records to the lake and can neither read nor destroy what is there.
 resource "aws_iam_policy" "datalake_writer" {
-  name        = "vibesense-datalake-writer"
-  description = "Append-only access to the VibeSense data lake raw/ and media/ prefixes"
+  name = "vibesense-datalake-writer"
+  # Covers raw/ AND media/ (see the policy document below).
+  #
+  # DO NOT edit this description. aws_iam_policy.description is immutable in
+  # AWS, so any change forces a destroy-and-recreate of the policy and its role
+  # attachment. That opens a window where the live cs-server has no PutObject —
+  # and a data lake flush during that window is DROPPED, not retried, losing
+  # BestTime observations that cannot be re-fetched. The policy DOCUMENT updates
+  # in place; only this string is dangerous.
+  description = "Append-only access to the VibeSense data lake raw/ prefix"
   tags        = var.tags
 
   policy = jsonencode({
