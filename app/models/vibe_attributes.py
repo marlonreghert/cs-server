@@ -22,6 +22,10 @@ class VibeAttributes(BaseModel):
     venue_id: str
     google_place_id: Optional[str] = None
     google_primary_type: Optional[str] = None  # Google Places primary type (e.g. "bar", "night_club")
+    # When True, an operator has corrected google_primary_type via the per-venue
+    # type override; re-enrichment must not overwrite it. See
+    # google_places_enrichment_service (enrichment guard).
+    primary_type_locked: bool = False
 
     # LGBTQ+ Related
     lgbtq_friendly: Optional[bool] = None

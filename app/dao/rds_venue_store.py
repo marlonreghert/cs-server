@@ -36,7 +36,8 @@ def _coerce_dt(value):
 # table_key -> (schema, table, [promoted column names])
 _ENRICHMENT = {
     "google_places.vibe_attributes": ("google_places", "vibe_attributes",
-                                       ["google_primary_type", "google_place_id"]),
+                                       ["google_primary_type", "google_place_id",
+                                        "primary_type_locked"]),
     "google_places.opening_hours": ("google_places", "opening_hours", []),
     "google_places.photos": ("google_places", "photos", []),
     "google_places.reviews": ("google_places", "reviews", []),
@@ -382,12 +383,18 @@ class RdsVenueStore:
             return self._upsert_weekly(venue_id, payload, history)
         schema, table, promoted_cols = _ENRICHMENT[table_key]
         promoted = promoted or {}
-        cols = ["venue_id", "payload", "deleted_at", "updated_at"] + promoted_cols
-        vals = [":venue_id", "CAST(:payload AS jsonb)", "NULL", "now()"] + [f":{c}" for c in promoted_cols]
+        # Only write promoted columns the caller actually provided. An omitted
+        # column falls to its DB default (e.g. primary_type_locked → false)
+        # instead of an explicit NULL, and on a conflict its existing value is
+        # preserved rather than reset. A caller that means NULL still passes the
+        # key explicitly with a None value.
+        active_promoted = [c for c in promoted_cols if c in promoted]
+        cols = ["venue_id", "payload", "deleted_at", "updated_at"] + active_promoted
+        vals = [":venue_id", "CAST(:payload AS jsonb)", "NULL", "now()"] + [f":{c}" for c in active_promoted]
         sets = ["payload=excluded.payload", "deleted_at=NULL", "updated_at=now()"] + \
-               [f"{c}=excluded.{c}" for c in promoted_cols]
+               [f"{c}=excluded.{c}" for c in active_promoted]
         params = {"venue_id": venue_id, "payload": json.dumps(payload)}
-        params.update({c: promoted.get(c) for c in promoted_cols})
+        params.update({c: promoted[c] for c in active_promoted})
         with self.engine.begin() as conn:
             conn.execute(text(
                 f"INSERT INTO {schema}.{table} ({', '.join(cols)}) "
