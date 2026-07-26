@@ -150,6 +150,24 @@ JOB_REGISTRY = {
         "unavailable_detail": "IG posts enrichment not configured (missing Apify API token)",
         "runner": lambda c, cfg: c.instagram_posts_enrichment_service.enrich_all_venues(),
     },
+    "venue_photo_archive": {
+        "label": "Venue Photo Archive",
+        "description": "Download all available Google photos for venues into the "
+        "dated S3 media archive. Costs one Google request per photo — venues "
+        "already archived in the target day are skipped unless overwrite is set.",
+        # Surfaced by GET /admin/jobs and rendered by the admin panel's pre-run
+        # options modal; every key here becomes a control in that dialog.
+        "default_config": {
+            "sources": ["google_photos"],
+            "venue_ids": "",
+            "path_mode": "new_day",
+            "path_override": "",
+            "overwrite": False,
+        },
+        "service_attr": "venue_photo_archive_service",
+        "unavailable_detail": "Media archive not configured (needs Google Places + a bucket)",
+        "runner": lambda c, cfg: c.venue_photo_archive_service.run(cfg),
+    },
     "menu_photos": {
         "label": "Menu Photo Enrichment",
         "description": "Fetch menu photos from Instagram highlights and Google Maps",

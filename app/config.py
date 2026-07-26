@@ -327,6 +327,16 @@ class Settings(BaseSettings):
     datalake_flush_max_seconds: int = 900
     datalake_shutdown_flush_seconds: int = 10
 
+    # Venue media archive (Google photos -> S3 media/ prefix). Off by default.
+    # Bucket falls back to datalake_bucket so the media archive lives beside the
+    # raw lake; credentials come from the same instance role (no keys here).
+    media_archive_enabled: bool = False
+    media_archive_bucket: str = ""
+    # Google returns at most ~10 photo references per place, so 10 is "all".
+    media_archive_max_photos_per_venue: int = 10
+    media_archive_photo_timeout_seconds: float = 15.0
+    media_archive_max_photo_bytes: int = 10485760  # 10 MiB
+
     # Menu Data Extraction (OpenAI GPT-4o-mini)
     openai_api_key: str = ""
     menu_extraction_enabled: bool = False

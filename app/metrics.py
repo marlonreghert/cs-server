@@ -412,6 +412,56 @@ DATALAKE_LAST_SUCCESS_TIMESTAMP = Gauge(
     "Unix timestamp of the last successful data lake upload",
 )
 
+# =============================================================================
+# Venue media archive (Google photos -> S3 media/ prefix)
+# =============================================================================
+# Google bills per photo request, so MEDIA_ARCHIVE_PHOTOS_STORED_TOTAL doubles as
+# the run's cost meter: photos stored x the per-request price is the Google spend,
+# readable in Grafana without opening a log.
+
+MEDIA_ARCHIVE_RUNS_TOTAL = Counter(
+    "media_archive_runs_total",
+    "Venue photo archive runs",
+    ["source", "status"],  # status: success, error
+)
+
+MEDIA_ARCHIVE_VENUES_TOTAL = Counter(
+    "media_archive_venues_total",
+    "Venues processed by the photo archive, by outcome",
+    ["source", "result"],  # result: archived, skipped_existing, no_place_id,
+                           # google_error, failed
+)
+
+MEDIA_ARCHIVE_PHOTOS_STORED_TOTAL = Counter(
+    "media_archive_photos_stored_total",
+    "Photos stored in the media archive",
+    ["source"],
+)
+
+MEDIA_ARCHIVE_PHOTO_FAILURES_TOTAL = Counter(
+    "media_archive_photo_failures_total",
+    "Photos that could not be archived",
+    ["source", "reason"],  # reason: download_error, store_error, too_large
+)
+
+MEDIA_ARCHIVE_BYTES_STORED_TOTAL = Counter(
+    "media_archive_bytes_stored_total",
+    "Bytes written to the media archive",
+    ["source"],
+)
+
+MEDIA_ARCHIVE_RUN_DURATION_SECONDS = Histogram(
+    "media_archive_run_duration_seconds",
+    "Venue photo archive run duration in seconds",
+    ["source"],
+    buckets=(1.0, 5.0, 15.0, 60.0, 300.0, 900.0, 1800.0, 3600.0),
+)
+
+MEDIA_ARCHIVE_LAST_SUCCESS_TIMESTAMP = Gauge(
+    "media_archive_last_success_timestamp",
+    "Unix timestamp of the last successful media archive run",
+)
+
 # OpenAI API metrics
 OPENAI_API_CALLS_TOTAL = Counter(
     "openai_api_calls_total",

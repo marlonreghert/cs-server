@@ -511,6 +511,7 @@ class GooglePlacesAPIClient:
         place_id: str,
         max_photos: int = 5,
         max_width: int = 800,
+        include_ref: bool = False,
     ) -> list[dict]:
         """Resolve FRESH, KEYLESS photo URLs (with author attribution) for a place.
 
@@ -530,6 +531,12 @@ class GooglePlacesAPIClient:
             place_id: Google Place ID ('places/ChIJ...' or bare 'ChIJ...')
             max_photos: Maximum number of photos to resolve (default 5)
             max_width: Requested max width in pixels (maxWidthPx, default 800)
+            include_ref: when True, each dict additionally carries `photo_name`
+                (Google's photo resource name). Off by default so the serving
+                path's cached Redis payload shape is untouched; the media archive
+                turns it on because it needs a STABLE per-photo id — the resource
+                name is the only value that identifies the same photo across
+                runs, and the keyless URL is not.
 
         Returns:
             List of dicts: [{url: <keyless photoUri>, author_name: str | None}, ...],
@@ -590,7 +597,10 @@ class GooglePlacesAPIClient:
             attributions = photo.get("authorAttributions", [])
             if attributions:
                 author_name = attributions[0].get("displayName")
-            result.append({"url": keyless_uri, "author_name": author_name})
+            entry = {"url": keyless_uri, "author_name": author_name}
+            if include_ref:
+                entry["photo_name"] = photo_name
+            result.append(entry)
 
         logger.debug(f"[GooglePlacesAPIClient] Resolved {len(result)} keyless photos for {place_id}")
         return result

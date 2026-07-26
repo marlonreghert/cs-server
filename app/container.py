@@ -9,6 +9,7 @@ from app.db import GeoRedisClient
 from app.dao import RedisVenueDAO, VenueBudgetDao
 from app.dao.venue_repository import VenueRepository
 from app.dao.datalake_writer import DatalakeWriter
+from app.dao.media_archive_store import MediaArchiveStore
 from app.api import BestTimeAPIClient
 from app.api.google_places_client import GooglePlacesAPIClient
 from app.services import VenuesRefresherService, VenueBudgetService
@@ -16,6 +17,7 @@ from app.handlers import AddVenueHandler
 from app.services.batch_add_service import BatchAddService
 from app.services.google_places_enrichment_service import GooglePlacesEnrichmentService
 from app.services.photo_enrichment_service import PhotoEnrichmentService
+from app.services.venue_photo_archive_service import VenuePhotoArchiveService
 from app.api.apify_instagram_client import ApifyInstagramClient
 from app.services.instagram_enrichment_service import InstagramEnrichmentService
 from app.services.instagram_posts_enrichment_service import InstagramPostsEnrichmentService
@@ -153,6 +155,8 @@ class Container:
         self.google_places_api = None
         self.google_places_enrichment_service = None
         self.photo_enrichment_service = None
+        self.media_archive_store = None
+        self.venue_photo_archive_service = None
 
         if settings.google_places_api_key:
             self.google_places_api = GooglePlacesAPIClient(
@@ -179,6 +183,38 @@ class Container:
                 serving_dao=self.serving_redis_dao,
             )
             logger.info("[Container] Photo Enrichment service initialized")
+
+            # Venue photo archive (Google photos -> S3 media/ prefix). Optional:
+            # needs Google Places (above) plus a bucket. Defaults to the data
+            # lake bucket so the media archive lives beside the raw lake under
+            # one Terraform-managed, instance-role-authenticated bucket.
+            archive_bucket = (
+                settings.media_archive_bucket or settings.datalake_bucket
+            )
+            if settings.media_archive_enabled and archive_bucket:
+                self.media_archive_store = MediaArchiveStore(
+                    bucket=archive_bucket,
+                    region=settings.datalake_region,
+                    access_key_id=settings.datalake_access_key_id or None,
+                    secret_access_key=settings.datalake_secret_access_key or None,
+                )
+                self.venue_photo_archive_service = VenuePhotoArchiveService(
+                    google_places_client=self.google_places_api,
+                    venue_dao=self.pipeline_repository,
+                    media_store=self.media_archive_store,
+                    max_photos_per_venue=settings.media_archive_max_photos_per_venue,
+                    photo_timeout_seconds=settings.media_archive_photo_timeout_seconds,
+                    max_photo_bytes=settings.media_archive_max_photo_bytes,
+                )
+                logger.info(
+                    f"[Container] Venue photo archive initialized "
+                    f"(bucket={archive_bucket})"
+                )
+            elif settings.media_archive_enabled:
+                logger.warning(
+                    "[Container] Media archive enabled but no bucket configured; "
+                    "the venue photo archive job stays unavailable"
+                )
         else:
             logger.warning(
                 "[Container] Google Places API key not configured. "

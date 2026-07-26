@@ -1,4 +1,3 @@
-@wip
 Feature: Archive venue photos to the dated S3 media prefix
   As the venue platform operator
   I must be able to download every available Google photo for the venues I choose
@@ -17,7 +16,7 @@ Feature: Archive venue photos to the dated S3 media prefix
     When the photo archive job runs for that venue
     Then 8 images are stored for that venue
     And each image is stored under the source, day, and venue partition
-    And every partition is expressed as a "key=value" directory
+    And every media partition is expressed as a "key=value" directory
 
   Scenario: Keep the author attributions with the images
     Given a venue with 3 available Google photos carrying author attributions
