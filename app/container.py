@@ -377,6 +377,18 @@ class Container:
         # its rows each cycle (wired after both exist; the projector is built above).
         self.redis_projection_service.eligibility_rule_service = self.eligibility_rule_service
 
+        # Closed-venue detection: reads stored review text and writes
+        # admin.venue_closure_signal, which serving.eligible_venue excludes on.
+        # Built after admin_config_service so phrase/window overrides are live;
+        # the settings flag gates whether the scheduled job runs at all.
+        from app.services.closure_detection_service import ClosureDetectionService
+
+        self.closure_detection_service = ClosureDetectionService(
+            rds_store=self.rds_store,
+            admin_config_service=self.admin_config_service,
+            enabled=lambda: settings.closure_detection_enabled,
+        )
+
         # Monthly budget DAO + service (used by add-by-address + discovery).
         self.venue_budget_dao = VenueBudgetDao(redis_internal_client)
         self.venue_budget_service = VenueBudgetService(

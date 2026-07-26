@@ -1,4 +1,3 @@
-@wip
 Feature: Closed-venue detection excludes permanently closed venues from serving
   Venues whose reviewers report them as permanently closed must not be served as
   open, busy places. Detection reads the review evidence already stored in RDS,

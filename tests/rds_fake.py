@@ -47,6 +47,9 @@ class InMemoryRdsVenueStore:
         self.addresses: dict[str, dict] = {}
         # table_key ("schema.table") -> venue_id -> row dict
         self.enrichment: dict[str, dict[str, dict]] = {}
+        # admin.venue_closure_signal: venue_id -> signal row. Evidence-derived and
+        # reversible — it gates serving without touching lifecycle_status.
+        self.closure_signals: dict[str, dict] = {}
         self.live_forecast: dict[str, dict] = {}
         self.favorites: dict[tuple[str, str], dict] = {}
         self.hot_like_events: list[dict] = []
@@ -249,8 +252,33 @@ class InMemoryRdsVenueStore:
             addr = self.addresses.get(vid) or {}
             if _geo_excluded(addr.get("lat"), addr.get("lng"), fence):
                 continue
+            # Closure is a further reversible predicate, alongside the geo-fence:
+            # a venue whose newest review reports it permanently closed leaves the
+            # serving view without any lifecycle change, and returns on its own
+            # once newer evidence clears the signal. Only high confidence excludes.
+            signal = self.closure_signals.get(vid)
+            if signal and signal.get("closed") and signal.get("confidence") == "high":
+                continue
             out.append(vid)
         return out
+
+    # ── admin.venue_closure_signal ────────────────────────────────────────────
+    def set_closure_signal(self, venue_id: str, signal: dict) -> None:
+        self._guard()
+        self.closure_signals[venue_id] = dict(signal)
+
+    def clear_closure_signal(self, venue_id: str) -> None:
+        self._guard()
+        self.closure_signals.pop(venue_id, None)
+
+    def get_closure_signal(self, venue_id: str) -> Optional[dict]:
+        self._guard()
+        row = self.closure_signals.get(venue_id)
+        return dict(row) if row else None
+
+    def list_closure_signals(self) -> list[dict]:
+        self._guard()
+        return [dict(row) for row in self.closure_signals.values()]
 
     def list_servable_venue_ids_by_priority(self, limit: int) -> list[str]:
         """Mirror RdsVenueStore: the top-`limit` servable (active AND eligible)

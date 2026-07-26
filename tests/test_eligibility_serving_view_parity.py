@@ -199,3 +199,92 @@ def test_seeded_good_type_table_matches_maps():
     expected = {(t.lower(), "google") for t in _GOOGLE_TO_CATEGORY}
     expected |= {(t.upper(), "besttime") for t in _BESTTIME_TO_CATEGORY}
     assert rows == expected
+
+
+# ── closure predicate parity ──────────────────────────────────────────────────
+# Closure is a third reversible serving predicate (alongside eligibility and the
+# geo-fence), added by migration 0019. It is NOT part of evaluate() — it is
+# evidence-derived, stored in admin.venue_closure_signal — so parity here means
+# the fake store and the SQL view agree with each other on the same rule:
+# a closed HIGH-confidence signal excludes; anything else does not.
+
+def _seed_active(store, venue_id):
+    store.upsert_venue(
+        Venue(
+            forecast=True, processed=True, venue_id=venue_id,
+            venue_name=f"Bar {venue_id}", venue_address=f"{venue_id} address",
+            venue_lat=_IN_LAT, venue_lng=_IN_LNG, venue_type="BAR",
+        )
+    )
+
+
+@pytest.mark.parametrize(
+    "signal,expected_servable",
+    [
+        (None, True),
+        ({"closed": False, "confidence": "high"}, True),
+        ({"closed": True, "confidence": "low"}, True),
+        ({"closed": True, "confidence": "high"}, False),
+    ],
+)
+def test_fake_store_closure_predicate(signal, expected_servable):
+    store = InMemoryRdsVenueStore()
+    _seed_active(store, "v_closure")
+    if signal is not None:
+        store.set_closure_signal("v_closure", {"venue_id": "v_closure", **signal})
+    servable = "v_closure" in set(store.list_servable_venue_ids())
+    assert servable is expected_servable
+
+
+def test_fake_store_closure_is_reversible():
+    """Clearing the signal returns the venue to the view — no lifecycle change."""
+    store = InMemoryRdsVenueStore()
+    _seed_active(store, "v_reopen")
+    store.set_closure_signal(
+        "v_reopen", {"venue_id": "v_reopen", "closed": True, "confidence": "high"}
+    )
+    assert "v_reopen" not in set(store.list_servable_venue_ids())
+    assert store.venues["v_reopen"].get("lifecycle_status", "active") == "active"
+
+    store.clear_closure_signal("v_reopen")
+    assert "v_reopen" in set(store.list_servable_venue_ids())
+
+
+@pytest.mark.skipif(not os.environ.get("RDS_TEST_URL"), reason="requires migrated Postgres")
+@pytest.mark.parametrize(
+    "closed,confidence,expected_servable",
+    [
+        (False, "high", True),
+        (True, "low", True),
+        (True, "high", False),
+    ],
+)
+def test_sql_view_closure_predicate(closed, confidence, expected_servable):
+    """The real serving.eligible_venue view must apply the same closure rule as
+    the fake store — this is what actually validates migration 0019's SQL."""
+    from sqlalchemy import create_engine, text
+
+    from app.dao.rds_venue_store import RdsVenueStore
+
+    store = RdsVenueStore(os.environ["RDS_TEST_URL"])
+    venue_id = f"v_closure_{uuid.uuid4().hex[:8]}"
+    _seed_active(store, venue_id)
+    try:
+        store.set_closure_signal(
+            venue_id,
+            {"venue_id": venue_id, "closed": closed, "confidence": confidence,
+             "reason": "review_reports_closed", "evidence_publish_time": "2026-01-12",
+             "matched_phrase": "fechou"},
+        )
+        servable = venue_id in set(store.list_servable_venue_ids())
+        assert servable is expected_servable
+
+        engine = create_engine(os.environ["RDS_TEST_URL"], future=True)
+        with engine.connect() as conn:
+            lifecycle = conn.execute(
+                text("SELECT lifecycle_status FROM venues.venue WHERE venue_id = :v"),
+                {"v": venue_id},
+            ).scalar()
+        assert lifecycle == "active", "closure must never change lifecycle"
+    finally:
+        store.clear_closure_signal(venue_id)

@@ -474,6 +474,35 @@ VENUES_GEO_EXCLUDED = Gauge(
     "on the last projector run",
 )
 
+# Closed-venue detection: venues whose newest review reports permanent closure.
+# A third reversible serve-time filter alongside eligibility and the geo-fence —
+# the venue stays active in RDS and returns to serving once newer evidence
+# clears its signal. Split by confidence because only `high` excludes from
+# serving; `low` is recorded for operator review and must be visible without
+# being mistaken for an exclusion.
+VENUES_CLOSED_FLAGGED = Gauge(
+    "venues_closed_flagged",
+    "Venues currently flagged as permanently closed by review evidence, by "
+    "confidence (only high-confidence signals exclude from serving)",
+    ["confidence"],
+)
+
+CLOSURE_DETECTION_RUNS_TOTAL = Counter(
+    "closure_detection_runs_total",
+    "Closure-detection runs by outcome",
+    ["outcome"],
+)
+
+CLOSURE_DETECTION_DURATION_SECONDS = Histogram(
+    "closure_detection_duration_seconds",
+    "Wall-clock duration of a closure-detection run",
+)
+
+CLOSURE_DETECTION_ERRORS_TOTAL = Counter(
+    "closure_detection_errors_total",
+    "Per-venue closure-detection failures (isolated; the run continues)",
+)
+
 REDIS_PROJECTION_REMOVED_TOTAL = Counter(
     "redis_projection_removed_total",
     "Total venues reconciled out of the Redis serving set by the projector "
