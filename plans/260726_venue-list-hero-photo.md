@@ -149,27 +149,61 @@ calls, ~$0.30.
 
 This one number sets `hero_photo_refresh_hours` and therefore the entire
 recurring bill. Using hero-only resolves (1 Place Details + 1 media = $0.012)
-at S=456:
+at the **measured** S = 1,725 (see S3 below):
 
 | p05 lifetime | Cadence | Google calls/SKU/month | Approx. cost |
 |---|---|---|---|
-| >= 7 days | weekly | ~2,000 | **$0** — inside the 10k/SKU free tier |
-| ~24 h | daily | ~13,700 | ~$26/mo |
-| ~6 h | 4x/day | ~54,700 | ~$313/mo |
+| >= 7 days | weekly | ~7,500 | **$0** — inside the 10k/SKU free tier |
+| ~24 h | daily | ~51,750 | **~$501/mo** |
+| ~6 h | 4x/day | ~207,000 | **~$2,364/mo** |
 | < ~4 h | — | — | **Do not build. Ship no list photo.** |
 
-**S2 — CDN width suffix rewrite.** `curl -I` a resolved URI with its `=w800`
-suffix mutated to `=w400`. If Google honors the directive, the refresh job can
-derive a list hero for free from any already-warm `venue_photos_fresh_v1` key,
-and the 400px list and 800px detail widths can eventually collapse to one
-resolve per venue. **Not a dependency** — the job falls back to its own media
-call. ~30 minutes.
+**The decision is effectively binary.** At the real catalog size only the weekly
+cadence is free; daily costs ~$501/mo. Treat "does a URI survive 7 days?" as the
+question, not "what is the exact lifetime".
 
-**S3 — real serving-set size.** Read `SERVING_VIEW_VENUES` and
-`REDIS_PROJECTION_VENUES` off prod Prometheus. Every cost figure above assumes
-456, from a plan dated 2026-07-02, while another dated 2026-06-17 says 849 and
-the active catalog is ~1255. If the real number is 849, multiply every figure by
-1.9x; at the full catalog, by ~2.8x.
+**Status: baseline captured 2026-07-26.** 20 hero URIs resolved across 20
+distinct Recife venues; an hourly probe is recording liveness per URI. Poller and
+data live at `~/.local/share/vibesense-hero-spike/` (`heroes.json`,
+`poll_heroes.py`, `hero_probe.jsonl`), registered in the user's crontab. The
+probe is a 1-byte ranged GET against `lh3.googleusercontent.com` — a CDN, not a
+billed Places SKU — so the poll itself costs nothing. **Read `hero_probe.jsonl`
+before executing this plan.**
+
+**S2 — CDN width suffix rewrite. ANSWERED: YES.** Resolved URIs have the form
+`https://lh3.googleusercontent.com/<token>=s4800-w400` and the suffix is fully
+client-rewritable on the same token — measured 2026-07-26:
+
+| Suffix | Bytes returned |
+|---|---|
+| `s4800-w400` (as resolved at `maxWidthPx=400`) | 89,858 |
+| `w200` | 24,723 |
+| `w800` | 296,260 |
+| `s400` | 62,186 |
+
+Three consequences, all simplifications:
+
+1. **One resolve serves every width.** The 400px list thumbnail and the 800px
+   detail image come from the same token, so a venue that is both listed and
+   opened costs **one** media call, not two. `maxWidthPx` at resolve time is only
+   a default, not a commitment.
+2. **The refresh job can derive a hero for free** from any warm
+   `venue_photos_fresh_v1` entry, as hoped — this is now a confirmed path rather
+   than a speculative optimization.
+3. **Width should drop to `w320`, not 400.** A 101dp box at 3x is 303px; at 400px
+   the payload is 89.9KB per card against 24.7KB at `w200`. Over a 1,725-venue
+   catalog that is a large, pointless bandwidth cost. Serve `w320` for the list.
+   Because rewriting is free and deterministic, cs-server normalizes the width
+   when it stores/serves; it never re-calls Google to change it.
+
+**S3 — real serving-set size. ANSWERED: 1,725.** Prod Prometheus
+(`vibesbot_pipeline_venues_input`, read 2026-07-26) reports **1,725** venues
+returned by cs-server's nearby endpoint, against 834 surviving the serve-time
+filters and 6,900 fetched cumulatively. The 456 figure this plan was originally
+costed against is stale by **3.8x**, which is what turns the daily cadence from
+"~$26/mo, obviously fine" into "~$501/mo, needs a decision". Confirm the eligible
+subset (`serving.eligible_venue`) at execution time — the hero job covers that
+set, which may be smaller than 1,725.
 
 ### Phase 1 — Persistence
 
@@ -357,10 +391,14 @@ Manual or integration checks:
   design costs the same as the on-demand path it replaces and only fixes latency
   — in that case ship no list photo. **Nothing else in this plan may start until
   this number exists.**
-- **Q2.** Does the `=w800` → `=w400` CDN suffix rewrite work? Run S2. If not, a
-  venue that is both listed and opened costs two independent media calls forever.
-- **Q3.** What is the live `SERVING_VIEW_VENUES`? Repo plans disagree (456 vs
-  849 vs 1255 active). Every cost figure here scales linearly with it.
+- ~~**Q2.** Does the CDN suffix rewrite work?~~ **ANSWERED 2026-07-26: yes,
+  fully.** One resolved token serves every width. A venue that is both listed and
+  opened costs one media call, not two, and warm detail caches seed list heroes
+  for free. See S2.
+- ~~**Q3.** What is the live serving-set size?~~ **ANSWERED 2026-07-26: 1,725**
+  (`vibesbot_pipeline_venues_input`), not 456 — a 3.8x correction that makes the
+  daily cadence cost ~$501/mo. See S3. Still confirm the eligible subset at
+  execution time.
 - **Q4 (product/legal, blocks the flag flip — not the code).** Google's Places
   terms require displaying `authorAttributions` alongside a photo, and a
   101x76dp thumbnail has nowhere to put it. Separately, retaining a resolved
@@ -369,10 +407,12 @@ Manual or integration checks:
   `author_name` through RDS and Redis so a later answer needs no re-projection,
   but renders nothing. **Must be answered before `FEATURE_LIST_HERO_PHOTO` is
   turned on, not before this code is written.**
-- **Q5.** `hero_photo_width_px` — the spec asked for "~300px"; 101dp x 3 = 303px,
-  so 400 covers 3x with headroom and a plausible 4x. Confirm 400. The width is
-  baked into the returned URL, so changing it later is a re-bake, not a
-  re-parametrization.
+- ~~**Q5.** `hero_photo_width_px` — confirm 400; changing it later is a re-bake.~~
+  **Dissolved by S2.** The width is *not* baked in any meaningful sense — the
+  suffix is rewritable on the stored token, so changing width later is a string
+  operation, not a re-resolve. **Decision: serve `w320`** (101dp at 3x = 303px),
+  which is 24.7KB/card against 89.9KB at 400px. Resolve at whatever `maxWidthPx`
+  is convenient and normalize on the way out.
 - **Q6.** The hero is `photos[0]` positionally — no quality ranking, so a card's
   thumbnail may be a menu shot. Accept for v1, or scope ranking in? Note the
   vibe-profile photo categorisation that could rank it matches on exact URL
