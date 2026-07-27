@@ -25,6 +25,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+import os
 import posixpath
 import time
 import uuid
@@ -80,8 +81,11 @@ ELIGIBILITY_VENUE_IDS = "venue_ids"
 ELIGIBILITY_POINT_RADIUS = "point_radius"
 ELIGIBILITY_MODES = (ELIGIBILITY_ALL, ELIGIBILITY_VENUE_IDS, ELIGIBILITY_POINT_RADIUS)
 
-RUN_TS_FORMAT = "%Y%m%dT%H%M%SZ"
 MAX_RADIUS_KM = 500.0
+
+# Crockford base32 — no I/L/O/U, so a run id can be read aloud or copied out of a
+# bucket listing without ambiguity.
+_CROCKFORD = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
 
 ESTIMATE_CAVEAT = (
     "This is an upper-bound estimate and may be wrong: it assumes every selected "
@@ -139,18 +143,44 @@ def day_prefix(source: str, day: str) -> str:
     return f"{MEDIA_ROOT}/source={source}/dt={day}/"
 
 
+def _b32(value: int, length: int) -> str:
+    out = []
+    for _ in range(length):
+        out.append(_CROCKFORD[value & 31])
+        value >>= 5
+    return "".join(reversed(out))
+
+
+def new_run_id(when: Optional[datetime] = None) -> str:
+    """A ULID: 48-bit millisecond timestamp, then 80 bits of randomness.
+
+    Time-ordered ON PURPOSE. The run id is the only thing distinguishing two
+    runs on the same day, and `_latest_archive_prefix` finds the newest run by
+    taking the last key from a LISTING — the writer role has no `GetObject`, so
+    it can never read a pointer to find out. A random id (uuid4) sorts randomly
+    and picks the wrong run about two thirds of the time, which would silently
+    break both `append_latest` and the `skip_scope` cost gate.
+
+    The timestamp is encoded independently of the random half so the two never
+    share a base32 character; interleaving them reintroduces the mis-ordering
+    this exists to prevent.
+    """
+    moment = when or datetime.now(timezone.utc)
+    millis = int(moment.timestamp() * 1000)
+    return _b32(millis, 10) + _b32(int.from_bytes(os.urandom(10), "big"), 16)
+
+
 def run_prefix(source: str, when: datetime, run_id: str) -> str:
     """Run-scoped prefix.
 
-    Every segment is fixed-width and zero-padded and `run_ts` is UTC, so the keys
-    sort chronologically as plain strings — which is what lets the latest run be
-    found by listing alone, without `GetObject`.
+    Every segment is fixed-width and zero-padded, and the run id is itself
+    time-ordered, so the keys sort chronologically as plain strings — which is
+    what lets the latest run be found by listing alone, without `GetObject`.
     """
-    stamp = when.strftime(RUN_TS_FORMAT)
     return (
         f"{MEDIA_ROOT}/source={source}/"
         f"year={when:%Y}/month={when:%m}/day={when:%d}/"
-        f"run_ts={stamp}/run_id={run_id}/"
+        f"run_id={run_id}/"
     )
 
 
@@ -401,7 +431,8 @@ class VenuePhotoArchiveService:
                 "[VenuePhotoArchive] append_latest found no existing partition; "
                 "starting a new run"
             )
-        return run_prefix(source, self._now(), uuid.uuid4().hex)
+        now = self._now()
+        return run_prefix(source, now, new_run_id(now))
 
     async def _latest_archive_prefix(self, source: str) -> Optional[str]:
         """The most recent EXISTING partition for a source, either layout.
@@ -671,8 +702,7 @@ class VenuePhotoArchiveService:
             "source": source,
             "prefix": prefix,
             "run_id": run_id,
-            "run_ts": prefix.split("run_ts=")[1].split("/")[0]
-            if "run_ts=" in prefix else None,
+            "completed_at_source": "server clock",
             "job_id": summary["job_id"],
             "completed_at": self._now().isoformat(),
             "venues_archived": summary["archived"],

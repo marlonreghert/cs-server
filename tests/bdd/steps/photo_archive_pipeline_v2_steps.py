@@ -72,7 +72,7 @@ def _seed_previous_run(context, venue_id="ven_prev", day="2026-07-26"):
     """A completed earlier run, laid out exactly as the pipeline writes it."""
     prefix = (
         f"{ROOT}year={day[:4]}/month={day[5:7]}/day={day[8:10]}/"
-        f"run_ts={day.replace('-', '')}T000000Z/run_id=00000000000000000000000000000000/"
+        f"run_id=0000000000{'0' * 16}/"
     )
     context.fake_s3.objects[f"{prefix}venue_id={venue_id}/old.jpg"] = b"old"
     context.previous_prefix = prefix
@@ -302,12 +302,12 @@ def step_get_record(context):
 
 
 # ── Then ──────────────────────────────────────────────────────────────────────
-@then("the images are stored under a run timestamp and run id partition")
+@then("the images are stored under a run id partition")
 def step_run_partition(context):
     keys = _keys(context)
     assert keys, "nothing stored"
     for k in keys:
-        assert "run_ts=" in k and "run_id=" in k, k
+        assert "run_id=" in k, k
         assert "year=" in k and "month=" in k and "day=" in k, k
 
 

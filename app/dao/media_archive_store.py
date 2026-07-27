@@ -95,10 +95,10 @@ class MediaArchiveStore:
     async def list_run_prefixes(self, source: str) -> list[str]:
         """Every run prefix stored for a source, ascending — latest last.
 
-        Walks the `year=/month=/day=/run_ts=/run_id=` levels with delimiter
-        listings. Every level is zero-padded and `run_ts` is a fixed-width UTC
-        stamp, so lexicographic order IS chronological order and the caller can
-        take the last entry without parsing a date.
+        Walks the `year=/month=/day=/run_id=` levels with delimiter listings.
+        Every level is zero-padded and the run id is itself time-ordered, so
+        lexicographic order IS chronological order and the caller can take the
+        last entry without parsing a date.
 
         Listing is the ONLY way this class can find the latest run: the writer
         role holds ListBucket but not GetObject, so reading a pointer object back
@@ -106,8 +106,8 @@ class MediaArchiveStore:
         """
         prefix = f"{MEDIA_ROOT}/source={source}/"
         level = [prefix]
-        # year= -> month= -> day= -> run_ts= -> run_id=
-        for _ in range(5):
+        # year= -> month= -> day= -> run_id=
+        for _ in range(4):
             children: list[str] = []
             for parent in level:
                 children.extend(await self._list_child_prefixes(parent))
