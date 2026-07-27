@@ -45,6 +45,16 @@ Feature: Operate the photo archive as a bounded, versioned, costed pipeline
     Then a latest marker for the source records the run partition it wrote to
     And the marker reports the run id, the venues archived, and the photos stored
 
+  Scenario: Move the latest marker on to the newest run
+    Given a run has already archived a venue today
+    When a second run starts with the path mode "new_run"
+    Then the latest marker names the second run's partition
+
+  Scenario: Leave the latest marker alone for a preview
+    Given the run is configured as a dry run
+    When the photo archive job runs
+    Then no latest marker is written
+
   Scenario: Reject a path override that escapes the media prefix
     Given the path mode is "override" with a prefix outside the media root
     When the photo archive job is triggered

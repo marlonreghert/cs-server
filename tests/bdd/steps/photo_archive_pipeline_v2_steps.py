@@ -522,3 +522,23 @@ def step_first_failed(context):
 @then("the second venue is archived")
 def step_second_archived_v2(context):
     assert _keys(context, venue_id=context.good_venue), "healthy venue was not archived"
+
+
+@then("the latest marker names the second run's partition")
+def step_marker_follows_latest(context):
+    markers = [k for k in context.fake_s3.objects if k.endswith("_latest.json")]
+    assert markers, "no marker was written"
+    body = json.loads(context.fake_s3.objects[markers[0]])
+    assert body["prefix"] == context.second_prefix, (
+        f"marker points at {body['prefix']!r}, not the newest run "
+        f"{context.second_prefix!r}"
+    )
+    assert body["prefix"] != context.first_prefix
+
+
+@then("no latest marker is written")
+def step_no_marker_for_preview(context):
+    # A preview that moved the "latest dump" pointer would make the next
+    # append_latest / skip check reason about a run that never stored anything.
+    markers = [k for k in context.fake_s3.objects if k.endswith("_latest.json")]
+    assert not markers, f"a dry run wrote a marker: {markers}"
