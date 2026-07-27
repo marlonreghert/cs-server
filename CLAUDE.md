@@ -111,3 +111,10 @@ mechanical edits can skip the lifecycle.
 - Redis persistence and key formats: `app/dao/redis_venue_dao.py`
 - Refresh business logic: `app/services/venues_refresher_service.py`
 - Metrics definitions: `app/metrics.py`
+- Venue retrieval, the `retrieved/` S3 layout, archive sources, and the cost
+  guarantees that hold spend down: `docs/venue-retrieval-storage.md`. **Read it
+  before touching the archive pipeline, its S3 paths, or `infra/datalake`** —
+  several invariants there are load-bearing (the run id must sort
+  chronologically; the skip check must not target the prefix being written to;
+  the IAM policy description must never be edited) and each has already caused
+  a real incident or a silent overspend.
