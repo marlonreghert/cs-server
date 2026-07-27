@@ -29,6 +29,7 @@ logger = logging.getLogger(__name__)
 
 MEDIA_ROOT = "media"
 MANIFEST_NAME = "_manifest.json"
+LATEST_MARKER_NAME = "_latest.json"
 
 # Content type -> file extension. Anything unrecognised is stored as .bin rather
 # than guessed, so a surprising type is visible in the key instead of silently
@@ -90,6 +91,71 @@ class MediaArchiveStore:
             if tail.startswith("dt="):
                 days.append(tail[len("dt="):])
         return sorted(days)
+
+    async def list_run_prefixes(self, source: str) -> list[str]:
+        """Every run prefix stored for a source, ascending — latest last.
+
+        Walks the `year=/month=/day=/run_ts=/run_id=` levels with delimiter
+        listings. Every level is zero-padded and `run_ts` is a fixed-width UTC
+        stamp, so lexicographic order IS chronological order and the caller can
+        take the last entry without parsing a date.
+
+        Listing is the ONLY way this class can find the latest run: the writer
+        role holds ListBucket but not GetObject, so reading a pointer object back
+        is not an option (see the module docstring).
+        """
+        prefix = f"{MEDIA_ROOT}/source={source}/"
+        level = [prefix]
+        # year= -> month= -> day= -> run_ts= -> run_id=
+        for _ in range(5):
+            children: list[str] = []
+            for parent in level:
+                children.extend(await self._list_child_prefixes(parent))
+            if not children:
+                return []
+            level = sorted(children)
+        return level
+
+    async def _list_child_prefixes(self, prefix: str) -> list[str]:
+        """Immediate `key=value/` children of a prefix, via a delimiter listing."""
+        out: list[str] = []
+        token: Optional[str] = None
+        while True:
+            kwargs: dict[str, Any] = {
+                "Bucket": self.bucket, "Prefix": prefix, "Delimiter": "/",
+            }
+            if token:
+                kwargs["ContinuationToken"] = token
+            try:
+                response = await asyncio.to_thread(self._s3.list_objects_v2, **kwargs)
+            except Exception as e:
+                logger.error(f"[MediaArchiveStore] listing {prefix!r} failed: {e}")
+                return []
+            for entry in response.get("CommonPrefixes", []) or []:
+                child = entry.get("Prefix") or ""
+                tail = child[len(prefix):].strip("/")
+                if "=" in tail:  # skip stray non-partition keys
+                    out.append(child)
+            token = response.get("NextContinuationToken")
+            if not response.get("IsTruncated") or not token:
+                return out
+
+    async def put_latest_marker(self, source: str, marker: dict) -> str:
+        """Record where the most recent completed run for this source landed.
+
+        Informational only — the pipeline resolves "latest" by listing, because
+        it cannot read objects back. This exists for the analytics roles that
+        can, so "where is the newest dump?" is answerable without a bucket walk.
+        """
+        key = f"{MEDIA_ROOT}/source={source}/{LATEST_MARKER_NAME}"
+        await asyncio.to_thread(
+            self._s3.put_object,
+            Bucket=self.bucket,
+            Key=key,
+            Body=json.dumps(marker, ensure_ascii=False).encode("utf-8"),
+            ContentType="application/json",
+        )
+        return key
 
     async def exists_for_venue(self, prefix: str, venue_id: str) -> bool:
         """True when anything is already stored for this venue under `prefix`.

@@ -336,6 +336,21 @@ class Settings(BaseSettings):
     media_archive_max_photos_per_venue: int = 10
     media_archive_photo_timeout_seconds: float = 15.0
     media_archive_max_photo_bytes: int = 10485760  # 10 MiB
+    # Per-run defaults when the operator does not say otherwise. Deliberately
+    # SMALL: Google bills per photo request, so the default click must be cheap
+    # (50 x 5 = 250 requests, inside the free tier) and scaling up must be a
+    # conscious edit. See the $10/month spend gate in the hero-photo plan.
+    media_archive_default_max_venues: int = 50
+    media_archive_default_max_photos: int = 5
+    # Outbound pacing for Google photo requests, and how many venues may be in
+    # flight at once. Keeps a large run from bursting into a 429 wall.
+    media_archive_rate_per_second: float = 5.0
+    media_archive_concurrency: int = 4
+    media_archive_max_retries: int = 3
+    # Unit price used ONLY for the pre-run estimate. Unverified against Google's
+    # current rate card (see Q1b in plans/260726_venue-list-hero-photo.md), which
+    # is why it is a setting and why the estimate carries a caveat.
+    google_photo_cost_per_1k_usd: float = 7.0
 
     # Menu Data Extraction (OpenAI GPT-4o-mini)
     openai_api_key: str = ""

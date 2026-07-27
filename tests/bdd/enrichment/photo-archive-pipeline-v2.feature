@@ -1,4 +1,3 @@
-@wip
 Feature: Operate the photo archive as a bounded, versioned, costed pipeline
   As the venue platform operator
   I must be able to target a photo archive run, see what it will cost before I
@@ -63,7 +62,7 @@ Feature: Operate the photo archive as a bounded, versioned, costed pipeline
     Given a venue was archived by the previous run
     When the photo archive job runs for that venue with overwrite enabled
     Then the venue's photos are fetched again
-    And the images are stored under the current run partition
+    And the new run partition holds images for that venue
 
   Scenario: Refuse to disable skipping without an explicit overwrite
     Given the skip scope is "none" and overwrite is disabled

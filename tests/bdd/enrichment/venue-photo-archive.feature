@@ -37,11 +37,15 @@ Feature: Archive venue photos to the dated S3 media prefix
     Then the images are stored under the 2026-07-24 partition
     And no new day partition is created
 
-  Scenario: Fall back to a new day when nothing has been archived yet
+  # Superseded by the run-scoped layout: with nothing to append to there is no
+  # previous partition to extend, so the fallback now opens a fresh versioned
+  # run rather than today's day partition. Explicitly asking for "new_day" still
+  # writes a day partition — the scenario above pins that.
+  Scenario: Fall back to a new run when nothing has been archived yet
     Given the media archive holds no partitions
     And the path mode is "append_latest"
     When the photo archive job runs
-    Then the images are stored under today's day partition
+    Then the images are stored under a newly created run partition
 
   Scenario: Write to an explicit override prefix
     Given the path mode is "override" with the prefix "media/manual/backfill-2026-07/"

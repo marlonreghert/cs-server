@@ -58,6 +58,13 @@ class _FakeS3:
         return out
 
 
+class _Throttled(Exception):
+    """Stands in for Google's 429. Carries `status_code` so the service's
+    throttle detection sees the same shape it sees from a real HTTP error."""
+
+    status_code = 429
+
+
 class _FakeGoogle:
     """Programmable Google Places photo client that counts its calls."""
 
@@ -65,9 +72,23 @@ class _FakeGoogle:
         self.photos_by_place: dict[str, list[dict]] = {}
         self.fail_places: set[str] = set()
         self.calls: list[str] = []
+        # `calls` counts venues reached; `attempts` counts underlying requests,
+        # so a retry is distinguishable from a second venue.
+        self.attempts = 0
+        self.throttle_once: set[str] = set()
+        self.throttle_always: set[str] = set()
+        self.max_photos_seen: "int | None" = None
 
     async def get_place_photos(self, place_id, max_photos=5, max_width=800, include_ref=False):
-        self.calls.append(place_id)
+        self.attempts += 1
+        self.max_photos_seen = max_photos
+        if place_id not in self.calls:
+            self.calls.append(place_id)
+        if place_id in self.throttle_always:
+            raise _Throttled("429 Too Many Requests")
+        if place_id in self.throttle_once:
+            self.throttle_once.discard(place_id)
+            raise _Throttled("429 Too Many Requests")
         if place_id in self.fail_places:
             raise RuntimeError("google photo fetch failed")
         return list(self.photos_by_place.get(place_id, []))[:max_photos]
@@ -131,7 +152,10 @@ def _build(context):
     )
 
 
-def _seed_venue(context, vid: str, *, place_id: "str | None" = "auto"):
+def _seed_venue(
+    context, vid: str, *, place_id: "str | None" = "auto", lat: float = -8.05,
+    lng: float = -34.88,
+):
     from app.models import Venue
     from app.models.vibe_attributes import VibeAttributes
 
@@ -142,8 +166,8 @@ def _seed_venue(context, vid: str, *, place_id: "str | None" = "auto"):
             venue_id=vid,
             venue_name=f"Venue {vid}",
             venue_address=f"addr {vid}",
-            venue_lat=-8.05,
-            venue_lng=-34.88,
+            venue_lat=lat,
+            venue_lng=lng,
             priority=1,
         )
     )

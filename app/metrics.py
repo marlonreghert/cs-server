@@ -462,6 +462,53 @@ MEDIA_ARCHIVE_LAST_SUCCESS_TIMESTAMP = Gauge(
     "Unix timestamp of the last successful media archive run",
 )
 
+# Deliberately NO job_id label anywhere below: a run id is unbounded cardinality
+# and would degrade the whole metrics store. Per-run detail lives in the logs
+# (queryable by job_id in Loki) and in the run record.
+
+MEDIA_ARCHIVE_GOOGLE_CALLS_TOTAL = Counter(
+    "media_archive_google_calls_total",
+    "Google photo requests issued by the archive pipeline (the billed unit)",
+    ["source"],
+)
+
+MEDIA_ARCHIVE_THROTTLED_TOTAL = Counter(
+    "media_archive_throttled_total",
+    "Throttled or transient-server responses from Google, by kind",
+    ["source", "reason"],  # reason: 429, 5xx
+)
+
+MEDIA_ARCHIVE_RATE_LIMIT_WAIT_SECONDS = Histogram(
+    "media_archive_rate_limit_wait_seconds",
+    "Time the archive pipeline waited on its own rate limiter",
+    ["source"],
+    buckets=(0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0),
+)
+
+MEDIA_ARCHIVE_VENUES_SELECTED = Gauge(
+    "media_archive_venues_selected",
+    "Venues selected by the most recent archive run, after caps",
+    ["source"],
+)
+
+MEDIA_ARCHIVE_VENUES_TRUNCATED_TOTAL = Counter(
+    "media_archive_venues_truncated_total",
+    "Eligible venues dropped by the max_venues cap",
+    ["source"],
+)
+
+MEDIA_ARCHIVE_ESTIMATED_COST_USD = Gauge(
+    "media_archive_estimated_cost_usd",
+    "Estimated Google cost of the most recently estimated archive run, in USD",
+    ["source"],
+)
+
+MEDIA_ARCHIVE_VENUES_WITH_MEDIA = Gauge(
+    "media_archive_venues_with_media",
+    "Venues archived by the most recent run — catalog photo coverage",
+    ["source"],
+)
+
 # OpenAI API metrics
 OPENAI_API_CALLS_TOTAL = Counter(
     "openai_api_calls_total",
