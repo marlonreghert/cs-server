@@ -9,8 +9,13 @@ static access key and both inherit the bounded timeouts.
 Layout (same Hive-style `key=value` convention as `raw/`, so `media/` is
 discoverable by the same query tooling):
 
-    media/source=<source>/dt=<YYYY-MM-DD>/venue_id=<venue_id>/<photo_id>.jpg
-    media/source=<source>/dt=<YYYY-MM-DD>/venue_id=<venue_id>/_manifest.json
+    retrieved/source=<s>/year=/month=/day=/run_id=<ulid>/venue_id=<v>/media/<photo_id>.jpg
+    retrieved/source=<s>/year=/month=/day=/run_id=<ulid>/venue_id=<v>/info/place.json
+    retrieved/source=<s>/year=/month=/day=/run_id=<ulid>/venue_id=<v>/info/_manifest.json
+
+Media and info are split per venue so a consumer can read one without listing
+the other: images are large and binary, everything else is a few KB of JSON.
+`media/` is the superseded root — its partitions stay readable where they are.
 
 The IAM policy backing this grants PutObject and a prefix-scoped ListBucket, but
 NOT GetObject: the pipeline may see that an object exists and add new ones, and
@@ -27,7 +32,11 @@ from app.dao.datalake_writer import _build_s3_client
 
 logger = logging.getLogger(__name__)
 
-MEDIA_ROOT = "media"
+MEDIA_ROOT = "media"          # superseded root, still listable
+RETRIEVED_ROOT = "retrieved"  # current root
+MEDIA_DIR = "media"           # per-venue subfolder for images
+INFO_DIR = "info"             # per-venue subfolder for everything else
+PLACE_INFO_NAME = "place.json"
 MANIFEST_NAME = "_manifest.json"
 LATEST_MARKER_NAME = "_latest.json"
 
@@ -104,7 +113,7 @@ class MediaArchiveStore:
         role holds ListBucket but not GetObject, so reading a pointer object back
         is not an option (see the module docstring).
         """
-        prefix = f"{MEDIA_ROOT}/source={source}/"
+        prefix = f"{RETRIEVED_ROOT}/source={source}/"
         level = [prefix]
         # year= -> month= -> day= -> run_id=
         for _ in range(4):
@@ -147,7 +156,7 @@ class MediaArchiveStore:
         it cannot read objects back. This exists for the analytics roles that
         can, so "where is the newest dump?" is answerable without a bucket walk.
         """
-        key = f"{MEDIA_ROOT}/source={source}/{LATEST_MARKER_NAME}"
+        key = f"{RETRIEVED_ROOT}/source={source}/{LATEST_MARKER_NAME}"
         await asyncio.to_thread(
             self._s3.put_object,
             Bucket=self.bucket,
@@ -190,7 +199,8 @@ class MediaArchiveStore:
         content_type: str,
     ) -> str:
         key = (
-            f"{prefix}venue_id={venue_id}/{photo_id}.{extension_for(content_type)}"
+            f"{prefix}venue_id={venue_id}/{MEDIA_DIR}/"
+            f"{photo_id}.{extension_for(content_type)}"
         )
         await asyncio.to_thread(
             self._s3.put_object,
@@ -201,6 +211,23 @@ class MediaArchiveStore:
         )
         return key
 
+    async def put_info(self, *, prefix: str, venue_id: str, info: dict) -> str:
+        """Store everything the source returned that is NOT an image.
+
+        Written even when a venue yields no photos: the place data is the
+        cheaper half of what was already paid for, and discarding it because
+        the images failed would throw away the part that still succeeded.
+        """
+        key = f"{prefix}venue_id={venue_id}/{INFO_DIR}/{PLACE_INFO_NAME}"
+        await asyncio.to_thread(
+            self._s3.put_object,
+            Bucket=self.bucket,
+            Key=key,
+            Body=json.dumps(info, ensure_ascii=False, default=str).encode("utf-8"),
+            ContentType="application/json",
+        )
+        return key
+
     async def put_manifest(self, *, prefix: str, venue_id: str, manifest: dict) -> str:
         """Store the per-venue manifest.
 
@@ -208,7 +235,7 @@ class MediaArchiveStore:
         image archived without its attribution is unusable. The manifest is what
         keeps the archive legitimate, not a nicety.
         """
-        key = f"{prefix}venue_id={venue_id}/{MANIFEST_NAME}"
+        key = f"{prefix}venue_id={venue_id}/{INFO_DIR}/{MANIFEST_NAME}"
         await asyncio.to_thread(
             self._s3.put_object,
             Bucket=self.bucket,

@@ -42,6 +42,21 @@ Feature: Choose where archived photos come from
     Then the Apify source partition holds the images
     And no Google request is made
 
+  Scenario: Keep everything the extractor returned that is not an image
+    Given the Apify source is configured
+    And a venue the extractor can find with 4 photos
+    When the photo archive job runs for that venue using the Apify source
+    Then the venue's info folder holds the place data
+    And the place data keeps the fields the scrape already paid for
+    And no image payload is duplicated inside the place data
+
+  Scenario: Keep the place data even when the venue has no photos
+    Given the Apify source is configured
+    And a venue the extractor finds with no photos
+    When the photo archive job runs for that venue using the Apify source
+    Then the venue's info folder holds the place data
+    And the venue is counted as info only
+
   Scenario: Count a venue the extractor cannot find without failing the run
     Given the Apify source is configured
     And a venue the extractor cannot find
