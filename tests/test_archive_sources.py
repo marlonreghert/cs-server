@@ -298,3 +298,31 @@ class TestCategoryFolders:
         assert "/" not in _safe_category("../../raw")
         assert _safe_category("../../raw") == "raw"
         assert _safe_category("") == "uncategorised"
+
+
+class TestCatalogResolvesFromTheDispatcher:
+    """Availability must be answered by whatever performs the fetch.
+
+    The container calls the Google client `google_places_api`; the service
+    calls it `google_places_client`. Asking the container reported Google as
+    unavailable in the panel while runs against it worked perfectly.
+    """
+
+    def test_google_is_available_when_the_service_holds_the_client(self):
+        service = SimpleNamespace(
+            google_places_client=object(), apify_gmaps_extractor_client=None
+        )
+        container = SimpleNamespace(
+            google_places_api=object(),          # the container's own name
+            venue_photo_archive_service=service,
+        )
+        catalog = {s["id"]: s for s in public_catalog(container)}
+        assert catalog[SOURCE_GOOGLE_PHOTOS]["available"] is True
+        assert catalog[SOURCE_APIFY_GMAPS]["available"] is False
+
+    def test_it_falls_back_to_the_container_when_no_service_is_wired(self):
+        container = SimpleNamespace(
+            google_places_client=object(), apify_gmaps_extractor_client=object()
+        )
+        catalog = {s["id"]: s for s in public_catalog(container)}
+        assert all(s["available"] for s in catalog.values())

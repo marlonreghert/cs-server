@@ -213,11 +213,16 @@ def get_source(source_id: str) -> ArchiveSource:
 def public_catalog(container) -> list[dict]:
     """The catalog the admin panel renders.
 
-    Availability is resolved from the container, so an unconfigured source is
-    visibly unavailable BEFORE an operator configures a run against it.
+    Availability is resolved from the SERVICE that actually dispatches, not
+    from the container. They name the same client differently — the container
+    calls it `google_places_api`, the service `google_places_client` — so
+    asking the container reported Google as unavailable while runs against it
+    worked fine. Whatever answers the fetch must answer the availability
+    question too.
     """
+    holder = getattr(container, "venue_photo_archive_service", None) or container
     out = []
     for source_id, source in ARCHIVE_SOURCES.items():
-        available = getattr(container, source.requires_attr, None) is not None
+        available = getattr(holder, source.requires_attr, None) is not None
         out.append(source.to_public(source_id, available))
     return out
