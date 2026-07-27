@@ -14,7 +14,7 @@ Feature: Operate the photo archive as a bounded, versioned, costed pipeline
   Scenario: Give each run its own versioned partition
     Given the path mode is "new_run"
     When the photo archive job runs
-    Then the images are stored under a run timestamp and run id partition
+    Then the images are stored under a run id partition
     And every media partition is expressed as a "key=value" directory
 
   Scenario: Keep two runs on the same day apart

@@ -22,6 +22,7 @@ from app.services.venue_photo_archive_service import (
     InvalidArchivePath,
     MAX_RADIUS_KM,
     VenuePhotoArchiveService,
+    new_run_id,
     parse_config,
     parse_venue_ids,
     run_prefix,
@@ -128,7 +129,7 @@ class TestRunPrefix:
         prefix = run_prefix("google_photos", when, "abc123")
         assert prefix == (
             "media/source=google_photos/year=2026/month=07/day=27/"
-            "run_ts=20260727T050918Z/run_id=abc123/"
+            "run_id=abc123/"
         )
         for segment in prefix.strip("/").split("/")[1:]:
             assert "=" in segment
@@ -142,8 +143,31 @@ class TestRunPrefix:
             datetime(2026, 12, 1, 5, 0, 0, tzinfo=timezone.utc),
             datetime(2027, 1, 1, 0, 0, 0, tzinfo=timezone.utc),
         ]
-        prefixes = [run_prefix("s", t, "x") for t in times]
+        prefixes = [run_prefix("s", t, new_run_id(t)) for t in times]
         assert prefixes == sorted(prefixes)
+
+    def test_runs_within_one_day_still_sort_by_time(self):
+        """The run id is the ONLY thing separating two runs on the same day.
+
+        A random id sorts randomly and picks the wrong "latest" about two thirds
+        of the time, which silently breaks append_latest and the skip_scope cost
+        gate. This is the regression guard for using a time-ordered id.
+        """
+        day = datetime(2026, 7, 27, 12, 0, 0, tzinfo=timezone.utc)
+        moments = [day.replace(second=s) for s in (1, 2, 3, 30, 59)]
+        prefixes = [run_prefix("s", m, new_run_id(m)) for m in moments]
+        assert prefixes == sorted(prefixes)
+        assert max(prefixes) == prefixes[-1], "latest-by-listing picked the wrong run"
+
+    def test_run_ids_are_unique_within_a_millisecond(self):
+        when = datetime(2026, 7, 27, 12, 0, 0, tzinfo=timezone.utc)
+        ids = {new_run_id(when) for _ in range(5000)}
+        assert len(ids) == 5000
+
+    def test_a_run_id_avoids_ambiguous_characters(self):
+        # Crockford base32: no I, L, O or U, so an id copied out of a bucket
+        # listing cannot be mistranscribed.
+        assert not (set(new_run_id()) & set("ILOU"))
 
     def test_override_traversal_is_rejected_on_the_normalised_path(self):
         with pytest.raises(InvalidArchivePath):

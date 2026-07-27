@@ -258,7 +258,7 @@ class TestPrefixResolution:
         svc = _service()
         prefix = await svc.resolve_prefix("google_photos", {"path_mode": "append_latest"})
         assert prefix.startswith("media/source=google_photos/year=")
-        assert "run_ts=" in prefix and "run_id=" in prefix
+        assert "run_id=" in prefix
 
     async def test_unknown_mode_is_rejected(self):
         svc = _service()
