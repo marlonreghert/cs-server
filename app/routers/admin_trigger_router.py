@@ -157,10 +157,16 @@ JOB_REGISTRY = {
         "runner": lambda c, cfg: c.instagram_posts_enrichment_service.enrich_all_venues(),
     },
     "venue_photo_archive": {
-        "label": "Venue Photo Archive",
-        "description": "Download all available Google photos for venues into the "
-        "dated S3 media archive. Costs one Google request per photo — venues "
-        "already archived in the target day are skipped unless overwrite is set.",
+        # The id stays `venue_photo_archive`: it is the API path, the admin
+        # panel's dispatch key and the name in every test across both repos.
+        # Renaming it would be a coordinated cross-repo break for no operator
+        # benefit — the LABEL is what anyone actually reads.
+        "label": "Venue Data Retrieval",
+        "description": "Retrieve venue photos and place data into the S3 "
+        "retrieved/ archive, from the Google Places API or the Apify Google "
+        "Maps scraper. Each venue gets media/ for images and info/ for "
+        "everything else. Venues already retrieved by the last run are skipped "
+        "unless overwrite is set.",
         # Surfaced by GET /admin/jobs and rendered by the admin panel's pre-run
         # options modal; every key here becomes a control in that dialog.
         # Mirrors the settings defaults deliberately: 50 x 5 = 250 upper-bound
