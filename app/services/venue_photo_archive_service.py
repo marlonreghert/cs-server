@@ -343,6 +343,16 @@ def parse_config(config: Optional[dict], *, default_max_venues: int,
             cfg.get("max_photos_per_venue"), "max_photos_per_venue",
             default=default_max_photos, maximum=100,
         ),
+        # Optional second cap, applied WITHIN each category. The venue cap still
+        # bounds the total, so this can only ever reduce a run, never enlarge it.
+        "max_photos_per_category": (
+            _positive_int(
+                cfg.get("max_photos_per_category"), "max_photos_per_category",
+                default=0, maximum=100,
+            )
+            if cfg.get("max_photos_per_category") not in (None, "", 0)
+            else None
+        ),
         "eligibility": resolved_eligibility,
         "skip_scope": skip_scope,
         "overwrite": overwrite,
@@ -928,7 +938,17 @@ class VenuePhotoArchiveService:
             return
 
         entries = []
+        per_category = cfg.get("max_photos_per_category")
+        taken: dict[str, int] = {}
         for photo in photos or []:
+            category = photo.get("category")
+            if per_category:
+                # Ordering is Google's own ranking, so taking the first N of a
+                # category takes its best N.
+                key = category or "uncategorised"
+                if taken.get(key, 0) >= per_category:
+                    continue
+                taken[key] = taken.get(key, 0) + 1
             entry = await self._store_photo(venue_id, source, prefix, photo, summary)
             if entry is not None:
                 entries.append(entry)
@@ -1021,6 +1041,7 @@ class VenuePhotoArchiveService:
                 photo_id=photo_id,
                 data=data,
                 content_type=content_type,
+                category=photo.get("category"),
             )
         except Exception as e:
             summary["photo_failures"] += 1
@@ -1040,6 +1061,8 @@ class VenuePhotoArchiveService:
             "content_type": content_type,
             "bytes": len(data),
             "author_name": photo.get("author_name"),
+            "category": photo.get("category"),
+            "uploaded_at": photo.get("uploaded_at"),
             "source_url": url,
             "photo_name": photo.get("photo_name"),
         }

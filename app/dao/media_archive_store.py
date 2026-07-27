@@ -9,7 +9,7 @@ static access key and both inherit the bounded timeouts.
 Layout (same Hive-style `key=value` convention as `raw/`, so `media/` is
 discoverable by the same query tooling):
 
-    retrieved/source=<s>/year=/month=/day=/run_id=<ulid>/venue_id=<v>/media/<photo_id>.jpg
+    retrieved/source=<s>/year=/month=/day=/run_id=<ulid>/venue_id=<v>/media/<category>/<photo_id>.jpg
     retrieved/source=<s>/year=/month=/day=/run_id=<ulid>/venue_id=<v>/info/place.json
     retrieved/source=<s>/year=/month=/day=/run_id=<ulid>/venue_id=<v>/info/_manifest.json
 
@@ -50,6 +50,23 @@ _EXTENSIONS = {
     "image/webp": "webp",
     "image/gif": "gif",
 }
+
+
+_CATEGORY_SAFE = "abcdefghijklmnopqrstuvwxyz0123456789_-"
+
+
+def _safe_category(category: Optional[str]) -> str:
+    """Normalise a category into a key-safe folder name.
+
+    Categories can come from a scrape, so they are untrusted input that ends up
+    in an object key: anything unexpected collapses to `uncategorised` rather
+    than producing a key with a slash or a space in it.
+    """
+    text = "".join(
+        c if c in _CATEGORY_SAFE else "_"
+        for c in str(category or "").strip().lower().replace(" ", "_")
+    ).strip("_")
+    return text or "uncategorised"
 
 
 def extension_for(content_type: Optional[str]) -> str:
@@ -197,9 +214,17 @@ class MediaArchiveStore:
         photo_id: str,
         data: bytes,
         content_type: str,
+        category: Optional[str] = None,
     ) -> str:
+        """Store one image, filed under its category when it has one.
+
+        The category is a plain directory rather than a `key=value` partition:
+        it is a container for browsing, not something the lake tooling should
+        treat as a partition column.
+        """
+        folder = f"{MEDIA_DIR}/{_safe_category(category)}" if category else MEDIA_DIR
         key = (
-            f"{prefix}venue_id={venue_id}/{MEDIA_DIR}/"
+            f"{prefix}venue_id={venue_id}/{folder}/"
             f"{photo_id}.{extension_for(content_type)}"
         )
         await asyncio.to_thread(
