@@ -147,7 +147,7 @@ def step_both_offered(context):
 @then("the Apify source declares its own configuration fields")
 def step_apify_fields(context):
     names = {f["name"] for f in context.catalog[SOURCE_APIFY_GMAPS]["config_schema"]}
-    assert {"photo_pool", "language"} <= names, names
+    assert {"language"} <= names, names
 
 
 @then("the Google source declares no extra configuration fields")

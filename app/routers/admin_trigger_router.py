@@ -361,6 +361,36 @@ async def trigger_job(job_name: str, config: Optional[dict] = None):
     )
 
 
+@router.post("/trigger/{job_name}/stop")
+async def stop_job(job_name: str):
+    """Cancel a run that is in flight.
+
+    The run is an in-memory asyncio task, so cancelling it stops the work at
+    the next await — which for this pipeline means before the next paid
+    request. Previously the only way to stop a run that was spending money was
+    to restart the container.
+    """
+    require()
+    if job_name not in JOB_REGISTRY:
+        raise HTTPException(status_code=404, detail=f"Unknown job: {job_name}")
+
+    task = _running_jobs.get(job_name)
+    if task is None or task.done():
+        return TriggerResponse(
+            status="not_running",
+            job=job_name,
+            message=f"{JOB_REGISTRY[job_name]['label']} is not running",
+        )
+
+    task.cancel()
+    logger.warning(f"[AdminTrigger] Job '{job_name}' cancelled by an operator")
+    return TriggerResponse(
+        status="stopping",
+        job=job_name,
+        message=f"{JOB_REGISTRY[job_name]['label']} is being stopped",
+    )
+
+
 # ── photo archive: estimate before spending, and run records after ────────────
 def _photo_archive_service():
     service = getattr(_container, "venue_photo_archive_service", None)
