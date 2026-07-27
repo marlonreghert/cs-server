@@ -719,7 +719,7 @@ class VenuePhotoArchiveService:
                         await self._sleep(delay)
                         continue
                 logger.error(
-                    f"[VenuePhotoArchive] Google fetch failed for {venue_id}: {e}"
+                    f"[VenuePhotoArchive] job={summary['job_id']} Google fetch failed for {venue_id}: {e}"
                 )
                 return None
         return None
@@ -737,7 +737,7 @@ class VenuePhotoArchiveService:
                     source=source, result="skipped_existing"
                 ).inc()
                 logger.debug(
-                    f"[VenuePhotoArchive] {venue_id} already archived; skipping"
+                    f"[VenuePhotoArchive] job={summary['job_id']} {venue_id} already archived; skipping"
                 )
                 return
 
@@ -778,7 +778,7 @@ class VenuePhotoArchiveService:
                 # The images are already stored; losing the manifest costs the
                 # attribution, so it is loud but does not fail the venue.
                 logger.error(
-                    f"[VenuePhotoArchive] manifest write failed for {venue_id}: {e}"
+                    f"[VenuePhotoArchive] job={summary['job_id']} manifest write failed for {venue_id}: {e}"
                 )
 
         summary["archived"] += 1
@@ -812,14 +812,14 @@ class VenuePhotoArchiveService:
             MEDIA_ARCHIVE_PHOTO_FAILURES_TOTAL.labels(
                 source=source, reason="too_large"
             ).inc()
-            logger.warning(f"[VenuePhotoArchive] {venue_id} photo too large: {e}")
+            logger.warning(f"[VenuePhotoArchive] job={summary['job_id']} {venue_id} photo too large: {e}")
             return None
         except Exception as e:
             summary["photo_failures"] += 1
             MEDIA_ARCHIVE_PHOTO_FAILURES_TOTAL.labels(
                 source=source, reason="download_error"
             ).inc()
-            logger.warning(f"[VenuePhotoArchive] {venue_id} photo download failed: {e}")
+            logger.warning(f"[VenuePhotoArchive] job={summary['job_id']} {venue_id} photo download failed: {e}")
             return None
 
         try:
@@ -835,7 +835,7 @@ class VenuePhotoArchiveService:
             MEDIA_ARCHIVE_PHOTO_FAILURES_TOTAL.labels(
                 source=source, reason="store_error"
             ).inc()
-            logger.warning(f"[VenuePhotoArchive] {venue_id} photo store failed: {e}")
+            logger.warning(f"[VenuePhotoArchive] job={summary['job_id']} {venue_id} photo store failed: {e}")
             return None
 
         summary["photos_stored"] += 1
