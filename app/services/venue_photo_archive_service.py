@@ -698,11 +698,24 @@ class VenuePhotoArchiveService:
         return summary
 
     async def _write_latest_marker(self, source, prefix, run_id, summary) -> None:
+        """Record where the most recent COMPLETED run landed.
+
+        Written with the run's own prefix, so it tracks the latest dump whatever
+        the layout is — it never parses the path.
+
+        It is not what the pipeline itself reads: `_latest_archive_prefix`
+        resolves the newest run by LISTING, because the writer role has no
+        `GetObject`. The two agree for normal runs and can differ for an
+        `override` run, whose prefix sits outside the run partitions — hence
+        `path_mode` here, so a reader can tell which kind of run wrote it.
+
+        A dry run never reaches this: a preview must not move the pointer.
+        """
         marker = {
             "source": source,
             "prefix": prefix,
             "run_id": run_id,
-            "completed_at_source": "server clock",
+            "path_mode": summary["config"]["path_mode"],
             "job_id": summary["job_id"],
             "completed_at": self._now().isoformat(),
             "venues_archived": summary["archived"],
