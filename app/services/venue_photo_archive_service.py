@@ -30,6 +30,7 @@ import posixpath
 import time
 import uuid
 from datetime import datetime, timezone
+from types import SimpleNamespace
 from typing import Any, Iterable, Optional
 
 import httpx
@@ -57,8 +58,16 @@ from app.utils.recife_time import recife_today
 
 logger = logging.getLogger(__name__)
 
-SOURCE_GOOGLE_PHOTOS = "google_photos"
-SUPPORTED_SOURCES = (SOURCE_GOOGLE_PHOTOS,)
+# Sources live in their own module: each owns its config, its fetcher and its
+# cost model, and the admin panel renders the catalog from there.
+from app.services.archive_sources import (  # noqa: E402
+    ARCHIVE_SOURCES,
+    SOURCE_APIFY_GMAPS,
+    SOURCE_GOOGLE_PHOTOS,
+    SUPPORTED_SOURCES,
+    ArchiveCreditExhausted,
+    get_source,
+)
 
 PATH_MODE_NEW_RUN = "new_run"
 # Retained with its ORIGINAL day-scoped meaning rather than aliased to new_run: a
@@ -82,6 +91,11 @@ ELIGIBILITY_POINT_RADIUS = "point_radius"
 ELIGIBILITY_MODES = (ELIGIBILITY_ALL, ELIGIBILITY_VENUE_IDS, ELIGIBILITY_POINT_RADIUS)
 
 MAX_RADIUS_KM = 500.0
+
+# Returned when a fetch exhausted its retries. Distinct from None/[], which
+# mean the source answered and simply had no photos — a failure and a miss
+# are different outcomes and must not be counted together.
+FETCH_FAILED = object()
 
 # Crockford base32 — no I/L/O/U, so a run id can be read aloud or copied out of a
 # bucket listing without ambiguity.
@@ -333,6 +347,8 @@ def parse_config(config: Optional[dict], *, default_max_venues: int,
         "skip_scope": skip_scope,
         "overwrite": overwrite,
         "dry_run": bool(cfg.get("dry_run")),
+        # Per-source fields, validated by the source that owns them.
+        "source_config": dict(cfg.get("source_config") or {}),
     }
 
 
@@ -376,6 +392,8 @@ class VenuePhotoArchiveService:
         venue_dao,
         media_store,
         downloader=None,
+        apify_gmaps_extractor_client=None,
+        settings=None,
         max_photos_per_venue: int = 10,
         photo_timeout_seconds: float = 15.0,
         max_photo_bytes: int = 10 * 1024 * 1024,
@@ -391,6 +409,9 @@ class VenuePhotoArchiveService:
         sleeper=None,
     ):
         self.google_places_client = google_places_client
+        # Named to match ArchiveSource.requires_attr, so availability and
+        # dispatch both resolve by attribute rather than by an if-ladder.
+        self.apify_gmaps_extractor_client = apify_gmaps_extractor_client
         self.venue_dao = venue_dao
         self.media_store = media_store
         self.downloader = downloader or HttpPhotoDownloader()
@@ -402,6 +423,13 @@ class VenuePhotoArchiveService:
         self.default_max_venues = default_max_venues
         self.max_retries = max(1, int(max_retries))
         self.cost_per_1k_usd = float(cost_per_1k_usd)
+        # Sources read their unit prices off settings via getattr with their own
+        # defaults, so an absent settings object degrades to those defaults
+        # rather than failing. The constructor's cost_per_1k_usd still wins for
+        # Google when no settings are injected.
+        self._settings = settings if settings is not None else SimpleNamespace(
+            google_photo_cost_per_1k_usd=self.cost_per_1k_usd,
+        )
         self.concurrency = max(1, int(concurrency))
         self._limiter = rate_limiter or AsyncRateLimiter(rate_per_second)
         self._sleep = sleeper or asyncio.sleep
@@ -545,22 +573,28 @@ class VenuePhotoArchiveService:
                 after_skip = len(remaining)
 
         photos_max = cfg["max_photos_per_venue"]
-        calls = after_skip * photos_max
-        cost = round(calls * self.cost_per_1k_usd / 1000.0, 4)
+        descriptor = get_source(source)
+        # Each source prices differently: Google per request (1 Details + N
+        # photos per venue), the extractor per place scraped regardless of how
+        # many photos come back. One formula cannot describe both.
+        calls, unit_label = descriptor.estimate_units(after_skip, cfg)
+        cost = round(calls * descriptor.unit_cost_usd(self._settings, cfg), 4)
         estimate = {
             "source": source,
             "venues_eligible": eligible_total,
             "venues_selected": len(selected),
             "venues_after_skip": after_skip,
             "photos_max": photos_max,
-            "est_google_calls": calls,
+            "est_google_calls": calls,   # kept: the admin panel reads this name
+            "est_units": calls,
+            "est_unit_label": unit_label,
             "est_cost_usd": cost,
             "est_bytes": calls * 300_000,  # ~300KB per photo, observed order
             "est_duration_seconds": round(calls / max(self._limiter.rate, 0.001), 1),
             "unknown_venue_ids": unknown,
             "assumptions": [
                 f"every venue returns the maximum of {photos_max} photos",
-                f"${self.cost_per_1k_usd:g} per 1,000 photo requests (configured, unverified)",
+                descriptor.cost_note,
                 "~300KB per stored image",
             ],
             "caveat": ESTIMATE_CAVEAT,
@@ -596,6 +630,13 @@ class VenuePhotoArchiveService:
             default_max_photos=self.max_photos_per_venue,
         )
         source = cfg["source"]
+        # A source whose dependency is unwired must fail here — loudly and for
+        # free — rather than partway through a run the operator is paying for.
+        if self._source_client(source) is None:
+            raise InvalidArchiveConfig(
+                f"source {source!r} is unavailable: "
+                f"{ARCHIVE_SOURCES[source].unavailable_reason}"
+            )
         job_id = str((config or {}).get("job_id") or uuid.uuid4().hex)
 
         started = time.perf_counter()
@@ -631,7 +672,9 @@ class VenuePhotoArchiveService:
             "photos_stored": 0,
             "photo_failures": 0,
             "bytes_stored": 0,
-            "google_calls": 0,
+            "source_calls": 0,
+            "no_match": 0,
+            "credit_exhausted": False,
             "throttled": 0,
             "unknown_venue_ids": unknown,
             "config": cfg,
@@ -662,11 +705,24 @@ class VenuePhotoArchiveService:
         semaphore = asyncio.Semaphore(self.concurrency)
 
         async def _guarded(venue_id: str) -> None:
+            # Once the source's budget is exhausted, stop starting new venues
+            # rather than generating one failure per remaining venue.
+            if summary.get("credit_exhausted"):
+                return
             async with semaphore:
                 try:
                     await self._archive_venue(
                         venue_id, source, prefix, reference_prefix, cfg, summary
                     )
+                except ArchiveCreditExhausted as e:
+                    # Not a per-venue failure: the budget is gone, so every
+                    # remaining venue would fail the same way. Record it and let
+                    # the run finish reporting what it did manage.
+                    if not summary.get("credit_exhausted"):
+                        logger.error(
+                            f"[VenuePhotoArchive] job={job_id} stopping: {e}"
+                        )
+                    summary["credit_exhausted"] = True
                 except Exception as e:  # noqa: BLE001 — one venue must not end the run
                     summary["failed"] += 1
                     MEDIA_ARCHIVE_VENUES_TOTAL.labels(
@@ -693,7 +749,7 @@ class VenuePhotoArchiveService:
             f"considered={summary['considered']} archived={summary['archived']} "
             f"skipped={summary['skipped_existing']} no_place_id={summary['no_place_id']} "
             f"failed={summary['failed']} photos={summary['photos_stored']} "
-            f"google_calls={summary['google_calls']} throttled={summary['throttled']}"
+            f"source_calls={summary['source_calls']} throttled={summary['throttled']}"
         )
         return summary
 
@@ -729,20 +785,30 @@ class VenuePhotoArchiveService:
             # convenience, not data.
             logger.warning(f"[VenuePhotoArchive] latest marker write failed: {e}")
 
-    async def _fetch_photos(self, venue_id, place_id, source, cfg, summary):
-        """Google fetch, paced and retried. Returns photos, or None on failure."""
+    def _source_client(self, source_id: str):
+        """The dependency the chosen source needs, or None when unwired."""
+        return getattr(self, ARCHIVE_SOURCES[source_id].requires_attr, None)
+
+    async def _fetch_photos(self, venue_id, venue_ctx, source, cfg, summary):
+        """Fetch through the CHOSEN source, paced and retried.
+
+        The pacing, retry and throttle accounting are source-independent; only
+        the call itself differs, which is what the registry owns.
+        """
+        descriptor = get_source(source)
+        client = self._source_client(source)
         for attempt in range(1, self.max_retries + 1):
             waited = await self._limiter.acquire()
             if waited:
                 MEDIA_ARCHIVE_RATE_LIMIT_WAIT_SECONDS.labels(source=source).observe(waited)
             try:
-                summary["google_calls"] += 1
+                summary["source_calls"] += 1
                 MEDIA_ARCHIVE_GOOGLE_CALLS_TOTAL.labels(source=source).inc()
-                return await self.google_places_client.get_place_photos(
-                    place_id,
-                    max_photos=cfg["max_photos_per_venue"],
-                    include_ref=True,
-                )
+                return await descriptor.fetch(client, venue_ctx, cfg)
+            except ArchiveCreditExhausted:
+                # The source's own budget is gone. Stop the whole run rather
+                # than keep calling into an exhausted balance.
+                raise
             except Exception as e:  # noqa: BLE001
                 if is_throttled(e):
                     summary["throttled"] += 1
@@ -762,10 +828,11 @@ class VenuePhotoArchiveService:
                         await self._sleep(delay)
                         continue
                 logger.error(
-                    f"[VenuePhotoArchive] job={summary['job_id']} Google fetch failed for {venue_id}: {e}"
+                    f"[VenuePhotoArchive] job={summary['job_id']} {source} fetch "
+                    f"failed for {venue_id}: {e}"
                 )
-                return None
-        return None
+                return FETCH_FAILED
+        return FETCH_FAILED
 
     async def _archive_venue(
         self, venue_id: str, source: str, prefix: str,
@@ -784,18 +851,28 @@ class VenuePhotoArchiveService:
                 )
                 return
 
-        # 2. A venue with no place id can never be fetched — not a failure.
-        place_id = self._place_id_for(venue_id)
-        if not place_id:
+        # 2. A venue the source cannot address can never be fetched — and must
+        #    cost nothing. Google needs a place id; the scraper needs a search
+        #    string, so the context carries both and the source picks.
+        venue_ctx = self._venue_context(venue_id)
+        if not venue_ctx.get("google_place_id") and source == SOURCE_GOOGLE_PHOTOS:
             summary["no_place_id"] += 1
             MEDIA_ARCHIVE_VENUES_TOTAL.labels(source=source, result="no_place_id").inc()
             return
+        if not venue_ctx.get("search_query") and source == SOURCE_APIFY_GMAPS:
+            summary["no_match"] += 1
+            MEDIA_ARCHIVE_VENUES_TOTAL.labels(source=source, result="no_match").inc()
+            return
 
         # 3. Now, and only now, spend.
-        photos = await self._fetch_photos(venue_id, place_id, source, cfg, summary)
-        if photos is None:
+        photos = await self._fetch_photos(venue_id, venue_ctx, source, cfg, summary)
+        if photos is FETCH_FAILED:
             summary["failed"] += 1
             MEDIA_ARCHIVE_VENUES_TOTAL.labels(source=source, result="google_error").inc()
+            return
+        if not photos:
+            summary["no_match"] += 1
+            MEDIA_ARCHIVE_VENUES_TOTAL.labels(source=source, result="no_match").inc()
             return
 
         entries = []
@@ -812,7 +889,8 @@ class VenuePhotoArchiveService:
                     manifest={
                         "venue_id": venue_id,
                         "source": source,
-                        "google_place_id": place_id,
+                        "google_place_id": venue_ctx.get("google_place_id"),
+                        "search_query": venue_ctx.get("search_query"),
                         "job_id": summary["job_id"],
                         "photos": entries,
                     },
@@ -826,6 +904,25 @@ class VenuePhotoArchiveService:
 
         summary["archived"] += 1
         MEDIA_ARCHIVE_VENUES_TOTAL.labels(source=source, result="archived").inc()
+
+    def _venue_context(self, venue_id: str) -> dict:
+        """What a source needs to address this venue.
+
+        Google works from a place id; the extractor is a search API and works
+        from a name + address string. Both are resolved here so the sources
+        stay ignorant of the DAO.
+        """
+        ctx: dict = {"venue_id": venue_id, "google_place_id": self._place_id_for(venue_id)}
+        try:
+            venue = self.venue_dao.get_venue(venue_id)
+        except Exception:
+            venue = None
+        name = getattr(venue, "venue_name", None) if venue else None
+        address = getattr(venue, "venue_address", None) if venue else None
+        query = " ".join(part for part in (name, address) if part).strip()
+        ctx["search_query"] = query or None
+        ctx["venue_name"] = name
+        return ctx
 
     def _place_id_for(self, venue_id: str) -> Optional[str]:
         try:

@@ -266,8 +266,10 @@ class TestEstimate:
             {"max_venues": 100, "max_photos_per_venue": 5}
         ))
         assert est["venues_selected"] == 20
-        assert est["est_google_calls"] == 100          # 20 x 5, an upper bound
-        assert est["est_cost_usd"] == pytest.approx(0.7)  # 100 / 1000 * $7
+        # 20 x (1 Place Details + 5 photo requests). The Details call was
+        # previously omitted, understating every Google run by a third.
+        assert est["est_google_calls"] == 120
+        assert est["est_cost_usd"] == pytest.approx(0.84)  # 120 / 1000 * $7
 
     def test_cost_is_zero_when_nothing_is_selected(self):
         est = asyncio.run(self._svc(0).estimate({"max_photos_per_venue": 5}))
@@ -285,7 +287,7 @@ class TestEstimate:
             {"max_venues": 10, "max_photos_per_venue": 2}
         ))
         assert est["venues_selected"] == 10
-        assert est["est_google_calls"] == 20
+        assert est["est_google_calls"] == 30   # 10 x (1 Details + 2 photos)
 
 
 # ── rate limiting and backoff ────────────────────────────────────────────────
