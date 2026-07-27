@@ -178,6 +178,7 @@ JOB_REGISTRY = {
             "path_override": "",
             "max_venues": 50,
             "max_photos_per_venue": 5,
+            "max_photos_per_category": "",
             "eligibility": {
                 "mode": "all", "venue_ids": "", "lat": "", "lon": "", "radius_km": "",
             },

@@ -245,3 +245,43 @@ def step_info_excludes_images(context):
 def step_info_only(context):
     assert context.summary["info_only"] >= 1, context.summary
     assert context.summary["info_stored"] >= 1, context.summary
+
+
+@given("a venue whose photos are {owner:d} from the owner and {visitor:d} from visitors")
+def step_mixed_authorship(context, owner, visitor):
+    context.venue_id = "ven_mixed"
+    _seed(context, context.venue_id)
+    photos = (
+        [{"url": f"https://x/own{i}", "author_name": "Owner",
+          "category": "by_owner", "photo_name": None} for i in range(owner)]
+        + [{"url": f"https://x/vis{i}", "author_name": "Someone",
+            "category": "by_visitor", "photo_name": None} for i in range(visitor)]
+    )
+    context.apify.photos_by_query[f"Venue {context.venue_id}"] = photos
+
+
+@given("at most {n:d} photo per category is kept")
+def step_per_category_cap(context, n):
+    context.config_over["max_photos_per_category"] = n
+
+
+def _category_keys(context, category):
+    return [k for k in context.fake_s3.objects
+            if f"/media/{category}/" in k and k.endswith(".jpg")]
+
+
+@then("the owner photos are stored in their own folder")
+def step_owner_folder(context):
+    assert _category_keys(context, "by_owner"), list(context.fake_s3.objects)[:4]
+
+
+@then("the visitor photos are stored in their own folder")
+def step_visitor_folder(context):
+    assert _category_keys(context, "by_visitor"), list(context.fake_s3.objects)[:4]
+
+
+@then("only {n:d} photo is stored in each category folder")
+def step_per_category_limit(context, n):
+    for category in ("by_owner", "by_visitor"):
+        keys = _category_keys(context, category)
+        assert len(keys) == n, f"{category}: expected {n}, got {len(keys)}"

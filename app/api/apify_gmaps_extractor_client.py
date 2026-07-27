@@ -264,13 +264,27 @@ class ApifyGMapsExtractorClient:
         out: list[dict] = []
         seen: set[str] = set()
 
+        venue_title = _normalize(place.get("title", ""))
         for image in place.get("images") or []:
             url = (image or {}).get("imageUrl") or (image or {}).get("url")
             if url and url not in seen:
                 seen.add(url)
+                author = (image or {}).get("authorName")
                 out.append({
                     "url": url,
-                    "author_name": (image or {}).get("authorName"),
+                    "author_name": author,
+                    "uploaded_at": (image or {}).get("uploadedAt"),
+                    # Google exposes photo tabs (Menu, Food & drink, Vibe...) but
+                    # tags no INDIVIDUAL image with one — `imageCategories` is a
+                    # place-level list of which tabs exist. "By owner" is the one
+                    # tab that IS derivable, by comparing the uploader to the
+                    # venue name, and it is the useful one: owners upload the
+                    # official shots.
+                    "category": (
+                        "by_owner"
+                        if venue_title and author and _normalize(author) == venue_title
+                        else "by_visitor"
+                    ),
                     # No Google photo resource name from a scrape; the URL is
                     # what photo_id_for() hashes, which keeps ids stable.
                     "photo_name": None,
@@ -279,7 +293,10 @@ class ApifyGMapsExtractorClient:
         for url in place.get("imageUrls") or []:
             if url and url not in seen:
                 seen.add(url)
-                out.append({"url": url, "author_name": None, "photo_name": None})
+                out.append({
+                    "url": url, "author_name": None, "photo_name": None,
+                    "uploaded_at": None, "category": "by_visitor",
+                })
 
         return out[:max_photos]
 

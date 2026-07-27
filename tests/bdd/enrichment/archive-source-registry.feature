@@ -57,6 +57,20 @@ Feature: Choose where archived photos come from
     Then the venue's info folder holds the place data
     And the venue is counted as info only
 
+  Scenario: File photos under the category they belong to
+    Given the Apify source is configured
+    And a venue whose photos are 2 from the owner and 3 from visitors
+    When the photo archive job runs for that venue using the Apify source
+    Then the owner photos are stored in their own folder
+    And the visitor photos are stored in their own folder
+
+  Scenario: Cap how many photos are kept per category
+    Given the Apify source is configured
+    And a venue whose photos are 2 from the owner and 3 from visitors
+    And at most 1 photo per category is kept
+    When the photo archive job runs for that venue using the Apify source
+    Then only 1 photo is stored in each category folder
+
   Scenario: Count a venue the extractor cannot find without failing the run
     Given the Apify source is configured
     And a venue the extractor cannot find

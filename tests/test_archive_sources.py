@@ -210,3 +210,91 @@ class TestCancellation:
         assert record is not None, "a cancelled run left no record"
         assert record["aborted"] is True
         assert "duration_seconds" in record
+
+
+class TestPhotoCategories:
+    """Google exposes photo tabs but tags no individual image with one.
+
+    `imageCategories` is a place-level list of which tabs exist. The one tab
+    that IS derivable is "By owner" — compare the uploader to the venue name —
+    and it is the useful one, since owners upload the official shots.
+    """
+
+    def _client(self):
+        from app.api.apify_gmaps_extractor_client import ApifyGMapsExtractorClient
+        return ApifyGMapsExtractorClient(api_token="t")
+
+    def test_owner_photos_are_labelled_by_owner(self):
+        photos = self._client()._archive_photos([{
+            "title": "Tasquinha do Tio",
+            "images": [
+                {"imageUrl": "u1", "authorName": "Tasquinha do Tio"},
+                {"imageUrl": "u2", "authorName": "Maria das Gracas"},
+            ],
+        }], 10)
+        assert [p["category"] for p in photos] == ["by_owner", "by_visitor"]
+
+    def test_matching_ignores_case_and_accents(self):
+        photos = self._client()._archive_photos([{
+            "title": "Café Central",
+            "images": [{"imageUrl": "u1", "authorName": "CAFE CENTRAL"}],
+        }], 10)
+        assert photos[0]["category"] == "by_owner"
+
+    def test_uploaded_at_is_kept(self):
+        photos = self._client()._archive_photos([{
+            "title": "X",
+            "images": [{"imageUrl": "u1", "authorName": "A",
+                        "uploadedAt": "2017-05-30T00:00:00.000Z"}],
+        }], 10)
+        assert photos[0]["uploaded_at"] == "2017-05-30T00:00:00.000Z"
+
+    def test_a_bare_url_list_still_yields_a_category(self):
+        photos = self._client()._archive_photos(
+            [{"title": "X", "imageUrls": ["u1", "u2"]}], 10
+        )
+        assert all(p["category"] == "by_visitor" for p in photos)
+
+
+class TestCategoryFolders:
+    def test_a_category_becomes_its_own_folder(self):
+        import asyncio
+
+        from app.dao.media_archive_store import MediaArchiveStore
+
+        class _S3:
+            def __init__(self): self.objects = {}
+            def put_object(self, Bucket=None, Key=None, Body=None, ContentType=None, **k):
+                self.objects[Key] = Body
+                return {}
+
+        s3 = _S3()
+        store = MediaArchiveStore(bucket="b", region="us-east-1", s3_client=s3)
+        key = asyncio.run(store.put_image(
+            prefix="retrieved/source=s/run_id=r/", venue_id="v1",
+            photo_id="p1", data=b"x", content_type="image/jpeg",
+            category="by_owner",
+        ))
+        assert key.endswith("venue_id=v1/media/by_owner/p1.jpg")
+
+    def test_an_uncategorised_photo_still_lands_under_media(self):
+        import asyncio
+
+        from app.dao.media_archive_store import MediaArchiveStore
+
+        class _S3:
+            def __init__(self): self.objects = {}
+            def put_object(self, **k): return {}
+
+        store = MediaArchiveStore(bucket="b", region="us-east-1", s3_client=_S3())
+        key = asyncio.run(store.put_image(
+            prefix="p/", venue_id="v1", photo_id="p1", data=b"x",
+            content_type="image/jpeg", category=None,
+        ))
+        assert key.endswith("venue_id=v1/media/p1.jpg")
+
+    def test_a_hostile_category_cannot_escape_the_key(self):
+        from app.dao.media_archive_store import _safe_category
+        assert "/" not in _safe_category("../../raw")
+        assert _safe_category("../../raw") == "raw"
+        assert _safe_category("") == "uncategorised"
