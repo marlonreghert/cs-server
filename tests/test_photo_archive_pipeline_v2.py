@@ -128,7 +128,7 @@ class TestRunPrefix:
         when = datetime(2026, 7, 27, 5, 9, 18, tzinfo=timezone.utc)
         prefix = run_prefix("google_photos", when, "abc123")
         assert prefix == (
-            "media/source=google_photos/year=2026/month=07/day=27/"
+            "retrieved/source=google_photos/year=2026/month=07/day=27/"
             "run_id=abc123/"
         )
         for segment in prefix.strip("/").split("/")[1:]:

@@ -8,6 +8,7 @@ negative: a run on one source must never reach the other's API.
 """
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 
 from behave import given, then, when  # type: ignore[import-untyped]
@@ -22,7 +23,7 @@ from app.services.venue_photo_archive_service import InvalidArchivePath
 from tests.bdd.steps.photo_archive_pipeline_v2_steps import _cfg, _run_v2, _seed
 from tests.bdd.steps.venue_photo_archive_steps import _run
 
-APIFY_ROOT = f"media/source={SOURCE_APIFY_GMAPS}/"
+APIFY_ROOT = f"retrieved/source={SOURCE_APIFY_GMAPS}/"
 
 
 class _FakeApify:
@@ -39,7 +40,15 @@ class _FakeApify:
             raise ArchiveCreditExhausted("Apify credits exhausted (402)")
         for key, photos in self.photos_by_query.items():
             if key in (search_query or ""):
-                return list(photos)[:max_photos]
+                # The real client returns photos AND the non-image place data.
+                return {
+                    "photos": list(photos)[:max_photos],
+                    "info": {
+                        "title": "Venue", "address": "A street", "phone": "+55",
+                        "website": "https://x", "categories": ["Bar"],
+                        "totalScore": 4.5, "placeId": "ChIJ",
+                    },
+                }
         return None
 
 
@@ -200,3 +209,39 @@ def step_estimate_unit_label(context, what):
 def step_estimate_image_caveat(context):
     blob = " ".join(context.estimate.get("assumptions", [])).lower()
     assert "not published" in blob or "per-image" in blob, context.estimate
+
+
+@given("a venue the extractor finds with no photos")
+def step_venue_no_photos(context):
+    context.venue_id = "ven_infoonly"
+    _seed(context, context.venue_id)
+    context.apify.photos_by_query[f"Venue {context.venue_id}"] = []
+
+
+@then("the venue's info folder holds the place data")
+def step_info_stored(context):
+    keys = [k for k in context.fake_s3.objects if k.endswith("info/place.json")]
+    assert keys, f"no place.json written: {list(context.fake_s3.objects)[:4]}"
+    context.place_json = json.loads(context.fake_s3.objects[keys[0]])
+
+
+@then("the place data keeps the fields the scrape already paid for")
+def step_info_fields(context):
+    place = context.place_json["place"]
+    # These come free with the place-scraped event; dropping them would discard
+    # data already billed for.
+    for f in ("title", "address", "phone", "website", "categories", "totalScore"):
+        assert f in place, f"{f} missing from the stored place data: {sorted(place)}"
+
+
+@then("no image payload is duplicated inside the place data")
+def step_info_excludes_images(context):
+    place = context.place_json["place"]
+    for f in ("images", "imageUrls", "imageCategories"):
+        assert f not in place, f"{f} was duplicated into the info JSON"
+
+
+@then("the venue is counted as info only")
+def step_info_only(context):
+    assert context.summary["info_only"] >= 1, context.summary
+    assert context.summary["info_stored"] >= 1, context.summary

@@ -415,7 +415,12 @@ def step_partitioned(context):
 @then('every media partition is expressed as a "key=value" directory')
 def step_key_value(context):
     key = _image_keys(context, context.venue_id)[0]
+    # `media/` and `info/` are per-venue containers, not partitions — they
+    # split images from everything else and are deliberately not key=value.
+    containers = {"media", "info"}
     for directory in key.split("/")[1:-1]:
+        if directory in containers:
+            continue
         assert "=" in directory, f"partition {directory!r} is not key=value"
 
 

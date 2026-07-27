@@ -24,7 +24,7 @@ from tests.bdd.steps.venue_photo_archive_steps import (  # reuse: one set of fak
 )
 
 SOURCE = "google_photos"
-ROOT = f"media/source={SOURCE}/"
+ROOT = f"retrieved/source={SOURCE}/"
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────
@@ -74,7 +74,7 @@ def _seed_previous_run(context, venue_id="ven_prev", day="2026-07-26"):
         f"{ROOT}year={day[:4]}/month={day[5:7]}/day={day[8:10]}/"
         f"run_id=0000000000{'0' * 16}/"
     )
-    context.fake_s3.objects[f"{prefix}venue_id={venue_id}/old.jpg"] = b"old"
+    context.fake_s3.objects[f"{prefix}venue_id={venue_id}/media/old.jpg"] = b"old"
     context.previous_prefix = prefix
     return prefix
 

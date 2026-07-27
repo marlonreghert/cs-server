@@ -181,9 +181,10 @@ class ApifyGMapsExtractorClient:
         wants everything the actor returns. Same run shape, same billing (per
         place, not per photo), no category filter.
 
-        Returns the archive's common photo dict — `url`, `author_name`,
-        `photo_name` — so the storage path is identical whichever source
-        produced it.
+        Returns `{"photos": [...], "info": {...}}` — the photos in the
+        archive's common dict shape (`url`, `author_name`, `photo_name`) plus
+        everything else the actor returned, which the same charge already
+        covered.
         """
         run_input = {
             "searchStringsArray": [search_query],
@@ -218,7 +219,13 @@ class ApifyGMapsExtractorClient:
             if not items:
                 logger.info(f"[ApifyGMaps] no result for query: {search_query}")
                 return None
-            return self._archive_photos(items, max_photos)
+            return {
+                "photos": self._archive_photos(items, max_photos),
+                # Everything the actor returned that is not an image. Already
+                # paid for by the same place-scraped event, so discarding it
+                # would be throwing away data we were billed for.
+                "info": self._place_info(items[0] or {}),
+            }
         except ApifyCreditExhaustedError:
             # Propagated, never swallowed: the caller must stop the whole run
             # rather than keep paying into an exhausted balance.
@@ -232,6 +239,18 @@ class ApifyGMapsExtractorClient:
             ).inc()
             logger.error(f"[ApifyGMaps] archive fetch failed for {search_query!r}: {e}")
             return None
+
+    # Image payloads are stored as files, not repeated inside the info JSON.
+    _IMAGE_KEYS = ("images", "imageUrls", "imageCategories")
+
+    def _place_info(self, place: dict) -> dict:
+        """The non-media half of the actor's result, kept verbatim.
+
+        Deliberately a subtraction rather than an allow-list: the actor adds
+        fields over time, and an allow-list would silently drop the new ones
+        while still paying for them.
+        """
+        return {k: v for k, v in place.items() if k not in self._IMAGE_KEYS}
 
     def _archive_photos(self, items: list[dict], max_photos: int) -> list[dict]:
         """Normalise the actor's images into the archive's photo dict.

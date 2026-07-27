@@ -35,7 +35,7 @@ from typing import Any, Iterable, Optional
 
 import httpx
 
-from app.dao.media_archive_store import MEDIA_ROOT
+from app.dao.media_archive_store import MEDIA_ROOT, RETRIEVED_ROOT
 from app.metrics import (
     MEDIA_ARCHIVE_BYTES_STORED_TOTAL,
     MEDIA_ARCHIVE_ESTIMATED_COST_USD,
@@ -192,7 +192,7 @@ def run_prefix(source: str, when: datetime, run_id: str) -> str:
     what lets the latest run be found by listing alone, without `GetObject`.
     """
     return (
-        f"{MEDIA_ROOT}/source={source}/"
+        f"{RETRIEVED_ROOT}/source={source}/"
         f"year={when:%Y}/month={when:%m}/day={when:%d}/"
         f"run_id={run_id}/"
     )
@@ -637,7 +637,10 @@ class VenuePhotoArchiveService:
                 f"source {source!r} is unavailable: "
                 f"{ARCHIVE_SOURCES[source].unavailable_reason}"
             )
-        job_id = str((config or {}).get("job_id") or uuid.uuid4().hex)
+        # The job id IS the run id: it appears in the path, and resolving the
+        # latest run by listing depends on it sorting chronologically, which a
+        # uuid4 does not. One time-ordered id serves both.
+        job_id = str((config or {}).get("job_id") or new_run_id(self._now()))
 
         started = time.perf_counter()
         # Resolve the prefix before selecting or fetching: an invalid override
@@ -674,6 +677,8 @@ class VenuePhotoArchiveService:
             "bytes_stored": 0,
             "source_calls": 0,
             "no_match": 0,
+            "info_stored": 0,
+            "info_only": 0,
             "credit_exhausted": False,
             "throttled": 0,
             "unknown_venue_ids": unknown,
@@ -748,7 +753,7 @@ class VenuePhotoArchiveService:
             f"[VenuePhotoArchive] job={job_id} done in {duration:.1f}s: "
             f"considered={summary['considered']} archived={summary['archived']} "
             f"skipped={summary['skipped_existing']} no_place_id={summary['no_place_id']} "
-            f"failed={summary['failed']} photos={summary['photos_stored']} "
+            f"failed={summary['failed']} photos={summary['photos_stored']} info={summary['info_stored']} "
             f"source_calls={summary['source_calls']} throttled={summary['throttled']}"
         )
         return summary
@@ -865,14 +870,47 @@ class VenuePhotoArchiveService:
             return
 
         # 3. Now, and only now, spend.
-        photos = await self._fetch_photos(venue_id, venue_ctx, source, cfg, summary)
-        if photos is FETCH_FAILED:
+        result = await self._fetch_photos(venue_id, venue_ctx, source, cfg, summary)
+        if result is FETCH_FAILED:
             summary["failed"] += 1
             MEDIA_ARCHIVE_VENUES_TOTAL.labels(source=source, result="google_error").inc()
             return
-        if not photos:
+        if not result:
             summary["no_match"] += 1
             MEDIA_ARCHIVE_VENUES_TOTAL.labels(source=source, result="no_match").inc()
+            return
+
+        photos = result.get("photos") or []
+        info = result.get("info") or {}
+
+        # 4. Store the info FIRST. It is the cheap half of what was already paid
+        #    for, so a venue whose images all fail still keeps the data that did
+        #    come back.
+        if info:
+            try:
+                await self.media_store.put_info(
+                    prefix=prefix,
+                    venue_id=venue_id,
+                    info={
+                        "venue_id": venue_id,
+                        "source": source,
+                        "job_id": summary["job_id"],
+                        "retrieved_at": self._now().isoformat(),
+                        "search_query": venue_ctx.get("search_query"),
+                        "place": info,
+                    },
+                )
+                summary["info_stored"] += 1
+            except Exception as e:
+                logger.error(
+                    f"[VenuePhotoArchive] job={summary['job_id']} info write "
+                    f"failed for {venue_id}: {e}"
+                )
+
+        if not photos:
+            # Info kept, no images available. Not a failure and not a miss.
+            summary["info_only"] += 1
+            MEDIA_ARCHIVE_VENUES_TOTAL.labels(source=source, result="info_only").inc()
             return
 
         entries = []

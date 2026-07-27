@@ -30,8 +30,12 @@ resource "aws_iam_policy" "datalake_writer" {
         Action = ["s3:PutObject"]
         Resource = [
           "${aws_s3_bucket.lake.arn}/raw/*",
-          # Venue photo archive. Binary media, same append-only treatment.
+          # Venue archive. Binary media AND the per-venue info JSON, same
+          # append-only treatment. `media/` is the superseded root: kept so a
+          # cs-server still running the old code during a deploy can finish its
+          # writes. Safe to prune once nothing writes there.
           "${aws_s3_bucket.lake.arn}/media/*",
+          "${aws_s3_bucket.lake.arn}/retrieved/*",
         ]
       },
       {
@@ -40,13 +44,13 @@ resource "aws_iam_policy" "datalake_writer" {
         # the "append to latest day" mode. This is metadata only — GetObject is
         # still withheld, so the app can see that an object exists and add new
         # ones, and can never read archived content back.
-        Sid      = "ListMediaPrefix"
+        Sid      = "ListArchivePrefixes"
         Effect   = "Allow"
         Action   = ["s3:ListBucket"]
         Resource = aws_s3_bucket.lake.arn
         Condition = {
           StringLike = {
-            "s3:prefix" = ["media/*", "media/"]
+            "s3:prefix" = ["media/*", "media/", "retrieved/*", "retrieved/"]
           }
         }
       },

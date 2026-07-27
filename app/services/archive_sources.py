@@ -94,9 +94,12 @@ async def _fetch_google(client, venue, cfg):
     place_id = venue.get("google_place_id")
     if not place_id:
         return None  # caller records `no_place_id`; costs nothing
-    return await client.get_place_photos(
+    photos = await client.get_place_photos(
         place_id, max_photos=cfg["max_photos_per_venue"], include_ref=True
     )
+    # The Places photo endpoint returns photos and nothing else, so there is no
+    # extra info to keep — an empty info block, not a missing one.
+    return {"photos": photos or [], "info": {"google_place_id": place_id}}
 
 
 def _google_units(venues: int, cfg: dict) -> tuple[int, str]:
@@ -120,11 +123,17 @@ async def _fetch_apify(client, venue, cfg):
         return None
     source_cfg = cfg.get("source_config") or {}
     pool = int(source_cfg.get("photo_pool") or 20)
-    return await client.fetch_venue_photos(
+    result = await client.fetch_venue_photos(
         query,
         max_photos=max(cfg["max_photos_per_venue"], pool),
         language=str(source_cfg.get("language") or "pt-BR"),
     )
+    if result is None:
+        return None
+    # Tolerate a client that still returns a bare photo list.
+    if isinstance(result, list):
+        return {"photos": result, "info": {}}
+    return result
 
 
 def _apify_units(venues: int, cfg: dict) -> tuple[int, str]:

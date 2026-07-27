@@ -173,8 +173,10 @@ class TestStoreKeys:
             data=b"x",
             content_type="image/jpeg",
         )
+        # Images sit in the venue's media/ subfolder; info/ holds everything
+        # else, so a consumer can read one without listing the other.
         assert key == (
-            "media/source=google_photos/dt=2026-07-26/venue_id=ven_a/abc123.jpg"
+            "media/source=google_photos/dt=2026-07-26/venue_id=ven_a/media/abc123.jpg"
         )
 
     async def test_lists_day_partitions_ascending(self):
@@ -257,7 +259,7 @@ class TestPrefixResolution:
         # for "new_day" explicitly still writes a day partition (tested above).
         svc = _service()
         prefix = await svc.resolve_prefix("google_photos", {"path_mode": "append_latest"})
-        assert prefix.startswith("media/source=google_photos/year=")
+        assert prefix.startswith("retrieved/source=google_photos/year=")
         assert "run_id=" in prefix
 
     async def test_unknown_mode_is_rejected(self):
