@@ -115,17 +115,25 @@ def _google_unit_cost(settings, cfg) -> float:
 async def _fetch_apify(client, venue, cfg):
     """One actor run per venue; the actor bills per place, not per photo.
 
-    Asking for a bigger photo pool is therefore nearly free, which is why
-    `photo_pool` exists as a source config rather than being tied to the cap.
+    The actor returns images in the order Google Maps displays them — the "All"
+    tab, which is Google's own ranking — so asking for N gives the TOP N, not an
+    arbitrary N. There is no category filter on either compass actor:
+    `imageCategories` is output metadata listing which tabs exist, not a
+    per-image label and not an input, so "only the Menu photos" is not
+    expressible here.
+
+    Requests exactly the operator's cap. An earlier version over-fetched into a
+    "pool" borrowed from the menu-photo path, where a bigger pool feeds a
+    downstream classifier; the archive has no such selection step, so the pool
+    only meant storing more photos than the operator asked for.
     """
     query = venue.get("search_query")
     if not query:
         return None
     source_cfg = cfg.get("source_config") or {}
-    pool = int(source_cfg.get("photo_pool") or 20)
     result = await client.fetch_venue_photos(
         query,
-        max_photos=max(cfg["max_photos_per_venue"], pool),
+        max_photos=cfg["max_photos_per_venue"],
         language=str(source_cfg.get("language") or "pt-BR"),
     )
     if result is None:
@@ -178,20 +186,16 @@ ARCHIVE_SOURCES: dict[str, ArchiveSource] = {
         unit_cost_usd=_apify_unit_cost,
         config_schema=[
             ConfigField(
-                name="photo_pool", label="Photos to request per place",
-                type="number", default=20,
-                help="The actor bills per place, not per photo, so a larger "
-                     "pool costs almost nothing and improves selection.",
-            ),
-            ConfigField(
                 name="language", label="Result language", type="text",
                 default="pt-BR",
                 help="Passed to the actor as the Google Maps locale.",
             ),
         ],
         cost_note=(
-            "Billed per place scraped, not per photo. The per-image charge is "
-            "not published by Apify, so the estimate is a floor."
+            "Billed per place scraped, not per photo. Photos come back in "
+            "Google Maps' own display order, so the cap takes the TOP N. The "
+            "per-image charge is not published by Apify, so the estimate is a "
+            "floor."
         ),
     ),
 }

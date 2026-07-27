@@ -82,7 +82,7 @@ class TestCatalog:
         )
         catalog = {s["id"]: s for s in public_catalog(container)}
         names = {f["name"] for f in catalog[SOURCE_APIFY_GMAPS]["config_schema"]}
-        assert {"photo_pool", "language"} <= names
+        assert {"language"} <= names
         # Google needs no extra fields; an empty schema is valid, not missing.
         assert catalog[SOURCE_GOOGLE_PHOTOS]["config_schema"] == []
 
@@ -102,6 +102,29 @@ class TestCostModels:
         few, _ = source.estimate_units(100, {"max_photos_per_venue": 1})
         many, _ = source.estimate_units(100, {"max_photos_per_venue": 10})
         assert many > few
+
+    def test_apify_requests_exactly_the_operator_cap(self):
+        """Asking for more than the cap means storing more than was asked for.
+
+        The actor returns photos in Google Maps' display order, so the cap
+        takes the TOP N — over-fetching a "pool" would just archive extra
+        photos the operator never requested.
+        """
+        import asyncio
+
+        seen = {}
+
+        class _Client:
+            async def fetch_venue_photos(self, query, max_photos=20, language="pt-BR"):
+                seen["max_photos"] = max_photos
+                return {"photos": [], "info": {}}
+
+        source = get_source(SOURCE_APIFY_GMAPS)
+        asyncio.run(source.fetch(
+            _Client(), {"search_query": "Venue X"},
+            {"max_photos_per_venue": 7, "source_config": {}},
+        ))
+        assert seen["max_photos"] == 7
 
     def test_apify_is_priced_per_place_not_per_photo(self):
         source = get_source(SOURCE_APIFY_GMAPS)
@@ -128,3 +151,62 @@ class TestCostModels:
         # A source must price itself even when nothing is injected.
         for source in ARCHIVE_SOURCES.values():
             assert source.unit_cost_usd(None, {}) > 0
+
+
+class TestCancellation:
+    """Stopping a run must be possible without restarting the container.
+
+    Before this, an operator who realised a 250-venue run was spending on the
+    wrong source had no way to stop it from the panel.
+    """
+
+    def test_a_cancelled_run_records_what_it_managed(self):
+        import asyncio
+
+        from app.services.venue_photo_archive_service import VenuePhotoArchiveService
+
+        class _Dao:
+            def list_active_venue_ids(self):
+                return [f"v{i}" for i in range(50)]
+
+            def get_venue(self, vid):
+                return type("V", (), {"venue_lat": -8.0, "venue_lng": -34.9,
+                                      "venue_name": vid, "venue_address": "a"})()
+
+            def get_vibe_attributes(self, vid):
+                return type("A", (), {"google_place_id": f"place_{vid}"})()
+
+        class _Store:
+            async def list_run_prefixes(self, source):
+                return []
+
+            async def list_day_partitions(self, source):
+                return []
+
+            async def exists_for_venue(self, prefix, vid):
+                return False
+
+        class _SlowGoogle:
+            async def get_place_photos(self, *a, **kw):
+                await asyncio.sleep(10)   # never completes before the cancel
+                return []
+
+        svc = VenuePhotoArchiveService(
+            google_places_client=_SlowGoogle(), venue_dao=_Dao(),
+            media_store=_Store(), downloader=object(),
+        )
+
+        async def go():
+            task = asyncio.ensure_future(svc.run({"job_id": "jid", "max_venues": 50}))
+            await asyncio.sleep(0.05)
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+        asyncio.run(go())
+        record = svc.get_run_record("jid")
+        assert record is not None, "a cancelled run left no record"
+        assert record["aborted"] is True
+        assert "duration_seconds" in record

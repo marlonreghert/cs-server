@@ -680,6 +680,7 @@ class VenuePhotoArchiveService:
             "info_stored": 0,
             "info_only": 0,
             "credit_exhausted": False,
+            "aborted": False,
             "throttled": 0,
             "unknown_venue_ids": unknown,
             "config": cfg,
@@ -737,7 +738,20 @@ class VenuePhotoArchiveService:
                         f"[VenuePhotoArchive] job={job_id} venue {venue_id} failed: {e}"
                     )
 
-        await asyncio.gather(*(_guarded(vid) for vid in selected))
+        try:
+            await asyncio.gather(*(_guarded(vid) for vid in selected))
+        except asyncio.CancelledError:
+            # An operator stopped the run. Record what it managed to do before
+            # re-raising, so a cancelled run is still accounted for rather than
+            # vanishing — it already spent money on the venues it finished.
+            summary["aborted"] = True
+            summary["duration_seconds"] = round(time.perf_counter() - started, 2)
+            self._save_run_record(job_id, summary)
+            logger.warning(
+                f"[VenuePhotoArchive] job={job_id} cancelled after "
+                f"{summary['archived']} archived / {summary['considered']} selected"
+            )
+            raise
 
         duration = time.perf_counter() - started
         MEDIA_ARCHIVE_RUN_DURATION_SECONDS.labels(source=source).observe(duration)
