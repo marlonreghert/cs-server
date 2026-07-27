@@ -111,11 +111,14 @@ Feature: Operate the photo archive as a bounded, versioned, costed pipeline
     Then the run is rejected before any Google request is made
 
   # 5 — Estimating the cost first
+  # 20 venues x (1 Place Details + 5 photo requests) = 120. The Details call
+  # per venue was previously missing from the estimate, understating a run by
+  # a third.
   Scenario: Estimate a run without spending anything
     Given 20 venues are eligible
     And the maximum number of photos per venue is 5
     When a cost estimate is requested for that configuration
-    Then the estimate reports at most 100 Google requests
+    Then the estimate reports at most 120 Google requests
     And the estimate reports an estimated cost in dollars
     And no Google request is made
     And the estimate states that it is an upper bound and may be wrong

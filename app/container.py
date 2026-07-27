@@ -158,6 +158,16 @@ class Container:
         self.media_archive_store = None
         self.venue_photo_archive_service = None
 
+        # Google Maps Extractor client. Built BEFORE its consumers: it backs the
+        # menu-photo fallback AND the archive's apify_gmaps_extractor source,
+        # and the archive service is constructed below.
+        self.apify_gmaps_extractor_client = None
+        if settings.apify_api_token:
+            self.apify_gmaps_extractor_client = ApifyGMapsExtractorClient(
+                api_token=settings.apify_api_token,
+            )
+            logger.info("[Container] Apify Google Maps Extractor client initialized")
+
         if settings.google_places_api_key:
             self.google_places_api = GooglePlacesAPIClient(
                 api_key=settings.google_places_api_key,
@@ -210,6 +220,13 @@ class Container:
                     concurrency=settings.media_archive_concurrency,
                     max_retries=settings.media_archive_max_retries,
                     cost_per_1k_usd=settings.google_photo_cost_per_1k_usd,
+                    # Second archive source. Left None when APIFY_API_TOKEN is
+                    # unset, which the source catalog reports as unavailable
+                    # rather than failing a run.
+                    apify_gmaps_extractor_client=getattr(
+                        self, "apify_gmaps_extractor_client", None
+                    ),
+                    settings=settings,
                 )
                 logger.info(
                     f"[Container] Venue photo archive initialized "
@@ -276,14 +293,6 @@ class Container:
                 api_token=settings.apify_api_token,
             )
             logger.info("[Container] Apify Instagram Highlights client initialized")
-
-        # Initialize Google Maps Extractor client (fallback for menu photos)
-        self.apify_gmaps_extractor_client = None
-        if settings.apify_api_token:
-            self.apify_gmaps_extractor_client = ApifyGMapsExtractorClient(
-                api_token=settings.apify_api_token,
-            )
-            logger.info("[Container] Apify Google Maps Extractor client initialized")
 
         # Initialize Menu Photo Enrichment (needs: S3 + Apify token)
         self.s3_client = None

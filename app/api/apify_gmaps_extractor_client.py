@@ -168,6 +168,102 @@ class ApifyGMapsExtractorClient:
             )
             return None
 
+    async def fetch_venue_photos(
+        self,
+        search_query: str,
+        max_photos: int = 20,
+        language: str = "pt-BR",
+    ) -> Optional[list[dict]]:
+        """Fetch ALL available photos for a venue — the archive's entry point.
+
+        Sibling of `fetch_venue_menu_photos` rather than a flag on it: that one
+        exists to find menu shots and filters by category, while the archive
+        wants everything the actor returns. Same run shape, same billing (per
+        place, not per photo), no category filter.
+
+        Returns the archive's common photo dict — `url`, `author_name`,
+        `photo_name` — so the storage path is identical whichever source
+        produced it.
+        """
+        run_input = {
+            "searchStringsArray": [search_query],
+            "maxImages": max_photos,
+            "language": language,
+            "includeImages": True,
+            "scrapeImageAuthors": True,
+        }
+        endpoint_label = "gmaps_archive_photos"
+        start_time = time.perf_counter()
+
+        try:
+            run_data = await self._start_run(run_input, endpoint_label)
+            if not run_data:
+                return None
+            status = await self._poll_run(run_data["id"], endpoint_label)
+            if status != "SUCCEEDED":
+                logger.error(f"[ApifyGMaps] archive run ended as {status}")
+                APIFY_API_CALLS_TOTAL.labels(
+                    endpoint=endpoint_label, status="error"
+                ).inc()
+                return None
+            items = await self._fetch_dataset(
+                run_data.get("defaultDatasetId"), endpoint_label
+            )
+            APIFY_API_CALL_DURATION_SECONDS.labels(endpoint=endpoint_label).observe(
+                time.perf_counter() - start_time
+            )
+            APIFY_API_CALLS_TOTAL.labels(
+                endpoint=endpoint_label, status="success"
+            ).inc()
+            if not items:
+                logger.info(f"[ApifyGMaps] no result for query: {search_query}")
+                return None
+            return self._archive_photos(items, max_photos)
+        except ApifyCreditExhaustedError:
+            # Propagated, never swallowed: the caller must stop the whole run
+            # rather than keep paying into an exhausted balance.
+            raise
+        except Exception as e:  # noqa: BLE001 — one venue must not end a run
+            APIFY_API_CALL_DURATION_SECONDS.labels(endpoint=endpoint_label).observe(
+                time.perf_counter() - start_time
+            )
+            APIFY_API_CALLS_TOTAL.labels(
+                endpoint=endpoint_label, status="error"
+            ).inc()
+            logger.error(f"[ApifyGMaps] archive fetch failed for {search_query!r}: {e}")
+            return None
+
+    def _archive_photos(self, items: list[dict], max_photos: int) -> list[dict]:
+        """Normalise the actor's images into the archive's photo dict.
+
+        The actor exposes images as `imageUrls` (plain strings) and/or
+        `images` (objects with an author). Both are read, de-duplicated by URL,
+        so a change in which one the actor populates cannot silently yield zero
+        photos.
+        """
+        place = items[0] or {}
+        out: list[dict] = []
+        seen: set[str] = set()
+
+        for image in place.get("images") or []:
+            url = (image or {}).get("imageUrl") or (image or {}).get("url")
+            if url and url not in seen:
+                seen.add(url)
+                out.append({
+                    "url": url,
+                    "author_name": (image or {}).get("authorName"),
+                    # No Google photo resource name from a scrape; the URL is
+                    # what photo_id_for() hashes, which keeps ids stable.
+                    "photo_name": None,
+                })
+
+        for url in place.get("imageUrls") or []:
+            if url and url not in seen:
+                seen.add(url)
+                out.append({"url": url, "author_name": None, "photo_name": None})
+
+        return out[:max_photos]
+
     def _extract_menu_photos(
         self,
         items: list[dict],

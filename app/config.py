@@ -351,6 +351,11 @@ class Settings(BaseSettings):
     # current rate card (see Q1b in plans/260726_venue-list-hero-photo.md), which
     # is why it is a setting and why the estimate carries a caveat.
     google_photo_cost_per_1k_usd: float = 7.0
+    # Apify pay-per-event rates for the compass google-maps-extractor, used ONLY
+    # by the pre-run estimate. Published rates as of 2026-07-27; the per-image
+    # charge is NOT published, so an Apify estimate is a floor.
+    apify_place_scraped_cost_usd: float = 0.004
+    apify_place_details_cost_usd: float = 0.002
 
     # Menu Data Extraction (OpenAI GPT-4o-mini)
     openai_api_key: str = ""

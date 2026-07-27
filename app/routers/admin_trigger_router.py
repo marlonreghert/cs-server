@@ -14,6 +14,7 @@ from app.handlers.add_venue_handler import (
     AddVenueByAddressRequest,
 )
 from app.models.batch_add import BatchAddRequest
+from app.services.archive_sources import public_catalog
 from app.services.venue_photo_archive_service import InvalidArchivePath
 from app.services.venue_eligibility import (
     ADMIN_CONFIG_ELIGIBILITY_KEY,
@@ -264,14 +265,20 @@ async def list_jobs():
         task = _running_jobs.get(name)
         running = task is not None and not task.done()
 
-        jobs.append({
+        entry = {
             "name": name,
             "label": info["label"],
             "description": info["description"],
             "available": available,
             "running": running,
             "default_config": info.get("default_config"),
-        })
+        }
+        # The archive publishes its source catalog so the admin panel renders
+        # the per-source controls from here — adding a source stays a backend
+        # change.
+        if name == "venue_photo_archive":
+            entry["sources"] = public_catalog(_container)
+        jobs.append(entry)
 
     return {"jobs": jobs}
 
