@@ -162,12 +162,21 @@ JOB_REGISTRY = {
         "already archived in the target day are skipped unless overwrite is set.",
         # Surfaced by GET /admin/jobs and rendered by the admin panel's pre-run
         # options modal; every key here becomes a control in that dialog.
+        # Mirrors the settings defaults deliberately: 50 x 5 = 250 upper-bound
+        # billed requests, so the default click stays inside Google's free tier
+        # and scaling up is a conscious edit.
         "default_config": {
-            "sources": ["google_photos"],
-            "venue_ids": "",
-            "path_mode": "new_day",
+            "source": "google_photos",
+            "path_mode": "new_run",
             "path_override": "",
+            "max_venues": 50,
+            "max_photos_per_venue": 5,
+            "eligibility": {
+                "mode": "all", "venue_ids": "", "lat": "", "lon": "", "radius_km": "",
+            },
+            "skip_scope": "latest_run",
             "overwrite": False,
+            "dry_run": False,
         },
         "service_attr": "venue_photo_archive_service",
         "unavailable_detail": "Media archive not configured (needs Google Places + a bucket)",
