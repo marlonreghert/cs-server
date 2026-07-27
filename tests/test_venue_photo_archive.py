@@ -251,10 +251,14 @@ class TestPrefixResolution:
         prefix = await svc.resolve_prefix("google_photos", {"path_mode": "append_latest"})
         assert prefix == "media/source=google_photos/dt=2026-07-24/"
 
-    async def test_append_latest_falls_back_to_today_when_empty(self):
+    async def test_append_latest_falls_back_to_a_new_run_when_empty(self):
+        # Superseded by run scoping: with no partition to append to there is
+        # nothing to extend, so the fallback opens a fresh versioned run. Asking
+        # for "new_day" explicitly still writes a day partition (tested above).
         svc = _service()
         prefix = await svc.resolve_prefix("google_photos", {"path_mode": "append_latest"})
-        assert prefix == "media/source=google_photos/dt=2026-07-26/"
+        assert prefix.startswith("media/source=google_photos/year=")
+        assert "run_ts=" in prefix and "run_id=" in prefix
 
     async def test_unknown_mode_is_rejected(self):
         svc = _service()

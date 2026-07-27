@@ -202,9 +202,14 @@ class Container:
                     google_places_client=self.google_places_api,
                     venue_dao=self.pipeline_repository,
                     media_store=self.media_archive_store,
-                    max_photos_per_venue=settings.media_archive_max_photos_per_venue,
+                    max_photos_per_venue=settings.media_archive_default_max_photos,
                     photo_timeout_seconds=settings.media_archive_photo_timeout_seconds,
                     max_photo_bytes=settings.media_archive_max_photo_bytes,
+                    default_max_venues=settings.media_archive_default_max_venues,
+                    rate_per_second=settings.media_archive_rate_per_second,
+                    concurrency=settings.media_archive_concurrency,
+                    max_retries=settings.media_archive_max_retries,
+                    cost_per_1k_usd=settings.google_photo_cost_per_1k_usd,
                 )
                 logger.info(
                     f"[Container] Venue photo archive initialized "

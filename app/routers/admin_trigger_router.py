@@ -3,6 +3,7 @@ import asyncio
 import json
 import logging
 import time
+import uuid
 from typing import Optional, Union
 
 from fastapi import APIRouter, HTTPException, Body, Query, Response
@@ -13,6 +14,7 @@ from app.handlers.add_venue_handler import (
     AddVenueByAddressRequest,
 )
 from app.models.batch_add import BatchAddRequest
+from app.services.venue_photo_archive_service import InvalidArchivePath
 from app.services.venue_eligibility import (
     ADMIN_CONFIG_ELIGIBILITY_KEY,
     ADMIN_CONFIG_GEOFENCE_KEY,
@@ -69,6 +71,9 @@ class TriggerResponse(BaseModel):
     status: str
     job: str
     message: str
+    # Identifies THIS run so its logs (Loki) and its run record can be found
+    # afterwards. Absent when nothing was started (e.g. already_running).
+    job_id: Optional[str] = None
 
 
 # Map of job names to their execution logic.
@@ -157,12 +162,21 @@ JOB_REGISTRY = {
         "already archived in the target day are skipped unless overwrite is set.",
         # Surfaced by GET /admin/jobs and rendered by the admin panel's pre-run
         # options modal; every key here becomes a control in that dialog.
+        # Mirrors the settings defaults deliberately: 50 x 5 = 250 upper-bound
+        # billed requests, so the default click stays inside Google's free tier
+        # and scaling up is a conscious edit.
         "default_config": {
-            "sources": ["google_photos"],
-            "venue_ids": "",
-            "path_mode": "new_day",
+            "source": "google_photos",
+            "path_mode": "new_run",
             "path_override": "",
+            "max_venues": 50,
+            "max_photos_per_venue": 5,
+            "eligibility": {
+                "mode": "all", "venue_ids": "", "lat": "", "lon": "", "radius_km": "",
+            },
+            "skip_scope": "latest_run",
             "overwrite": False,
+            "dry_run": False,
         },
         "service_attr": "venue_photo_archive_service",
         "unavailable_detail": "Media archive not configured (needs Google Places + a bucket)",
@@ -304,12 +318,19 @@ async def trigger_job(job_name: str, config: Optional[dict] = None):
             ),
         )
 
+    # Mint the run's identity here, not inside the job: the caller must be told
+    # what it started before the run finishes, and the same id has to reach the
+    # log lines so a trigger can be traced to its output.
+    job_id = uuid.uuid4().hex
+    run_config = dict(config or {})
+    run_config["job_id"] = job_id
+
     # Launch as background task
     async def _wrapper():
         try:
-            await _run_job(job_name, config=config)
+            await _run_job(job_name, config=run_config)
         except Exception as e:
-            logger.error(f"[AdminTrigger] Job '{job_name}' failed: {e}")
+            logger.error(f"[AdminTrigger] Job '{job_name}' job_id={job_id} failed: {e}")
         finally:
             _running_jobs.pop(job_name, None)
             if locked:
@@ -317,12 +338,54 @@ async def trigger_job(job_name: str, config: Optional[dict] = None):
 
     task = asyncio.create_task(_wrapper())
     _running_jobs[job_name] = task
+    logger.info(f"[AdminTrigger] Job '{job_name}' started job_id={job_id}")
 
     return TriggerResponse(
         status="started",
         job=job_name,
         message=f"{JOB_REGISTRY[job_name]['label']} started in background",
+        job_id=job_id,
     )
+
+
+# ── photo archive: estimate before spending, and run records after ────────────
+def _photo_archive_service():
+    service = getattr(_container, "venue_photo_archive_service", None)
+    if service is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Media archive not configured (needs Google Places + a bucket)",
+        )
+    return service
+
+
+@router.post("/trigger/venue_photo_archive/estimate")
+async def estimate_photo_archive(config: Optional[dict] = None):
+    """Price a photo archive run WITHOUT making a single Google request.
+
+    Declared before the generic `/trigger/{job_name}` handler would ever see it —
+    FastAPI matches in declaration order, and this literal path is registered
+    after that route, so it is reachable only because the path segment count
+    differs. Kept as its own route rather than a flag on the trigger so an
+    estimate can never accidentally start a run.
+    """
+    require()
+    try:
+        return await _photo_archive_service().estimate(config)
+    except InvalidArchivePath as e:
+        # Includes InvalidArchiveConfig: the operator's request was rejected and
+        # nothing was spent.
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.get("/jobs/runs/{job_id}")
+async def get_job_run(job_id: str):
+    """What a specific run did, by the job id its trigger returned."""
+    require()
+    record = _photo_archive_service().get_run_record(job_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail=f"No run record for {job_id}")
+    return record
 
 
 @router.post("/venues/by-address")
