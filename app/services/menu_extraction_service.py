@@ -33,13 +33,14 @@ def selectable_menu_photos(entries: list[dict]) -> list[dict]:
     sending it to GPT-4o is pure waste — this is where the `legible` attribute
     pays for the classifier that produced it.
 
-    An entry with NO legibility verdict is kept. An archive from before the
-    classifier existed must behave exactly as it did before, and "unknown" is
-    not "unreadable".
+    Only a confident `no` drops a photo. An entry with no legibility verdict at
+    all, or one the classifier answered `not_classified`, is KEPT: an archive
+    from before the classifier existed must behave exactly as it did before,
+    and "could not tell" is not "unreadable".
     """
     return [
         entry for entry in entries
-        if (entry.get("attributes") or {}).get("legible") != "nao"
+        if (entry.get("attributes") or {}).get("legible") != "no"
     ]
 
 

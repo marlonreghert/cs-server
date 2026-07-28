@@ -188,22 +188,34 @@ Google's four tabs do not include the signals worth most to this product. They
 cannot say who is in the room, whether there are children, whether a menu is
 even legible, or whether that terrace has a roof when it rains. So a vision pass
 labels every photo with **our** taxonomy (`app/models/photo_taxonomy.py`) —
-`menu`, `food_drinks`, `interior`, `exterior`, `crowd`, `other` — plus the
-attributes that category can carry.
+`menu`, `food_drinks`, `interior`, `exterior`, `crowd`, `other` — plus a short
+set of attributes that category can carry.
 
 It runs **between the fetch and the store**, so a photo lands in the right
-folder the first time: no second write, no object copy.
+folder the first time: no second write, no object copy. **One call** returns the
+category, its attributes and the people block: the schema is small enough to fit
+one prompt without blunting it, and a second pass would send every image twice
+when image tokens are the bill.
 
-**Two passes, deliberately not one.** Pass 1 assigns the category, a confidence
-and a quality. Pass 2 groups by category and asks one focused prompt per
-category — a focused prompt is measurably more accurate than one carrying six
-schemas, `other` costs nothing because it is skipped, and **adding a field later
-re-runs one category rather than the catalogue**. That re-run reads the archived
-copies back from S3 (`rederive_attributes`, which is what the `GetObject` grant
-on `retrieved/*` exists for) and never re-pays a provider.
+**Deliberately generic and coarse.** This is not the product's pt-BR vocabulary
+and does not try to be — `taxonomy.py` describes a venue, this describes a
+photograph. A model reading a thumbnail can tell beer from a cocktail; it cannot
+reliably tell a caipirinha from a batida, so `drink_type` is
+`beer | cocktails | wine | non_alcoholic | other` and stops there. Every list is
+short on purpose, and a venue-level opinion is somebody else's job.
 
-Four rules hold the cost and the correctness down:
+Five rules hold the cost and the correctness down:
 
+- **An attribute is written only when the model is confident about *that*
+  attribute.** Confidence is reported per attribute, not per photo: a model can
+  be certain a room is a bar and unsure whether it has screens, and those two
+  facts do not share a fate. Under `photo_attribute_confidence` (0.8, higher
+  than the category's 0.6 — a wrong category misfiles a photo, a wrong attribute
+  is read as a fact about the venue) the value becomes `not_classified`.
+- **`not_classified` is stored, not omitted.** It means "asked, could not tell",
+  which an absent key does not, and it is what makes "how much of the catalogue
+  can we actually read" a query rather than a guess. Every field of the schema
+  is present on every classified photo.
 - **A source that names its own tabs is never classified.** `ArchiveSource.
   provides_categories` is `True` for `searchapi_gmaps_photos`: its category is
   Google's own answer, and a guess would be a downgrade. Apify and the Places
@@ -212,27 +224,32 @@ Four rules hold the cost and the correctness down:
   leaves every photo archived under the category its source gave it. Losing a
   photo already paid for because a classifier was unavailable is the wrong
   trade.
-- **Low confidence files as `other`**, with an `other_kind` recorded in pass 1
-  saying *why* — so those photos can be found and reclassified later without
-  re-billing. A wrong label is worse than an honest unknown, because everything
-  downstream trusts it.
 - **`authorship` is the provider's fact and classification never writes it.**
   The model's read goes to `likely_authorship`, and only where the provider had
   no answer.
 
-Attributes marked as taxonomy-aligned (`estetica`, `publico`, `dress_code`,
-`clima_social`, `music_format`) emit the **exact labels from
-`app/models/taxonomy.py`**, validated by the same `validate_category_labels`, so
-there is no parallel vocabulary to translate and a taxonomy edit cannot silently
-desync the two. Anything outside the vocabulary is dropped, not stored.
+A low-confidence *category* files the photo as `other` with an `other_kind`
+saying why, so those photos can be found and reclassified later without
+re-billing.
 
-Cost is ~$2 for the full ~17k-photo catalogue, roughly three quarters of it
-pass 2 — one twentieth of a single month of SearchApi's plan, and one-off rather
-than a subscription. It is metered (`photo_classification_cost_usd`) rather than
-assumed, and both passes are switchable per run and per deployment.
+**Extending the schema** re-runs the same call over the archived copies
+(`rederive_attributes`, which is what the `GetObject` grant on `retrieved/*`
+exists for) and never re-pays a provider. That path **discards the category the
+model returns**: the category is in the S3 key of an object that already exists,
+so writing a new one would leave a manifest entry disagreeing with its own key.
+Recategorizing means moving objects, which is a different job.
 
-The first consumer is menu extraction: a photo whose `legible` is `nao` is never
+Cost is roughly **$1 for the full ~17k-photo catalogue** now that each photo is
+sent once — one fortieth of a single month of SearchApi's plan, and one-off
+rather than a subscription. It is metered (`photo_classification_cost_usd`)
+rather than assumed, and the attribute half can be switched off on its own
+(`photo_attributes_enabled`, `derive_photo_attributes` per run) since the
+attribute JSON is most of the output cost.
+
+The first consumer is menu extraction: a photo whose `legible` is `no` is never
 sent to the extractor, so the classifier pays for itself in OCR calls not made.
+Only a confident `no` drops a photo — `not_classified` is kept, because "could
+not tell" is not "unreadable".
 
 ### Photo dates
 

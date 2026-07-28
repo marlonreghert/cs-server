@@ -1,29 +1,33 @@
 """Fixed vocabulary for per-photo classification.
 
-Sibling of `taxonomy.py`, which describes a VENUE. This describes one
-PHOTOGRAPH: which of six buckets it belongs in, and the attributes that bucket
-can carry.
+Sibling of `taxonomy.py`, which describes a VENUE in the product's own pt-BR
+vocabulary. This describes one PHOTOGRAPH, and deliberately does **not** speak
+that vocabulary: it is a coarse, generic, English classification of what is in
+the frame. A venue-level opinion is somebody else's job.
 
-The organising rule: **wherever a photo can answer a question `taxonomy.py`
-already asks, this emits that taxonomy's own labels** rather than a parallel
-vocabulary that would have to be translated later. Those attributes carry a
-`taxonomy_key` and are validated by `validate_category_labels`, so the
-vocabulary lives in exactly one place and a taxonomy edit cannot desync the two.
-Everything else is a photo-native fact the venue taxonomy has no home for —
-whether a menu is legible, whether there are children, whether a terrace has a
-roof.
+Three rules shape every entry below:
 
-Cardinality follows one rule: **one value when a photo can only be one thing, an
-array when it can genuinely show several.** An array extends without a
-migration; a boolean does not, which is why `dress_code` and `seating_type` are
-lists and not a spray of flags.
+1. **Coarse beats precise.** A model reading a thumbnail can tell beer from a
+   cocktail; it cannot reliably tell a caipirinha from a batida, and a label it
+   gets wrong is worse than one it never emitted, because everything downstream
+   will trust it. Every list is short on purpose.
+2. **Every attribute can say `not_classified`.** It is a real answer — "asked,
+   could not tell" — and it is stored rather than omitted, so an unknown is
+   visible instead of looking like a field nobody asked about.
+3. **An attribute is only written when the model is confident about THAT
+   attribute.** Confidence is per-attribute, not per-photo: a model can be
+   certain a room is a bar and unsure whether it has screens, and those two
+   facts must not share a fate. Below the floor, the value becomes
+   `not_classified`.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any, Optional
 
-from app.models.taxonomy import TAXONOMY, validate_category_labels
+# "Asked, could not tell." Appended to every attribute's vocabulary, and what a
+# low-confidence, unparseable, or unlisted answer collapses to.
+NOT_CLASSIFIED = "not_classified"
 
 CATEGORY_MENU = "menu"
 CATEGORY_FOOD_DRINKS = "food_drinks"
@@ -41,12 +45,12 @@ PHOTO_CATEGORIES: tuple[str, ...] = (
 # rather than about the subject, because "is there open air overhead" is
 # something a vision model answers reliably and "is this outdoorsy" is not.
 CATEGORY_RULES: dict[str, str] = {
-    CATEGORY_MENU: "the subject is a menu, cardápio, price board or drinks list",
+    CATEGORY_MENU: "the subject is a menu, price board or drinks list",
     CATEGORY_FOOD_DRINKS: "the subject is a dish, a drink, or a laid table",
     CATEGORY_INTERIOR: "an enclosed space of the venue — there is a ROOF overhead",
     CATEGORY_EXTERIOR: (
-        "open air — the SKY is visible. Facade, terrace, rooftop, quintal, "
-        "calçada, beira-mar. A covered varanda is interior, not exterior"
+        "open air — the SKY is visible. Facade, terrace, rooftop, garden, "
+        "sidewalk, beachfront. A covered veranda is interior, not exterior"
     ),
     CATEGORY_CROWD: (
         "people are the SUBJECT — you can read who is there. People at the "
@@ -55,16 +59,9 @@ CATEGORY_RULES: dict[str, str] = {
     CATEGORY_OTHER: "none of the above",
 }
 
-# Photo quality. Shared across every category because the question it answers —
-# is this good enough to show in the app — is asked of every photo.
-QUALITY_VALUES: tuple[str, ...] = ("boa", "escura", "borrada", "baixa_resolucao")
-
-TIME_OF_DAY_VALUES: tuple[str, ...] = ("dia", "entardecer", "noite")
-
-SEATING_VALUES: tuple[str, ...] = (
-    "mesas", "banquetas_balcao", "sofas", "mesas_altas", "bancos_comunitarios",
-    "em_pe", "puffs",
-)
+# Is this good enough to show in the app. Two buckets, because the difference
+# between "dark" and "blurry" changes nothing anyone does with the photo.
+QUALITY_VALUES: tuple[str, ...] = ("good", "poor", NOT_CLASSIFIED)
 
 # The provider's authorship is a fact; this is a guess, and is only ever written
 # where the provider had no answer. Kept under a different name so the two can
@@ -76,214 +73,160 @@ AUTHORSHIP_GUESS_VALUES: tuple[str, ...] = ("by_owner", "by_visitor")
 class Attr:
     """One attribute a category can carry.
 
-    `taxonomy_key` defers the allowed values to `app/models/taxonomy.py`, which
-    is what keeps the photo vocabulary and the venue vocabulary from drifting.
+    Single-valued, always. An array invites the model to hedge by listing
+    everything plausible, which is precisely the imprecision this schema exists
+    to avoid — and a yes/no question is an enum here rather than a bool so that
+    "could not tell" is sayable.
     """
 
     name: str
-    many: bool = False
     values: tuple[str, ...] = ()
-    taxonomy_key: Optional[str] = None
-    boolean: bool = False
     why: str = ""
 
     def allowed(self) -> tuple[str, ...]:
-        if self.taxonomy_key:
-            return tuple(TAXONOMY.get(self.taxonomy_key, ()))
-        return self.values
+        return self.values + (NOT_CLASSIFIED,)
 
+
+# ── asked of every photo, whatever its category ──────────────────────────────
+SHARED_ATTRIBUTES: tuple[Attr, ...] = (
+    Attr("time_of_day", values=("day", "night"),
+         why="a daytime venue and a nighttime venue are different venues"),
+)
 
 # ── the people block ─────────────────────────────────────────────────────────
 # Extracted from ANY photo with visible people, not only from photos filed as
 # `crowd`. Otherwise every person in every interior shot is discarded — and
 # `has_kids`, the one signal the `familia` mode has no other source for, is the
 # field most likely to turn up in a photo filed as something else.
+#
+# Deliberately absent: race, ethnicity, individual gender, dress, age, and
+# anything else that profiles the people in the frame rather than describing
+# the place. The model is unreliable at it, no product question needs it, and a
+# venue recommender that reads crowds that way is a line this system does not
+# cross.
 PEOPLE_ATTRIBUTES: tuple[Attr, ...] = (
-    Attr("crowd_level", values=("vazio", "poucas_pessoas", "movimentado", "cheio", "lotado"),
+    Attr("crowd_level", values=("empty", "some", "busy", "packed"),
          why="corroborates busyness from a second, independent source"),
-    Attr("publico", many=True, taxonomy_key="publico",
-         why="the age-range and scene read, in the vocabulary the product speaks"),
-    Attr("has_kids", boolean=True,
-         why="the familia mode's only photo evidence — a fact, not an impression"),
-    Attr("dress_code", many=True, taxonomy_key="dress_code",
-         why="the generic dress read"),
-    Attr("dress_scene", many=True,
-         values=("rock_metal", "rap_hip_hop", "funk_baile", "sertanejo",
-                 "alternativo_indie", "queer", "praia", "esportivo", "fantasia_tematico"),
-         why="the subculture read, which dress_code is too coarse for"),
-    Attr("group_type", many=True,
-         values=("casais", "amigos", "familias", "sozinhos", "grupo_grande", "turistas"),
-         why="casais -> date; grupo_grande -> resenha"),
-    Attr("activity", many=True,
-         values=("dancando", "bebendo", "comendo", "conversando", "assistindo_show",
-                 "assistindo_jogo", "karaoke", "fila"),
-         why="dancando is the best role_agitado signal; fila means the place is hot"),
-    Attr("clima_social", taxonomy_key="clima_social",
-         why="straight into the venue vibe profile"),
-    Attr("time_of_day", values=TIME_OF_DAY_VALUES,
-         why="a Tuesday-afternoon crowd is not a Saturday-night crowd"),
+    Attr("has_kids", values=("yes", "no"),
+         why="the familia mode's only photo evidence"),
+    Attr("group_type", values=("couples", "friends", "families", "mixed"),
+         why="couples -> date; friends -> resenha"),
+    Attr("activity", values=("dancing", "eating_drinking", "watching", "other"),
+         why="dancing is the best role_agitado signal available"),
 )
-
-# Deliberately absent: race, ethnicity, and individual gender. The model is
-# unreliable at it, no product question needs it, and profiling crowds by those
-# attributes is a line this system does not cross. `publico` and `dress_scene`
-# read the SCENE — what a place is, from how people chose to present — never a
-# claim about an individual in the frame. Also absent: cleanliness and
-# attractiveness, which are subjective and defamatory about a real business.
 
 PHOTO_ATTRIBUTES: dict[str, tuple[Attr, ...]] = {
     CATEGORY_MENU: (
-        Attr("legible", values=("sim", "parcial", "nao"),
+        Attr("legible", values=("yes", "partial", "no"),
              why="gates menu extraction — stop paying OCR for unreadable menus"),
-        Attr("medium", values=("impresso", "lousa", "placa_parede", "tela_digital",
-                               "qr_code", "livreto"),
-             why="a QR-code photo has no text to extract"),
-        Attr("page_side", values=("frente", "verso", "ambos", "pagina_interna"),
-             why="so extraction knows whether it has the whole menu"),
-        Attr("content_scope", values=("so_comida", "so_bebida", "ambos"),
+        Attr("has_prices", values=("yes", "no"),
+             why="gates the price-tier pipeline"),
+        Attr("covers", values=("food", "drinks", "both"),
              why="a drinks-only board is a bar signal"),
-        Attr("sections", many=True,
-             values=("entradas", "petiscos", "principais", "sobremesas", "cervejas",
-                     "drinks", "vinhos", "cafe", "combos", "infantil"),
-             why="an `infantil` section is direct familia evidence"),
-        Attr("has_prices", boolean=True, why="gates the price-tier pipeline"),
-        Attr("is_promo", boolean=True, why="happy hour, rodízio, chopp em dobro"),
-        Attr("language", values=("pt", "en", "es", "multi"),
-             why="a bilingual menu means tourist-facing"),
     ),
     CATEGORY_FOOD_DRINKS: (
-        Attr("subject", values=("comida", "bebida", "ambos")),
-        Attr("dish_type", many=True,
-             values=("petisco", "porcao", "prato_individual", "sanduiche", "pizza",
-                     "frutos_do_mar", "carne_churrasco", "massa", "japonesa",
-                     "sobremesa", "regional", "veg")),
-        Attr("drink_type", many=True,
-             values=("cerveja_chopp", "coquetel", "caipirinha", "vinho", "destilado",
-                     "sem_alcool", "cafe", "balde_combo")),
-        Attr("portion_size", values=("individual", "para_dividir", "combo_balde"),
-             why="sharing plates -> intencao: Sentar com a galera"),
-        Attr("plating", values=("simples", "caprichado", "autoral", "embalado"),
-             why="autoral -> the jantar mode"),
-        Attr("setting", values=("mesa_posta", "balcao", "close_up", "com_pessoas"),
-             why="a laid table means table service, not a counter"),
-        Attr("dietary_labels", many=True,
-             values=("vegetariano", "vegano", "sem_gluten", "infantil"),
-             why="only when visibly labelled"),
+        Attr("subject", values=("food", "drinks", "both")),
+        Attr("drink_type",
+             values=("beer", "cocktails", "wine", "non_alcoholic", "other"),
+             why="beer is the Brazilian bar signal; the rest is one bucket each"),
+        Attr("food_type", values=("snacks", "main_dish", "dessert", "other")),
+        Attr("portion", values=("individual", "shareable"),
+             why="sharing plates -> a table-of-friends venue"),
     ),
     CATEGORY_INTERIOR: (
         Attr("space_type",
-             values=("salao", "balcao_bar", "pista_danca", "palco", "lounge",
-                     "sala_jantar", "entrada", "mezanino_vip", "cozinha_aberta",
-                     "banheiro"),
-             why="pista_danca is the strongest role_agitado signal available"),
-        Attr("estetica", many=True, taxonomy_key="estetica"),
-        Attr("lighting",
-             values=("natural", "quente_baixa", "neon_colorida", "escura_balada",
-                     "fluorescente"),
-             why="quente_baixa is what date and clima_social: Intimista are made of"),
-        Attr("seating_type", many=True, values=SEATING_VALUES,
-             why="em_pe ~ balada; bancos_comunitarios ~ resenha"),
-        Attr("music_format", many=True, taxonomy_key="music_format",
-             why="a stage, a DJ booth, a karaoke screen — music_format has no "
-                 "photo evidence today"),
-        Attr("screens", values=("telao", "tvs", "nenhuma"),
-             why="'tem telão pro jogo?' is one of the most-asked questions "
-                 "about a Brazilian bar"),
-        Attr("capacity", values=("intimo", "medio", "amplo", "multiplos_ambientes")),
+             values=("dining", "bar", "dance_floor", "stage", "other"),
+             why="dance_floor is the strongest role_agitado signal available"),
+        Attr("lighting", values=("bright", "dim", "dark"),
+             why="dim is what date and an intimate room are made of"),
+        Attr("has_screens", values=("yes", "no"),
+             why="'is the game on?' is one of the most-asked questions about a "
+                 "Brazilian bar"),
+        Attr("music_setup", values=("live_music", "dj", "none_visible"),
+             why="a stage or a DJ booth — music has no photo evidence today"),
     ),
     CATEGORY_EXTERIOR: (
-        Attr("exterior_kind",
-             values=("fachada", "area_externa", "rooftop", "quintal_jardim",
-                     "calcada", "pe_na_areia", "piscina", "estacionamento"),
-             why="separates 'how do I find the door' from 'is there an open-air area'"),
-        Attr("covered", values=("descoberto", "parcial", "coberto"),
+        Attr("exterior_kind", values=("facade", "open_air_area", "other"),
+             why="separates 'how do I find the door' from 'is there an "
+                 "open-air area'"),
+        Attr("covered", values=("covered", "partial", "uncovered"),
              why="the rain question, which nothing else answers"),
-        Attr("view", many=True,
-             values=("mar", "cidade", "natureza", "rio", "rua", "sem_vista")),
-        Attr("estetica", many=True, taxonomy_key="estetica"),
-        Attr("seating_type", many=True, values=SEATING_VALUES),
-        Attr("venue_name_legible", boolean=True,
-             why="confirms the right venue, and is the photo to show for "
-                 "'how do I find it'"),
-        Attr("time_of_day", values=TIME_OF_DAY_VALUES),
+        Attr("view", values=("sea", "city", "nature", "none")),
     ),
     CATEGORY_CROWD: PEOPLE_ATTRIBUTES,
     CATEGORY_OTHER: (
         Attr("other_kind",
-             values=("logo_arte", "flyer_evento", "documento_aviso", "pessoa_isolada",
-                     "irrelevante", "ilegivel"),
+             values=("logo_art", "event_flyer", "document", "irrelevant"),
              why="knowing WHY it is `other` lets us reclassify later without "
-                 "re-billing. flyer_evento is the likeliest future promotion: a "
-                 "flyer carries the event, the DJ, the date and the cover"),
+                 "re-billing. event_flyer is the likeliest future promotion: a "
+                 "flyer carries the event, the date and the cover"),
     ),
 }
 
 
-def _coerce_bool(value: Any) -> Optional[bool]:
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, str) and value.strip().lower() in ("true", "false"):
-        return value.strip().lower() == "true"
-    return None
+def attributes_for(category: str) -> tuple[Attr, ...]:
+    """The full schema for a category, shared attributes included."""
+    own = PHOTO_ATTRIBUTES.get(category)
+    if own is None:
+        return ()
+    return own + SHARED_ATTRIBUTES
 
 
-def _validate_one(spec: Attr, value: Any) -> Any:
-    """One attribute, or None when the model returned something unusable."""
-    if value is None:
-        return None
-    if spec.boolean:
-        return _coerce_bool(value)
+# ── validation ───────────────────────────────────────────────────────────────
+def _confident_value(spec: Attr, raw: Any, threshold: float) -> str:
+    """One attribute, collapsed to `not_classified` unless it clears the bar.
 
-    if spec.many:
-        # A scalar for an array field is tolerated and wrapped: the model
-        # returning "mesas" instead of ["mesas"] is a formatting slip, not a
-        # different answer.
-        items = value if isinstance(value, (list, tuple)) else [value]
-        raw = [str(v) for v in items]
-        if spec.taxonomy_key:
-            kept = validate_category_labels(spec.taxonomy_key, raw)
-        else:
-            kept = [v for v in raw if v in spec.allowed()]
-        return kept or None
-
-    # A single-valued field given a list is NOT tolerated: it means the model
-    # answered a different question than the one asked, and picking one of the
-    # answers would invent a fact.
-    if isinstance(value, (list, tuple, dict)):
-        return None
-    text = str(value)
-    return text if text in spec.allowed() else None
-
-
-def _validate_against(specs: tuple[Attr, ...], raw: Any) -> dict:
-    if not isinstance(raw, dict):
-        return {}
-    out: dict[str, Any] = {}
-    for spec in specs:
-        validated = _validate_one(spec, raw.get(spec.name))
-        if validated is not None:
-            out[spec.name] = validated
-    return out
-
-
-def validate_attributes(category: str, raw: Any) -> dict:
-    """Keep only the attributes that belong to this category and are in vocabulary.
-
-    An unknown field, an invented label, or a value of the wrong shape is
-    DROPPED rather than stored — the rest of the verdict survives. A wrong label
-    is worse than a missing one, because everything downstream will trust it.
+    The model answers `{"value": ..., "confidence": 0-1}`. A bare value with no
+    confidence is NOT accepted: without a confidence there is nothing to check
+    it against, and the whole point of this field is that it was only written
+    when the model was sure.
     """
-    return _validate_against(PHOTO_ATTRIBUTES.get(category, ()), raw)
+    if not isinstance(raw, dict):
+        return NOT_CLASSIFIED
+    value = raw.get("value")
+    if isinstance(value, (list, tuple, dict)) or value is None:
+        # A list means the model answered a different question than the one
+        # asked; picking one of its answers would invent a fact.
+        return NOT_CLASSIFIED
+    try:
+        confidence = float(raw.get("confidence"))
+    except (TypeError, ValueError):
+        return NOT_CLASSIFIED
+    if confidence < threshold:
+        return NOT_CLASSIFIED
+    text = str(value)
+    return text if text in spec.allowed() else NOT_CLASSIFIED
 
 
-def validate_people(raw: Any) -> dict:
-    """The people block, valid for a photo of any category."""
-    return _validate_against(PEOPLE_ATTRIBUTES, raw)
+def _validate_against(specs: tuple[Attr, ...], raw: Any, threshold: float) -> dict:
+    """Every field of the schema, always — a known unknown beats a silent gap."""
+    values = raw if isinstance(raw, dict) else {}
+    return {
+        spec.name: _confident_value(spec, values.get(spec.name), threshold)
+        for spec in specs
+    }
 
 
-def validate_quality(value: Any) -> Optional[str]:
-    text = str(value or "")
-    return text if text in QUALITY_VALUES else None
+def validate_attributes(category: str, raw: Any, threshold: float) -> dict:
+    """This category's attributes, each either confidently read or unknown."""
+    specs = attributes_for(category)
+    return _validate_against(specs, raw, threshold) if specs else {}
+
+
+def validate_people(raw: Any, threshold: float) -> dict:
+    """The people block — for a photo of any category, when people are visible.
+
+    Returns {} when the model reported no people at all, which is different
+    from reporting people it could not describe.
+    """
+    if not isinstance(raw, dict) or not raw:
+        return {}
+    return _validate_against(PEOPLE_ATTRIBUTES, raw, threshold)
+
+
+def validate_quality(raw: Any, threshold: float) -> str:
+    spec = Attr("quality", values=("good", "poor"))
+    return _confident_value(spec, raw, threshold)
 
 
 def validate_authorship_guess(value: Any) -> Optional[str]:
@@ -291,43 +234,28 @@ def validate_authorship_guess(value: Any) -> Optional[str]:
     return text if text in AUTHORSHIP_GUESS_VALUES else None
 
 
+# ── prompt text, generated from the schema ───────────────────────────────────
+# Generated rather than written out again, so a vocabulary change cannot leave
+# the prompt asking for labels that no longer validate.
 def _describe(spec: Attr) -> str:
-    if spec.boolean:
-        shape = "true or false"
-    elif spec.many:
-        shape = "array of any of: " + ", ".join(spec.allowed())
-    else:
-        shape = "exactly one of: " + ", ".join(spec.allowed())
-    return f"- {spec.name}: {shape}"
-
-
-def describe_attributes(category: str) -> str:
-    """The attribute schema as prompt text.
-
-    Generated from the specs rather than written out again, so a vocabulary
-    change cannot leave the prompt describing labels that no longer validate.
-    """
-    lines = [_describe(spec) for spec in PHOTO_ATTRIBUTES.get(category, ())]
-    if category != CATEGORY_CROWD:
-        lines.append("")
-        lines.append("Also, ONLY if people are visible in the photo, a `people` object:")
-        lines.extend(_describe(spec) for spec in PEOPLE_ATTRIBUTES)
-    return "\n".join(lines)
-
-
-def describe_other_kind() -> str:
-    """The `other_kind` line, for the CATEGORY prompt rather than the attribute one.
-
-    It belongs to pass 1 because pass 2 skips `other` entirely: this is the only
-    chance to record WHY a photo could not be categorized, and the model has
-    already looked at the image, so asking costs nothing.
-    """
-    spec = PHOTO_ATTRIBUTES[CATEGORY_OTHER][0]
-    return (
-        f"- {spec.name} (ONLY when category is `{CATEGORY_OTHER}`): "
-        f"exactly one of: {', '.join(spec.allowed())}"
-    )
+    return f"- {spec.name}: one of {', '.join(spec.allowed())}"
 
 
 def describe_categories() -> str:
     return "\n".join(f"- {name}: {rule}" for name, rule in CATEGORY_RULES.items())
+
+
+def describe_attributes(category: str) -> str:
+    return "\n".join(_describe(spec) for spec in attributes_for(category))
+
+
+def describe_people() -> str:
+    return "\n".join(_describe(spec) for spec in PEOPLE_ATTRIBUTES)
+
+
+def describe_schema() -> str:
+    """Every category's attributes, for the single classification prompt."""
+    blocks = []
+    for category in PHOTO_CATEGORIES:
+        blocks.append(f"If category is `{category}`:\n{describe_attributes(category)}")
+    return "\n\n".join(blocks)

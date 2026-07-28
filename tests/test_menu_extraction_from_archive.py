@@ -215,8 +215,8 @@ class TestLegibilityGate:
     def test_an_illegible_photo_is_never_sent_to_extraction(self):
         legible, blurred = _menu_keys(NEW_RUN)
         store = self._store_with_manifest([
-            {"key": legible, "attributes": {"legible": "sim"}},
-            {"key": blurred, "attributes": {"legible": "nao"}},
+            {"key": legible, "attributes": {"legible": "yes"}},
+            {"key": blurred, "attributes": {"legible": "no"}},
         ])
         urls, _, _ = asyncio.run(_service(store)._archive_photo_urls(VENUE))
         assert len(urls) == 1 and legible in urls[0]
@@ -224,7 +224,7 @@ class TestLegibilityGate:
     def test_a_partly_legible_photo_is_still_worth_reading(self):
         key = _menu_keys(NEW_RUN, n=1)[0]
         store = self._store_with_manifest([
-            {"key": key, "attributes": {"legible": "parcial"}},
+            {"key": key, "attributes": {"legible": "partial"}},
         ])
         urls, _, _ = asyncio.run(_service(store)._archive_photo_urls(VENUE))
         assert len(urls) == 1
@@ -236,10 +236,20 @@ class TestLegibilityGate:
         urls, _, _ = asyncio.run(_service(store)._archive_photo_urls(VENUE))
         assert len(urls) == 1
 
+    def test_a_photo_the_classifier_could_not_judge_is_kept(self):
+        # `not_classified` means "asked, could not tell" — which is exactly the
+        # case where the extractor deserves its shot at the photo.
+        key = _menu_keys(NEW_RUN, n=1)[0]
+        store = self._store_with_manifest([
+            {"key": key, "attributes": {"legible": "not_classified"}},
+        ])
+        urls, _, _ = asyncio.run(_service(store)._archive_photo_urls(VENUE))
+        assert len(urls) == 1
+
     def test_a_photo_the_manifest_never_mentions_is_kept(self):
         listed, unlisted = _menu_keys(NEW_RUN)
         store = self._store_with_manifest(
-            [{"key": listed, "attributes": {"legible": "sim"}}],
+            [{"key": listed, "attributes": {"legible": "yes"}}],
             keys=[listed, unlisted],
         )
         urls, _, _ = asyncio.run(_service(store)._archive_photo_urls(VENUE))
@@ -252,7 +262,7 @@ class TestLegibilityGate:
 
     def test_a_venue_whose_every_menu_is_illegible_costs_nothing(self):
         store = self._store_with_manifest([
-            {"key": k, "attributes": {"legible": "nao"}} for k in _menu_keys(NEW_RUN)
+            {"key": k, "attributes": {"legible": "no"}} for k in _menu_keys(NEW_RUN)
         ])
         assert asyncio.run(
             _service(store)._archive_photo_urls(VENUE)
@@ -261,8 +271,8 @@ class TestLegibilityGate:
 
     def test_the_selector_is_a_pure_function_of_the_entries(self):
         entries = [
-            {"key": "a", "attributes": {"legible": "sim"}},
-            {"key": "b", "attributes": {"legible": "nao"}},
+            {"key": "a", "attributes": {"legible": "yes"}},
+            {"key": "b", "attributes": {"legible": "no"}},
             {"key": "c"},
         ]
         assert [e["key"] for e in selectable_menu_photos(entries)] == ["a", "c"]

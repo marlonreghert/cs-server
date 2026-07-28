@@ -1082,8 +1082,8 @@ class VenuePhotoArchiveService:
             stats = await self.photo_classifier.annotate(
                 photos,
                 # Both gates must be open: the deployment-level switch and this
-                # run's. Pass 2 is roughly three quarters of the spend, so it is
-                # the one that can be closed on its own.
+                # run's. The attribute JSON is most of the output cost, so it is
+                # the half that can be closed on its own.
                 derive_attributes=bool(cfg.get("derive_photo_attributes", True))
                 and getattr(self._settings, "photo_attributes_enabled", True),
                 venue_id=venue_id,

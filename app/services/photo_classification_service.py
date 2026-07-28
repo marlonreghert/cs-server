@@ -3,7 +3,7 @@
 Sits between the fetch and the store in the archive pipeline, so a photo lands
 in the right folder the first time — no second write, no object copy.
 
-Three rules carry the behaviour and must not be relaxed:
+Four rules carry the behaviour and must not be relaxed:
 
 1. **Classification is an enhancement, not a dependency.** If the model fails,
    the photo keeps the category its source gave it and is still archived.
@@ -13,7 +13,10 @@ Three rules carry the behaviour and must not be relaxed:
    the source's category; a low-confidence verdict is filed as `other`. Filing
    a failure as `other` would erase what the source did know, and guessing on
    low confidence would invent what nobody knows.
-3. **`authorship` is never written here.** It is the provider's fact. The
+3. **Attribute confidence is per attribute.** The model can be certain a room
+   is a bar and unsure whether it has screens. Anything under the bar becomes
+   `not_classified` on its own, without dragging its neighbours down with it.
+4. **`authorship` is never written here.** It is the provider's fact. The
    model's read goes in `likely_authorship`, and only where the provider had no
    answer, so a guess can never be mistaken for the fact.
 """
@@ -29,6 +32,7 @@ from app.metrics import (
 )
 from app.models.photo_taxonomy import (
     CATEGORY_OTHER,
+    NOT_CLASSIFIED,
     PHOTO_CATEGORIES,
     validate_attributes,
     validate_authorship_guess,
@@ -55,21 +59,25 @@ class PhotoClassificationService:
         client,
         model: Optional[str] = None,
         confidence_threshold: float = 0.6,
+        attribute_confidence_threshold: float = 0.8,
         batch_size: int = 10,
         cost_per_photo_usd: float = DEFAULT_COST_PER_PHOTO_USD,
     ):
         self.client = client
         self.model = model
+        # Two bars, and the attribute one is higher on purpose. A wrong category
+        # misfiles a photo; a wrong attribute is read as a fact about the venue.
         self.confidence_threshold = float(confidence_threshold)
+        self.attribute_confidence_threshold = float(attribute_confidence_threshold)
         self.batch_size = max(1, int(batch_size))
         self.cost_per_photo_usd = float(cost_per_photo_usd)
 
     # ── the live path ────────────────────────────────────────────────────────
     async def annotate(
         self, photos: list[dict], *, derive_attributes: bool = True,
-        venue_id: str = "",
+        recategorize: bool = True, venue_id: str = "",
     ) -> dict:
-        """Classify a venue's photos and attach their attributes.
+        """Classify a venue's photos in one call and attach what came back.
 
         Photos are annotated IN PLACE — the archive pipeline then files each one
         under `photo["category"]`. Returns the counts and the estimated cost.
@@ -85,24 +93,27 @@ class PhotoClassificationService:
             photo.setdefault("source_category", photo.get("category"))
 
         urls = [p.get("url") for p in photos]
-        verdicts = await self._classify(urls, venue_id)
+        verdicts = await self._classify(urls, venue_id, derive_attributes)
         for photo, verdict in zip(photos, verdicts):
-            if self._apply_verdict(photo, verdict):
-                stats["classified"] += 1
-
-        if derive_attributes:
-            stats["attributed"] = await self._attach_attributes(photos, venue_id)
+            classified, attributed = self._apply_verdict(
+                photo, verdict, derive_attributes, recategorize
+            )
+            stats["classified"] += int(classified)
+            stats["attributed"] += int(attributed)
 
         stats["cost_usd"] = round(
-            (stats["classified"] + stats["attributed"]) * self.cost_per_photo_usd, 6
+            stats["classified"] * self.cost_per_photo_usd, 6
         )
         PHOTO_CLASSIFICATION_COST_USD.inc(stats["cost_usd"])
         return stats
 
-    async def _classify(self, urls: list[str], venue_id: str) -> list[dict]:
+    async def _classify(
+        self, urls: list[str], venue_id: str, with_attributes: bool
+    ) -> list[dict]:
         try:
             verdicts = await self.client.classify_photos(
-                urls, model=self.model, batch_size=self.batch_size
+                urls, model=self.model, batch_size=self.batch_size,
+                with_attributes=with_attributes,
             )
         except Exception as e:  # noqa: BLE001 — degrade, never fail the venue
             logger.error(
@@ -116,17 +127,21 @@ class PhotoClassificationService:
         # Short responses are padded rather than truncating the venue's photos.
         return list(verdicts) + [{}] * max(0, len(urls) - len(verdicts))
 
-    def _apply_verdict(self, photo: dict, verdict: Any) -> bool:
-        """True when the photo got a real category out of this."""
+    def _apply_verdict(
+        self, photo: dict, verdict: Any, derive_attributes: bool,
+        recategorize: bool = True,
+    ) -> tuple[bool, bool]:
+        """(got a category, got any attribute worth storing)."""
         if not isinstance(verdict, dict) or not verdict:
             # No verdict at all — the model failed or said nothing. The source's
             # category stands; this is NOT `other`.
             PHOTO_CLASSIFICATION_FALLBACKS_TOTAL.labels(reason="no_verdict").inc()
-            return False
+            return False, False
 
-        quality = validate_quality(verdict.get("quality"))
-        if quality:
-            photo["quality"] = quality
+        quality = validate_quality(
+            verdict.get("quality"), self.attribute_confidence_threshold
+        )
+        photo["quality"] = quality
 
         # Only where the provider was silent. A provider answer is a fact and
         # outranks the model's read every time.
@@ -141,6 +156,14 @@ class PhotoClassificationService:
         except (TypeError, ValueError):
             confidence = 0.0
 
+        if not recategorize:
+            # Re-reading an archived photo: its category is in the S3 key of an
+            # object that already exists, so the verdict's category is dropped
+            # and the attributes are validated against the category the photo
+            # is actually filed under.
+            return True, (self._apply_attributes(photo, verdict)
+                          if derive_attributes else False)
+
         if category not in PHOTO_CATEGORIES:
             PHOTO_CLASSIFICATION_FALLBACKS_TOTAL.labels(reason="unknown_category").inc()
             photo["category"] = CATEGORY_OTHER
@@ -151,76 +174,60 @@ class PhotoClassificationService:
             photo["category"] = category
         photo["classification_confidence"] = round(confidence, 3)
 
-        if photo["category"] == CATEGORY_OTHER:
-            # WHY it is `other` comes from the first pass, because the second
-            # one deliberately skips `other` entirely. It costs nothing extra —
-            # pass 1 already looked at the image — and it is what lets an
-            # `other` photo be found and reclassified later without re-billing.
-            kind = validate_attributes(CATEGORY_OTHER, verdict)
-            if kind:
-                photo["attributes"] = kind
-
         PHOTO_CLASSIFICATION_TOTAL.labels(category=photo["category"]).inc()
-        return True
+        if not derive_attributes:
+            return True, False
+        return True, self._apply_attributes(photo, verdict)
 
-    async def _attach_attributes(self, photos: list[dict], venue_id: str) -> int:
-        """Second pass, grouped by category. `other` is skipped entirely."""
-        groups: dict[str, list[dict]] = {}
-        for photo in photos:
-            category = photo.get("category")
-            if category in PHOTO_CATEGORIES and category != CATEGORY_OTHER:
-                groups.setdefault(category, []).append(photo)
+    def _apply_attributes(self, photo: dict, verdict: dict) -> bool:
+        """Attach the category's attributes and, if anyone is visible, the people.
 
-        attributed = 0
-        for category, group in groups.items():
-            urls = [p.get("url") for p in group]
-            try:
-                results = await self.client.derive_attributes(
-                    category, urls, model=self.model, batch_size=self.batch_size
-                )
-            except Exception as e:  # noqa: BLE001
-                # A categorized photo with no attributes is still useful, and
-                # re-derivable from S3 later without paying a provider again.
-                logger.warning(
-                    f"[PhotoClassification] attributes failed for {venue_id} "
-                    f"({category}); photos stay categorized: {e}"
-                )
-                PHOTO_CLASSIFICATION_FALLBACKS_TOTAL.labels(
-                    reason="attributes_error"
-                ).inc(len(group))
-                continue
-            attributed += self._apply_attributes(category, group, results)
-        return attributed
+        Every field of the schema is written, as a value or as `not_classified`.
+        A known unknown is worth storing: it says the question was asked, which
+        an absent key does not, and it is what makes "how much of the catalogue
+        can we actually read" a query rather than a guess.
+        """
+        attributes = validate_attributes(
+            photo["category"], verdict.get("attributes"),
+            self.attribute_confidence_threshold,
+        )
+        if attributes:
+            photo["attributes"] = attributes
+        people = validate_people(
+            verdict.get("people"), self.attribute_confidence_threshold
+        )
+        if people:
+            photo["people"] = people
 
-    def _apply_attributes(self, category: str, group: list[dict], results) -> int:
-        applied = 0
-        for photo, result in zip(group, list(results or [])):
-            if not isinstance(result, dict) or not result:
-                continue
-            attributes = validate_attributes(category, result.get("attributes"))
-            if attributes:
-                photo["attributes"] = attributes
-            people = validate_people(result.get("people"))
-            if people:
-                photo["people"] = people
-            if attributes or people:
-                applied += 1
-        return applied
+        known = [v for v in list(attributes.values()) + list(people.values())
+                 if v != NOT_CLASSIFIED]
+        if not known:
+            PHOTO_CLASSIFICATION_FALLBACKS_TOTAL.labels(
+                reason="no_confident_attribute"
+            ).inc()
+        return bool(known)
 
     # ── the backfill path ────────────────────────────────────────────────────
     async def derive_for_archived(self, entries: list[dict], urls: list[str]) -> int:
-        """Attach attributes to already-archived photos, from their stored copies.
+        """Re-classify already-archived photos from their stored copies.
 
-        Same second pass, reading presigned S3 urls instead of provider links —
-        which is what lets the attribute schema grow without re-fetching, and
-        without a provider bill.
+        Same single call, reading presigned S3 urls instead of provider links —
+        which is what lets the schema grow without re-fetching, and without a
+        provider bill.
+
+        The call returns a category too, and it is **deliberately discarded**:
+        the category is in the S3 key of an object that already exists, so
+        writing a new one into the manifest would leave an entry disagreeing
+        with its own key. Recategorizing means moving objects, which is a
+        different job from extending a schema. `authorship` is likewise carried
+        through untouched, exactly as on the live path.
         """
-        staged = [
-            dict(entry, url=url) for entry, url in zip(entries, urls)
-        ]
-        attributed = await self._attach_attributes(staged, venue_id="(archived)")
+        staged = [dict(entry, url=url) for entry, url in zip(entries, urls)]
+        stats = await self.annotate(
+            staged, recategorize=False, venue_id="(archived)"
+        )
         for entry, photo in zip(entries, staged):
-            for field in ("attributes", "people"):
-                if photo.get(field):
+            for field in ("quality", "attributes", "people", "likely_authorship"):
+                if photo.get(field) is not None:
                     entry[field] = photo[field]
-        return attributed
+        return stats["attributed"]

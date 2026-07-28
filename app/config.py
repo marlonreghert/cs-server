@@ -373,10 +373,16 @@ class Settings(BaseSettings):
     # menu filter's threshold: a wrong label is worse than an honest unknown,
     # because everything downstream will trust it.
     photo_classification_confidence: float = 0.6
+    # The bar for ONE attribute, and higher than the category's on purpose: a
+    # wrong category misfiles a photo, a wrong attribute is read as a fact about
+    # the venue. Confidence is reported per attribute, so a model that is sure
+    # about the room and unsure about the screens keeps the first and loses only
+    # the second — anything under this becomes `not_classified`.
+    photo_attribute_confidence: float = 0.8
     photo_classification_batch_size: int = 10
-    # Pass 2 — the per-category attribute schemas. Switchable on its own so a
-    # run can categorize cheaply without paying for the attribute JSON, which
-    # is roughly three quarters of the cost.
+    # The attributes half of the single classification call. Switchable on its
+    # own so a run can categorize cheaply without paying for the attribute JSON,
+    # which is most of the output cost.
     photo_attributes_enabled: bool = True
     # Unit price used ONLY to report what a run cost: 85 image tokens at
     # detail="low", plus the prompt share and the JSON written back.

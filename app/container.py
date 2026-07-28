@@ -560,6 +560,7 @@ class Container:
             client=self.openai_photo_classifier_client,
             model=settings.photo_classification_model,
             confidence_threshold=settings.photo_classification_confidence,
+            attribute_confidence_threshold=settings.photo_attribute_confidence,
             batch_size=settings.photo_classification_batch_size,
             cost_per_photo_usd=settings.photo_classification_cost_per_photo_usd,
         )

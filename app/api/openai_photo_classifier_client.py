@@ -1,21 +1,20 @@
 """OpenAI vision client for per-photo classification.
 
-Two passes, deliberately not one:
+**One pass.** The category, that category's attributes and the people block come
+back from a single call, because the schema is small enough to fit one prompt
+without blunting it. Two passes would send every image twice — image tokens are
+the bill here, and a second look buys nothing when the second question is four
+coarse enums.
 
-  * `classify_photos` — a small prompt, one category per image. Runs BEFORE the
-    image is stored, so it lands in the right folder with no second write.
-  * `derive_attributes` — photos grouped by category, one focused prompt per
-    category, `other` skipped entirely.
+The model reports a confidence **per attribute**, not one for the photo: it can
+be certain a room is a bar and unsure whether it has screens, and those two
+facts must not share a fate. The service drops anything under the bar to
+`not_classified`.
 
-Two passes cost more image tokens than one six-schema mega-prompt, and buy two
-things worth more than that: a focused prompt is measurably more accurate than
-one carrying every schema at once, and adding a field later re-runs ONE category
-rather than the whole catalogue.
-
-Both take a plain list of image urls and neither cares where they came from —
-provider CDN links during a live run, presigned S3 urls when attributes are
-re-derived over an archived run. That is what lets the schema grow without
-paying a provider again.
+Takes a plain list of image urls and does not care where they came from —
+provider CDN links during a live run, presigned S3 urls when an archived run is
+re-classified after the schema changes. That is what lets the schema grow
+without paying a provider again.
 
 Modelled on `OpenAIMenuClient.classify_menu_photos`: same batching, same
 `detail: "low"` thumbnails, same json_object response format.
@@ -35,9 +34,11 @@ from app.metrics import (
     OPENAI_API_CALL_DURATION_SECONDS,
 )
 from app.models.photo_taxonomy import (
-    describe_attributes,
+    NOT_CLASSIFIED,
+    QUALITY_VALUES,
     describe_categories,
-    describe_other_kind,
+    describe_people,
+    describe_schema,
 )
 
 logger = logging.getLogger(__name__)
@@ -45,37 +46,49 @@ logger = logging.getLogger(__name__)
 DEFAULT_MODEL = "gpt-4o-mini"
 
 
-def _category_prompt() -> str:
-    return (
+def _prompt(with_attributes: bool = True) -> str:
+    head = (
         "You are labelling photos from a bar/restaurant's Google Maps listing "
         "for a Brazilian nightlife app.\n\n"
         "Put each image in EXACTLY ONE category:\n"
         f"{describe_categories()}\n\n"
-        "Also report, for each image:\n"
-        "- quality: one of boa, escura, borrada, baixa_resolucao\n"
-        # Asked HERE, in pass 1, because pass 2 skips `other` entirely.
-        f"{describe_other_kind()}\n"
+        "Also report for each image:\n"
+        "- quality: good or poor — is this worth showing in an app\n"
         "- likely_authorship: by_owner or by_visitor. Staged, empty, evenly lit "
         "and professionally plated reads as by_owner; handheld, candid, with "
         "people and mixed light reads as by_visitor. Omit if unsure.\n"
-        "- confidence: 0 to 1. Be honest — a low confidence is filed as `other`, "
-        "which is better than a wrong label.\n\n"
-        "Reply ONLY with JSON:\n"
-        '{"results": [{"index": 0, "category": "interior", "quality": "boa", '
-        '"likely_authorship": "by_owner", "confidence": 0.93}]}\n\n'
-        "One entry per image, in order."
+        f"- confidence: 0 to 1 for the category. Be honest — a low confidence "
+        f"is filed as `other`, which is better than a wrong label.\n"
     )
-
-
-def _attribute_prompt(category: str) -> str:
-    return (
-        f"You are describing photos already classified as `{category}` from a "
-        "bar/restaurant's Google Maps listing, for a Brazilian nightlife app.\n\n"
-        "For each image, report these attributes. OMIT any attribute you cannot "
-        "read from the photo — a missing value is far better than a guess.\n\n"
-        f"{describe_attributes(category)}\n\n"
+    if not with_attributes:
+        return head + (
+            '\nReply ONLY with JSON:\n'
+            '{"results": [{"index": 0, "category": "interior", '
+            '"quality": {"value": "good", "confidence": 0.9}, '
+            '"confidence": 0.93}]}\n\n'
+            "One entry per image, in order."
+        )
+    return head + (
+        "\nThen describe the image using ONLY the attributes of the category "
+        "you chose:\n\n"
+        f"{describe_schema()}\n\n"
+        "And, ONLY if people are visible — whatever the category — a `people` "
+        "object. A photo with nobody in it must have NO people object:\n"
+        f"{describe_people()}\n\n"
+        "EVERY attribute is an object with a value AND your confidence in that "
+        f"one attribute: {{\"value\": ..., \"confidence\": 0.0-1.0}}. Confidence "
+        "is per attribute, not for the whole photo — be sure about one field "
+        "and unsure about the next.\n"
+        f"Answer `{NOT_CLASSIFIED}` whenever you cannot tell from the image. "
+        f"`{NOT_CLASSIFIED}` is always a better answer than a guess, and it is "
+        "an expected outcome, not a failure.\n\n"
         "Reply ONLY with JSON:\n"
-        '{"results": [{"index": 0, "attributes": {...}, "people": {...}}]}\n\n'
+        '{"results": [{"index": 0, "category": "interior", "confidence": 0.93,\n'
+        '  "quality": {"value": "good", "confidence": 0.95},\n'
+        '  "likely_authorship": "by_visitor",\n'
+        '  "attributes": {"space_type": {"value": "bar", "confidence": 0.91},\n'
+        '                 "lighting": {"value": "dim", "confidence": 0.88}},\n'
+        '  "people": {"crowd_level": {"value": "busy", "confidence": 0.9}}}]}\n\n'
         "One entry per image, in order. Use only the listed values."
     )
 
@@ -102,40 +115,28 @@ class OpenAIPhotoClassifierClient:
         await self.client.close()
 
     async def classify_photos(
-        self, photo_urls: list[str], *, model: Optional[str] = None, batch_size: int = 10
+        self, photo_urls: list[str], *, model: Optional[str] = None,
+        batch_size: int = 10, with_attributes: bool = True,
     ) -> list[dict]:
-        """One verdict per photo, index-aligned with `photo_urls`."""
-        return await self._run_passes(
-            photo_urls, _category_prompt(), "photo_classify", model, batch_size
-        )
+        """One verdict per photo, index-aligned with `photo_urls`.
 
-    async def derive_attributes(
-        self, category: str, photo_urls: list[str], *,
-        model: Optional[str] = None, batch_size: int = 10,
-    ) -> list[dict]:
-        """One attribute object per photo, index-aligned with `photo_urls`."""
-        return await self._run_passes(
-            photo_urls, _attribute_prompt(category), "photo_attributes",
-            model, batch_size,
-        )
-
-    async def _run_passes(
-        self, photo_urls: list[str], prompt: str, endpoint: str,
-        model: Optional[str], batch_size: int,
-    ) -> list[dict]:
+        `with_attributes=False` asks for the category alone — the operator's
+        cheap mode, which skips the attribute JSON that dominates output cost.
+        """
         if not photo_urls:
             return []
+        prompt = _prompt(with_attributes)
         out: list[dict] = []
         for batch in _batched(list(photo_urls), batch_size):
             # A failed batch yields empty verdicts for ITS photos only. One bad
             # batch must not cost a venue the photos in every other batch.
-            results = await self._one_batch(batch, prompt, endpoint, model)
+            results = await self._one_batch(batch, prompt, model)
             by_index = {r.get("index"): r for r in results if isinstance(r, dict)}
             out.extend(dict(by_index.get(i) or {}) for i in range(len(batch)))
         return out
 
     async def _one_batch(
-        self, urls: list[str], prompt: str, endpoint: str, model: Optional[str]
+        self, urls: list[str], prompt: str, model: Optional[str]
     ) -> list[dict]:
         content: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
         for url in urls:
@@ -145,6 +146,7 @@ class OpenAIPhotoClassifierClient:
             })
 
         started = time.perf_counter()
+        endpoint = "photo_classify"
         try:
             response = await self.client.chat.completions.create(
                 model=model or self.model,
@@ -156,23 +158,28 @@ class OpenAIPhotoClassifierClient:
             duration = time.perf_counter() - started
             OPENAI_API_CALL_DURATION_SECONDS.labels(endpoint=endpoint).observe(duration)
             OPENAI_API_CALLS_TOTAL.labels(endpoint=endpoint, status="success").inc()
-            return self._parse(response.choices[0].message.content or "", endpoint)
+            return self._parse(response.choices[0].message.content or "")
         except Exception as e:  # noqa: BLE001 — the caller degrades, never fails
             OPENAI_API_CALL_DURATION_SECONDS.labels(endpoint=endpoint).observe(
                 time.perf_counter() - started
             )
             OPENAI_API_CALLS_TOTAL.labels(endpoint=endpoint, status="error").inc()
-            logger.error(f"[PhotoClassifier] {endpoint} batch failed: {e}")
+            logger.error(f"[PhotoClassifier] batch failed: {e}")
             return []
 
-    def _parse(self, raw_text: str, endpoint: str) -> list[dict]:
+    def _parse(self, raw_text: str) -> list[dict]:
         try:
             data = json.loads(_strip_fences(raw_text))
         except json.JSONDecodeError as e:
-            logger.error(f"[PhotoClassifier] {endpoint} returned unparseable JSON: {e}")
+            logger.error(f"[PhotoClassifier] returned unparseable JSON: {e}")
             return []
         results = data.get("results") if isinstance(data, dict) else None
         if not isinstance(results, list):
-            logger.warning(f"[PhotoClassifier] {endpoint} response had no results array")
+            logger.warning("[PhotoClassifier] response had no results array")
             return []
         return [r for r in results if isinstance(r, dict)]
+
+
+# Re-exported so a caller can state the quality vocabulary without reaching into
+# the taxonomy module for it.
+__all__ = ["OpenAIPhotoClassifierClient", "DEFAULT_MODEL", "QUALITY_VALUES"]

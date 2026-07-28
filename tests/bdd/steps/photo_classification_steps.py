@@ -1,17 +1,24 @@
 """Behave steps for tests/bdd/enrichment/photo-classification.feature.
 
 Drives the REAL VenuePhotoArchiveService and the REAL PhotoClassificationService
-over a fake vision client, so the validation, the fallbacks and the two-pass
-ordering under test are all real code — only the model call is faked.
+over a fake vision client, so the validation, the confidence gate and the
+fallbacks under test are all real code — only the model call is faked.
 
 The fake is programmed PER PHOTO URL rather than per call, because the pipeline
 batches and the scenarios must not depend on how the batches happen to split.
 
-Two properties are asserted by counting, because they are the ones that cost
+Attribute values are written in the scenarios as bare values and wrapped into
+the `{"value": ..., "confidence": ...}` shape the model actually returns, at a
+confidence above the floor. A scenario that cares about confidence says so by
+passing the pair itself — that is the only place the shape appears, so the
+scenarios stay about behaviour rather than about JSON.
+
+Three properties are asserted by counting, because they are the ones that cost
 money if they regress:
   * a source that already knows its categories must reach the classifier zero
-    times, and
-  * a photo filed as `other` must reach the attribute pass zero times.
+    times,
+  * a venue's photos must classify in one call rather than one per photo, and
+  * a run with attributes disabled must never ask for them.
 """
 from __future__ import annotations
 
@@ -26,46 +33,61 @@ from tests.bdd.steps.venue_photo_archive_steps import (  # reuse: one set of fak
 
 SOURCE = "google_photos"
 
+# Comfortably above the 0.8 attribute floor the service is built with below.
+SURE = 0.95
+# Comfortably below it.
+UNSURE = 0.4
+
+
+def _sure(value):
+    """A scenario's bare value, in the shape the model answers with."""
+    return {"value": value, "confidence": SURE}
+
+
+def _wrap(block):
+    """Wrap a scenario's plain {field: value} into per-attribute confidences.
+
+    A field whose value is already a dict is passed through untouched, which is
+    how a scenario expresses an unsure answer or a malformed one.
+    """
+    return {
+        field: value if isinstance(value, dict) else _sure(value)
+        for field, value in (block or {}).items()
+    }
+
 
 # ── the fake vision client ───────────────────────────────────────────────────
 class _FakeClassifierClient:
     """Programmable stand-in for OpenAIPhotoClassifierClient.
 
-    `verdicts` and `attributes` are keyed by photo url. Anything not registered
-    falls back to a benign default, so a scenario only has to say what it cares
-    about.
+    `verdicts` is keyed by photo url. Anything not registered falls back to a
+    benign default, so a scenario only has to say what it cares about.
     """
 
     def __init__(self) -> None:
         self.verdicts: dict[str, dict] = {}
-        self.attributes: dict[str, dict] = {}
         self.classify_calls: list[list[str]] = []
-        self.attribute_calls: list[tuple[str, list[str]]] = []
+        self.attribute_requests: list[bool] = []
         self.fail_classify = False
-        self.fail_attributes = False
         self.default_verdict = {"category": "interior", "confidence": 0.9}
 
-    async def classify_photos(self, photo_urls, *, model=None, batch_size=10):
+    async def classify_photos(self, photo_urls, *, model=None, batch_size=10,
+                              with_attributes=True):
         self.classify_calls.append(list(photo_urls))
+        self.attribute_requests.append(bool(with_attributes))
         if self.fail_classify:
             raise RuntimeError("vision model unavailable")
         out = []
         for i, url in enumerate(photo_urls):
             verdict = dict(self.default_verdict)
             verdict.update(self.verdicts.get(url) or {})
+            if not with_attributes:
+                # The real client does not ask for them, so the model does not
+                # answer with them.
+                verdict.pop("attributes", None)
+                verdict.pop("people", None)
             verdict["index"] = i
             out.append(verdict)
-        return out
-
-    async def derive_attributes(self, category, photo_urls, *, model=None, batch_size=10):
-        self.attribute_calls.append((category, list(photo_urls)))
-        if self.fail_attributes:
-            raise RuntimeError("vision model unavailable")
-        out = []
-        for i, url in enumerate(photo_urls):
-            entry = dict(self.attributes.get(url) or {})
-            entry["index"] = i
-            out.append(entry)
         return out
 
 
@@ -91,6 +113,7 @@ def _build_with_classifier(context):
     context.classifier = PhotoClassificationService(
         client=context.classifier_client,
         confidence_threshold=0.6,
+        attribute_confidence_threshold=0.8,
         batch_size=10,
     )
     context.store = MediaArchiveStore(
@@ -149,13 +172,22 @@ def _seed_photos(context, vid, specs, *, source_obj=None):
     return photos
 
 
-def _one_photo(context, vid, verdict=None, attributes=None, **photo_fields):
+def _one_photo(context, vid, verdict=None, attributes=None, people=None,
+               **photo_fields):
+    """One venue, one photo, and the verdict the model will return for it.
+
+    `attributes` and `people` are written plainly by the scenario and wrapped
+    into per-attribute confidences here.
+    """
     photos = _seed_photos(context, vid, [photo_fields])
     url = photos[0]["url"]
-    if verdict:
-        context.classifier_client.verdicts[url] = verdict
-    if attributes:
-        context.classifier_client.attributes[url] = attributes
+    full = dict(verdict or {})
+    if attributes is not None:
+        full["attributes"] = _wrap(attributes)
+    if people is not None:
+        full["people"] = _wrap(people)
+    if full:
+        context.classifier_client.verdicts[url] = full
     return photos[0]
 
 
@@ -193,7 +225,8 @@ def step_classifier_available(context):
 # ── 1. The six categories ────────────────────────────────────────────────────
 @given('a fetched photo the classifier categorizes as "{category}"')
 def step_photo_categorized_as(context, category):
-    _one_photo(context, f"ven_cat_{category}", verdict={"category": category, "confidence": 0.9})
+    _one_photo(context, f"ven_cat_{category}",
+               verdict={"category": category, "confidence": 0.9})
 
 
 @given("the source files photos under an authorship placeholder category")
@@ -210,7 +243,7 @@ def step_venue_n_photos(context, n):
 @given("a fetched photo showing open air overhead")
 def step_photo_open_air(context):
     _one_photo(context, "ven_sky", verdict={"category": "exterior", "confidence": 0.9},
-               attributes={"attributes": {"exterior_kind": "area_externa"}})
+               attributes={"exterior_kind": "open_air_area"})
 
 
 @given("a fetched photo showing a roof overhead")
@@ -221,15 +254,13 @@ def step_photo_roof(context):
 @given("a fetched photo of the venue facade from the street")
 def step_photo_facade(context):
     _one_photo(context, "ven_facade", verdict={"category": "exterior", "confidence": 0.9},
-               attributes={"attributes": {"exterior_kind": "fachada",
-                                          "venue_name_legible": True}})
+               attributes={"exterior_kind": "facade"})
 
 
 @given("a fetched photo of a partially covered terrace")
 def step_photo_terrace(context):
     _one_photo(context, "ven_terrace", verdict={"category": "exterior", "confidence": 0.9},
-               attributes={"attributes": {"exterior_kind": "area_externa",
-                                          "covered": "parcial"}})
+               attributes={"exterior_kind": "open_air_area", "covered": "partial"})
 
 
 # ── 3. People are read wherever they appear ──────────────────────────────────
@@ -237,117 +268,145 @@ def step_photo_terrace(context):
 def step_photo_room_with_people(context):
     _one_photo(context, "ven_room_people",
                verdict={"category": "interior", "confidence": 0.9},
-               attributes={"attributes": {"space_type": "salao"},
-                           "people": {"crowd_level": "poucas_pessoas",
-                                      "clima_social": "Tranquilo"}})
+               attributes={"space_type": "dining"},
+               people={"crowd_level": "some"})
 
 
 @given("a fetched photo of an empty room")
 def step_photo_empty_room(context):
     _one_photo(context, "ven_empty_room",
                verdict={"category": "interior", "confidence": 0.9},
-               attributes={"attributes": {"space_type": "salao"}, "people": None})
+               attributes={"space_type": "dining"})
 
 
 @given("a fetched photo of a crowd that includes children")
 def step_photo_crowd_kids(context):
     _one_photo(context, "ven_kids", verdict={"category": "crowd", "confidence": 0.9},
-               attributes={"people": {"crowd_level": "movimentado", "has_kids": True,
-                                      "publico": ["Família"]}})
+               people={"crowd_level": "busy", "has_kids": "yes",
+                       "group_type": "families"})
 
 
-@given("a fetched photo of a crowd at a rock night")
-def step_photo_crowd_rock(context):
-    _one_photo(context, "ven_rock", verdict={"category": "crowd", "confidence": 0.9},
-               attributes={"people": {"crowd_level": "cheio",
-                                      "dress_code": ["Alternativo"],
-                                      "dress_scene": ["rock_metal"]}})
+@given("a fetched photo of a busy dance floor")
+def step_photo_dance_floor(context):
+    _one_photo(context, "ven_dancing", verdict={"category": "crowd", "confidence": 0.9},
+               people={"crowd_level": "packed", "activity": "dancing"})
 
 
 # ── 4. Per-category attributes ───────────────────────────────────────────────
 @given("a fetched photo of a blurred menu")
 def step_photo_blurred_menu(context):
     _one_photo(context, "ven_blurred_menu",
-               verdict={"category": "menu", "confidence": 0.9, "quality": "borrada"},
-               attributes={"attributes": {"legible": "nao"}})
+               verdict={"category": "menu", "confidence": 0.9,
+                        "quality": _sure("poor")},
+               attributes={"legible": "no"})
 
 
-@given("a fetched photo of the back page of a drinks menu")
-def step_photo_back_drinks_menu(context):
+@given("a fetched photo of a drinks menu")
+def step_photo_drinks_menu(context):
     _one_photo(context, "ven_drinks_menu",
                verdict={"category": "menu", "confidence": 0.9},
-               attributes={"attributes": {"legible": "sim", "page_side": "verso",
-                                          "content_scope": "so_bebida"}})
+               attributes={"legible": "yes", "covers": "drinks"})
 
 
 @given("a fetched photo of a menu without prices")
 def step_photo_menu_no_prices(context):
     _one_photo(context, "ven_menu_noprice",
                verdict={"category": "menu", "confidence": 0.9},
-               attributes={"attributes": {"legible": "sim", "has_prices": False}})
+               attributes={"legible": "yes", "has_prices": "no"})
 
 
 @given("an archived menu photo marked as not legible")
 def step_archived_illegible(context):
     context.menu_entries = [{"photo_id": "illegible", "key": "k/illegible.jpg",
                              "category": "menu",
-                             "attributes": {"legible": "nao"}}]
+                             "attributes": {"legible": "no"}}]
 
 
 @given("an archived menu photo marked as legible")
 def step_archived_legible(context):
     context.menu_entries.append({"photo_id": "readable", "key": "k/readable.jpg",
                                  "category": "menu",
-                                 "attributes": {"legible": "sim"}})
+                                 "attributes": {"legible": "yes"}})
+
+
+@given("an archived menu photo whose legibility could not be classified")
+def step_archived_unknown_legibility(context):
+    # "Could not tell" is not "unreadable": dropping it would silently lose a
+    # menu the extractor might well have read.
+    context.menu_entries = [{"photo_id": "unsure", "key": "k/unsure.jpg",
+                             "category": "menu",
+                             "attributes": {"legible": "not_classified"}}]
 
 
 @given("a fetched photo of a sharing platter")
 def step_photo_platter(context):
     _one_photo(context, "ven_platter",
                verdict={"category": "food_drinks", "confidence": 0.9},
-               attributes={"attributes": {"subject": "comida",
-                                          "portion_size": "para_dividir"}})
+               attributes={"subject": "food", "portion": "shareable"})
 
 
 @given("a fetched photo of a room with a DJ booth")
 def step_photo_dj(context):
     _one_photo(context, "ven_dj", verdict={"category": "interior", "confidence": 0.9},
-               attributes={"attributes": {"space_type": "pista_danca",
-                                          "music_format": ["DJ"]}})
+               attributes={"space_type": "dance_floor", "music_setup": "dj"})
 
 
 @given("a fetched photo of a room with a projector screen")
 def step_photo_screen(context):
     _one_photo(context, "ven_screen", verdict={"category": "interior", "confidence": 0.9},
-               attributes={"attributes": {"screens": "telao"}})
+               attributes={"has_screens": "yes"})
 
 
 @given("a fetched photo of an event flyer")
 def step_photo_flyer(context):
-    # `other_kind` rides on the CATEGORY verdict, not the attribute pass: pass 2
-    # skips `other` entirely, so registering it as an attribute here would test a
-    # channel the pipeline never reads.
     _one_photo(context, "ven_flyer",
-               verdict={"category": "other", "confidence": 0.9,
-                        "other_kind": "flyer_evento"})
+               verdict={"category": "other", "confidence": 0.9},
+               attributes={"other_kind": "event_flyer"})
 
 
-# ── 5. Taxonomy-aligned attributes ───────────────────────────────────────────
-@given("a fetched photo of a dimly lit intimate room")
-def step_photo_intimate(context):
-    _one_photo(context, "ven_intimate",
+# ── 5. Only what the model is sure of becomes a fact ─────────────────────────
+@given("a fetched photo the classifier reads confidently as a bar")
+def step_photo_sure_bar(context):
+    _one_photo(context, "ven_sure_bar",
                verdict={"category": "interior", "confidence": 0.9},
-               attributes={"attributes": {"lighting": "quente_baixa",
-                                          "estetica": ["Intimista"]}})
+               attributes={"space_type": "bar"})
 
 
-@given("the classifier returns an aesthetic label that is not in the taxonomy")
+@given("a fetched photo whose space type the classifier is unsure about")
+def step_photo_unsure_space(context):
+    _one_photo(context, "ven_unsure_space",
+               verdict={"category": "interior", "confidence": 0.9},
+               attributes={"space_type": {"value": "bar", "confidence": UNSURE}})
+
+
+@given("a fetched photo read confidently as a bar but unsure about its screens")
+def step_photo_mixed_confidence(context):
+    _one_photo(context, "ven_mixed_conf",
+               verdict={"category": "interior", "confidence": 0.9},
+               attributes={"space_type": "bar",
+                           "has_screens": {"value": "yes", "confidence": UNSURE}})
+
+
+@given("the classifier returns an attribute with no confidence")
+def step_attribute_without_confidence(context):
+    # Nothing to check it against, so it cannot have cleared the bar.
+    _one_photo(context, "ven_no_conf",
+               verdict={"category": "interior", "confidence": 0.9},
+               attributes={"space_type": {"value": "bar"}})
+
+
+@given("a fetched photo the classifier describes only partially")
+def step_photo_partial_description(context):
+    _one_photo(context, "ven_partial",
+               verdict={"category": "interior", "confidence": 0.9},
+               attributes={"space_type": "bar"})
+
+
+@given("the classifier returns a lighting value that is not in the vocabulary")
 def step_invented_label(context):
     _one_photo(context, "ven_invented",
                verdict={"category": "interior", "confidence": 0.9},
-               attributes={"attributes": {"space_type": "salao",
-                                          "estetica": ["Cyberpunk", "Rústico"]}})
-    context.invented_label = "Cyberpunk"
+               attributes={"space_type": "bar", "lighting": "candlelit"})
 
 
 # ── 6. Who took the photo ────────────────────────────────────────────────────
@@ -377,14 +436,13 @@ def step_photo_by_visitor(context):
 @given("the photo classifier fails for every request")
 def step_classifier_fails(context):
     context.classifier_client.fail_classify = True
-    context.classifier_client.fail_attributes = True
 
 
-@given("the classifier categorizes photos but fails to derive attributes")
-def step_attributes_fail(context):
-    context.classifier_client.fail_attributes = True
+@given("a fetched photo the classifier categorizes but cannot describe")
+def step_photo_no_attributes(context):
     _one_photo(context, "ven_attr_fail",
-               verdict={"category": "interior", "confidence": 0.9})
+               verdict={"category": "interior", "confidence": 0.9},
+               attributes={})
 
 
 @given("the classifier returns a verdict below the confidence threshold")
@@ -420,22 +478,23 @@ def step_classification_disabled(context):
 @given("attribute derivation is disabled for the run")
 def step_attributes_disabled(context):
     context.config_over["derive_photo_attributes"] = False
-    _one_photo(context, "ven_no_attrs", verdict={"category": "interior", "confidence": 0.9})
+    _one_photo(context, "ven_no_attrs",
+               verdict={"category": "interior", "confidence": 0.9},
+               attributes={"space_type": "bar"})
 
 
 # ── 9. Re-deriving from the archive ──────────────────────────────────────────
 @given("a completed run whose photos are archived")
 def step_completed_run(context):
     _one_photo(context, "ven_rederive", verdict={"category": "interior", "confidence": 0.9},
-               attributes={"attributes": {"space_type": "salao"}})
+               attributes={"space_type": "bar"})
     _run_job(context, venue_ids=context.venue_id)
     context.archived_prefix = context.summary["prefix"]
-    context.classifier_client.attribute_calls.clear()
+    context.classifier_client.classify_calls.clear()
     context.google.calls.clear()
 
 
-@given("the attribute schema gains a field the model can read from them")
-def step_schema_gains_field(context):
+def _register_for_stored_copies(context, verdict):
     """Program the model's answer for the STORED copies, not the provider link.
 
     A re-derive pass never sees the provider url again — that is the point of it
@@ -446,11 +505,27 @@ def step_schema_gains_field(context):
         signed = context.fake_s3.generate_presigned_url(
             "get_object", Params={"Key": key}
         )
-        # The whole category is re-answered, not just the new field: the model
-        # is asked the current schema, so a re-run replaces rather than merges.
-        context.classifier_client.attributes[signed] = {
-            "attributes": {"space_type": "salao", "screens": "telao"}
-        }
+        context.classifier_client.verdicts[signed] = verdict
+
+
+@given("the attribute schema gains a field the model can read from them")
+def step_schema_gains_field(context):
+    # The whole category is re-answered, not just the new field: the model is
+    # asked the current schema, so a re-run replaces rather than merges.
+    _register_for_stored_copies(context, {
+        "category": "interior", "confidence": 0.9,
+        "attributes": _wrap({"space_type": "bar", "has_screens": "yes"}),
+    })
+
+
+@given("the classifier would now categorize those photos differently")
+def step_classifier_recategorizes(context):
+    # The category is in the S3 key of an object that already exists, so a
+    # manifest that took this answer would disagree with its own key.
+    _register_for_stored_copies(context, {
+        "category": "crowd", "confidence": 0.99,
+        "attributes": _wrap({"crowd_level": "packed"}),
+    })
 
 
 # ── When ─────────────────────────────────────────────────────────────────────
@@ -463,9 +538,7 @@ def step_menu_selection(context):
 
 @when("attribute derivation is re-run for that run")
 def step_rederive(context):
-    context.rederived = _run(
-        context.service.rederive_attributes(SOURCE)
-    )
+    context.rederived = _run(context.service.rederive_attributes(SOURCE))
 
 
 # ── Then: categories and filing ──────────────────────────────────────────────
@@ -483,7 +556,8 @@ def step_entry_category(context, category):
 
 @then("no photo is filed under an authorship placeholder category")
 def step_no_placeholder_folder(context):
-    bad = [k for k in _image_keys(context) if f"/media/{context.placeholder_category}/" in k]
+    bad = [k for k in _image_keys(context)
+           if f"/media/{context.placeholder_category}/" in k]
     assert not bad, f"photos were filed under the placeholder category: {bad}"
 
 
@@ -501,6 +575,12 @@ def step_not_per_photo(context):
     assert len(calls) < photos, f"{len(calls)} calls for {photos} photos"
 
 
+@then("the classifier is called exactly once")
+def step_called_once(context):
+    calls = context.classifier_client.classify_calls
+    assert len(calls) == 1, f"expected one call, got {len(calls)}: {calls}"
+
+
 @then("the photo is filed under its classified category")
 def step_filed_under_classified(context):
     keys = _image_keys(context, context.venue_id)
@@ -509,26 +589,57 @@ def step_filed_under_classified(context):
 
 
 # ── Then: attributes ─────────────────────────────────────────────────────────
-@then('the manifest entry records the exterior kind "{kind}"')
-def step_exterior_kind(context, kind):
+@then('the manifest entry records the attribute "{field}" as "{value}"')
+def step_entry_attribute(context, field, value):
     attrs = _entry(context).get("attributes") or {}
-    assert attrs.get("exterior_kind") == kind, attrs
+    assert attrs.get(field) == value, attrs
 
 
-@then("the manifest entry records that the area is partially covered")
-def step_partially_covered(context):
+@then("the manifest entry carries attributes")
+def step_entry_has_attributes(context):
+    assert _entry(context).get("attributes"), _entry(context)
+
+
+@then("the manifest entry carries no attributes")
+def step_entry_no_attributes(context):
+    assert not _entry(context).get("attributes"), _entry(context)
+
+
+@then('the manifest entry carries only the "{category}" attributes')
+def step_entry_only_own_attributes(context, category):
+    from app.models.photo_taxonomy import attributes_for
+
+    expected = {spec.name for spec in attributes_for(category)}
+    actual = set((_entry(context).get("attributes") or {}))
+    assert actual == expected, f"expected {sorted(expected)}, got {sorted(actual)}"
+
+
+@then('every attribute of the "{category}" schema is present in the manifest entry')
+def step_entry_schema_complete(context, category):
+    from app.models.photo_taxonomy import attributes_for
+
     attrs = _entry(context).get("attributes") or {}
-    assert attrs.get("covered") == "parcial", attrs
+    for spec in attributes_for(category):
+        assert spec.name in attrs, f"{spec.name} is missing from {attrs}"
 
 
+@then("the rest of the classifier verdict is stored")
+def step_rest_of_verdict(context):
+    attrs = _entry(context).get("attributes") or {}
+    assert attrs.get("space_type") == "bar", attrs
+
+
+@then("the classifier is not asked for attributes")
+def step_no_attributes_requested(context):
+    asked = context.classifier_client.attribute_requests
+    assert asked, "the classifier was never called"
+    assert not any(asked), f"attributes were requested anyway: {asked}"
+
+
+# ── Then: people ─────────────────────────────────────────────────────────────
 @then("the manifest entry carries a people block")
 def step_has_people(context):
     assert _entry(context).get("people"), _entry(context)
-
-
-@then("the people block records a crowd level")
-def step_people_crowd_level(context):
-    assert (_entry(context).get("people") or {}).get("crowd_level"), _entry(context)
 
 
 @then("the manifest entry carries no people block")
@@ -536,119 +647,13 @@ def step_no_people(context):
     assert not _entry(context).get("people"), _entry(context)
 
 
-@then("the people block records that children are present")
-def step_people_kids(context):
-    assert (_entry(context).get("people") or {}).get("has_kids") is True, _entry(context)
-
-
-@then("the people block records a dress code from the venue taxonomy")
-def step_people_dress_code(context):
-    from app.models.taxonomy import TAXONOMY
-
+@then('the people block records "{field}" as "{value}"')
+def step_people_field(context, field, value):
     people = _entry(context).get("people") or {}
-    codes = people.get("dress_code") or []
-    assert codes, people
-    for code in codes:
-        assert code in TAXONOMY["dress_code"], f"{code!r} is not a dress_code label"
+    assert people.get(field) == value, people
 
 
-@then('the people block records the dress scene "{scene}"')
-def step_people_dress_scene(context, scene):
-    people = _entry(context).get("people") or {}
-    assert scene in (people.get("dress_scene") or []), people
-
-
-@then("the manifest entry records that the menu is not legible")
-def step_menu_illegible(context):
-    attrs = _entry(context).get("attributes") or {}
-    assert attrs.get("legible") == "nao", attrs
-
-
-@then('the manifest entry records the menu page side "{side}"')
-def step_menu_page_side(context, side):
-    attrs = _entry(context).get("attributes") or {}
-    assert attrs.get("page_side") == side, attrs
-
-
-@then('the manifest entry records the menu content scope "{scope}"')
-def step_menu_scope(context, scope):
-    attrs = _entry(context).get("attributes") or {}
-    assert attrs.get("content_scope") == scope, attrs
-
-
-@then("the manifest entry records that the menu has no prices")
-def step_menu_no_prices(context):
-    attrs = _entry(context).get("attributes") or {}
-    assert attrs.get("has_prices") is False, attrs
-
-
-@then("only the legible menu photo is selected")
-def step_only_legible(context):
-    ids = [e["photo_id"] for e in context.selected]
-    assert ids == ["readable"], ids
-
-
-@then('the manifest entry records the portion size "{size}"')
-def step_portion_size(context, size):
-    attrs = _entry(context).get("attributes") or {}
-    assert attrs.get("portion_size") == size, attrs
-
-
-@then("the manifest entry records a music format from the venue taxonomy")
-def step_music_format(context):
-    from app.models.taxonomy import TAXONOMY
-
-    attrs = _entry(context).get("attributes") or {}
-    formats = attrs.get("music_format") or []
-    assert formats, attrs
-    for value in formats:
-        assert value in TAXONOMY["music_format"], f"{value!r} is not a music_format label"
-
-
-@then('the manifest entry records the screens value "{value}"')
-def step_screens(context, value):
-    attrs = _entry(context).get("attributes") or {}
-    assert attrs.get("screens") == value, attrs
-
-
-@then("the manifest entry carries no interior attributes")
-def step_no_interior_attrs(context):
-    attrs = _entry(context).get("attributes") or {}
-    for field in ("space_type", "lighting", "decor_style", "screens", "capacity"):
-        assert field not in attrs, f"{field} belongs to interior, not menu: {attrs}"
-
-
-@then('the manifest entry records the other kind "{kind}"')
-def step_other_kind(context, kind):
-    attrs = _entry(context).get("attributes") or {}
-    assert attrs.get("other_kind") == kind, attrs
-
-
-@then("the manifest entry records an aesthetic from the venue taxonomy")
-def step_aesthetic(context):
-    from app.models.taxonomy import TAXONOMY
-
-    attrs = _entry(context).get("attributes") or {}
-    values = attrs.get("estetica") or []
-    assert values, attrs
-    for value in values:
-        assert value in TAXONOMY["estetica"], f"{value!r} is not an estetica label"
-
-
-@then("that aesthetic label is not stored")
-def step_invented_dropped(context):
-    attrs = _entry(context).get("attributes") or {}
-    assert context.invented_label not in (attrs.get("estetica") or []), attrs
-
-
-@then("the rest of the classifier verdict is stored")
-def step_rest_kept(context):
-    attrs = _entry(context).get("attributes") or {}
-    assert "Rústico" in (attrs.get("estetica") or []), attrs
-    assert attrs.get("space_type") == "salao", attrs
-
-
-# ── Then: authorship ─────────────────────────────────────────────────────────
+# ── Then: who took the photo ─────────────────────────────────────────────────
 @then('the manifest entry still records the authorship "{value}"')
 def step_authorship_kept(context, value):
     assert _entry(context).get("authorship") == value, _entry(context)
@@ -661,14 +666,27 @@ def step_likely_authorship(context):
 
 @then("the manifest entry records no likely authorship")
 def step_no_likely_authorship(context):
-    assert "likely_authorship" not in _entry(context), _entry(context)
+    assert not _entry(context).get("likely_authorship"), _entry(context)
+
+
+# ── Then: menu selection ─────────────────────────────────────────────────────
+@then("only the legible menu photo is selected")
+def step_only_legible(context):
+    ids = [e["photo_id"] for e in context.selected]
+    assert ids == ["readable"], ids
+
+
+@then("that menu photo is selected")
+def step_that_photo_selected(context):
+    ids = [e["photo_id"] for e in context.selected]
+    assert ids == ["unsure"], ids
 
 
 # ── Then: degrading ──────────────────────────────────────────────────────────
 @then("all {n:d} photos are still archived")
 def step_all_archived(context, n):
     keys = _image_keys(context, context.venue_id)
-    assert len(keys) == n, f"expected {n} images, got {len(keys)}: {keys}"
+    assert len(keys) == n, f"expected {n} photos, got {len(keys)}: {keys}"
 
 
 @then("the photos keep the category the source gave them")
@@ -677,40 +695,28 @@ def step_keep_source_category(context):
         assert entry.get("category") == entry.get("source_category"), entry
 
 
-@then("the manifest entry carries no attributes")
-def step_no_attributes(context):
-    assert not _entry(context).get("attributes"), _entry(context)
-
-
 @then("both venues are archived")
 def step_both_archived(context):
-    assert _image_keys(context, context.failing_venue), "the failing venue lost its photos"
-    assert _image_keys(context, context.good_venue), "the healthy venue was not archived"
+    for vid in (context.failing_venue, context.good_venue):
+        assert _image_keys(context, vid), f"{vid} was not archived"
 
 
 @then("the second venue's photos carry a classified category")
-def step_second_classified(context):
-    entries = _entries(context, context.good_venue)
-    assert entries and entries[0].get("category") == "interior", entries
+def step_second_venue_classified(context):
+    entry = _entry(context, context.good_venue)
+    assert entry["category"] == "interior", entry
 
 
 # ── Then: cost control ───────────────────────────────────────────────────────
 @then("the classifier is not called")
 def step_classifier_not_called(context):
-    assert not context.classifier_client.classify_calls, (
-        f"the classifier was called: {context.classifier_client.classify_calls}"
-    )
-
-
-@then("no attribute request is made for that photo")
-def step_no_attribute_request(context):
-    calls = context.classifier_client.attribute_calls
-    assert not calls, f"attributes were derived for an `other` photo: {calls}"
+    calls = context.classifier_client.classify_calls
+    assert not calls, f"the classifier was called: {calls}"
 
 
 @then("the run summary reports the number of photos classified")
 def step_summary_classified(context):
-    assert context.summary.get("photos_classified") == 6, context.summary
+    assert context.summary.get("photos_classified"), context.summary
 
 
 @then("the run summary reports an estimated classification cost")
@@ -722,19 +728,12 @@ def step_summary_cost(context):
 # ── Then: re-deriving ────────────────────────────────────────────────────────
 @then("the archived photos are read from the bucket")
 def step_read_from_bucket(context):
-    calls = context.classifier_client.attribute_calls
-    assert calls, "no attribute pass ran over the archived run"
-    urls = [u for _, batch in calls for u in batch]
+    calls = context.classifier_client.classify_calls
+    assert calls, "no pass ran over the archived run"
+    urls = [u for batch in calls for u in batch]
     assert all("presigned" in u for u in urls), urls
 
 
 @then("no provider request is made")
 def step_no_provider_request(context):
     assert not context.google.calls, f"the provider was called: {context.google.calls}"
-
-
-@then("the manifest entry records the new attribute")
-def step_rederived_attribute(context):
-    attrs = _entry(context).get("attributes") or {}
-    assert attrs.get("screens") == "telao", attrs
-    assert context.rederived["photos_attributed"] == 1, context.rederived

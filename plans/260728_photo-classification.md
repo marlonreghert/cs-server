@@ -18,6 +18,35 @@ whether that terrace has a roof when it rains.
 not a parallel vocabulary that has to be translated later. Everything else is a
 photo-native fact the taxonomy has no home for.
 
+## Revised after review (2026-07-28)
+
+Three decisions changed after this plan was written; the sections below are kept
+for the reasoning that still holds, but **`app/models/photo_taxonomy.py` is the
+source of truth for the vocabulary.**
+
+1. **Generic and coarse, not precise.** A model reading a thumbnail cannot
+   reliably tell a caipirinha from a batida, and a label it gets wrong is worse
+   than one it never emitted. Every attribute list was cut to 3-5 values plus
+   `other`, the values are English, and the schema went from ~45 fields to ~18.
+2. **One pass, not two.** With a schema this small a focused per-category prompt
+   buys little, and two passes send every image twice — image tokens are the
+   bill. Category, attributes and the people block now come back from one call,
+   halving the cost to ~$1 for the catalogue.
+3. **No taxonomy-aligned `[T]` fields.** `estetica`, `publico`, `dress_code`,
+   `clima_social` were dropped and `music_format` became a coarse
+   `music_setup`. The photo vocabulary no longer speaks the venue vocabulary;
+   `vibe_classifier` gets a mapping layer if it ever consumes photo labels.
+
+And one rule this plan did not have:
+
+4. **Per-attribute confidence.** The model reports a confidence for each
+   attribute, not one for the photo. Below `photo_attribute_confidence` (0.8,
+   deliberately higher than the category's 0.6) the value becomes
+   `not_classified` on its own, without dragging its neighbours down.
+   `not_classified` is **stored**, not omitted: it means "asked, could not
+   tell", which an absent key does not say.
+
+
 ## Non-goals
 
 - **Replacing the vibe classifier.** `vibe_classifier_service` derives the
@@ -87,101 +116,41 @@ when people are the subject. People at the edges of a room shot leave it
 `interior` — but the people attributes are still extracted from it (see
 *The people block*).
 
-## Attributes, per category
+## Attributes, per category — SUPERSEDED, see the revision above
 
-Cardinality follows one rule: **one value when a photo can only be one thing; an
-array when it can genuinely show several.** Arrays extend without a migration.
+The tables that were here listed ~45 fields in pt-BR, several of them aligned to
+`app/models/taxonomy.py`. What shipped is coarser and generic. Current schema,
+generated from `app/models/photo_taxonomy.py`:
 
-Rows marked **[T]** emit the exact labels from `app/models/taxonomy.py` and are
-validated by the existing `validate_category_labels`.
+| Category | Attributes |
+|---|---|
+| *(every photo)* | `time_of_day`: day · night |
+| `menu` | `legible`: yes · partial · no — **gates menu extraction**<br>`has_prices`: yes · no — gates the price tier<br>`covers`: food · drinks · both |
+| `food_drinks` | `subject`: food · drinks · both<br>`drink_type`: beer · cocktails · wine · non_alcoholic · other<br>`food_type`: snacks · main_dish · dessert · other<br>`portion`: individual · shareable |
+| `interior` | `space_type`: dining · bar · dance_floor · stage · other<br>`lighting`: bright · dim · dark<br>`has_screens`: yes · no<br>`music_setup`: live_music · dj · none_visible |
+| `exterior` | `exterior_kind`: facade · open_air_area · other<br>`covered`: covered · partial · uncovered<br>`view`: sea · city · nature · none |
+| `crowd` | the people block, below |
+| `other` | `other_kind`: logo_art · event_flyer · document · irrelevant |
 
-### menu
+**The people block** — `crowd_level`: empty · some · busy · packed ·
+`has_kids`: yes · no · `group_type`: couples · friends · families · mixed ·
+`activity`: dancing · eating_drinking · watching · other.
 
-| Field | Card | Values | Why |
-|---|---|---|---|
-| `legible` | one | `sim` · `parcial` · `nao` | **Gates menu extraction** — stop paying OCR for blurred menus |
-| `medium` | one | `impresso` · `lousa` · `placa_parede` · `tela_digital` · `qr_code` · `livreto` | a QR-code photo has no text to extract; a lousa means daily specials |
-| `page_side` | one | `frente` · `verso` · `ambos` · `pagina_interna` | so extraction knows whether it has the whole menu |
-| `content_scope` | one | `so_comida` · `so_bebida` · `ambos` | a drinks-only board is a bar signal |
-| `sections` | array | `entradas` · `petiscos` · `principais` · `sobremesas` · `cervejas` · `drinks` · `vinhos` · `cafe` · `combos` · `infantil` | `infantil` is direct **`familia`** evidence |
-| `has_prices` | one (bool) | | gates the price-tier pipeline |
-| `is_promo` | one (bool) | | happy hour, rodízio, chopp em dobro → `intencao: Happy hour` |
-| `language` | one | `pt` · `en` · `es` · `multi` | a bilingual menu means tourist-facing → `publico: Turistas` |
+The `crowd` **category** means people are the subject. The block is extracted
+from **any** photo with visible people, whatever its category — otherwise every
+person in every interior shot is thrown away, and `has_kids`, the one thing
+`familia` needs, is the field most likely to appear in a photo filed as
+something else. A photo with nobody in it has no people block at all, which is
+different from one whose people could not be read.
 
-### food_drinks
+Every attribute also accepts `not_classified`, and every field of the category's
+schema is written on every classified photo. Cardinality is single-valued
+throughout: an array invites the model to hedge by listing everything plausible,
+which is the imprecision this schema exists to avoid.
 
-| Field | Card | Values | Why |
-|---|---|---|---|
-| `subject` | one | `comida` · `bebida` · `ambos` | |
-| `dish_type` | array | `petisco` · `porcao` · `prato_individual` · `sanduiche` · `pizza` · `frutos_do_mar` · `carne_churrasco` · `massa` · `japonesa` · `sobremesa` · `regional` · `veg` | |
-| `drink_type` | array | `cerveja_chopp` · `coquetel` · `caipirinha` · `vinho` · `destilado` · `sem_alcool` · `cafe` · `balde_combo` | |
-| `portion_size` | one | `individual` · `para_dividir` · `combo_balde` | sharing plates → `intencao: Sentar com a galera` |
-| `plating` | one | `simples` · `caprichado` · `autoral` · `embalado` | `autoral` → `jantar` / `intencao: Comer bem` |
-| `setting` | one | `mesa_posta` · `balcao` · `close_up` · `com_pessoas` | a laid table means table service, not a counter |
-| `dietary_labels` | array | `vegetariano` · `vegano` · `sem_gluten` · `infantil` | only when visibly labelled |
-
-### interior
-
-| Field | Card | Values | Why |
-|---|---|---|---|
-| `space_type` | one | `salao` · `balcao_bar` · `pista_danca` · `palco` · `lounge` · `sala_jantar` · `entrada` · `mezanino_vip` · `cozinha_aberta` · `banheiro` | `pista_danca` is the strongest `role_agitado` signal available |
-| `estetica` **[T]** | array | Instagramável · Minimalista · Retrô · Underground · Neon · Intimista · Sofisticado · Moderno · Rústico · Vista bonita · Nature vibe | straight into the vibe profile |
-| `lighting` | one | `natural` · `quente_baixa` · `neon_colorida` · `escura_balada` · `fluorescente` | `quente_baixa` is what `date` and `clima_social: Intimista` are made of |
-| `seating_type` | array | `mesas` · `banquetas_balcao` · `sofas` · `mesas_altas` · `bancos_comunitarios` · `em_pe` · `puffs` | `em_pe` ≈ balada; `bancos_comunitarios` ≈ resenha |
-| `music_format` **[T]** | array | DJ · Som ao vivo · Banda ao vivo · Roda de samba · Karaokê · Playlist ambiente · Open mic · Instrumental | a stage, a DJ booth, a karaoke screen — **`music_format` has no photo evidence today** |
-| `screens` | one | `telao` · `tvs` · `nenhuma` | *"tem telão pro jogo?"* is one of the most-asked questions about a Brazilian bar and deserves its own field |
-| `capacity` | one | `intimo` · `medio` · `amplo` · `multiplos_ambientes` | `multiplos_ambientes` is a real thing people ask about |
-
-### exterior
-
-| Field | Card | Values | Why |
-|---|---|---|---|
-| `exterior_kind` | one | `fachada` · `area_externa` · `rooftop` · `quintal_jardim` · `calcada` · `pe_na_areia` · `piscina` · `estacionamento` | separates *how do I find the door* from *is there an open-air area* |
-| `covered` | one | `descoberto` · `parcial` · `coberto` | the rain question, which nothing else answers |
-| `view` | array | `mar` · `cidade` · `natureza` · `rio` · `rua` · `sem_vista` | maps to `estetica: Beira-mar / Vista bonita` |
-| `estetica` **[T]** | array | (as above, plus `Ao ar livre`, `Beira-mar`) | |
-| `seating_type` | array | (same set as interior) | |
-| `venue_name_legible` | one (bool) | | a facade with a readable name both confirms we have the right venue and is the photo to show for *how do I find it* |
-| `time_of_day` | one | `dia` · `entardecer` · `noite` | day and night are different venues |
-
-### crowd — *and* the people block
-
-The `crowd` **category** means people are the subject. The `people` **block** is
-extracted from **any** photo with visible people, whatever its category —
-otherwise every person in every interior shot is thrown away, and `has_kids`,
-the one thing `familia` needs, is the field most likely to appear in a photo
-filed as something else.
-
-| Field | Card | Values | Why |
-|---|---|---|---|
-| `crowd_level` | one | `vazio` · `poucas_pessoas` · `movimentado` · `cheio` · `lotado` | corroborates busyness with a second, independent source |
-| `publico` **[T]** | array | Galera jovem · Galera 30+ · Galera 50+ · Família · Casais · Turistas · Alternativo · Gótico · LGBTQ+ · Artistas / criativos · Público misto | this **is** the age-range and scene read, in the vocabulary the product already speaks |
-| `has_kids` | one (bool) | | **the `familia` unlock.** Kept as its own boolean rather than trusting `publico: Família`, because it is a fact, not an impression |
-| `dress_code` **[T]** | array | Casual · Arrumadinho · Esporte fino · Praia · Alternativo · Sem dress code | the generic read |
-| `dress_scene` | array | `rock_metal` · `rap_hip_hop` · `funk_baile` · `sertanejo` · `alternativo_indie` · `queer` · `praia` · `esportivo` · `fantasia_tematico` | the specific read — subculture, which `dress_code` is too coarse for and which is exactly what people pick a night out by |
-| `group_type` | array | `casais` · `amigos` · `familias` · `sozinhos` · `grupo_grande` · `turistas` | `casais` → `date`; `grupo_grande` → `resenha` |
-| `activity` | array | `dancando` · `bebendo` · `comendo` · `conversando` · `assistindo_show` · `assistindo_jogo` · `karaoke` · `fila` | `dancando` is the single best `role_agitado` signal; `fila` means the place is hot |
-| `clima_social` **[T]** | one | Intimista · Social · Animado · Agitado · Fervendo · Tranquilo | direct to the vibe profile |
-| `time_of_day` | one | `dia` · `entardecer` · `noite` | a Tuesday-afternoon crowd is not a Saturday-night crowd |
-
-### other
-
-| Field | Card | Values | Why |
-|---|---|---|---|
-| `other_kind` | one | `logo_arte` · `flyer_evento` · `documento_aviso` · `pessoa_isolada` · `irrelevante` · `ilegivel` | knowing **why** it is `other` lets us reclassify later without re-billing |
-
-`flyer_evento` is the likeliest future promotion out of `other`: a flyer carries
-the event, the DJ, the date and the cover charge — a whole extraction pipeline
-of its own. Naming it now means we can find those photos when we want them.
-
-### Shared, on every photo
-
-| Field | Card | Values | Why |
-|---|---|---|---|
-| `category` | one | the six above | |
-| `confidence` | one | 0–1 | below threshold → `other` |
-| `quality` | one | `boa` · `escura` · `borrada` · `baixa_resolucao` | **which photo do we show in the app.** Feeds directly into the in-flight `venue-list-hero-photo` work — an `interior`, `quality: boa`, `crowd_level: movimentado`, `lighting: quente_baixa` photo is a good hero, and now that is a query |
-| `people` | block | the crowd block above, when people are visible | |
+Top-level on the entry, beside the attributes: `category`, `confidence`,
+`quality` (good · poor · not_classified), `source_category`, `authorship`,
+`likely_authorship`.
 
 ## Who took the photo
 
@@ -229,21 +198,25 @@ cardinality, the allowed values, and — for **[T]** fields — the
 `app/models/taxonomy.py` key to defer to, so the vocabulary lives in exactly one
 place.
 
-### 2. Two passes, not one
+### 2. One pass — SUPERSEDED, see the revision above
 
-- **Pass 1 — categorize.** A small prompt, one label + confidence + quality per
-  image, batched. Runs **before storing** so photos land in the right folder with
-  no second write and no object copy.
-- **Pass 2 — attributes.** Photos grouped by category, one focused prompt per
-  category. `other` is skipped entirely.
+This plan called for two passes: categorize, then a focused per-category
+attribute prompt. What shipped is **one call** returning the category, that
+category's attributes and the people block together.
 
-Two passes rather than one six-schema mega-prompt because a focused prompt is
-measurably more accurate, `other` costs nothing in pass 2, and — the operational
-reason — **adding a field later re-runs one category, not the catalogue.** Since
-the writer role can now `GetObject` on `retrieved/*`, that re-run reads archived
-photos from S3 and never re-pays the provider. The classifier therefore takes a
-list of image urls and does not care whether they are provider CDN links (live)
-or presigned S3 keys (backfill).
+The argument for two was that a focused prompt is measurably more accurate than
+one carrying every schema at once. That holds for the ~45-field schema this plan
+described; it does not hold for the ~18-field coarse one that shipped, and two
+passes send every image twice when image tokens are the bill. `other` costing
+nothing in pass 2 stopped mattering once `other_kind` moved into the single
+verdict.
+
+What survives: the classifier takes a list of image urls and does not care
+whether they are provider CDN links (live) or presigned S3 keys (backfill).
+Since the writer role can `GetObject` on `retrieved/*`, extending the schema
+re-runs over archived photos and never re-pays the provider — that re-run
+**discards the category the model returns**, because the category is in the S3
+key of an object that already exists.
 
 ### 3. Client
 
@@ -264,11 +237,11 @@ may force it off.
 Classification is an **enhancement, not a dependency.** If the model fails, is
 disabled, or returns nothing, the photo keeps its source category and is still
 archived. Losing photos we already paid to fetch because a classifier was
-unavailable is the wrong trade. Pass 2 failing leaves a categorized photo with no
-attributes — still useful, and re-runnable from S3.
+unavailable is the wrong trade.
 
-Low confidence files as `other` rather than guessing. A wrong label is worse than
-an honest unknown, because everything downstream will trust it.
+Low confidence files as `other` rather than guessing, and a low-confidence
+ATTRIBUTE becomes `not_classified` on its own. A wrong label is worse than an
+honest unknown, because everything downstream will trust it.
 
 ## Data, config, and API impact
 
@@ -277,12 +250,15 @@ an honest unknown, because everything downstream will trust it.
   name.
 - **New settings:** `photo_classification_enabled` (true),
   `photo_classification_model` (`gpt-4o-mini`), `photo_classification_confidence`
-  (0.6, matching the menu filter), `photo_classification_batch_size` (10),
-  `photo_attributes_enabled` (true — pass 2, separately switchable).
-- **Cost:** ~**$2 for the full 17k-photo catalogue**, of which pass 2 is roughly
-  three quarters (85 input tokens per image at low detail; the attribute JSON is
-  what costs). That is one twentieth of a single month of SearchApi's $40 plan,
-  and it is a one-off rather than a subscription. Metered, not assumed.
+  (0.6, the CATEGORY bar, matching the menu filter),
+  `photo_attribute_confidence` (0.8, the per-ATTRIBUTE bar — higher because a
+  wrong category misfiles a photo while a wrong attribute is read as a fact),
+  `photo_classification_batch_size` (10), `photo_attributes_enabled` (true — the
+  attribute half of the call, separately switchable).
+- **Cost:** ~**$1 for the full 17k-photo catalogue** now that each photo is sent
+  once (85 input tokens per image at low detail; the attribute JSON is what
+  costs). One fortieth of a single month of SearchApi's $40 plan, and a one-off
+  rather than a subscription. Metered, not assumed.
 
 ## Error handling and observability
 
@@ -292,7 +268,8 @@ an honest unknown, because everything downstream will trust it.
 | A label outside the vocabulary | dropped; the rest of the verdict is kept |
 | Confidence below threshold | `other` |
 | Malformed JSON | that batch falls back; logged with the venue id |
-| Pass 2 fails | photo stays categorized, attributes absent |
+| An attribute below the confidence bar | that attribute is `not_classified`; its neighbours are unaffected |
+| An attribute with no confidence reported | `not_classified` — nothing to check it against |
 | Classification disabled | no call, no cost |
 | Source provides real categories | not called at all |
 
@@ -319,7 +296,7 @@ Scenarios:
 - A low-confidence verdict files the photo as `other` with an `other_kind`.
 - An invented label is dropped and the rest of the verdict survives.
 - A model failure leaves every photo archived under its source category.
-- Pass 2 failing leaves the photo categorized with no attributes.
+- A verdict with no attributes still records the whole schema as `not_classified`.
 - A source that provides real categories is never classified.
 - Classification and attributes can each be disabled per run, and then cost
   nothing.
@@ -338,7 +315,7 @@ Pytest unit tests:
 - `likely_authorship` is written only for `unknown`, and `authorship` is never
   mutated.
 - Batching: batch size respected, remainder batch, empty input, `other` skipped
-  in pass 2.
+  when attributes are switched off.
 - Each failure mode maps to its documented behavior.
 - Cost estimate arithmetic.
 - The generated prompts name every category, field, and allowed value, so a
