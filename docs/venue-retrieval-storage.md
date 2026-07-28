@@ -117,9 +117,15 @@ catalog.** It is asked of the most recent *existing* partition instead.
 
 ### Other spend controls
 
-- `max_venues`, `max_photos_per_venue` — always applied; defaults small
-  (50 × 5 = 250 upper-bound requests, inside Google's free tier)
-- `max_photos_per_category` — optional second cap, per category
+- `max_venues` — always applied
+- `max_photos_per_venue` — the **total** for the venue, across every category.
+  A category-aware source returns up to its limit for EACH category, so without
+  this total cap the count silently multiplies by however many categories are
+  ticked. Defaults small (50 × 5 = 250 upper-bound requests, inside Google's
+  free tier).
+- `max_photos_per_category` — optional cap **within** each category. It also
+  bounds the fetch, so photos the venue cap would discard are never downloaded.
+  The venue cap always wins.
 - `dry_run` — selection + estimate, **zero calls, nothing written**
 - **No cron.** Operator-triggered only, so steady-state spend is $0.
 

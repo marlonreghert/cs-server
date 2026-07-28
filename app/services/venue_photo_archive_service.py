@@ -941,8 +941,14 @@ class VenuePhotoArchiveService:
 
         entries = []
         per_category = cfg.get("max_photos_per_category")
+        per_venue = cfg["max_photos_per_venue"]
         taken: dict[str, int] = {}
         for photo in photos or []:
+            # "Photos per venue" must mean per VENUE. A category-aware source
+            # returns up to its own limit for EACH category, so without this the
+            # total silently multiplied by the number of categories chosen.
+            if len(entries) >= per_venue:
+                break
             category = photo.get("category")
             if per_category:
                 # Ordering is Google's own ranking, so taking the first N of a
