@@ -201,6 +201,20 @@ returns no date leaves the fields null rather than inventing one.
 SerpApi exposes richer per-photo metadata behind a `photo_meta` call **per
 photo** — one billed search each, so not worth it for a date Apify gives free.
 
+**Joining the sources.** A photo id is derived from the URL **token**, not the
+whole URL: `lh3.googleusercontent.com/...<token>=<size spec>`, where the size
+spec varies by caller (the extractor returns `=w1920-h1080-k-no`, the photos
+engine `=s0`, for the identical image). So one image gets **one id whatever
+fetched it**, and running both sources over a venue lets them be joined on that
+id — SearchApi supplies the category, Apify the upload date and author. Verified
+on real data: two photos of one venue matched across sources once the suffix was
+ignored.
+
+Nothing else dates a SearchApi photo. The CDN is a dead end — checked, and
+`lh3.googleusercontent.com` returns no `Last-Modified` and `ETag: "v0"`. The
+`latest` category is the only in-band recency signal: membership means Google
+considers it a recent upload.
+
 ---
 
 ## 5. IAM — the sharp edges
