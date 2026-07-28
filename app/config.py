@@ -280,6 +280,11 @@ class Settings(BaseSettings):
     instagram_judge_enabled: bool = False
     instagram_judge_model: str = "gpt-4o-mini"
     instagram_judge_max_venue_photos: int = 3
+
+    # Pipeline run registry: how many recent runs per pipeline stay selectable
+    # in Grafana. This is the cardinality ceiling — series = pipelines x size.
+    pipeline_run_registry_enabled: bool = True
+    pipeline_run_registry_size: int = 10
     instagram_not_found_cache_ttl_days: int = 7
 
     # Instagram Posts Scraping (feeds post captions into vibe classifier)

@@ -1,4 +1,3 @@
-@wip
 Feature: Give every pipeline run an identity an operator can select
   As the platform operator
   I must be able to tell one run of a pipeline from another, in metrics and in
