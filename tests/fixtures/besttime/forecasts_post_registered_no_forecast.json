@@ -1,0 +1,27 @@
+{
+  "probe": "E_registered_no_forecast",
+  "status": "UNVERIFIED_PLACEHOLDER",
+  "request": {
+    "method": "POST",
+    "url": "https://besttime.app/api/v1/forecasts",
+    "params": {
+      "api_key_private": "<redacted>",
+      "venue_name": "<placeholder — not yet captured>",
+      "venue_address": "<placeholder — not yet captured>"
+    },
+    "body": null
+  },
+  "response": {
+    "status_code": 400,
+    "headers": {},
+    "body": {
+      "status": "Error",
+      "message": "Could not generate a forecast for this venue: not enough foot traffic data collected yet"
+    }
+  },
+  "context": {
+    "expected_outcome": "HTTP 4xx with status=Error on POST /forecasts, but the venue nonetheless appears in GET /venues (the account inventory) with venue_forecasted=false. This is the assumption plans/260728_add-venue-without-forecast.md's reconcile depends on.",
+    "not_yet_probed": true,
+    "note": "This response body is a PLACEHOLDER guess, NOT a captured BestTime response -- BestTime's real wording for a 'registered but unforecastable' rejection is unknown until the supervised probe runs (see the plan's Open Questions). Run the probe exactly once, then replace this file's response.body.message (and status_code/headers if they differ) with the real captured values, and flip the Probe E row in PROBE_MANIFEST.md to VERIFIED. Every BDD scenario and unit test that needs a 'BestTime rejects the create' body loads this file's message, so swapping it here is the only change needed -- no test code should hardcode this wording."
+  }
+}

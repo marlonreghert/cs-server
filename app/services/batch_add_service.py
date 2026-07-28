@@ -62,11 +62,14 @@ def _classify(outcome: AddVenueOutcome) -> dict:
         "match_reason": None,
     }
     if code == 201:
-        res["outcome"] = (
-            "created_recovered_timeout"
-            if body.get("recovered_from_timeout")
-            else "created"
-        )
+        if body.get("recovered_from_timeout"):
+            res["outcome"] = "created_recovered_timeout"
+        elif status == "created_without_forecast":
+            # BestTime registered the venue but built it no forecast; a
+            # reconcile-hit success, not a rejection (not in _STOP_OUTCOMES).
+            res["outcome"] = "created_without_forecast"
+        else:
+            res["outcome"] = "created"
     elif code == 200 and status == "already_exists":
         res["outcome"] = "already_exists"
     elif code == 200 and status == "matched_via_geo_fallback":

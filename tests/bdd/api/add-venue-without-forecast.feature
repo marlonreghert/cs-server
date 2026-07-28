@@ -1,4 +1,3 @@
-@wip
 Feature: Add a venue BestTime registers but cannot forecast
 
   An operator must be able to catalog a venue that exists on BestTime's side but

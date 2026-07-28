@@ -33,6 +33,9 @@ def _clean_batch_lock():
     (AddVenueOutcome(201, {"status": "created", "venue_id": "v1"}), "created"),
     (AddVenueOutcome(201, {"status": "created", "recovered_from_timeout": True,
                            "venue_id": "v2"}), "created_recovered_timeout"),
+    (AddVenueOutcome(201, {"status": "created_without_forecast",
+                           "source": "besttime_inventory", "venue_id": "v1b"}),
+     "created_without_forecast"),
     (AddVenueOutcome(200, {"status": "already_exists", "venue_id": "v3"}),
      "already_exists"),
     (AddVenueOutcome(200, {"status": "matched_via_geo_fallback",
@@ -60,6 +63,12 @@ def test_classify_geo_link_carries_reason():
                                         "match_reason": "exact", "venue_id": "vX"}))
     assert r["newly_linked"] is True and r["match_reason"] == "exact"
     assert r["venue_id"] == "vX"
+
+
+def test_created_without_forecast_is_not_a_stop_outcome():
+    # A reconcile-hit success (plans/260728_add-venue-without-forecast.md)
+    # must never end a batch job early like a spend-stopping rejection.
+    assert "created_without_forecast" not in bas._STOP_OUTCOMES
 
 
 # ── service harness ──────────────────────────────────────────────────────────
@@ -202,6 +211,28 @@ async def test_quota_exhausted_stops_the_batch():
     assert job["processed"] == 2  # C never attempted
     assert handler.calls == ["A", "B"]
     assert "quota_exhausted" in job["stopped_reason"]
+
+
+@pytest.mark.asyncio
+async def test_created_without_forecast_row_counts_as_success_and_does_not_stop():
+    handler = _Handler({
+        "A": AddVenueOutcome(201, {"status": "created", "venue_id": "vA"}),
+        "B": AddVenueOutcome(201, {"status": "created_without_forecast",
+                                   "source": "besttime_inventory", "venue_id": "vB"}),
+        "C": AddVenueOutcome(201, {"status": "created", "venue_id": "vC"}),
+    })
+    google = _Google({"A": (-9.6, -35.7), "B": (-9.61, -35.71), "C": (-9.62, -35.72)})
+    svc = _service(handler, google)
+    req = BatchAddRequest(venues=[
+        {"venue_name": "A", "venue_address": "a"},
+        {"venue_name": "B", "venue_address": "b"},
+        {"venue_name": "C", "venue_address": "c"},
+    ])
+    job = await _run_to_completion(svc, req)
+    assert job["status"] == "done"
+    assert job["processed"] == 3  # C was NOT skipped -- not a stop outcome
+    assert job["summary"] == {"created": 2, "created_without_forecast": 1}
+    assert handler.calls == ["A", "B", "C"]
 
 
 @pytest.mark.asyncio

@@ -508,6 +508,9 @@ class Container:
             # System of record for the geo-link undo path (created_at recency
             # guard + soft-delete; the projector then drops it from serving).
             rds_store=self.rds_store,
+            # Bounds the free account-inventory read the non-OK-create
+            # reconcile performs (plans/260728_add-venue-without-forecast.md).
+            inventory_cache_seconds=settings.add_venue_inventory_cache_seconds,
         )
 
         # Server-side batch venue-add: runs a curated list through the same

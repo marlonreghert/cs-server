@@ -856,12 +856,36 @@ VENUES_BY_PRICE_LEVEL_SOURCE = Gauge(
 ADD_VENUE_BY_ADDRESS_TOTAL = Counter(
     "add_venue_by_address_total",
     "Outcomes of POST /admin/venues/by-address",
-    ["result"],  # created | created_recovered_timeout | already_exists |
+    ["result"],  # created | created_recovered_timeout |
+                 # created_without_forecast | already_exists |
                  # matched_via_geo_fallback | quota_exhausted |
                  # besttime_monthly_cap | besttime_error |
                  # besttime_bad_response | besttime_rejected_no_geo_match |
                  # timeout_unconfirmed | validation_error |
                  # geo_link_undone | geo_link_undo_rejected
+)
+
+# Outcomes of the free BestTime account-inventory reconcile that runs after a
+# non-OK, non-monthly-cap POST /forecasts rejection, before the monthly slot
+# is released and before the geo fallback (plans/
+# 260728_add-venue-without-forecast.md). Distinct from INVENTORY_SYNC_*
+# below, which covers the monthly crawler's full-catalog sync, not this
+# per-add reconcile.
+ADD_VENUE_INVENTORY_RECONCILE_TOTAL = Counter(
+    "add_venue_inventory_reconcile_total",
+    "Outcomes of the free BestTime account-inventory reconcile attempted "
+    "after a non-OK, non-monthly-cap POST /forecasts rejection",
+    ["result"],  # hit | miss | error
+)
+
+# Whether that reconcile read was served from the in-process TTL cache
+# (add_venue_inventory_cache_seconds) or issued a fresh BestTime listing —
+# lets an operator see whether the cache is earning its latency.
+ADD_VENUE_INVENTORY_CACHE_TOTAL = Counter(
+    "add_venue_inventory_cache_total",
+    "Whether an account-inventory reconcile read was served from the "
+    "in-process cache or issued a fresh BestTime listing",
+    ["source"],  # cache | live
 )
 
 INVENTORY_SYNC_VENUES_TOTAL = Counter(

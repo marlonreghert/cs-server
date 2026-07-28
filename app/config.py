@@ -188,6 +188,20 @@ class Settings(BaseSettings):
     besttime_search_rate_per_hour: int = 300
     besttime_rate_max_wait_seconds: float = 75.0
 
+    # Bounds the free BestTime account-inventory read that AddVenueHandler's
+    # reconcile performs after a non-OK, non-monthly-cap POST /forecasts
+    # rejection (plans/260728_add-venue-without-forecast.md): BestTime may
+    # have registered the venue even though it could not build it a
+    # forecast, and the geo fallback's /venues/filter never returns an
+    # unforecastable venue. The reconcile listing is cached in-process for
+    # this many seconds so a batch of many rejected rows performs at most
+    # one full paged listing per window instead of one per row. <=0
+    # disables the cache (every reconcile reads live). Does NOT apply to
+    # the separate timeout-recovery reconcile (_recover_timed_out_create),
+    # which always reads live so its post-timeout grace sleep still
+    # observes a venue that just registered.
+    add_venue_inventory_cache_seconds: int = 300
+
     # Google Places API Configuration
     # Enrichment includes: vibe attributes, business status checks, permanently closed detection
     google_places_api_key: str = ""

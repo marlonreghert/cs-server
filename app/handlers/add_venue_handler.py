@@ -26,6 +26,8 @@ from app.dao.redis_venue_dao import RedisVenueDAO
 from app.dao.venue_row import venue_from_row
 from app.metrics import (
     ADD_VENUE_BY_ADDRESS_TOTAL,
+    ADD_VENUE_INVENTORY_CACHE_TOTAL,
+    ADD_VENUE_INVENTORY_RECONCILE_TOTAL,
     VENUE_MONTHLY_NEW_COUNT,
 )
 from app.models import (
@@ -72,6 +74,13 @@ MIN_CONTAINMENT_MATCH_LEN = 5
 # A fresh geo-fallback link is reversible for this window (measured from the
 # venue's RDS created_at). Undo past the window is refused as not undo-eligible.
 GEO_LINK_UNDO_WINDOW_SECONDS = 24 * 60 * 60
+# Bounds the free BestTime account-inventory read that the non-OK-create
+# reconcile performs (_reconcile_account_inventory), mirrored by the
+# `add_venue_inventory_cache_seconds` setting. <=0 disables the cache: every
+# reconcile reads live. Does NOT apply to _find_in_account_inventory (the
+# timeout-recovery reconcile), which always reads live so its post-timeout
+# grace sleep still observes a venue that just registered.
+DEFAULT_ADD_VENUE_INVENTORY_CACHE_SECONDS = 300.0
 # Deprecation reason/source stamped by an undo. The source is the reactivation
 # key: an active re-add of a venue deprecated with this source is allowed to
 # resurrect it (RdsVenueStore._preserve_deprecation exemption).
@@ -106,6 +115,33 @@ def _address_hash(venue_name: str, venue_address: str) -> str:
     ).hexdigest()
 
 
+class _AccountInventoryCache:
+    """In-process, unkeyed TTL cache for one BestTime account-inventory
+    listing, used only by the non-OK-create reconcile
+    (_reconcile_account_inventory). There is exactly one cache per
+    AddVenueHandler instance: it caches the WHOLE inventory (not a per-venue
+    lookup) and is invalidated by TTL only. Safe to share across concurrent
+    reconciles because a rejected create never registers anything new
+    between the rejection and the reconcile -- there is no freshness race to
+    protect here (unlike the timeout-recovery reconcile, which stays
+    uncached; see _find_in_account_inventory)."""
+
+    def __init__(self) -> None:
+        self.rows: Optional[list] = None
+        self.fetched_at: float = 0.0
+
+    def get(self, ttl_seconds: float) -> Optional[list]:
+        if ttl_seconds <= 0 or self.rows is None:
+            return None
+        if time.monotonic() - self.fetched_at > ttl_seconds:
+            return None
+        return self.rows
+
+    def set(self, rows: list) -> None:
+        self.rows = rows
+        self.fetched_at = time.monotonic()
+
+
 class AddVenueHandler:
     def __init__(
         self,
@@ -117,6 +153,7 @@ class AddVenueHandler:
         google_places_enrichment_service=None,
         rds_store=None,
         timeout_recovery_grace_seconds: float = DEFAULT_TIMEOUT_RECOVERY_GRACE_SECONDS,
+        inventory_cache_seconds: float = DEFAULT_ADD_VENUE_INVENTORY_CACHE_SECONDS,
     ) -> None:
         self.venue_dao = venue_dao
         self.besttime = besttime_api
@@ -127,6 +164,12 @@ class AddVenueHandler:
         # venue from serving). Optional so non-RDS wirings still construct.
         self.rds_store = rds_store
         self.timeout_recovery_grace_seconds = timeout_recovery_grace_seconds
+        # Bounds the free account-inventory read the non-OK-create reconcile
+        # performs (see _reconcile_account_inventory); <=0 disables the cache.
+        # Public + directly mutable, mirroring timeout_recovery_grace_seconds,
+        # so tests/BDD can flip it without reaching into a private collaborator.
+        self.inventory_cache_seconds = inventory_cache_seconds
+        self._inventory_cache = _AccountInventoryCache()
         # Optional: when configured AND the request carries a `place_id`, the
         # manual-add flow re-sources the price tier from Google (enum + range) via
         # the shared derivation helper. Dependency-aware: absent client / place_id
@@ -272,12 +315,13 @@ class AddVenueHandler:
             )
 
         if not _response_ok(response):
-            # Release the reservation either way — BestTime did not add a venue.
-            self.budget.release_manual_slot()
-            # A monthly-cap rejection is its own legible state: surface BestTime's
-            # status/message instead of laundering it through the geo fallback
-            # into a misleading "rejected the address" (the originating bug).
+            # A monthly-cap rejection keeps priority over the reconcile: a
+            # capped account has not registered anything, so release the
+            # reservation and surface BestTime's own status/message instead
+            # of laundering it through the geo fallback into a misleading
+            # "rejected the address" (the originating bug).
             if _is_monthly_cap_rejection(response):
+                self.budget.release_manual_slot()
                 ADD_VENUE_BY_ADDRESS_TOTAL.labels(result="besttime_monthly_cap").inc()
                 snap = self.budget.get_snapshot()
                 logger.warning(
@@ -294,7 +338,24 @@ class AddVenueHandler:
                         "quota": snap.quota,
                     },
                 )
-            # Recoverable failure: try the geo fallback before we give up.
+
+            # Reconcile against the free account inventory BEFORE releasing
+            # the slot and BEFORE the geo fallback: BestTime may have
+            # registered the venue even though it could not build a forecast
+            # for it, and the geo fallback's /venues/filter never returns an
+            # unforecastable venue (the bug this closes). Membership in the
+            # inventory -- not the wording of BestTime's rejection -- is the
+            # discriminator (plans/260728_add-venue-without-forecast.md).
+            match = await self._reconcile_before_release(
+                request.venue_name, request.venue_address
+            )
+            if match is not None:
+                return await self._finalize_inventory_venue(request, match)
+
+            # No inventory hit (or the reconcile read itself failed, already
+            # logged): release the reservation and fall through to the geo
+            # fallback exactly as before this feature.
+            self.budget.release_manual_slot()
             return await self._geo_fallback(request, radius_m, response)
 
         # 5. Success: persist + cache + record + report.
@@ -315,10 +376,16 @@ class AddVenueHandler:
         analysis: list,
         result_label: str,
         recovered_from_timeout: bool = False,
+        status: str = "created",
+        source: str = "besttime_new",
     ) -> AddVenueOutcome:
         """Shared success tail for a venue confirmed on BestTime's side —
-        whether the create returned inline or was recovered from the account
-        inventory after a timeout."""
+        whether the create returned inline, was recovered from the account
+        inventory after a timeout, or was reconciled from the account
+        inventory after a non-OK create (``status``/``source`` let that last
+        case report its own ``created_without_forecast`` /
+        ``besttime_inventory`` body while every existing caller keeps
+        today's ``created`` / ``besttime_new`` defaults)."""
         # Record the unique BestTime interaction against the monthly ledger so
         # the unique-venue count reflects manual adds, not just refresh.
         self.budget.mark_touched(venue.venue_id)
@@ -353,17 +420,64 @@ class AddVenueHandler:
 
         ADD_VENUE_BY_ADDRESS_TOTAL.labels(result=result_label).inc()
         body = {
-            "status": "created",
+            "status": status,
             "venue_id": venue.venue_id,
             "venue_name": venue.venue_name,
             "venue_address": venue.venue_address,
             "venue_lat": venue.venue_lat,
             "venue_lng": venue.venue_lng,
-            "source": "besttime_new",
+            "source": source,
         }
         if recovered_from_timeout:
             body["recovered_from_timeout"] = True
         return AddVenueOutcome(status_code=201, body=body)
+
+    async def _finalize_inventory_venue(
+        self, request: AddVenueByAddressRequest, match
+    ) -> AddVenueOutcome:
+        """Complete the add from an account-inventory reconcile hit after a
+        non-OK POST /forecasts: BestTime registered the venue -- it really
+        did touch our account -- but could not build it a forecast. Persist
+        with `forecast` sourced from the inventory row's `venue_forecasted`,
+        then hand off to the same success tail a normal create uses (ledger
+        touch, inline Google enrichment, address cache, gauge). The monthly
+        slot is left reserved by the caller (never released here): unlike a
+        genuine rejection, this create really did register a venue."""
+        venue = Venue(
+            processed=True,
+            forecast=bool(match.venue_forecasted),
+            venue_id=match.venue_id,
+            venue_name=match.venue_name or request.venue_name,
+            venue_address=match.venue_address or request.venue_address,
+            venue_lat=float(
+                match.venue_lat if match.venue_lat is not None else request.venue_lat
+            ),
+            venue_lng=float(
+                match.venue_lng if match.venue_lng is not None else request.venue_lng
+            ),
+        )
+        # Same price sourcing as _persist_new_venue/_recover_timed_out_create:
+        # with inline enrichment wired, it owns the single Google fetch.
+        price_place_id = (
+            None
+            if self.google_places_enrichment_service is not None
+            else request.place_id
+        )
+        await self._derive_and_set_price(venue, price_place_id)
+        self.venue_dao.upsert_venue(venue)
+        logger.info(
+            f"[AddVenueHandler] inventory reconcile hit: persisting "
+            f"{venue.venue_id} ({venue.venue_name!r}) without a forecast "
+            "after a rejected create"
+        )
+        return await self._finalize_created_venue(
+            request,
+            venue,
+            analysis=[],
+            result_label="created_without_forecast",
+            status="created_without_forecast",
+            source="besttime_inventory",
+        )
 
     async def _recover_timed_out_create(
         self, request: AddVenueByAddressRequest, elapsed_seconds: float
@@ -420,7 +534,11 @@ class AddVenueHandler:
         )
         venue = Venue(
             processed=True,
-            forecast=True,
+            # Sourced from the matched inventory row, not hardcoded: BestTime
+            # may have registered this venue without being able to build it a
+            # forecast, same as the non-timeout reconcile
+            # (_finalize_inventory_venue) -- the two reconcile paths must agree.
+            forecast=bool(match.venue_forecasted),
             venue_id=match.venue_id,
             venue_name=match.venue_name or request.venue_name,
             venue_address=match.venue_address or request.venue_address,
@@ -451,53 +569,59 @@ class AddVenueHandler:
     async def _find_in_account_inventory(
         self, venue_name: str, venue_address: str
     ):
-        """Search the account inventory (free, paged read) for the submitted
-        venue by accent-folded name; disambiguate multiple name matches by
-        address-token overlap.
+        """Search the account inventory (free, paged read, always LIVE — see
+        _reconcile_account_inventory for the cached variant) for the
+        submitted venue by accent-folded name; disambiguate multiple name
+        matches by address-token overlap. Matching guards documented on the
+        shared helper: _match_inventory_rows.
 
-        Guarded the same way as the geo-fallback matcher (_find_name_match):
-        an EXACT folded-name match links regardless of length/overlap, but a
-        containment (substring) match links ONLY when the shorter folded name
-        is at least MIN_CONTAINMENT_MATCH_LEN chars AND shares a non-zero
-        address token with the submission. Without this, a timed-out create
-        for a short folded name ("vila", "casa") could "recover" an unrelated
-        inventory venue whose name merely contains those chars — returning 201
-        with the wrong venue_id and poisoning the address cache so every future
-        add of that address short-circuits to it."""
-        target_name = _fold_text(venue_name)
-        if not target_name:
+        Always reads live (never cached) so _recover_timed_out_create's
+        post-timeout grace sleep still observes a venue that just registered
+        on BestTime's side — a cache populated before the timeout could miss
+        it."""
+        rows = [row async for row in self.besttime.list_account_inventory()]
+        return _match_inventory_rows(rows, venue_name, venue_address)
+
+    async def _reconcile_account_inventory(self, venue_name: str, venue_address: str):
+        """Reconcile a non-OK, non-monthly-cap POST /forecasts rejection
+        against the free BestTime account inventory, bounded by the
+        in-process TTL cache (self.inventory_cache_seconds; <=0 disables it
+        so every call reads live). Safe to cache — unlike
+        _find_in_account_inventory (the timeout-recovery reconcile, always
+        live) — because a rejected create never registers anything NEW
+        between the rejection and this reconcile, so there is no freshness
+        race a cached read could miss. A listing failure propagates to the
+        caller uncached (never poisons the cache with a partial page)."""
+        cached = self._inventory_cache.get(self.inventory_cache_seconds)
+        if cached is not None:
+            ADD_VENUE_INVENTORY_CACHE_TOTAL.labels(source="cache").inc()
+            rows = cached
+        else:
+            rows = [row async for row in self.besttime.list_account_inventory()]
+            self._inventory_cache.set(rows)
+            ADD_VENUE_INVENTORY_CACHE_TOTAL.labels(source="live").inc()
+        return _match_inventory_rows(rows, venue_name, venue_address)
+
+    async def _reconcile_before_release(self, venue_name: str, venue_address: str):
+        """Wrap _reconcile_account_inventory with the error handling and
+        result metric the reconcile-before-release step needs: a listing
+        failure must never mask the original rejection as a 500, so it logs
+        (with the submitted venue name, for batch-add troubleshooting) and
+        returns None — the caller then falls through to today's release +
+        geo-fallback behavior exactly as if no reconcile had been attempted."""
+        try:
+            match = await self._reconcile_account_inventory(venue_name, venue_address)
+        except Exception as e:
+            ADD_VENUE_INVENTORY_RECONCILE_TOTAL.labels(result="error").inc()
+            logger.warning(
+                f"[AddVenueHandler] account-inventory reconcile failed for "
+                f"{venue_name!r}: {type(e).__name__}: {e}"
+            )
             return None
-        address_tokens = set(_fold_text(venue_address).split())
-
-        def _overlap(row) -> int:
-            return len(address_tokens & set(_fold_text(row.venue_address or "").split()))
-
-        exact: list = []
-        containment: list = []
-        async for row in self.besttime.list_account_inventory():
-            name = _fold_text(row.venue_name or "")
-            if not name:
-                continue
-            if name == target_name:
-                exact.append(row)
-            elif target_name in name or name in target_name:
-                # A short generic folded name must never containment-link.
-                if min(len(target_name), len(name)) < MIN_CONTAINMENT_MATCH_LEN:
-                    continue
-                containment.append(row)
-
-        # Exact folded matches win regardless of address overlap (an exact
-        # name is a strong signal; multiple exact rows disambiguate by overlap).
-        if exact:
-            return max(exact, key=_overlap) if len(exact) > 1 else exact[0]
-
-        # Containment-only: require a non-zero address-token overlap so an
-        # unrelated venue whose name merely contains the folded string is never
-        # linked. Ties/best pick by overlap.
-        scored = [(o, r) for r in containment if (o := _overlap(r)) > 0]
-        if not scored:
-            return None
-        return max(scored, key=lambda t: t[0])[1]
+        ADD_VENUE_INVENTORY_RECONCILE_TOTAL.labels(
+            result="hit" if match is not None else "miss"
+        ).inc()
+        return match
 
     def _lookup_cached_venue_id(
         self, venue_name: str, venue_address: str
@@ -1005,6 +1129,59 @@ def _response_ok(response) -> bool:
             and bool(info.get("venue_id"))
         )
     return False
+
+
+def _match_inventory_rows(rows: list, venue_name: str, venue_address: str):
+    """Pick the best account-inventory match for a submitted (name, address).
+
+    Shared by the live (uncached) timeout-recovery reconcile
+    (_find_in_account_inventory) and the cached create-rejection reconcile
+    (_reconcile_account_inventory) — extracted so both call the exact same
+    matching code rather than two copies that could drift.
+
+    Guarded the same way as the geo-fallback matcher (_find_name_match): an
+    EXACT folded-name match links regardless of length/overlap, but a
+    containment (substring) match links ONLY when the shorter folded name is
+    at least MIN_CONTAINMENT_MATCH_LEN chars AND shares a non-zero address
+    token with the submission. Without this, a short folded name ("vila",
+    "casa") could "recover" an unrelated inventory venue whose name merely
+    contains those chars — returning the wrong venue_id and poisoning the
+    address cache so every future add of that address short-circuits to it.
+    """
+    target_name = _fold_text(venue_name)
+    if not target_name:
+        return None
+    address_tokens = set(_fold_text(venue_address).split())
+
+    def _overlap(row) -> int:
+        return len(address_tokens & set(_fold_text(row.venue_address or "").split()))
+
+    exact: list = []
+    containment: list = []
+    for row in rows:
+        name = _fold_text(row.venue_name or "")
+        if not name:
+            continue
+        if name == target_name:
+            exact.append(row)
+        elif target_name in name or name in target_name:
+            # A short generic folded name must never containment-link.
+            if min(len(target_name), len(name)) < MIN_CONTAINMENT_MATCH_LEN:
+                continue
+            containment.append(row)
+
+    # Exact folded matches win regardless of address overlap (an exact
+    # name is a strong signal; multiple exact rows disambiguate by overlap).
+    if exact:
+        return max(exact, key=_overlap) if len(exact) > 1 else exact[0]
+
+    # Containment-only: require a non-zero address-token overlap so an
+    # unrelated venue whose name merely contains the folded string is never
+    # linked. Ties/best pick by overlap.
+    scored = [(o, r) for r in containment if (o := _overlap(r)) > 0]
+    if not scored:
+        return None
+    return max(scored, key=lambda t: t[0])[1]
 
 
 def _find_name_match(venues: list, venue_name: str, venue_address: str = ""):

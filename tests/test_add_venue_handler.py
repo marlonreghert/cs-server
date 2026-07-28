@@ -8,8 +8,9 @@ green run in BDD validates the happy path end-to-end; these unit tests
 pin the branching contract.
 """
 import json
+import time
 from datetime import datetime, timedelta, timezone
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import fakeredis
 import httpx
@@ -391,6 +392,9 @@ async def test_besttime_status_error_triggers_geo_fallback_hit(
     besttime.add_venue_to_account.return_value = NewVenueResponse.model_validate(
         {"status": "Error", "message": "Could not geocode address"}
     )
+    # Absent from the account inventory -> the reconcile misses cleanly and
+    # falls through to the geo fallback exactly as before this feature.
+    besttime.list_account_inventory = _inventory([])
     matched = VenueFilterVenue(
         venue_id="ven_geo_match",
         venue_name="Bar do Joao",
@@ -423,6 +427,8 @@ async def test_besttime_error_with_no_geo_match_returns_502(handler, besttime, f
     besttime.add_venue_to_account.return_value = NewVenueResponse.model_validate(
         {"status": "Error", "message": "Could not geocode address"}
     )
+    # Absent from the account inventory -> the reconcile misses cleanly.
+    besttime.list_account_inventory = _inventory([])
     besttime.venue_filter.return_value = VenueFilterResponse(
         status="OK", venues=[], venues_n=0
     )
@@ -820,6 +826,9 @@ async def test_geo_fallback_unavailable_carries_besttime_message(
     besttime.add_venue_to_account.return_value = NewVenueResponse.model_validate(
         {"status": "Error", "message": "Could not geocode address"}
     )
+    # Absent from the account inventory -> the reconcile misses cleanly and
+    # falls through to the (here, unavailable) geo fallback.
+    besttime.list_account_inventory = _inventory([])
     besttime.venue_filter.side_effect = httpx.ConnectError("filter down")
 
     outcome = await handler.add(_req())
@@ -827,6 +836,274 @@ async def test_geo_fallback_unavailable_carries_besttime_message(
     assert outcome.status_code == 502
     assert outcome.body["besttime_message"] == "Could not geocode address"
     assert outcome.body["besttime_status"] == "Error"
+
+
+# ── reconcile-before-release via the account inventory (free read) ───────────
+# A non-OK, non-monthly-cap POST /forecasts rejection reconciles against the
+# free account inventory BEFORE the slot is released and BEFORE the geo
+# fallback (plans/260728_add-venue-without-forecast.md). On a hit the venue is
+# persisted with `forecast` sourced from the inventory row and the slot stays
+# reserved; on a miss (or a failed listing) behavior is unchanged.
+
+_RECONCILE_INVENTORY_ROW = {
+    "venue_id": "ven_reconciled",
+    "venue_name": "Bar do Joao",
+    "venue_address": "Rua das Flores 123, Recife - PE",
+    "venue_lat": -8.05,
+    "venue_lng": -34.88,
+    "venue_forecasted": False,
+}
+
+
+def _rejected_not_cap() -> NewVenueResponse:
+    return NewVenueResponse.model_validate(
+        {"status": "Error", "message": "Could not generate a forecast for this venue"}
+    )
+
+
+def _counting_inventory(rows, counter: dict):
+    """Wraps _inventory(rows) to also count how many times the underlying
+    listing generator was actually invoked (vs served from cache)."""
+    inner = _inventory(rows)
+
+    async def _tracking(page_size: int = 1000):
+        counter["n"] = counter.get("n", 0) + 1
+        async for row in inner(page_size):
+            yield row
+
+    return _tracking
+
+
+@pytest.mark.asyncio
+async def test_reconcile_hit_persists_created_without_forecast_and_keeps_slot(
+    handler, besttime, fake
+):
+    besttime.add_venue_to_account.return_value = _rejected_not_cap()
+    besttime.list_account_inventory = _inventory([_RECONCILE_INVENTORY_ROW])
+
+    outcome = await handler.add(_req())
+
+    assert outcome.status_code == 201
+    assert outcome.body["status"] == "created_without_forecast"
+    assert outcome.body["source"] == "besttime_inventory"
+    assert outcome.body["venue_id"] == "ven_reconciled"
+    persisted = json.loads(fake.get("venues_geo_place_v1:ven_reconciled"))
+    assert persisted["forecast"] is False, persisted
+    # The monthly slot stays RESERVED (not released then re-spent) -- the
+    # create really did register a venue on BestTime's side.
+    assert int(fake.get("venue_add_counter_v1:2026-05")) == 1
+    assert fake.sismember("besttime_touched_v1:2026-05", "ven_reconciled")
+    # Never a second create, and the (paid-adjacent) geo-fallback filter call
+    # is skipped entirely on a reconcile hit.
+    assert besttime.add_venue_to_account.await_count == 1
+    assert besttime.venue_filter.await_count == 0
+
+
+@pytest.mark.asyncio
+async def test_reconcile_hit_forecast_true_when_inventory_says_so(handler, besttime, fake):
+    besttime.add_venue_to_account.return_value = _rejected_not_cap()
+    besttime.list_account_inventory = _inventory(
+        [{**_RECONCILE_INVENTORY_ROW, "venue_forecasted": True}]
+    )
+
+    outcome = await handler.add(_req())
+
+    assert outcome.status_code == 201
+    persisted = json.loads(fake.get("venues_geo_place_v1:ven_reconciled"))
+    assert persisted["forecast"] is True, persisted
+
+
+@pytest.mark.asyncio
+async def test_reconcile_hit_does_not_release_the_reserved_slot(
+    handler, besttime, budget, fake, monkeypatch
+):
+    besttime.add_venue_to_account.return_value = _rejected_not_cap()
+    besttime.list_account_inventory = _inventory([_RECONCILE_INVENTORY_ROW])
+    release_spy = MagicMock(wraps=budget.release_manual_slot)
+    monkeypatch.setattr(budget, "release_manual_slot", release_spy)
+
+    outcome = await handler.add(_req())
+
+    assert outcome.status_code == 201
+    release_spy.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_reconcile_miss_releases_the_slot_then_runs_geo_fallback(
+    handler, besttime, budget, fake, monkeypatch
+):
+    besttime.add_venue_to_account.return_value = _rejected_not_cap()
+    besttime.list_account_inventory = _inventory([])  # absent from inventory
+    besttime.venue_filter.return_value = VenueFilterResponse(
+        status="OK", venues=[], venues_n=0
+    )
+    release_spy = MagicMock(wraps=budget.release_manual_slot)
+    monkeypatch.setattr(budget, "release_manual_slot", release_spy)
+
+    outcome = await handler.add(_req())
+
+    # Unchanged shape: today's honest "BestTime rejected + no geo match" 502.
+    assert outcome.status_code == 502
+    assert "geo fallback" in outcome.body["detail"].lower()
+    release_spy.assert_called_once()
+    assert besttime.venue_filter.await_count == 1
+    assert int(fake.get("venue_add_counter_v1:2026-05") or 0) == 0
+
+
+@pytest.mark.asyncio
+async def test_monthly_cap_rejection_never_lists_the_inventory(handler, besttime, fake):
+    calls: dict = {}
+    besttime.list_account_inventory = _counting_inventory([_RECONCILE_INVENTORY_ROW], calls)
+    besttime.add_venue_to_account.return_value = NewVenueResponse.model_validate(
+        {
+            "status": "Error",
+            "message": "Max amount of monthly venues (500) reached. Venue "
+            "counter will reset at midnight on the first day of the month.",
+        }
+    )
+
+    outcome = await handler.add(_req())
+
+    assert outcome.status_code == 429
+    assert calls.get("n", 0) == 0, "monthly-cap rejection must skip the reconcile entirely"
+
+
+@pytest.mark.asyncio
+async def test_reconcile_listing_failure_falls_through_to_geo_fallback_and_logs(
+    handler, besttime, fake, caplog
+):
+    besttime.add_venue_to_account.return_value = _rejected_not_cap()
+
+    async def _broken_inventory(page_size: int = 1000):
+        raise httpx.ConnectError("simulated inventory list failure")
+        yield  # pragma: no cover - never reached, keeps this an async generator
+
+    besttime.list_account_inventory = _broken_inventory
+    besttime.venue_filter.return_value = VenueFilterResponse(
+        status="OK", venues=[], venues_n=0
+    )
+
+    with caplog.at_level("WARNING", logger="app.handlers.add_venue_handler"):
+        outcome = await handler.add(_req())
+
+    # A reconcile failure must never turn a would-be 502 into a 500, and the
+    # response must be exactly what the operator would have gotten before
+    # this feature (release + geo fallback).
+    assert outcome.status_code == 502
+    assert "geo fallback" in outcome.body["detail"].lower()
+    assert int(fake.get("venue_add_counter_v1:2026-05") or 0) == 0
+    assert any(
+        "reconcile failed" in r.message and "Bar do Joao" in r.message
+        for r in caplog.records
+    ), caplog.text
+
+
+@pytest.mark.asyncio
+async def test_reconcile_short_name_containment_guard_still_applies(handler, besttime, fake):
+    """A 4-char folded name ("vila") must not containment-link an unrelated,
+    longer inventory venue whose name merely contains it -- same
+    MIN_CONTAINMENT_MATCH_LEN guard the timeout reconcile already enforces."""
+    besttime.add_venue_to_account.return_value = _rejected_not_cap()
+    besttime.list_account_inventory = _inventory([
+        {"venue_id": "ven_unrelated", "venue_name": "Vila Madalena Bar",
+         "venue_address": "Rua Outra, 500, Sao Paulo - SP", "venue_forecasted": False},
+    ])
+    besttime.venue_filter.return_value = VenueFilterResponse(
+        status="OK", venues=[], venues_n=0
+    )
+
+    outcome = await handler.add(
+        _req(venue_name="Vila", venue_address="Rua Curta 10, Recife - PE")
+    )
+
+    assert outcome.status_code != 201
+    assert outcome.body.get("status") != "created_without_forecast"
+
+
+@pytest.mark.asyncio
+async def test_timeout_recovery_forecast_flag_false_from_inventory_row(
+    venue_dao, besttime, budget, fake
+):
+    """_recover_timed_out_create must source `forecast` from the matched
+    inventory row (not hardcode True), agreeing with the non-timeout
+    reconcile above."""
+    besttime.add_venue_to_account.side_effect = httpx.ReadTimeout("simulated")
+    besttime.list_account_inventory = _inventory(
+        [{**_INVENTORY_ROW, "venue_forecasted": False}]
+    )
+    handler = _timeout_handler(venue_dao, besttime, budget, fake)
+
+    outcome = await handler.add(_req())
+
+    assert outcome.status_code == 201
+    persisted = venue_dao.get_venue(_INVENTORY_ROW["venue_id"])
+    assert persisted.forecast is False
+
+
+# ── inventory-listing cache (add_venue_inventory_cache_seconds) ──────────────
+# Bounds the free account-inventory read the reconcile above performs: one
+# listing per TTL window regardless of how many rejected rows reconcile
+# inside it. Scoped to the non-timeout reconcile only -- _find_in_account_
+# inventory (the timeout-recovery path) always reads live; see
+# _reconcile_account_inventory's docstring.
+
+
+@pytest.mark.asyncio
+async def test_inventory_cache_reused_across_reconciles_within_ttl(
+    handler, besttime, fake, monkeypatch
+):
+    calls: dict = {}
+    besttime.list_account_inventory = _counting_inventory([], calls)
+    besttime.add_venue_to_account.return_value = _rejected_not_cap()
+    besttime.venue_filter.return_value = VenueFilterResponse(
+        status="OK", venues=[], venues_n=0
+    )
+    handler.inventory_cache_seconds = 300
+
+    clock = {"t": 1000.0}
+    monkeypatch.setattr(time, "monotonic", lambda: clock["t"])
+
+    await handler.add(_req(venue_name="Bar Um", venue_address="Rua 1, Recife - PE"))
+    clock["t"] += 10  # well inside the 300s TTL
+    await handler.add(_req(venue_name="Bar Dois", venue_address="Rua 2, Recife - PE"))
+
+    assert calls.get("n") == 1, "expected a single listing across both reconciles"
+
+
+@pytest.mark.asyncio
+async def test_inventory_cache_expires_after_ttl(handler, besttime, fake, monkeypatch):
+    calls: dict = {}
+    besttime.list_account_inventory = _counting_inventory([], calls)
+    besttime.add_venue_to_account.return_value = _rejected_not_cap()
+    besttime.venue_filter.return_value = VenueFilterResponse(
+        status="OK", venues=[], venues_n=0
+    )
+    handler.inventory_cache_seconds = 5
+
+    clock = {"t": 1000.0}
+    monkeypatch.setattr(time, "monotonic", lambda: clock["t"])
+
+    await handler.add(_req(venue_name="Bar Um", venue_address="Rua 1, Recife - PE"))
+    clock["t"] += 10  # exceeds the 5s TTL
+    await handler.add(_req(venue_name="Bar Dois", venue_address="Rua 2, Recife - PE"))
+
+    assert calls.get("n") == 2, "expected a fresh listing after the TTL expired"
+
+
+@pytest.mark.asyncio
+async def test_inventory_cache_disabled_reads_live_every_time(handler, besttime, fake):
+    calls: dict = {}
+    besttime.list_account_inventory = _counting_inventory([], calls)
+    besttime.add_venue_to_account.return_value = _rejected_not_cap()
+    besttime.venue_filter.return_value = VenueFilterResponse(
+        status="OK", venues=[], venues_n=0
+    )
+    handler.inventory_cache_seconds = 0
+
+    await handler.add(_req(venue_name="Bar Um", venue_address="Rua 1, Recife - PE"))
+    await handler.add(_req(venue_name="Bar Dois", venue_address="Rua 2, Recife - PE"))
+
+    assert calls.get("n") == 2, "0 must disable the cache: every reconcile reads live"
 
 
 def test_fold_text_normalizes_accents_case_and_punctuation():

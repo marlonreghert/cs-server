@@ -12,13 +12,15 @@ section of `plans/add_venue_by_address_26_05_26.md`.
 | B — deliberate fake address | `forecasts_post_unknown_error.json` | 2026-05-26 | **UNVERIFIED** | Same cap guard masked the geocoder-rejection shape. Re-probe required after 2026-06-01. |
 | C — `/venues/filter` radius hit | `venues_filter_radius_200m.json` | 2026-05-26 | **VERIFIED** | 200 OK, returned Casas Bahia with full `venue_id`, `venue_name`, `venue_address`, `venue_lat`, `venue_lng`, `day_info`, `rating`, `reviews`, `venue_type`. Geo-fallback contract pinned. |
 | D — fresh BestTime create | `forecasts_post_fresh_create_ok.json` + `forecasts_post_fresh_then_reread_ok.json` | (not run) | **BLOCKED** | Cannot run while monthly cap is at 500/500. Run once, supervised, after 2026-06-01. |
+| E — registered but unforecastable venue | `forecasts_post_registered_no_forecast.json` | (not run) | **BLOCKED** | Owned by the user, tracked as an Open Question in `plans/260728_add-venue-without-forecast.md`. Submit one real venue known to be on Google but with no BestTime foot traffic; capture the exact `POST /forecasts` status/body, then confirm the venue appears in `GET /venues` with `venue_forecasted=false`. Until run, the file's `response.body.message` is a **placeholder guess**, not a captured value. |
 
 ## Locking-in plan after 2026-06-01
 
 1. Re-run `BESTTIME_KEY=… GOOGLE_PLACES_KEY=… python scripts/probe_besttime_forecasts.py --probe ab` to capture the real success + geocoder-rejection shapes.
 2. Run Probe D once with a real venue we actually want, following the script's interactive prompts.
-3. Diff each captured fixture against the version checked in here. Any field changes (new optional fields, renames, type changes) must be reflected in `app/models/` and `app/api/besttime_client.py`.
-4. Flip the row's Status column to **VERIFIED** above and commit.
+3. Run Probe E separately (not part of `probe_besttime_forecasts.py` — no automated mode exists for it yet): submit one real venue known to be on Google but with no BestTime foot traffic, capture the `POST /forecasts` status/body by hand into `forecasts_post_registered_no_forecast.json`, and confirm via `GET /venues` that it registered with `venue_forecasted=false`.
+4. Diff each captured fixture against the version checked in here. Any field changes (new optional fields, renames, type changes) must be reflected in `app/models/` and `app/api/besttime_client.py`.
+5. Flip the row's Status column to **VERIFIED** above and commit.
 
 ## What the unverified fixtures actually contain today
 
