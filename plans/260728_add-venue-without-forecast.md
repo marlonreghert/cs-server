@@ -184,12 +184,51 @@ Manual or integration checks:
 - A 400-row batch-add performs at most one inventory listing per cache TTL.
 - `alembic current` is unchanged by this feature.
 
+## Status: ABANDONED — the premise is false (2026-07-28)
+
+**This plan is not being implemented. Do not resume it.** The branch
+`feature/add-venue-without-forecast` exists on origin with a complete, green
+implementation, but it is built on a premise production disproved. It is kept
+only as reference for the replacement plan.
+
+**What happened.** An operator add of "Praça do Arsenal" (-8.061036, -34.871297)
+in prod returned BestTime's unforecastable rejection verbatim:
+
+> `Error: Venue found, but could not forecast this venue. Potential issues: This
+> place is too new, or does not have enough visitor volume to make a forecast.`
+
+A free `GET /venues` listing of the whole BestTime account inventory (2,340
+venues) was then searched for that venue. **It is absent.** The only near-name
+match is an unrelated venue, "Arsenal do Sabor" (R. da Guia 165). So BestTime's
+"Venue found" means found in *their* database, not registered in *ours* — exactly
+what `NewVenueInfo`'s docstring already recorded from the 2026-07-02 prod
+observation ("carries a venue_info block WITHOUT an id since nothing was
+created").
+
+**Consequence.** The inventory reconcile this plan specifies can never hit for the
+unforecastable case. It is dead code for its own motivating scenario.
+
+**Replacement direction (needs its own `/plan-feature`).** Catalog these venues
+*without BestTime at all*: mint a venue_id in a namespace distinct from BestTime's,
+persist from the rejection body — which carries `venue_name`, `venue_address`,
+`venue_lat`/`venue_lon`, `rating`, `reviews`, `price_level`, everything but an id —
+plus the existing inline Google enrichment, and exclude such venues from BestTime
+live/weekly refresh selection since there is no BestTime id to query. Cost: zero
+BestTime spend, ever. The structural discriminator is `venue_info` present with
+coordinates but no `venue_id`; note that `tests/bdd/api/besttime-rejection-venue-info.feature`
+currently pins that same case as a rejection and would have to change. The main
+risk is the "venue_id is BestTime's id" invariant, which runs through the RDS
+primary key, Redis key formats, and the app's navigation id.
+
+**Supporting prod counts (2026-07-28):** account inventory 2,340 venues, 1,848
+(79%) with `venue_forecasted=false`; RDS 2,255 active, 273 with `forecast=false`;
+`serving.eligible_venue` 1,728, of which 202 have `forecast=false`; 1,102 (64%)
+have Google opening hours.
+
 ## Open Questions
-- **Probe outcome.** The design assumes BestTime registers the venue in the account
-  inventory even when it answers non-OK on `POST /forecasts`. The supervised probe
-  must confirm this before `/execute-feature` runs. If the venue is *not* registered,
-  the reconcile can never hit and this approach must be replaced (most likely by
-  BestTime's venue-search endpoint, which is paid and would need its own cost review).
+- **Probe outcome — ANSWERED, negatively.** See the Status section above. The
+  design assumed BestTime registers the venue in the account inventory even when it
+  answers non-OK on `POST /forecasts`. Production says it does not.
 - **Does a `forecast=false` venue waste live-refresh credits?** Refresh selection is
   by `priority` only, so these venues are already fetched today. Confirm against the
   BestTime ledger whether a live call on an unforecastable venue draws credit; if it
