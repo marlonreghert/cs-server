@@ -19,7 +19,9 @@ logger = logging.getLogger(__name__)
 GOOGLE_PLACES_API_BASE = "https://places.googleapis.com/v1"
 
 # Field mask for fetching photos (include author attributions for copyright compliance)
-PHOTOS_FIELDS_MASK = "photos.name,photos.authorAttributions"
+# Dimensions come free in the same billed call, and a photo's aspect ratio is
+# not recoverable later without re-fetching it.
+PHOTOS_FIELDS_MASK = "photos.name,photos.authorAttributions,photos.widthPx,photos.heightPx"
 # Field mask for vibe-related attributes
 # See: https://developers.google.com/maps/documentation/places/web-service/place-details
 VIBE_FIELDS_MASK = ",".join([
@@ -593,11 +595,25 @@ class GooglePlacesAPIClient:
             keyless_uri = await self._resolve_photo_media_uri(photo_name, max_width)
             if not keyless_uri:
                 continue
-            author_name = None
-            attributions = photo.get("authorAttributions", [])
-            if attributions:
-                author_name = attributions[0].get("displayName")
-            entry = {"url": keyless_uri, "author_name": author_name}
+            # Keep the WHOLE attribution list, not just the first display name.
+            # Google's terms require showing attribution with a photo, and the
+            # `uri` is the half that makes that possible — dropping it means the
+            # archive cannot be used compliantly later, and it cannot be
+            # recovered without paying for the photo again.
+            attributions = photo.get("authorAttributions", []) or []
+            first = attributions[0] if attributions else {}
+            entry = {
+                "url": keyless_uri,
+                "author_name": first.get("displayName"),
+                "author_uri": first.get("uri"),
+                "author_photo_uri": first.get("photoUri"),
+                "attributions": attributions,
+                "width_px": photo.get("widthPx"),
+                "height_px": photo.get("heightPx"),
+                # Everything the provider said about this photo, verbatim, so a
+                # field we do not use today is still there when we want it.
+                "raw": photo,
+            }
             if include_ref:
                 entry["photo_name"] = photo_name
             result.append(entry)

@@ -270,9 +270,17 @@ def step_cache_holds_same(context, count):
     cached = _fresh_list(context)
     assert cached is not None, "fresh cache not written"
     assert len(cached) == count, f"expected {count} cached, got {len(cached)}: {cached}"
-    assert cached == context.response.json()["venue_photos"], (
-        f"cache {cached} != response {context.response.json()['venue_photos']}"
-    )
+    # The cache holds everything the provider returned — attributions, author
+    # uris, dimensions, the raw payload — while the response carries only the
+    # fields the DTO exposes. So the check is that what is SERVED comes from the
+    # cache, not that the two are byte-identical.
+    served = context.response.json()["venue_photos"]
+    for served_photo, cached_photo in zip(served, cached):
+        for field, value in served_photo.items():
+            assert cached_photo.get(field) == value, (
+                f"served {field}={value!r} is not what the cache holds "
+                f"({cached_photo.get(field)!r})"
+            )
 
 
 @then("the fresh photo cache for the venue holds exactly {count:d} items")

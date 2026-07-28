@@ -66,6 +66,7 @@ test-unit:
 		tests/test_photo_archive_pipeline_v2.py \
 		tests/test_archive_sources.py \
 		tests/test_menu_extraction_from_archive.py \
+		tests/test_photo_metadata_fidelity.py \
 		-v
 
 test-integration:

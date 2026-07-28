@@ -270,21 +270,31 @@ class ApifyGMapsExtractorClient:
             if url and url not in seen:
                 seen.add(url)
                 author = (image or {}).get("authorName")
+                # Authorship is a FACT about the photo; `category` is where we
+                # decide to file it. They were the same field, so classifying a
+                # photo would have destroyed the owner/visitor signal — which
+                # cannot be recovered without re-fetching.
+                authorship = (
+                    "by_owner"
+                    if venue_title and author and _normalize(author) == venue_title
+                    else "by_visitor"
+                )
                 out.append({
                     "url": url,
                     "author_name": author,
+                    "author_uri": (image or {}).get("authorUrl"),
+                    "authorship": authorship,
                     "uploaded_at": (image or {}).get("uploadedAt"),
+                    # Verbatim provider payload, so a field we ignore today is
+                    # still here when we want it.
+                    "raw": image,
                     # Google exposes photo tabs (Menu, Food & drink, Vibe...) but
                     # tags no INDIVIDUAL image with one — `imageCategories` is a
-                    # place-level list of which tabs exist. "By owner" is the one
-                    # tab that IS derivable, by comparing the uploader to the
-                    # venue name, and it is the useful one: owners upload the
-                    # official shots.
-                    "category": (
-                        "by_owner"
-                        if venue_title and author and _normalize(author) == venue_title
-                        else "by_visitor"
-                    ),
+                    # place-level list of which tabs exist. Authorship is the one
+                    # signal derivable here, so it doubles as the filing category
+                    # until a classifier assigns a real one; `authorship` above
+                    # keeps the fact either way.
+                    "category": authorship,
                     # No Google photo resource name from a scrape; the URL is
                     # what photo_id_for() hashes, which keeps ids stable.
                     "photo_name": None,
@@ -293,9 +303,13 @@ class ApifyGMapsExtractorClient:
         for url in place.get("imageUrls") or []:
             if url and url not in seen:
                 seen.add(url)
+                # A bare url carries nothing but itself: no author, so no
+                # authorship claim can honestly be made.
                 out.append({
-                    "url": url, "author_name": None, "photo_name": None,
-                    "uploaded_at": None, "category": "by_visitor",
+                    "url": url, "author_name": None, "author_uri": None,
+                    "photo_name": None, "uploaded_at": None,
+                    "authorship": "unknown", "category": "by_visitor",
+                    "raw": {"imageUrl": url},
                 })
 
         return out[:max_photos]
