@@ -426,9 +426,18 @@ def _media_summary(entries: list[dict]) -> dict:
     for entry in entries:
         key = entry.get("category") or "uncategorised"
         by_category[key] = by_category.get(key, 0) + 1
+    # Counted separately from `by_category` on purpose: once a classifier owns
+    # the category, authorship is the only remaining record of who took the
+    # photo, and it must stay visible at summary level.
+    by_authorship: dict[str, int] = {}
+    for entry in entries:
+        who = entry.get("authorship") or "unknown"
+        by_authorship[who] = by_authorship.get(who, 0) + 1
+
     return {
         "photos": len(entries),
         "by_category": by_category,
+        "by_authorship": by_authorship,
         "bytes": sum(e.get("bytes") or 0 for e in entries),
         "oldest_uploaded_at": dates[0] if dates else None,
         "newest_uploaded_at": dates[-1] if dates else None,
@@ -1108,14 +1117,33 @@ class VenuePhotoArchiveService:
         summary["bytes_stored"] += len(data)
         MEDIA_ARCHIVE_PHOTOS_STORED_TOTAL.labels(source=source).inc()
         MEDIA_ARCHIVE_BYTES_STORED_TOTAL.labels(source=source).inc(len(data))
-        return {
+        # Everything known about this photo. A field costs bytes in a JSON
+        # sidecar; re-fetching it costs a billed request, and some of it —
+        # authorship, attribution uris — cannot be recovered at all once the
+        # provider rotates the photo. So nothing the provider told us is dropped.
+        entry = {
             "photo_id": photo_id,
             "key": key,
             "content_type": content_type,
             "bytes": len(data),
-            "author_name": photo.get("author_name"),
+            # Where we filed it (may later come from a classifier) vs who took
+            # it (a fact about the photo, never overwritten by classification).
             "category": photo.get("category"),
+            "authorship": photo.get("authorship"),
+            "author_name": photo.get("author_name"),
+            "author_uri": photo.get("author_uri"),
+            "author_photo_uri": photo.get("author_photo_uri"),
+            # Google's terms require attribution to be displayed with a photo,
+            # so the full list is kept — not just the first display name.
+            "attributions": photo.get("attributions"),
             "uploaded_at": photo.get("uploaded_at"),
+            "width_px": photo.get("width_px"),
+            "height_px": photo.get("height_px"),
             "source_url": url,
             "photo_name": photo.get("photo_name"),
+            "thumbnail_url": photo.get("thumbnail"),
         }
+        # The provider's own object, verbatim, for anything not modelled above.
+        if photo.get("raw"):
+            entry["raw"] = photo["raw"]
+        return {k: v for k, v in entry.items() if v is not None}
