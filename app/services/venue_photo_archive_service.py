@@ -403,6 +403,7 @@ class VenuePhotoArchiveService:
         media_store,
         downloader=None,
         apify_gmaps_extractor_client=None,
+        searchapi_photos_client=None,
         settings=None,
         max_photos_per_venue: int = 10,
         photo_timeout_seconds: float = 15.0,
@@ -422,6 +423,7 @@ class VenuePhotoArchiveService:
         # Named to match ArchiveSource.requires_attr, so availability and
         # dispatch both resolve by attribute rather than by an if-ladder.
         self.apify_gmaps_extractor_client = apify_gmaps_extractor_client
+        self.searchapi_photos_client = searchapi_photos_client
         self.venue_dao = venue_dao
         self.media_store = media_store
         self.downloader = downloader or HttpPhotoDownloader()

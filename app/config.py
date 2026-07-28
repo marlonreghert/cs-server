@@ -356,6 +356,10 @@ class Settings(BaseSettings):
     # charge is NOT published, so an Apify estimate is a floor.
     apify_place_scraped_cost_usd: float = 0.004
     apify_place_details_cost_usd: float = 0.002
+    # SearchApi.io — the only source that can name a photo's Google tab. Billed
+    # per search, one per category per venue. Developer plan rate.
+    searchapi_api_key: str = ""
+    searchapi_cost_per_1k_usd: float = 4.0
 
     # Menu Data Extraction (OpenAI GPT-4o-mini)
     openai_api_key: str = ""

@@ -158,6 +158,16 @@ class Container:
         self.media_archive_store = None
         self.venue_photo_archive_service = None
 
+        # SearchApi photo client — the category-aware source. Built before the
+        # archive service, which is constructed below.
+        self.searchapi_photos_client = None
+        if settings.searchapi_api_key:
+            from app.api.serpapi_client import SerpApiClient
+            self.searchapi_photos_client = SerpApiClient(
+                api_key=settings.searchapi_api_key,
+            )
+            logger.info("[Container] SearchApi photo client initialized")
+
         # Google Maps Extractor client. Built BEFORE its consumers: it backs the
         # menu-photo fallback AND the archive's apify_gmaps_extractor source,
         # and the archive service is constructed below.
@@ -225,6 +235,9 @@ class Container:
                     # rather than failing a run.
                     apify_gmaps_extractor_client=getattr(
                         self, "apify_gmaps_extractor_client", None
+                    ),
+                    searchapi_photos_client=getattr(
+                        self, "searchapi_photos_client", None
                     ),
                     settings=settings,
                 )
