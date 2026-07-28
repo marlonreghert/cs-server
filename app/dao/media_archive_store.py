@@ -183,6 +183,69 @@ class MediaArchiveStore:
         )
         return key
 
+    async def latest_run_prefix(self, source: str) -> Optional[str]:
+        """The newest run for a source, or None.
+
+        Always the NEWEST, never "any run that has photos": a run is a snapshot,
+        and blending runs would pair a fresh menu with a stale one and give no
+        sign it had happened.
+        """
+        prefixes = await self.list_run_prefixes(source)
+        return prefixes[-1] if prefixes else None
+
+    async def list_venue_photos(
+        self, prefix: str, venue_id: str, category: Optional[str] = None
+    ) -> list[str]:
+        """Image keys for one venue under a run, optionally one category.
+
+        Only images: the `info/` sidecars (`place.json`, `_manifest.json`) live
+        under the same venue prefix and must never be handed to a vision model
+        as though they were photos.
+        """
+        folder = f"{MEDIA_DIR}/{_safe_category(category)}" if category else MEDIA_DIR
+        search = f"{prefix}venue_id={venue_id}/{folder}/"
+        keys: list[str] = []
+        token: Optional[str] = None
+        while True:
+            kwargs: dict[str, Any] = {"Bucket": self.bucket, "Prefix": search}
+            if token:
+                kwargs["ContinuationToken"] = token
+            try:
+                response = await asyncio.to_thread(self._s3.list_objects_v2, **kwargs)
+            except Exception as e:
+                logger.error(
+                    f"[MediaArchiveStore] listing photos for {venue_id} failed: {e}"
+                )
+                return []
+            for entry in response.get("Contents", []) or []:
+                key = entry.get("Key") or ""
+                if key.rsplit(".", 1)[-1].lower() in _EXTENSIONS.values():
+                    keys.append(key)
+            token = response.get("NextContinuationToken")
+            if not response.get("IsTruncated") or not token:
+                return sorted(keys)
+
+    async def presign(self, key: str, expires_in: int = 900) -> Optional[str]:
+        """A time-limited GET url for one archived object.
+
+        Needed because the vision model fetches the image itself, so the bucket
+        stays private and the url carries the grant. Short-lived on purpose: it
+        is handed to a third party.
+
+        Returns None rather than raising — one unsignable photo must not lose
+        the venue's other photos.
+        """
+        try:
+            return await asyncio.to_thread(
+                self._s3.generate_presigned_url,
+                "get_object",
+                Params={"Bucket": self.bucket, "Key": key},
+                ExpiresIn=expires_in,
+            )
+        except Exception as e:
+            logger.warning(f"[MediaArchiveStore] presign failed for {key}: {e}")
+            return None
+
     async def exists_for_venue(self, prefix: str, venue_id: str) -> bool:
         """True when anything is already stored for this venue under `prefix`.
 

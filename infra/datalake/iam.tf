@@ -39,6 +39,17 @@ resource "aws_iam_policy" "datalake_writer" {
         ]
       },
       {
+        # Menu extraction presigns archived photos so OpenAI can fetch them, and
+        # a presigned URL is only valid if the SIGNER holds GetObject. Scoped to
+        # `retrieved/*` deliberately: this is media the app itself wrote, and
+        # `raw/*` — the BestTime lake — stays unreadable, which is the half of
+        # the append-only guarantee that actually matters.
+        Sid      = "ReadArchivedMedia"
+        Effect   = "Allow"
+        Action   = ["s3:GetObject"]
+        Resource = ["${aws_s3_bucket.lake.arn}/retrieved/*"]
+      },
+      {
         # The photo archive must LIST to work: it skips venues already archived
         # in the target day (so a re-run costs nothing at Google) and resolves
         # the "append to latest day" mode. This is metadata only — GetObject is

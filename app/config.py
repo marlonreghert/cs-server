@@ -367,6 +367,15 @@ class Settings(BaseSettings):
     menu_extraction_on_startup: bool = False
     menu_extraction_cron: str = "0 6 1 * *"  # Monthly: 1st at 6 AM
     menu_extraction_model: str = "gpt-4o-mini"
+    # Where extraction gets its photos. `archive` reads the newest run of the
+    # retrieval pipeline — real Google "Menu" tab shots, already paid for —
+    # instead of a second private copy. `redis` restores the original path
+    # without a deploy.
+    menu_extraction_photo_source: str = "archive"
+    menu_extraction_archive_source: str = "searchapi_gmaps_photos"
+    menu_extraction_archive_category: str = "menu"
+    # Short: the url is handed to OpenAI, not kept.
+    menu_photo_presign_seconds: int = 900
 
     # Vibe Classifier (OpenAI Vision - 2-stage hybrid)
     vibe_classifier_enabled: bool = False

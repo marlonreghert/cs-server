@@ -364,6 +364,14 @@ class Container:
                 extraction_model=settings.menu_extraction_model,
                 photo_filter_enabled=settings.menu_photo_filter_enabled,
                 photo_filter_confidence=settings.menu_photo_filter_confidence,
+                # Reads the retrieval pipeline's archive rather than a second
+                # copy of the same photos. None when the media archive is not
+                # configured, which the service reports rather than crashing.
+                media_store=getattr(self, "media_archive_store", None),
+                photo_source=settings.menu_extraction_photo_source,
+                archive_source=settings.menu_extraction_archive_source,
+                archive_category=settings.menu_extraction_archive_category,
+                presign_seconds=settings.menu_photo_presign_seconds,
             )
             logger.info("[Container] OpenAI Menu client and Menu Extraction service initialized")
         else:
