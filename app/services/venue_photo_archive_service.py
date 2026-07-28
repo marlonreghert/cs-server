@@ -392,6 +392,33 @@ class HttpPhotoDownloader:
         await self._client.aclose()
 
 
+def _media_summary(entries: list[dict]) -> dict:
+    """A per-venue digest of what was stored.
+
+    Exists so "is this venue's imagery stale?" and "did we get any menu shots?"
+    are answerable from the summary alone, without walking every photo entry.
+
+    `uploaded_at` is the date Google received the photo, NOT when it was taken —
+    Google strips EXIF, so no source here can offer a capture date. It is a good
+    freshness proxy and a bad provenance one. Absent for sources that do not
+    return it (SearchApi returns only image and thumbnail), in which case the
+    date fields are null rather than invented.
+    """
+    dates = sorted(e["uploaded_at"] for e in entries if e.get("uploaded_at"))
+    by_category: dict[str, int] = {}
+    for entry in entries:
+        key = entry.get("category") or "uncategorised"
+        by_category[key] = by_category.get(key, 0) + 1
+    return {
+        "photos": len(entries),
+        "by_category": by_category,
+        "bytes": sum(e.get("bytes") or 0 for e in entries),
+        "oldest_uploaded_at": dates[0] if dates else None,
+        "newest_uploaded_at": dates[-1] if dates else None,
+        "photos_with_date": len(dates),
+    }
+
+
 class VenuePhotoArchiveService:
     """Downloads venue photos into the versioned media archive."""
 
@@ -972,6 +999,7 @@ class VenuePhotoArchiveService:
                         "google_place_id": venue_ctx.get("google_place_id"),
                         "search_query": venue_ctx.get("search_query"),
                         "job_id": summary["job_id"],
+                        "media": _media_summary(entries),
                         "photos": entries,
                     },
                 )

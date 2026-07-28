@@ -182,6 +182,25 @@ used — one page is 20 photos, above the usual per-venue cap.
 Category names reach an S3 key, so they are **untrusted input**: `_safe_category`
 collapses traversal (`../../raw` → `raw`) and empties to `uncategorised`.
 
+### Photo dates
+
+`info/_manifest.json` carries `uploaded_at` per photo, plus a `media` digest
+(count, `by_category`, bytes, oldest/newest upload, how many had a date) so
+"is this venue's imagery stale?" is answerable without walking every entry.
+
+| Source | photo date |
+|---|---|
+| `apify_gmaps_extractor` | ✅ `uploadedAt`, free in the same payload |
+| `searchapi_gmaps_photos` | ❌ response is `image` + `thumbnail` only |
+| `google_photos` | ❌ none returned |
+
+It is the **upload** date, not the capture date — Google strips EXIF, so no
+source here can give one. Good freshness proxy, bad provenance. A source that
+returns no date leaves the fields null rather than inventing one.
+
+SerpApi exposes richer per-photo metadata behind a `photo_meta` call **per
+photo** — one billed search each, so not worth it for a date Apify gives free.
+
 ---
 
 ## 5. IAM — the sharp edges

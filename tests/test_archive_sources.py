@@ -577,3 +577,52 @@ class TestPhotoCapsAcrossCategories:
             "max_photos_per_category": 4,
         }))
         assert summary["photos_stored"] == 5
+
+
+class TestMediaSummary:
+    """A per-venue digest so freshness is answerable without walking photos."""
+
+    def _summary(self, entries):
+        from app.services.venue_photo_archive_service import _media_summary
+        return _media_summary(entries)
+
+    def test_it_reports_the_oldest_and_newest_upload(self):
+        s = self._summary([
+            {"uploaded_at": "2022-07-31T00:00:00.000Z"},
+            {"uploaded_at": "2018-07-28T00:00:00.000Z"},
+            {"uploaded_at": "2025-03-28T00:00:00.000Z"},
+        ])
+        assert s["oldest_uploaded_at"].startswith("2018")
+        assert s["newest_uploaded_at"].startswith("2025")
+        assert s["photos_with_date"] == 3
+
+    def test_a_source_without_dates_reports_null_rather_than_inventing_one(self):
+        # SearchApi returns only image and thumbnail; a fabricated date would be
+        # worse than an absent one.
+        s = self._summary([{"category": "menu"}, {"category": "menu"}])
+        assert s["oldest_uploaded_at"] is None
+        assert s["newest_uploaded_at"] is None
+        assert s["photos_with_date"] == 0
+        assert s["photos"] == 2
+
+    def test_partial_dates_are_summarised_from_what_exists(self):
+        s = self._summary([
+            {"uploaded_at": "2020-01-01T00:00:00.000Z"}, {}, {},
+        ])
+        assert s["photos"] == 3
+        assert s["photos_with_date"] == 1
+        assert s["oldest_uploaded_at"] == s["newest_uploaded_at"]
+
+    def test_it_counts_photos_per_category(self):
+        s = self._summary([
+            {"category": "menu"}, {"category": "menu"}, {"category": "vibe"}, {},
+        ])
+        assert s["by_category"] == {"menu": 2, "vibe": 1, "uncategorised": 1}
+
+    def test_it_totals_the_bytes_stored(self):
+        s = self._summary([{"bytes": 100}, {"bytes": 250}, {}])
+        assert s["bytes"] == 350
+
+    def test_an_empty_venue_summarises_to_zero(self):
+        s = self._summary([])
+        assert s["photos"] == 0 and s["by_category"] == {}
