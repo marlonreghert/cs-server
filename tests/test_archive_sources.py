@@ -495,3 +495,85 @@ class TestAllCatchAllCategory:
             100, {"source_config": {"categories": ["menu", "all"]}}
         )
         assert units == 200
+
+
+class TestPhotoCapsAcrossCategories:
+    """"Photos per venue" must mean per VENUE.
+
+    A category-aware source returns up to its limit for EACH category, so
+    without a total cap the count silently multiplied by however many
+    categories were ticked.
+    """
+
+    def _svc(self, photos):
+        import asyncio
+
+        from app.services.venue_photo_archive_service import VenuePhotoArchiveService
+
+        stored = []
+
+        class _Store:
+            async def list_run_prefixes(self, s): return []
+            async def list_day_partitions(self, s): return []
+            async def exists_for_venue(self, p, v): return False
+            async def put_info(self, **k): return "info"
+            async def put_manifest(self, **k): return "man"
+            async def put_latest_marker(self, *a, **k): return "marker"
+            async def put_image(self, *, prefix, venue_id, photo_id, data,
+                                content_type, category=None):
+                stored.append(category)
+                return f"{category}/{photo_id}"
+
+        class _Dao:
+            def list_active_venue_ids(self): return ["v1"]
+            def get_venue(self, v):
+                return type("V", (), {"venue_lat": -8.0, "venue_lng": -34.9,
+                                      "venue_name": "V", "venue_address": "a"})()
+            def get_vibe_attributes(self, v):
+                return type("A", (), {"google_place_id": "p1"})()
+
+        class _Dl:
+            async def download(self, url, timeout=None, max_bytes=None):
+                return b"x", "image/jpeg"
+
+        class _Google:
+            async def get_place_photos(self, *a, **k):
+                return photos
+
+        svc = VenuePhotoArchiveService(
+            google_places_client=_Google(), venue_dao=_Dao(),
+            media_store=_Store(), downloader=_Dl(),
+        )
+        return svc, stored, asyncio
+
+    def _photos(self, per_cat):
+        out = []
+        for cat, n in per_cat.items():
+            out += [{"url": f"{cat}{i}", "category": cat} for i in range(n)]
+        return out
+
+    def test_the_venue_cap_bounds_the_total_across_categories(self):
+        svc, stored, asyncio = self._svc(self._photos({"menu": 5, "vibe": 5, "all": 5}))
+        summary = asyncio.run(svc.run({"venue_ids": "v1", "max_photos_per_venue": 6}))
+        assert summary["photos_stored"] == 6, "the venue cap did not bound the total"
+        assert len(stored) == 6
+
+    def test_the_per_category_cap_applies_within_each_category(self):
+        svc, stored, asyncio = self._svc(self._photos({"menu": 5, "vibe": 5}))
+        asyncio.run(svc.run({
+            "venue_ids": "v1", "max_photos_per_venue": 50,
+            "max_photos_per_category": 2,
+        }))
+        assert stored.count("menu") == 2
+        assert stored.count("vibe") == 2
+
+    def test_the_venue_cap_still_wins_over_the_category_cap(self):
+        # 3 categories x 4 each = 12 available, but the venue cap is 5.
+        svc, stored, asyncio = self._svc(
+            self._photos({"menu": 4, "vibe": 4, "all": 4})
+        )
+        summary = asyncio.run(svc.run({
+            "venue_ids": "v1", "max_photos_per_venue": 5,
+            "max_photos_per_category": 4,
+        }))
+        assert summary["photos_stored"] == 5

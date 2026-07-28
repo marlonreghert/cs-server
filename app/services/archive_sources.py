@@ -173,10 +173,13 @@ async def _fetch_searchapi(client, venue, cfg):
     categories = source_cfg.get("categories") or ["menu"]
     if isinstance(categories, str):
         categories = [c.strip() for c in categories.split(",") if c.strip()]
+    # Per CATEGORY, so the per-category cap governs when set; otherwise the
+    # venue cap is the only bound and the service trims the total afterwards.
+    per_category = cfg.get("max_photos_per_category") or cfg["max_photos_per_venue"]
     return await client.fetch_venue_photos(
         place_id,
         categories=categories,
-        max_photos=cfg["max_photos_per_venue"],
+        max_photos=per_category,
         hl=str(source_cfg.get("language") or "pt-BR"),
     )
 
