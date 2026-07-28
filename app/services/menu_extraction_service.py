@@ -37,6 +37,11 @@ class MenuExtractionService:
         extraction_model: str = "gpt-4o",
         photo_filter_enabled: bool = True,
         photo_filter_confidence: float = 0.6,
+        media_store=None,
+        photo_source: str = "archive",
+        archive_source: str = "searchapi_gmaps_photos",
+        archive_category: str = "menu",
+        presign_seconds: int = 900,
     ):
         self.openai_client = openai_client
         self.s3_client = s3_client
@@ -44,6 +49,86 @@ class MenuExtractionService:
         self.extraction_model = extraction_model
         self.photo_filter_enabled = photo_filter_enabled
         self.photo_filter_confidence = photo_filter_confidence
+        # Reading the archive instead of a second private copy of the same
+        # photos. `redis` keeps the original path selectable without a deploy.
+        self.media_store = media_store
+        self.photo_source = photo_source
+        self.archive_source = archive_source
+        self.archive_category = archive_category
+        self.presign_seconds = presign_seconds
+
+    async def _photo_urls(self, venue_id: str):
+        """Presigned urls for this venue's menu photos, and their ids.
+
+        Returns (None, None) when the venue has no photos — a normal outcome,
+        not a failure. A photo that cannot be signed is skipped so it never
+        costs the venue its other photos.
+        """
+        if self.photo_source == "archive":
+            return await self._archive_photo_urls(venue_id)
+        return await self._redis_photo_urls(venue_id)
+
+    async def _archive_photo_urls(self, venue_id: str):
+        """The NEWEST archive run's photos for the configured category.
+
+        Deliberately the newest run only: a run is a snapshot, so falling back
+        to an older one would silently pair a fresh menu with a stale photo.
+        """
+        if self.media_store is None:
+            logger.error("[MenuExtraction] archive source selected but no media store")
+            return None, None
+        prefix = await self.media_store.latest_run_prefix(self.archive_source)
+        if not prefix:
+            logger.info(
+                f"[MenuExtraction] no {self.archive_source} run to read for {venue_id}"
+            )
+            return None, None
+        keys = await self.media_store.list_venue_photos(
+            prefix, venue_id, self.archive_category
+        )
+        if not keys:
+            logger.debug(
+                f"[MenuExtraction] {venue_id} absent from the newest "
+                f"{self.archive_source} run"
+            )
+            return None, None
+
+        urls, ids = [], []
+        for key in keys:
+            url = await self.media_store.presign(key, self.presign_seconds)
+            if url:
+                urls.append(url)
+                ids.append(key.rsplit("/", 1)[-1].rsplit(".", 1)[0])
+        if not urls:
+            # Every signature failed — almost always the IAM grant, so say which.
+            logger.error(
+                f"[MenuExtraction] could not sign any archived photo for "
+                f"{venue_id}; check s3:GetObject on retrieved/* for this role"
+            )
+            return None, None
+        logger.info(
+            f"[MenuExtraction] {venue_id}: {len(urls)} {self.archive_category} "
+            f"photo(s) from the newest {self.archive_source} run"
+        )
+        return urls, ids
+
+    async def _redis_photo_urls(self, venue_id: str):
+        """The original path: photos the menu_photos job put in its own bucket."""
+        menu_photos = self.venue_dao.get_venue_menu_photos(venue_id)
+        if menu_photos is None or not menu_photos.has_photos():
+            logger.debug(f"[MenuExtraction] No menu photos for {venue_id}")
+            return None, None
+        urls, ids = [], []
+        for photo in menu_photos.photos:
+            try:
+                urls.append(await self.s3_client.generate_presigned_url(photo.s3_key))
+                ids.append(photo.photo_id)
+            except Exception as e:
+                logger.error(
+                    f"[MenuExtraction] Failed to generate presigned URL for "
+                    f"{photo.s3_key}: {e}"
+                )
+        return (urls, ids) if urls else (None, None)
 
     async def extract_menu_for_venue(
         self, venue_id: str, force_refresh: bool = False
@@ -65,26 +150,12 @@ class MenuExtractionService:
                 MENU_EXTRACTION_RESULTS.labels(result="cached").inc()
                 return existing
 
-        # Get menu photos from Redis
-        menu_photos = self.venue_dao.get_venue_menu_photos(venue_id)
-        if menu_photos is None or not menu_photos.has_photos():
-            logger.debug(f"[MenuExtraction] No menu photos for {venue_id}")
+        # Where the photos come from is a seam, so the archive path can be
+        # switched back to the Redis one by config rather than a deploy.
+        presigned_urls, photo_ids = await self._photo_urls(venue_id)
+        if presigned_urls is None:
             MENU_EXTRACTION_RESULTS.labels(result="no_photos").inc()
             return None
-
-        # Generate presigned URLs for each photo
-        presigned_urls = []
-        photo_ids = []
-        for photo in menu_photos.photos:
-            try:
-                url = await self.s3_client.generate_presigned_url(photo.s3_key)
-                presigned_urls.append(url)
-                photo_ids.append(photo.photo_id)
-            except Exception as e:
-                logger.error(
-                    f"[MenuExtraction] Failed to generate presigned URL for "
-                    f"{photo.s3_key}: {e}"
-                )
 
         if not presigned_urls:
             logger.error(f"[MenuExtraction] No presigned URLs generated for {venue_id}")
