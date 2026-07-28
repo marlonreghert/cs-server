@@ -26,6 +26,23 @@ logger = logging.getLogger(__name__)
 REQUEST_DELAY = 0.5  # 2 req/sec
 
 
+def selectable_menu_photos(entries: list[dict]) -> list[dict]:
+    """Archived menu photos worth paying an extractor to read.
+
+    A photo the classifier marked illegible has no text in it to extract, so
+    sending it to GPT-4o is pure waste — this is where the `legible` attribute
+    pays for the classifier that produced it.
+
+    An entry with NO legibility verdict is kept. An archive from before the
+    classifier existed must behave exactly as it did before, and "unknown" is
+    not "unreadable".
+    """
+    return [
+        entry for entry in entries
+        if (entry.get("attributes") or {}).get("legible") != "nao"
+    ]
+
+
 class MenuExtractionService:
     """Extracts structured menu data from stored menu photos."""
 
@@ -58,11 +75,12 @@ class MenuExtractionService:
         self.presign_seconds = presign_seconds
 
     async def _photo_urls(self, venue_id: str):
-        """Presigned urls for this venue's menu photos, and their ids.
+        """Presigned urls for this venue's menu photos, their ids, and whether
+        they still need the pre-filter.
 
-        Returns (None, None) when the venue has no photos — a normal outcome,
-        not a failure. A photo that cannot be signed is skipped so it never
-        costs the venue its other photos.
+        Returns (None, None, False) when the venue has no photos — a normal
+        outcome, not a failure. A photo that cannot be signed is skipped so it
+        never costs the venue its other photos.
         """
         if self.photo_source == "archive":
             return await self._archive_photo_urls(venue_id)
@@ -73,16 +91,21 @@ class MenuExtractionService:
 
         Deliberately the newest run only: a run is a snapshot, so falling back
         to an older one would silently pair a fresh menu with a stale photo.
+
+        Never pre-filtered: these photos are already in the `menu` category by
+        construction, and the manifest has told us which of them are legible —
+        a second GPT pass to re-decide "is this a menu" would pay twice for an
+        answer we hold.
         """
         if self.media_store is None:
             logger.error("[MenuExtraction] archive source selected but no media store")
-            return None, None
+            return None, None, False
         prefix = await self.media_store.latest_run_prefix(self.archive_source)
         if not prefix:
             logger.info(
                 f"[MenuExtraction] no {self.archive_source} run to read for {venue_id}"
             )
-            return None, None
+            return None, None, False
         keys = await self.media_store.list_venue_photos(
             prefix, venue_id, self.archive_category
         )
@@ -91,7 +114,11 @@ class MenuExtractionService:
                 f"[MenuExtraction] {venue_id} absent from the newest "
                 f"{self.archive_source} run"
             )
-            return None, None
+            return None, None, False
+        keys = await self._drop_illegible(prefix, venue_id, keys)
+        if not keys:
+            logger.info(f"[MenuExtraction] every menu photo for {venue_id} is illegible")
+            return None, None, False
 
         urls, ids = [], []
         for key in keys:
@@ -105,19 +132,41 @@ class MenuExtractionService:
                 f"[MenuExtraction] could not sign any archived photo for "
                 f"{venue_id}; check s3:GetObject on retrieved/* for this role"
             )
-            return None, None
+            return None, None, False
         logger.info(
             f"[MenuExtraction] {venue_id}: {len(urls)} {self.archive_category} "
             f"photo(s) from the newest {self.archive_source} run"
         )
-        return urls, ids
+        return urls, ids, False
+
+    async def _drop_illegible(self, prefix: str, venue_id: str, keys: list[str]):
+        """Remove the photos the classifier said have no readable text.
+
+        Only what the manifest POSITIVELY marks illegible is dropped. A key the
+        manifest does not mention — an unclassified run, a photo added later —
+        is kept, so this can only ever narrow a known-bad set, never silently
+        lose a menu.
+        """
+        manifest = await self.media_store.read_manifest(prefix, venue_id)
+        entries = (manifest or {}).get("photos") or []
+        if not entries:
+            return keys
+        known = {e.get("key") for e in entries}
+        keep = {e.get("key") for e in selectable_menu_photos(entries)}
+        selected = [k for k in keys if k not in known or k in keep]
+        if len(selected) < len(keys):
+            logger.info(
+                f"[MenuExtraction] {venue_id}: skipped {len(keys) - len(selected)} "
+                f"illegible menu photo(s) before paying for extraction"
+            )
+        return selected
 
     async def _redis_photo_urls(self, venue_id: str):
         """The original path: photos the menu_photos job put in its own bucket."""
         menu_photos = self.venue_dao.get_venue_menu_photos(venue_id)
         if menu_photos is None or not menu_photos.has_photos():
             logger.debug(f"[MenuExtraction] No menu photos for {venue_id}")
-            return None, None
+            return None, None, False
         urls, ids = [], []
         for photo in menu_photos.photos:
             try:
@@ -128,7 +177,11 @@ class MenuExtractionService:
                     f"[MenuExtraction] Failed to generate presigned URL for "
                     f"{photo.s3_key}: {e}"
                 )
-        return (urls, ids) if urls else (None, None)
+        # These are unfiltered: they may be any photo the venue had, so the
+        # pre-filter still has to decide which of them are menus — except for
+        # the two sources that were already filtered upstream.
+        needs_filter = menu_photos.source not in ("instagram_highlights", "gmaps_extractor")
+        return (urls, ids, needs_filter) if urls else (None, None, False)
 
     async def extract_menu_for_venue(
         self, venue_id: str, force_refresh: bool = False
@@ -152,7 +205,7 @@ class MenuExtractionService:
 
         # Where the photos come from is a seam, so the archive path can be
         # switched back to the Redis one by config rather than a deploy.
-        presigned_urls, photo_ids = await self._photo_urls(venue_id)
+        presigned_urls, photo_ids, needs_filter = await self._photo_urls(venue_id)
         if presigned_urls is None:
             MENU_EXTRACTION_RESULTS.labels(result="no_photos").inc()
             return None
@@ -162,15 +215,14 @@ class MenuExtractionService:
             MENU_EXTRACTION_RESULTS.labels(result="error").inc()
             return None
 
-        # Pre-filter: classify which photos are menus using GPT-4o-mini
-        # Skip for Instagram-sourced photos (already filtered by highlight title)
-        # Skip for GMaps-sourced photos (no category filtering available;
-        # owner-prioritized photos are sent directly to extraction)
-        if (
-            self.photo_filter_enabled
-            and len(presigned_urls) > 1
-            and menu_photos.source not in ("instagram_highlights", "gmaps_extractor")
-        ):
+        # Pre-filter: classify which photos are menus using GPT-4o-mini.
+        # `needs_filter` comes from whoever supplied the photos — the archive
+        # path has already filtered by category and legibility, and the Redis
+        # path knows which of ITS sources were pre-filtered upstream. Reading
+        # that flag from the supplier is also the fix for a NameError: this
+        # condition used to reference `menu_photos`, a local of the Redis
+        # branch, which does not exist on the archive path.
+        if self.photo_filter_enabled and len(presigned_urls) > 1 and needs_filter:
             try:
                 menu_indices = await self.openai_client.classify_menu_photos(
                     presigned_urls,

@@ -16,6 +16,7 @@ from app.services import VenuesRefresherService, VenueBudgetService
 from app.handlers import AddVenueHandler
 from app.services.batch_add_service import BatchAddService
 from app.services.google_places_enrichment_service import GooglePlacesEnrichmentService
+from app.services.photo_classification_service import PhotoClassificationService
 from app.services.photo_enrichment_service import PhotoEnrichmentService
 from app.services.venue_photo_archive_service import VenuePhotoArchiveService
 from app.api.apify_instagram_client import ApifyInstagramClient
@@ -26,6 +27,7 @@ from app.api.s3_client import S3Client
 from app.api.apify_instagram_highlights_client import ApifyInstagramHighlightsClient
 from app.api.apify_gmaps_extractor_client import ApifyGMapsExtractorClient
 from app.api.openai_menu_client import OpenAIMenuClient
+from app.api.openai_photo_classifier_client import OpenAIPhotoClassifierClient
 from app.services.menu_photo_enrichment_service import MenuPhotoEnrichmentService
 from app.services.menu_extraction_service import MenuExtractionService
 from app.api.openai_vibe_client import OpenAIVibeClient
@@ -157,6 +159,8 @@ class Container:
         self.photo_enrichment_service = None
         self.media_archive_store = None
         self.venue_photo_archive_service = None
+        self.openai_photo_classifier_client = None
+        self.photo_classification_service = None
 
         # SearchApi photo client — the category-aware source. Built before the
         # archive service, which is constructed below.
@@ -212,6 +216,11 @@ class Container:
                 settings.media_archive_bucket or settings.datalake_bucket
             )
             if settings.media_archive_enabled and archive_bucket:
+                # Per-photo classification. Optional in the strict sense: with no
+                # OpenAI key (or switched off) the classifier stays None and the
+                # archive runs exactly as it did before, photos keeping whatever
+                # category their source gave them.
+                self._init_photo_classifier(settings)
                 self.media_archive_store = MediaArchiveStore(
                     bucket=archive_bucket,
                     region=settings.datalake_region,
@@ -239,6 +248,7 @@ class Container:
                     searchapi_photos_client=getattr(
                         self, "searchapi_photos_client", None
                     ),
+                    photo_classifier=self.photo_classification_service,
                     settings=settings,
                 )
                 logger.info(
@@ -525,6 +535,40 @@ class Container:
 
         logger.info("[Container] Container initialized successfully")
 
+    def _init_photo_classifier(self, settings: Settings) -> None:
+        """Build the per-photo classifier, or leave the archive unclassified.
+
+        Deliberately silent-but-logged when there is no key: the archive job is
+        the expensive half of this pipeline and must keep running without the
+        cheap half. A photo already paid for is never lost to a missing
+        classifier.
+        """
+        if not settings.photo_classification_enabled:
+            logger.info("[Container] Photo classification disabled by config")
+            return
+        if not settings.openai_api_key:
+            logger.warning(
+                "[Container] Photo classification enabled but no OpenAI key; "
+                "archived photos keep the category their source gave them"
+            )
+            return
+        self.openai_photo_classifier_client = OpenAIPhotoClassifierClient(
+            api_key=settings.openai_api_key,
+            model=settings.photo_classification_model,
+        )
+        self.photo_classification_service = PhotoClassificationService(
+            client=self.openai_photo_classifier_client,
+            model=settings.photo_classification_model,
+            confidence_threshold=settings.photo_classification_confidence,
+            batch_size=settings.photo_classification_batch_size,
+            cost_per_photo_usd=settings.photo_classification_cost_per_photo_usd,
+        )
+        logger.info(
+            f"[Container] Photo classification initialized "
+            f"(model={settings.photo_classification_model}, "
+            f"attributes={settings.photo_attributes_enabled})"
+        )
+
     async def shutdown(self):
         """Clean up resources on shutdown."""
         logger.info("[Container] Shutting down container")
@@ -582,3 +626,12 @@ class Container:
                 logger.info("[Container] OpenAI Vibe client closed")
             except Exception as e:
                 logger.error(f"[Container] Error closing OpenAI Vibe client: {e}")
+
+        if self.openai_photo_classifier_client:
+            try:
+                await self.openai_photo_classifier_client.close()
+                logger.info("[Container] OpenAI Photo Classifier client closed")
+            except Exception as e:
+                logger.error(
+                    f"[Container] Error closing OpenAI Photo Classifier client: {e}"
+                )

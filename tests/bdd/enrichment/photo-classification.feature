@@ -1,4 +1,3 @@
-@wip
 Feature: Classify archived photos into our own categories and attributes
   As the venue platform operator
   I must label every archived photo with our six categories and the per-category
@@ -146,9 +145,9 @@ Feature: Classify archived photos into our own categories and attributes
   # 6 — Who took the photo
   Scenario: Leave a known authorship untouched by classification
     Given a fetched photo the provider attributes to the venue owner
-    And a fetched photo the classifier categorizes as "menu"
     When the photo archive job runs for that venue
-    Then the manifest entry still records the authorship "by_owner"
+    Then the photo is filed under the "menu" category
+    And the manifest entry still records the authorship "by_owner"
 
   Scenario: Guess the author only when the provider did not say
     Given a fetched photo whose provider authorship is unknown
@@ -218,6 +217,8 @@ Feature: Classify archived photos into our own categories and attributes
   # 9 — Extending the schema without paying a provider again
   Scenario: Re-derive attributes for an archived run from stored photos
     Given a completed run whose photos are archived
+    And the attribute schema gains a field the model can read from them
     When attribute derivation is re-run for that run
     Then the archived photos are read from the bucket
     And no provider request is made
+    And the manifest entry records the new attribute

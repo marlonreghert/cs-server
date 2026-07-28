@@ -509,6 +509,27 @@ MEDIA_ARCHIVE_VENUES_WITH_MEDIA = Gauge(
     ["source"],
 )
 
+# Photo classification. `fallbacks` is the one to watch: it separates "the model
+# failed" (photos keep their source category) from "the model was unsure" (filed
+# as `other`), which look identical in the category counts but mean opposite
+# things about whether the classifier is working.
+PHOTO_CLASSIFICATION_TOTAL = Counter(
+    "photo_classification_total",
+    "Photos classified, by the category they were filed under",
+    ["category"],
+)
+
+PHOTO_CLASSIFICATION_FALLBACKS_TOTAL = Counter(
+    "photo_classification_fallbacks_total",
+    "Photos that did not get a confident category, by reason",
+    ["reason"],
+)
+
+PHOTO_CLASSIFICATION_COST_USD = Counter(
+    "photo_classification_cost_usd",
+    "Estimated cumulative vision-model spend on photo classification, in USD",
+)
+
 # OpenAI API metrics
 OPENAI_API_CALLS_TOTAL = Counter(
     "openai_api_calls_total",

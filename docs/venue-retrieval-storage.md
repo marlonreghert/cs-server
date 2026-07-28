@@ -182,6 +182,58 @@ used — one page is 20 photos, above the usual per-venue cap.
 Category names reach an S3 key, so they are **untrusted input**: `_safe_category`
 collapses traversal (`../../raw` → `raw`) and empties to `uncategorised`.
 
+### Our own categories: the photo classifier
+
+Google's four tabs do not include the signals worth most to this product. They
+cannot say who is in the room, whether there are children, whether a menu is
+even legible, or whether that terrace has a roof when it rains. So a vision pass
+labels every photo with **our** taxonomy (`app/models/photo_taxonomy.py`) —
+`menu`, `food_drinks`, `interior`, `exterior`, `crowd`, `other` — plus the
+attributes that category can carry.
+
+It runs **between the fetch and the store**, so a photo lands in the right
+folder the first time: no second write, no object copy.
+
+**Two passes, deliberately not one.** Pass 1 assigns the category, a confidence
+and a quality. Pass 2 groups by category and asks one focused prompt per
+category — a focused prompt is measurably more accurate than one carrying six
+schemas, `other` costs nothing because it is skipped, and **adding a field later
+re-runs one category rather than the catalogue**. That re-run reads the archived
+copies back from S3 (`rederive_attributes`, which is what the `GetObject` grant
+on `retrieved/*` exists for) and never re-pays a provider.
+
+Four rules hold the cost and the correctness down:
+
+- **A source that names its own tabs is never classified.** `ArchiveSource.
+  provides_categories` is `True` for `searchapi_gmaps_photos`: its category is
+  Google's own answer, and a guess would be a downgrade. Apify and the Places
+  API return no per-image category, so those are classified.
+- **Classification is an enhancement, never a dependency.** A model failure
+  leaves every photo archived under the category its source gave it. Losing a
+  photo already paid for because a classifier was unavailable is the wrong
+  trade.
+- **Low confidence files as `other`**, with an `other_kind` recorded in pass 1
+  saying *why* — so those photos can be found and reclassified later without
+  re-billing. A wrong label is worse than an honest unknown, because everything
+  downstream trusts it.
+- **`authorship` is the provider's fact and classification never writes it.**
+  The model's read goes to `likely_authorship`, and only where the provider had
+  no answer.
+
+Attributes marked as taxonomy-aligned (`estetica`, `publico`, `dress_code`,
+`clima_social`, `music_format`) emit the **exact labels from
+`app/models/taxonomy.py`**, validated by the same `validate_category_labels`, so
+there is no parallel vocabulary to translate and a taxonomy edit cannot silently
+desync the two. Anything outside the vocabulary is dropped, not stored.
+
+Cost is ~$2 for the full ~17k-photo catalogue, roughly three quarters of it
+pass 2 — one twentieth of a single month of SearchApi's plan, and one-off rather
+than a subscription. It is metered (`photo_classification_cost_usd`) rather than
+assumed, and both passes are switchable per run and per deployment.
+
+The first consumer is menu extraction: a photo whose `legible` is `nao` is never
+sent to the extractor, so the classifier pays for itself in OCR calls not made.
+
 ### Photo dates
 
 `info/_manifest.json` carries `uploaded_at` per photo, plus a `media` digest

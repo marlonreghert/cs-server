@@ -225,6 +225,34 @@ class MediaArchiveStore:
             if not response.get("IsTruncated") or not token:
                 return sorted(keys)
 
+    async def list_run_venue_ids(self, prefix: str) -> list[str]:
+        """Venue ids archived under a run, ascending."""
+        out: list[str] = []
+        for child in await self._list_child_prefixes(prefix):
+            tail = child[len(prefix):].strip("/")
+            if tail.startswith("venue_id="):
+                out.append(tail[len("venue_id="):])
+        return sorted(out)
+
+    async def read_manifest(self, prefix: str, venue_id: str) -> Optional[dict]:
+        """The stored manifest for one venue, or None.
+
+        The one read that needs `s3:GetObject` — scoped to `retrieved/*` for
+        exactly this, so an archived run's labels can be revised without
+        re-fetching the photos from a provider. Returns None rather than
+        raising: a venue with an unreadable manifest must not end a pass over
+        the rest of the run.
+        """
+        key = f"{prefix}venue_id={venue_id}/{INFO_DIR}/{MANIFEST_NAME}"
+        try:
+            response = await asyncio.to_thread(
+                self._s3.get_object, Bucket=self.bucket, Key=key
+            )
+            return json.loads(response["Body"].read())
+        except Exception as e:
+            logger.warning(f"[MediaArchiveStore] manifest read failed for {key}: {e}")
+            return None
+
     async def presign(self, key: str, expires_in: int = 900) -> Optional[str]:
         """A time-limited GET url for one archived object.
 
