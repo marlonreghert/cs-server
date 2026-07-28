@@ -415,7 +415,83 @@ class TestSearchApiCategorySource:
         source = get_source(SOURCE_SEARCHAPI_PHOTOS)
         field = next(f for f in source.config_schema if f.name == "categories")
         assert field.type == "multiselect"
-        assert set(field.options) == {"menu", "food_drink", "vibe", "latest"}
+        assert set(field.options) == {"menu", "food_drink", "vibe", "latest", "all"}
 
 
 SETTINGS_SEARCHAPI = SimpleNamespace(searchapi_cost_per_1k_usd=4.0)
+
+
+class TestAllCatchAllCategory:
+    """`all` is the unfiltered view, and it is NOT a superset.
+
+    Measured on a live place: the four named tabs plus `all` yielded 84
+    distinct photos, of which `all` held 20 and `menu` shared none. Each tab
+    surfaces its own photos, so `all` is what catches the rest — including the
+    place-specific dish tabs whose ids cannot be enumerated.
+    """
+
+    def _client(self):
+        import app.api.serpapi_client as m
+        cls = [v for k, v in vars(m).items()
+               if isinstance(v, type) and hasattr(v, "PHOTO_CATEGORIES")][0]
+
+        class _C(cls):
+            def __init__(self):
+                self.seen_category_ids = []
+
+            async def fetch_photos(self, place_id=None, data_id=None,
+                                   category_id=None, hl="pt-BR"):
+                self.seen_category_ids.append(category_id)
+                tag = category_id or "ALL"
+                return {"photos": [{"image": f"{tag}-{i}"} for i in range(2)]}
+        return _C()
+
+    def _run(self, client, categories):
+        import asyncio
+        return asyncio.run(client.fetch_venue_photos(
+            "ChIJ_x", categories=categories, max_photos=10
+        ))
+
+    def test_all_is_fetched_without_a_category_filter(self):
+        client = self._client()
+        self._run(client, ["all"])
+        assert client.seen_category_ids == [None], client.seen_category_ids
+
+    def test_named_tabs_are_fetched_before_the_catch_all(self):
+        # So a photo in both is filed under the specific tab, not `all`.
+        client = self._client()
+        self._run(client, ["all", "menu"])
+        assert client.seen_category_ids[-1] is None
+        assert client.seen_category_ids[0] == client.PHOTO_CATEGORIES["menu"]
+
+    def test_a_photo_in_both_is_filed_under_the_specific_tab(self):
+        import asyncio
+
+        import app.api.serpapi_client as m
+        cls = [v for k, v in vars(m).items()
+               if isinstance(v, type) and hasattr(v, "PHOTO_CATEGORIES")][0]
+
+        class _Dup(cls):
+            def __init__(self): pass
+            async def fetch_photos(self, place_id=None, data_id=None,
+                                   category_id=None, hl="pt-BR"):
+                # The same photo appears in the menu tab and in `all`.
+                return {"photos": [{"image": "shared.jpg"}]}
+
+        out = asyncio.run(_Dup().fetch_venue_photos(
+            "p", categories=["all", "menu"], max_photos=10
+        ))
+        assert len(out["photos"]) == 1, "the duplicate was stored twice"
+        assert out["photos"][0]["category"] == "menu"
+
+    def test_all_is_offered_in_the_picker(self):
+        source = get_source(SOURCE_SEARCHAPI_PHOTOS)
+        field = next(f for f in source.config_schema if f.name == "categories")
+        assert "all" in field.options
+
+    def test_the_catch_all_is_billed_like_any_other_category(self):
+        source = get_source(SOURCE_SEARCHAPI_PHOTOS)
+        units, _ = source.estimate_units(
+            100, {"source_config": {"categories": ["menu", "all"]}}
+        )
+        assert units == 200

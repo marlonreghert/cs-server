@@ -140,10 +140,38 @@ and the useful one, since owners upload the official shots.
 Photos come back in **Google Maps' display order** (the "All" tab, Google's own
 ranking), so a cap of N takes the **top N**, not an arbitrary N.
 
-**Real Google categories** would need SearchApi.io's `google_maps_photos` engine
-with `category_id` (present as `app/api/serpapi_client.py`, currently
-deprecated), at **one request per category per venue** — cost multiplies by the
-number of categories.
+### Real categories: the `searchapi_gmaps_photos` source
+
+`app/api/serpapi_client.py` (SearchApi.io, despite the file name) is the only
+source that knows which Google tab a photo came from. One billed search per
+category per venue; 250 venues x 3 categories is ~$3.
+
+The engine accepts `category_id` but returns **no categories array** — verified
+live; the response is `search_metadata`, `search_parameters`, `photos`,
+`pagination`. So ids cannot be discovered at runtime. They are protobuf:
+`Menu` = `CgIYIQ` = `0a 02 18 21` (field 3, varint 33), the one value SerpApi
+publishes. Walking that index against a live place found the rest:
+
+| idx | category | contents |
+|---|---|---|
+| 32 | `food_drink` | plated dishes |
+| 33 | `menu` | menu cards (documented) |
+| 34 | `vibe` | interiors, atmosphere |
+| 36 | `latest` | recent uploads |
+| — | `all` | unfiltered; **no** `category_id` |
+
+Indices 24–31 and 40–49 return nothing, so **those four are the complete
+enumerable set.** Place-specific tabs ("Octopus as food", "Risotto") exist in
+the UI but use a different id form and cannot be guessed.
+
+`all` is **not a superset**: measured on one place, the four tabs plus `all`
+gave 84 distinct photos, of which `all` held 20 and `menu` shared none. Each tab
+surfaces its own photos, so `all` is the catch-all for what the named tabs miss.
+Named tabs are fetched first so a photo appearing in both is filed under the
+specific one.
+
+`all` paginates (`next_page_token`); each page is another billed search. Not
+used — one page is 20 photos, above the usual per-venue cap.
 
 Category names reach an S3 key, so they are **untrusted input**: `_safe_category`
 collapses traversal (`../../raw` → `raw`) and empties to `uncategorised`.

@@ -127,12 +127,24 @@ class SerpApiClient:
     # response, whose top-level keys are search_metadata, search_parameters,
     # photos and pagination — so the ids cannot be discovered at runtime and
     # this table is the only way to ask for a named tab.
-    PHOTO_CATEGORIES: dict[str, str] = {
+    # `all` is the unfiltered view — no category_id at all. It is NOT a superset:
+    # measured on a live place, the four named tabs plus `all` yielded 84
+    # distinct photos of which `all` held 20, and `menu` shared none of them.
+    # Each tab surfaces its own photos, so `all` is the bucket that catches what
+    # the named ones miss — including the place-specific dish tabs ("Octopus as
+    # food", "Risotto") whose ids are not of this form and cannot be enumerated.
+    ALL_CATEGORY = "all"
+    PHOTO_CATEGORIES: dict[str, "str | None"] = {
         "food_drink": "CgIYIA",   # 32 — plated dishes
         "menu": "CgIYIQ",         # 33 — menu cards (documented)
         "vibe": "CgIYIg",         # 34 — interiors and atmosphere
         "latest": "CgIYJA",       # 36 — recent uploads
+        ALL_CATEGORY: None,       # unfiltered — the catch-all
     }
+
+    # Named tabs are fetched BEFORE `all`, so a photo that appears in both is
+    # filed under the specific tab rather than the catch-all.
+    _CATEGORY_ORDER = ("menu", "food_drink", "vibe", "latest", ALL_CATEGORY)
 
     async def fetch_venue_photos(
         self,
@@ -153,7 +165,9 @@ class SerpApiClient:
         Returns the archive's common shape: `{"photos": [...], "info": {...}}`
         with every photo tagged with the category folder it belongs in.
         """
-        wanted = [c for c in (categories or ["menu"]) if c in self.PHOTO_CATEGORIES]
+        requested = set(categories or ["menu"])
+        wanted = [c for c in self._CATEGORY_ORDER
+                  if c in requested and c in self.PHOTO_CATEGORIES]
         if not wanted:
             logger.warning("[SearchApi] no known categories requested")
             return None
@@ -163,7 +177,9 @@ class SerpApiClient:
         found: list[str] = []
         for name in wanted:
             result = await self.fetch_photos(
-                place_id=place_id, category_id=self.PHOTO_CATEGORIES[name], hl=hl
+                place_id=place_id,
+                category_id=self.PHOTO_CATEGORIES[name],   # None for `all`
+                hl=hl,
             )
             if not result or not result.get("photos"):
                 continue
