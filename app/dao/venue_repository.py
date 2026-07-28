@@ -191,7 +191,10 @@ class VenueRepository(RedisVenueDAO):
         del cache_ttl_days, not_found_ttl_days
         self.rds_store.upsert_enrichment(
             "instagram.handle", instagram.venue_id, _json(instagram), history=_HISTORY,
-            promoted={"instagram_handle": getattr(instagram, "instagram_handle", None)},
+            promoted={
+                "instagram_handle": getattr(instagram, "instagram_handle", None),
+                "source": getattr(instagram, "source", None),
+            },
         )
 
     def set_venue_ig_posts(self, posts) -> None:

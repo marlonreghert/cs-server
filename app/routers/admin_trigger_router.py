@@ -144,10 +144,23 @@ JOB_REGISTRY = {
     },
     "instagram": {
         "label": "Instagram Discovery",
-        "description": "Discover Instagram handles for venues via Google Places + Apify",
-        "service_attr": "instagram_enrichment_service",
-        "unavailable_detail": "Instagram enrichment not configured (missing Apify API token)",
-        "runner": lambda c, cfg: c.instagram_enrichment_service.enrich_all_venues(),
+        "description": "Find Instagram handles cheapest-source-first: the venue's "
+        "Google website, then the archived Google Maps payload (both free), then "
+        "the paid Apify search. Every candidate is verified against the real "
+        "profile. Turn the paid tier off for a zero-cost pass.",
+        # Rendered by the vibesadmin Enrichments options modal — every key here
+        # becomes a control on the Run dialog.
+        "default_config": {
+            "force_refresh": False,
+            "tier_google_website_enabled": True,
+            "tier_archived_gmaps_website_enabled": True,
+            "tier_apify_search_enabled": True,
+            "judge_enabled": False,
+            "venue_ids": "",
+        },
+        "service_attr": "instagram_cascade_service",
+        "unavailable_detail": "Instagram cascade not configured",
+        "runner": lambda c, cfg: c.instagram_cascade_service.run(cfg),
     },
     "instagram_posts": {
         "label": "Instagram Posts Scraping",
