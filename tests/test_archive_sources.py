@@ -626,3 +626,43 @@ class TestMediaSummary:
     def test_an_empty_venue_summarises_to_zero(self):
         s = self._summary([])
         assert s["photos"] == 0 and s["by_category"] == {}
+
+
+class TestPhotoIdentityAcrossSources:
+    """One image, one id — whatever fetched it and at whatever size.
+
+    This is what lets the sources be joined: SearchApi knows a photo's category
+    and Apify knows its upload date, and neither knows the other. The shared id
+    is the only thing that can connect them.
+    """
+
+    TOKEN = ("https://lh3.googleusercontent.com/gps-cs-s/"
+             "AHRPTWk7lPwpUxm4QEM1v107VeDGAcMLE3vm8Hx2oqyDH9J4g")
+
+    def _id(self, url):
+        from app.services.venue_photo_archive_service import photo_id_for
+        return photo_id_for({"url": url})
+
+    def test_the_same_photo_from_two_sources_gets_one_id(self):
+        # Observed in real data: the extractor returns =w1920-h1080-k-no where
+        # the photos engine returns =s0 for the identical image.
+        assert self._id(f"{self.TOKEN}=w1920-h1080-k-no") == self._id(f"{self.TOKEN}=s0")
+
+    def test_size_variants_of_one_photo_collapse(self):
+        ids = {self._id(f"{self.TOKEN}={sz}") for sz in ("s0", "w400", "s4800-w400", "w2048")}
+        assert len(ids) == 1
+
+    def test_different_photos_stay_distinct(self):
+        assert self._id(f"{self.TOKEN}=s0") != self._id(
+            "https://lh3.googleusercontent.com/gps-cs-s/SOMETHINGELSE=s0"
+        )
+
+    def test_a_google_resource_name_still_wins(self):
+        # The Places API gives a durable name; it is a better identity than a URL.
+        from app.services.venue_photo_archive_service import photo_id_for
+        a = photo_id_for({"photo_name": "places/X/photos/ref1", "url": f"{self.TOKEN}=s0"})
+        b = photo_id_for({"photo_name": "places/X/photos/ref1", "url": "https://other=w1"})
+        assert a == b
+
+    def test_a_url_without_a_size_suffix_is_handled(self):
+        assert self._id(self.TOKEN) == self._id(f"{self.TOKEN}=s0")

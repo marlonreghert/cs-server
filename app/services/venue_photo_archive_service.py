@@ -218,14 +218,31 @@ def validate_override(prefix: Any) -> str:
     return normalised.rstrip("/") + "/"
 
 
+def photo_token(url: str) -> str:
+    """The size-independent part of a Google photo URL.
+
+    A lh3.googleusercontent.com URL is `<token>=<size spec>`, and the size spec
+    varies by who asked: the extractor returns `=w1920-h1080-k-no` where the
+    photos engine returns `=s0` for the very same image. The token is the photo;
+    the suffix is a rendering request.
+    """
+    return str(url or "").split("=")[0]
+
+
 def photo_id_for(photo: dict) -> str:
     """Stable id for a photo.
 
-    Derived from Google's photo resource name when available so the same photo
-    keeps the same id across days and runs; falls back to the URL. Hashed to a
-    fixed length because the raw resource name is long and not key-safe.
+    Derived from Google's photo resource name when available, else from the URL
+    TOKEN rather than the whole URL — so one image gets one id no matter which
+    source fetched it or at what size. That is what lets the same photo be
+    recognised across sources: SearchApi knows a photo's category and Apify
+    knows its upload date, and neither knows the other, so the shared id is the
+    only thing that can join them.
+
+    Hashed to a fixed length because the raw resource name is long and not
+    key-safe.
     """
-    seed = photo.get("photo_name") or photo.get("url") or ""
+    seed = photo.get("photo_name") or photo_token(photo.get("url")) or ""
     return hashlib.sha256(seed.encode("utf-8")).hexdigest()[:16]
 
 
