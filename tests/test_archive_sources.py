@@ -14,6 +14,7 @@ import pytest
 from app.services.archive_sources import (
     ARCHIVE_SOURCES,
     SOURCE_APIFY_GMAPS,
+    SOURCE_SEARCHAPI_PHOTOS,
     SOURCE_GOOGLE_PHOTOS,
     SUPPORTED_SOURCES,
     get_source,
@@ -321,8 +322,100 @@ class TestCatalogResolvesFromTheDispatcher:
         assert catalog[SOURCE_APIFY_GMAPS]["available"] is False
 
     def test_it_falls_back_to_the_container_when_no_service_is_wired(self):
-        container = SimpleNamespace(
-            google_places_client=object(), apify_gmaps_extractor_client=object()
-        )
+        # Every source's client present, so every source should be available —
+        # which also fails loudly if a new source is added without wiring.
+        container = SimpleNamespace(**{
+            src.requires_attr: object() for src in ARCHIVE_SOURCES.values()
+        })
         catalog = {s["id"]: s for s in public_catalog(container)}
-        assert all(s["available"] for s in catalog.values())
+        assert all(s["available"] for s in catalog.values()), catalog
+
+
+class TestSearchApiCategorySource:
+    """The only source that can name a photo's Google tab.
+
+    Category ids are constants baked into the client: the engine returns no
+    categories array (verified against a live response), so they cannot be
+    discovered at runtime.
+    """
+
+    def _client(self, per_category):
+        class _C:
+            PHOTO_CATEGORIES = {"menu": "a", "food_drink": "b", "vibe": "c", "latest": "d"}
+            calls = []
+
+            async def fetch_venue_photos(self, place_id, categories=None,
+                                         max_photos=20, hl="pt-BR"):
+                self.calls.append((place_id, tuple(categories or ()), hl))
+                photos, found = [], []
+                for c in categories or []:
+                    n = per_category.get(c, 0)
+                    if not n:
+                        continue          # a tab this venue does not have
+                    found.append(c)
+                    photos += [{"url": f"{c}{i}", "category": c,
+                                "author_name": None, "photo_name": None}
+                               for i in range(n)]
+                if not photos:
+                    return None
+                return {"photos": photos,
+                        "info": {"google_place_id": place_id,
+                                 "categories_found": found}}
+        return _C()
+
+    def _fetch(self, client, categories, max_photos=10):
+        import asyncio
+        source = get_source(SOURCE_SEARCHAPI_PHOTOS)
+        return asyncio.run(source.fetch(
+            client, {"google_place_id": "ChIJ_x"},
+            {"max_photos_per_venue": max_photos,
+             "source_config": {"categories": categories}},
+        ))
+
+    def test_photos_are_tagged_with_their_category(self):
+        result = self._fetch(self._client({"menu": 2, "vibe": 3}), ["menu", "vibe"])
+        by_cat = {}
+        for p in result["photos"]:
+            by_cat[p["category"]] = by_cat.get(p["category"], 0) + 1
+        assert by_cat == {"menu": 2, "vibe": 3}
+
+    def test_a_category_the_venue_lacks_is_skipped_not_failed(self):
+        # Most places carry only a couple of tabs; absence is the normal case.
+        result = self._fetch(self._client({"menu": 2}), ["menu", "vibe", "latest"])
+        assert result is not None
+        assert {p["category"] for p in result["photos"]} == {"menu"}
+        assert result["info"]["categories_found"] == ["menu"]
+
+    def test_a_venue_with_no_place_id_costs_nothing(self):
+        import asyncio
+        source = get_source(SOURCE_SEARCHAPI_PHOTOS)
+        client = self._client({"menu": 5})
+        out = asyncio.run(source.fetch(client, {"google_place_id": None},
+                                       {"max_photos_per_venue": 5, "source_config": {}}))
+        assert out is None
+        assert client.calls == [], "a venue without a place id must not be fetched"
+
+    def test_it_is_billed_per_category_per_venue(self):
+        source = get_source(SOURCE_SEARCHAPI_PHOTOS)
+        one, label = source.estimate_units(250, {"source_config": {"categories": ["menu"]}})
+        three, _ = source.estimate_units(
+            250, {"source_config": {"categories": ["menu", "vibe", "food_drink"]}}
+        )
+        assert one == 250 and three == 750
+        assert "search" in label
+        # 750 searches at $4/1k — the number the live probe implied.
+        assert three * source.unit_cost_usd(SETTINGS_SEARCHAPI, {}) == pytest.approx(3.0)
+
+    def test_categories_may_arrive_as_a_comma_separated_string(self):
+        # The admin panel can submit either shape.
+        result = self._fetch(self._client({"menu": 1, "vibe": 1}), "menu,vibe")
+        assert {p["category"] for p in result["photos"]} == {"menu", "vibe"}
+
+    def test_it_declares_the_categories_it_can_fetch(self):
+        source = get_source(SOURCE_SEARCHAPI_PHOTOS)
+        field = next(f for f in source.config_schema if f.name == "categories")
+        assert field.type == "multiselect"
+        assert set(field.options) == {"menu", "food_drink", "vibe", "latest"}
+
+
+SETTINGS_SEARCHAPI = SimpleNamespace(searchapi_cost_per_1k_usd=4.0)

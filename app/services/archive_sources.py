@@ -25,6 +25,7 @@ logger = logging.getLogger(__name__)
 
 SOURCE_GOOGLE_PHOTOS = "google_photos"
 SOURCE_APIFY_GMAPS = "apify_gmaps_extractor"
+SOURCE_SEARCHAPI_PHOTOS = "searchapi_gmaps_photos"
 
 
 class ArchiveCreditExhausted(Exception):
@@ -41,7 +42,7 @@ class ConfigField:
 
     name: str
     label: str
-    type: str  # "number" | "text" | "select"
+    type: str  # "number" | "text" | "select" | "multiselect"
     default: Any = None
     help: str = ""
     options: Optional[list[str]] = None
@@ -157,6 +158,43 @@ def _apify_unit_cost(settings, cfg) -> float:
     )
 
 
+# ── searchapi_gmaps_photos ───────────────────────────────────────────────────
+async def _fetch_searchapi(client, venue, cfg):
+    """One request PER CATEGORY, which is exactly what it bills.
+
+    The only source that can say which Google tab a photo came from. The engine
+    returns no categories array, so the ids come from the table on the client;
+    a tab a venue lacks simply yields nothing and is skipped.
+    """
+    place_id = venue.get("google_place_id")
+    if not place_id:
+        return None
+    source_cfg = cfg.get("source_config") or {}
+    categories = source_cfg.get("categories") or ["menu"]
+    if isinstance(categories, str):
+        categories = [c.strip() for c in categories.split(",") if c.strip()]
+    return await client.fetch_venue_photos(
+        place_id,
+        categories=categories,
+        max_photos=cfg["max_photos_per_venue"],
+        hl=str(source_cfg.get("language") or "pt-BR"),
+    )
+
+
+def _searchapi_units(venues: int, cfg: dict) -> tuple[int, str]:
+    source_cfg = cfg.get("source_config") or {}
+    categories = source_cfg.get("categories") or ["menu"]
+    if isinstance(categories, str):
+        categories = [c for c in categories.split(",") if c.strip()]
+    # One billed search per category per venue — no discovery call, because the
+    # category ids are constants.
+    return venues * max(1, len(categories)), "searches"
+
+
+def _searchapi_unit_cost(settings, cfg) -> float:
+    return float(getattr(settings, "searchapi_cost_per_1k_usd", 4.0)) / 1000.0
+
+
 ARCHIVE_SOURCES: dict[str, ArchiveSource] = {
     SOURCE_GOOGLE_PHOTOS: ArchiveSource(
         label="Google Places API",
@@ -196,6 +234,35 @@ ARCHIVE_SOURCES: dict[str, ArchiveSource] = {
             "Google Maps' own display order, so the cap takes the TOP N. The "
             "per-image charge is not published by Apify, so the estimate is a "
             "floor."
+        ),
+    ),
+    SOURCE_SEARCHAPI_PHOTOS: ArchiveSource(
+        label="SearchApi Google Maps photos (by category)",
+        description=(
+            "The only source that knows which Google tab a photo came from — "
+            "Menu, Food & drink, Vibe. Costs one search per category per venue."
+        ),
+        requires_attr="searchapi_photos_client",
+        unavailable_reason="SearchApi key not configured (SEARCHAPI_API_KEY)",
+        fetch=_fetch_searchapi,
+        estimate_units=_searchapi_units,
+        unit_cost_usd=_searchapi_unit_cost,
+        config_schema=[
+            ConfigField(
+                name="categories", label="Photo categories", type="multiselect",
+                default=["menu"],
+                options=["menu", "food_drink", "vibe", "latest"],
+                help="Each category is a separate billed search per venue. A "
+                     "venue that lacks a tab is skipped, not failed.",
+            ),
+            ConfigField(
+                name="language", label="Result language", type="text",
+                default="pt-BR", help="Passed to the engine as `hl`.",
+            ),
+        ],
+        cost_note=(
+            "Billed per search: one per category, per venue. No discovery call "
+            "— the category ids are constants."
         ),
     ),
 }

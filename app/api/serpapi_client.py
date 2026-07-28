@@ -116,7 +116,86 @@ class SerpApiClient:
             )
             return None
 
+    # Google's photo tabs, by the index inside the `category_id` protobuf.
+    # `Menu` = base64(0a 02 18 21) = field 3 varint 33, which is the one value
+    # SerpApi's docs publish; the rest were found by walking that index against
+    # a live place and identifying the resulting photo sets. The same indices
+    # return the same kinds of photo on other venues, so they are Google
+    # constants rather than per-place ids.
+    #
+    # This engine does NOT return a categories array — verified against a live
+    # response, whose top-level keys are search_metadata, search_parameters,
+    # photos and pagination — so the ids cannot be discovered at runtime and
+    # this table is the only way to ask for a named tab.
+    PHOTO_CATEGORIES: dict[str, str] = {
+        "food_drink": "CgIYIA",   # 32 — plated dishes
+        "menu": "CgIYIQ",         # 33 — menu cards (documented)
+        "vibe": "CgIYIg",         # 34 — interiors and atmosphere
+        "latest": "CgIYJA",       # 36 — recent uploads
+    }
+
+    async def fetch_venue_photos(
+        self,
+        place_id: str,
+        categories: Optional[list[str]] = None,
+        max_photos: int = 20,
+        hl: str = "pt-BR",
+    ) -> Optional[dict]:
+        """Fetch photos for the archive, one request per category.
+
+        Each category is a separate billed search, which is the whole cost
+        model: asking for three categories costs three searches per venue.
+
+        A category a venue does not have returns an error from the engine and is
+        SKIPPED rather than failing the venue — most places carry only a couple
+        of tabs, so absence is the normal case, not a fault.
+
+        Returns the archive's common shape: `{"photos": [...], "info": {...}}`
+        with every photo tagged with the category folder it belongs in.
+        """
+        wanted = [c for c in (categories or ["menu"]) if c in self.PHOTO_CATEGORIES]
+        if not wanted:
+            logger.warning("[SearchApi] no known categories requested")
+            return None
+
+        photos: list[dict] = []
+        seen: set[str] = set()
+        found: list[str] = []
+        for name in wanted:
+            result = await self.fetch_photos(
+                place_id=place_id, category_id=self.PHOTO_CATEGORIES[name], hl=hl
+            )
+            if not result or not result.get("photos"):
+                continue
+            found.append(name)
+            for photo in result["photos"][:max_photos]:
+                url = photo.get("image")
+                if not url or url in seen:
+                    continue
+                seen.add(url)
+                photos.append({
+                    "url": url,
+                    "thumbnail": photo.get("thumbnail"),
+                    "category": name,
+                    # The engine returns no attribution for a photo, so there is
+                    # nothing honest to put here.
+                    "author_name": None,
+                    "photo_name": None,
+                })
+
+        if not photos:
+            return None
+        return {
+            "photos": photos,
+            "info": {
+                "google_place_id": place_id,
+                "categories_requested": wanted,
+                "categories_found": found,
+            },
+        }
+
     async def fetch_photos(
+
         self,
         data_id: Optional[str] = None,
         place_id: Optional[str] = None,
