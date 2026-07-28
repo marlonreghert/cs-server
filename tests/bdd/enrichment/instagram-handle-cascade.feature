@@ -1,4 +1,3 @@
-@wip
 Feature: Find a venue's Instagram handle from the cheapest source that has it
   As the venue platform
   I must try the sources I already paid for before buying a search, verify that
@@ -158,7 +157,7 @@ Feature: Find a venue's Instagram handle from the cheapest source that has it
     When the cascade runs for that venue
     Then the failing source is counted as an error
     And the cascade still reaches the paid search
-    And the run completes successfully
+    And the cascade run completes successfully
 
   Scenario: Skip the archived source when the archive cannot be read
     Given reading the archived payload is not permitted

@@ -48,6 +48,14 @@ class VenueInstagram(BaseModel):
     followers_count: Optional[int] = None
     is_business_account: Optional[bool] = None
     business_category: Optional[str] = None
+    # Which cascade tier produced this handle. Promoted to a real column on
+    # instagram.handle because "how many came free vs paid" is the first
+    # question this feature has to answer, and jsonb extraction across the
+    # catalog is exactly the query that gets written wrong.
+    source: Optional[str] = None
+    # Evidence behind the decision: signals, probe verdict, name similarity and
+    # the judge's mode/reason. Rides in `payload`, no migration needed.
+    discovery: Optional[dict] = None
     discovered_at: datetime = Field(default_factory=datetime.utcnow)
 
     def has_instagram(self) -> bool:

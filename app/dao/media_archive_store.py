@@ -332,3 +332,43 @@ class MediaArchiveStore:
             ContentType="application/json",
         )
         return key
+
+    # ── reads (GetObject, scoped to retrieved/ by IAM) ───────────────────────
+    async def get_info(self, *, source: str, venue_id: str) -> Optional[dict]:
+        """The most recent archived place payload for a venue, or None.
+
+        Reads are permitted ONLY under `retrieved/`; `raw/` and `media/` remain
+        unreadable by the app, so the raw lake and the image archive keep their
+        append-only property. A denial surfaces as PermissionError so the caller
+        can report "cannot look here" rather than treating it as "nothing found".
+        """
+        prefix = f"{RETRIEVED_ROOT}/source={source}/"
+        try:
+            response = await asyncio.to_thread(
+                self._s3.list_objects_v2, Bucket=self.bucket, Prefix=prefix
+            )
+        except Exception as e:
+            if "AccessDenied" in str(e):
+                raise PermissionError(str(e))
+            logger.error(f"[MediaArchiveStore] listing info for {venue_id} failed: {e}")
+            return None
+
+        keys = [
+            c["Key"] for c in (response.get("Contents") or [])
+            if f"venue_id={venue_id}/" in c["Key"] and c["Key"].endswith("/info/place.json")
+        ]
+        if not keys:
+            return None
+        # Keys embed year=/month=/day=/run_id=, so lexicographic max is newest.
+        key = max(keys)
+        try:
+            obj = await asyncio.to_thread(
+                self._s3.get_object, Bucket=self.bucket, Key=key
+            )
+            body = obj["Body"].read()
+            return json.loads(body.decode("utf-8"))
+        except Exception as e:
+            if "AccessDenied" in str(e):
+                raise PermissionError(str(e))
+            logger.error(f"[MediaArchiveStore] reading {key} failed: {e}")
+            return None

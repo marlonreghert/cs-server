@@ -364,6 +364,14 @@ class InMemoryRdsVenueStore:
             out.append(vid)
         return out
 
+    def list_instagram_sources(self):
+        out = {}
+        for row in self.enrichment.get("instagram.handle", {}).values():
+            if row.get("deleted_at"):
+                continue
+            out[row.get("source")] = out.get(row.get("source"), 0) + 1
+        return list(out.items())
+
     def list_fresh_instagram_venue_ids(
         self, found_max_age_seconds, not_found_max_age_seconds
     ) -> list[str]:

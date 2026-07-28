@@ -50,6 +50,17 @@ resource "aws_iam_policy" "datalake_writer" {
         Resource = ["${aws_s3_bucket.lake.arn}/retrieved/*"]
       },
       {
+        # The Instagram handle cascade reads back the archived Google Maps
+        # payloads to recover a venue's website — a free source for a handle we
+        # would otherwise pay Apify to search for. Scoped to retrieved/ ONLY:
+        # raw/ (the BestTime lake) and media/ (the images) stay unreadable, so
+        # the append-only property holds everywhere it mattered before.
+        Sid      = "ReadRetrievedPayloads"
+        Effect   = "Allow"
+        Action   = ["s3:GetObject"]
+        Resource = "${aws_s3_bucket.lake.arn}/retrieved/*"
+      },
+      {
         # The photo archive must LIST to work: it skips venues already archived
         # in the target day (so a re-run costs nothing at Google) and resolves
         # the "append to latest day" mode. This is metadata only — GetObject is

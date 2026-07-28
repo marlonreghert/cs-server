@@ -41,7 +41,7 @@ _ENRICHMENT = {
     "google_places.opening_hours": ("google_places", "opening_hours", []),
     "google_places.photos": ("google_places", "photos", []),
     "google_places.reviews": ("google_places", "reviews", []),
-    "instagram.handle": ("instagram", "handle", ["instagram_handle"]),
+    "instagram.handle": ("instagram", "handle", ["instagram_handle", "source"]),
     "instagram.posts": ("instagram", "posts", []),
     "venues.menu_photos": ("venues", "menu_photos", []),
     "venues.menu_data": ("venues", "menu_data", []),
@@ -416,6 +416,22 @@ class RdsVenueStore:
             params["age"] = float(max_age_seconds)
         with self.engine.connect() as conn:
             return [r[0] for r in conn.execute(text(sql), params)]
+
+    def list_instagram_sources(self) -> list[tuple]:
+        """(source, count) across live handles.
+
+        The point of promoting `source` to a column: this is the question the
+        cascade exists to answer, and it must not require jsonb extraction over
+        the whole catalog.
+        """
+        with self._engine.connect() as conn:
+            rows = conn.execute(
+                text(
+                    "SELECT source, count(*) FROM instagram.handle "
+                    "WHERE deleted_at IS NULL GROUP BY source"
+                )
+            ).fetchall()
+        return [(r[0], r[1]) for r in rows]
 
     def list_fresh_instagram_venue_ids(
         self, found_max_age_seconds, not_found_max_age_seconds
