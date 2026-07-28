@@ -251,9 +251,12 @@ ARCHIVE_SOURCES: dict[str, ArchiveSource] = {
             ConfigField(
                 name="categories", label="Photo categories", type="multiselect",
                 default=["menu"],
-                options=["menu", "food_drink", "vibe", "latest"],
+                options=["menu", "food_drink", "vibe", "latest", "all"],
                 help="Each category is a separate billed search per venue. A "
-                     "venue that lacks a tab is skipped, not failed.",
+                     "venue that lacks a tab is skipped, not failed. `all` is "
+                     "the unfiltered view — it catches photos the named tabs "
+                     "miss, including place-specific ones like \"Risotto\" "
+                     "whose ids cannot be enumerated.",
             ),
             ConfigField(
                 name="language", label="Result language", type="text",
