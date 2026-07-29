@@ -1,4 +1,3 @@
-@wip
 Feature: Instagram candidate loss
   As the operator of the Instagram handle pipeline
   I want every usable candidate a search returns to survive parsing
@@ -62,5 +61,5 @@ Feature: Instagram candidate loss
 
   Scenario: Treat a blank venue id list as the whole catalogue
     Given the servable catalogue holds the venues "ven_a, ven_b"
-    When the cascade runs for the venue ids ""
+    When the cascade runs for an empty venue id list
     Then the cascade is attempted for exactly the venues "ven_a, ven_b"
