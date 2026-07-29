@@ -74,7 +74,6 @@
   }
 
   .mockbar { position: relative; z-index: 3; background: #000; color: #8B84A3; font-size: .75rem; padding: 9px 0; border-bottom: 1px solid var(--divider); }
-  .mockbar .wrap { display: flex; gap: 14px; justify-content: space-between; flex-wrap: wrap; }
   .mockbar b { color: var(--violet-lit); font-weight: 700; }
 
   /* ================= header ================= */
@@ -92,6 +91,9 @@
   .site-nav a { color: var(--muted); font-size: .9rem; font-weight: 600; }
   .site-nav a:hover { color: var(--violet-lit); }
   @media (max-width: 900px) { .site-nav { display: none; } }
+  /* Section rail for narrow viewports, where .site-nav is hidden. Declared
+     hidden so the desktop rendering above is completely unaffected. */
+  .site-nav-m { display: none; }
   .nav-cta { background: var(--primary-strong); color: #fff; font-size: .84rem; font-weight: 700; padding: 9px 17px; border-radius: 10px; }
   .nav-cta:hover { background: #8B5CF6; }
   @media (max-width: 520px) { .nav-cta { display: none; } }
@@ -314,6 +316,95 @@
   .foot-fine { color: #5F5878; font-size: .77rem; margin-top: 12px; }
   .foot-legal { line-height: 1.9; }
 
+
+  /* ========================= NARROW VIEWPORTS =========================
+     Additive only — every rule below sits inside a max-width query, so the
+     desktop layout renders exactly as before.
+
+     The bug: at 360px the venue card's text column collapses to ~141px while
+     .vstatus / .vmeta are `white-space: nowrap` and <body> sets
+     `overflow-x: hidden` — so the closing-time + trend sentence, the one line
+     the card exists to deliver, was being silently CLIPPED. It now wraps.
+     The header was also losing its nav (<=900px) and then its CTA (<=520px),
+     leaving phones with a logo and nothing else. */
+  @media (max-width: 720px) {
+    .wrap { padding: 0 20px; }
+
+    /* Brand + CTA on one row; sections move to a scrollable rail beneath. */
+    .site-head .row { height: 58px; }
+    .brand img { width: 30px; height: 30px; }
+    .brandtype { font-size: 1.06rem; }
+    .nav-cta { display: inline-flex; font-size: .8rem; padding: 8px 14px; }
+    .site-nav-m {
+      display: flex; gap: 8px; overflow-x: auto; -webkit-overflow-scrolling: touch;
+      padding: 9px 20px 10px; border-top: 1px solid var(--divider);
+      scrollbar-width: none;
+    }
+    .site-nav-m::-webkit-scrollbar { display: none; }
+    .site-nav-m a {
+      flex: none; white-space: nowrap; font-size: .8rem; font-weight: 600;
+      color: var(--muted); background: rgba(167,139,250,.08);
+      border: 1px solid var(--divider); padding: 8px 14px; border-radius: 999px;
+    }
+
+    /* Vertical rhythm: 100px sections are enormous on a phone. */
+    .hero { padding: 46px 0 54px; }
+    .section { padding: 58px 0; }
+    .cta { padding: 60px 0; }
+    .site-foot { padding: 42px 0 36px; }
+    .hero-grid { gap: 34px; }
+    h1 { font-size: clamp(2rem, 8.6vw, 2.8rem); }
+    h2 { font-size: clamp(1.45rem, 6.2vw, 1.95rem); }
+    .sub { font-size: 1rem; margin-bottom: 26px; }
+    .lead-copy { font-size: .97rem; }
+    /* Large blurred glows are costly to composite on phone GPUs. */
+    .hero::before, .hero::after { filter: blur(14px); }
+
+    /* --- the venue card --- */
+    .device { max-width: none; padding: 12px; border-radius: 18px; }
+    .vcard { padding: 10px; gap: 10px; align-items: flex-start; }
+    .vthumb { width: 76px; height: 64px; }
+    .vthumb span { font-size: 22px; }
+    .vbody { justify-content: flex-start; gap: 7px; }
+    /* Card type at the app's real metrics — namePhoto 13/17 over cardTitle's
+       semiBold, caption 12/16 for rating and meta, and PriceIndicator's pips
+       (11px, active weight 900 in success.base, inactive regular in
+       text.placeholder, gap 2). Scoped here so the desktop card above keeps the
+       exact rendering that is already live. */
+    .vname { min-width: 0; font-size: 13px; line-height: 17px; font-weight: 600; letter-spacing: normal; }
+    .vrating { font-size: 12px; line-height: 16px; }
+    .vmeta { font-size: 12px; line-height: 16px; }
+    .vprice { display: inline-flex; align-items: center; gap: 2px; font-size: 11px; letter-spacing: normal; }
+    .vprice i { font-size: 11px; line-height: 14px; font-weight: 900; }
+    .vprice i.off { font-weight: 400; color: #9CA3AF; }
+    /* Wrap, never clip: two lines is fine, a cut sentence is not. */
+    .vstatus, .vmeta { white-space: normal; }
+    .vrow { flex-wrap: wrap; row-gap: 5px; }
+    .vrow3 { align-items: flex-start; }
+
+    /* Legend: five stacked full-width blocks read badly — make it a list. */
+    .scale { grid-template-columns: 1fr; gap: 12px; }
+    .tier { flex-direction: row; align-items: center; gap: 11px; }
+    .tier .key { width: 22px; flex: none; }
+    .tier .tno { flex: none; }
+    .scale-ends { margin: 32px 0 14px; }
+    .ghost-note { margin-top: 30px; }
+
+    .stats { gap: 18px; }
+    .stat { padding-left: 15px; }
+    .modes { gap: 11px; }
+  }
+
+  @media (max-width: 400px) {
+    /* Smallest phones: hand every remaining pixel to the text column. */
+    .wrap { padding: 0 16px; }
+    .vthumb { width: 64px; height: 56px; }
+    .vthumb span { font-size: 19px; }
+    .store { padding: 11px 15px; }
+    .store .s2 { font-size: .9rem; }
+    .device::after { left: 14px; font-size: .54rem; }
+  }
+
   @media (prefers-reduced-motion: reduce) { *, *::after, *::before { animation: none !important; transition: none !important; scroll-behavior: auto !important; } }
 </style>
 </head>
@@ -337,6 +428,13 @@
     </nav>
     <a class="nav-cta" href="https://play.google.com/store/apps/details?id=com.vibesense.app">Baixar</a>
   </div>
+  <nav class="site-nav-m" aria-label="Se&ccedil;&otilde;es">
+    <a href="#movimento">Movimento ao vivo</a>
+    <a href="#vibes">Vibes</a>
+    <a href="#presenca">Onde estamos</a>
+    <a href="#sobre-nos">Sobre n&oacute;s</a>
+    <a href="#empresa">Empresa</a>
+  </nav>
 </header>
 
 <main id="top">
@@ -363,24 +461,24 @@
         <div class="vcard">
           <div class="vthumb"><span aria-hidden="true">🍺</span></div>
           <div class="vbody">
-            <div class="vrow"><span class="vname">Bodega de V&eacute;io</span><span class="vrating">4,5 <span class="star">&#9733;</span></span></div>
-            <div class="vrow"><span class="vmeta">Bar &middot; a 300 m</span><span class="chip chip-b3">movimentado</span></div>
+            <div class="vrow"><span class="vname">Bodega de V&eacute;io</span><span class="vrating">4.5 <span class="star">&#9733;</span></span></div>
+            <div class="vrow"><span class="vmeta">Bar &middot; 300 m</span><span class="chip chip-b3">movimentado</span></div>
             <div class="vrow vrow3"><span class="vstatus">Fecha &agrave;s 2h &middot; Continuar&aacute; assim at&eacute; fechar</span><span class="vprice"><i>$</i><i class="off">$</i><i class="off">$</i><i class="off">$</i></span></div>
           </div>
         </div>
         <div class="vcard">
           <div class="vthumb"><span aria-hidden="true">💃</span></div>
           <div class="vbody">
-            <div class="vrow"><span class="vname">Club Metr&oacute;pole</span><span class="vrating">4,4 <span class="star">&#9733;</span></span></div>
-            <div class="vrow"><span class="vmeta">Casa Noturna &middot; 3,2 km</span><span class="chip chip-b5">cheio</span></div>
+            <div class="vrow"><span class="vname">Club Metr&oacute;pole</span><span class="vrating">4.4 <span class="star">&#9733;</span></span></div>
+            <div class="vrow"><span class="vmeta">Casa Noturna &middot; 3 km</span><span class="chip chip-b5">cheio</span></div>
             <div class="vrow vrow3"><span class="vstatus">Fecha &agrave;s 5h &middot; Continuar&aacute; assim at&eacute; fechar</span><span class="vprice"><i>$</i><i>$</i><i>$</i><i class="off">$</i></span></div>
           </div>
         </div>
         <div class="vcard">
           <div class="vthumb"><span aria-hidden="true">☕</span></div>
           <div class="vbody">
-            <div class="vrow"><span class="vname">Borsoi Caf&eacute;</span><span class="vrating">4,6 <span class="star">&#9733;</span></span></div>
-            <div class="vrow"><span class="vmeta">Cafeteria &middot; 7,1 km</span><span class="chip chip-b2">pouco movimentado</span></div>
+            <div class="vrow"><span class="vname">Borsoi Caf&eacute;</span><span class="vrating">4.6 <span class="star">&#9733;</span></span></div>
+            <div class="vrow"><span class="vmeta">Cafeteria &middot; 7 km</span><span class="chip chip-b2">pouco movimentado</span></div>
             <div class="vrow vrow3"><span class="vstatus">Fecha &agrave;s 19h &middot; Fica movimentado &agrave;s 17:00</span><span class="vprice"><i>$</i><i>$</i><i class="off">$</i><i class="off">$</i></span></div>
           </div>
         </div>
