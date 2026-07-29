@@ -247,11 +247,16 @@ class Settings(BaseSettings):
     photo_cache_ttl_days: int = 5
     # TTL (hours) for the ON-DEMAND `venue_photos_fresh_v1:*` Redis cache, which
     # holds FRESH, KEYLESS googleusercontent.com URLs resolved per-venue on
-    # demand (POST /internal/venues/{id}/photos/resolve). Kept short because
-    # Google rotates the photo token; a few hours amortizes repeated opens
-    # without serving a rotated/dead URL. Admin-tunable live via the vibesadmin
-    # `admin_config:photo_fresh_cache_ttl_hours` key.
-    photo_fresh_cache_ttl_hours: int = 6
+    # demand (POST /internal/venues/{id}/photos/resolve). A day is acceptable
+    # because vibes_bot's dead-URL retry forces a re-resolve (max_photos +
+    # force=true) and overwrites this key on first sighting of a rotated/dead
+    # URL, instead of waiting out the TTL — so staleness is bounded by the
+    # repair path, not by this number alone. Admin-tunable live via the
+    # vibesadmin `admin_config:photo_fresh_cache_ttl_hours` key.
+    # ROLLOUT: this code default ships ahead of the retry path. Production must
+    # stay at 6h via the admin_config override until vibes_bot's retry is
+    # deployed — see plans/260729_photo-resolve-cost-controls.md Rollout Note.
+    photo_fresh_cache_ttl_hours: int = 24
 
     # Instagram Discovery (Apify) Configuration
     apify_api_token: str = ""

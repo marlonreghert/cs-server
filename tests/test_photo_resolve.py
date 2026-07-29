@@ -11,6 +11,9 @@ POST /internal/venues/{id}/photos/resolve:
   set/get round-trip + isolation from the legacy venue_photos_v1 key.
 - PhotoEnrichmentService.resolve_and_cache_fresh_photos branches: happy path,
   no google_place_id, zero photos, and exception (never cached).
+- Cost controls: max_photos/force, the partial-cache upgrade decision table,
+  the byte-for-byte legacy path when both are omitted, a forced re-resolve,
+  a Redis read failure during the upgrade check, and VENUE_PHOTOS_FETCHED_TOTAL.
 """
 import json
 
@@ -27,6 +30,7 @@ from app.dao.redis_venue_dao import (
     VENUE_PHOTOS_KEY_FORMAT,
     ADMIN_CONFIG_FRESH_PHOTOS_TTL_KEY,
 )
+from app.metrics import VENUE_PHOTO_RESOLVE_TOTAL, VENUE_PHOTOS_FETCHED_TOTAL
 from app.models.vibe_attributes import VibeAttributes
 from app.services.photo_enrichment_service import PhotoEnrichmentService
 
@@ -321,3 +325,166 @@ async def test_resolve_uses_serving_dao_fallback_for_place_id(fake_redis):
     assert google.last_kwargs["place_id"] == "places/FALLBACK"
     # Fresh cache is written through the primary (system-of-record) DAO's Redis.
     assert primary.get_venue_photos_fresh("v1") == result
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Cost controls: max_photos, force, and the partial-cache upgrade rule
+# ══════════════════════════════════════════════════════════════════════════════
+def _synthetic_photos(n, prefix="p"):
+    return [
+        {"url": f"https://lh3.googleusercontent.com/{prefix}{i}", "author_name": None}
+        for i in range(n)
+    ]
+
+
+async def test_omitting_both_bypasses_the_cache_even_when_full(dao):
+    """The byte-for-byte legacy contract: a caller giving neither max_photos
+    nor force must observe today's behaviour exactly — no cache read, always
+    resolve settings.photos_per_venue and overwrite — even when a full,
+    perfectly sufficient cached entry already exists. This is the one branch
+    the BDD suite cannot distinguish from the general upgrade rule (both reach
+    the same outcome when nothing is cached), so it is pinned here directly."""
+    _seed_place_id(dao, "v1")
+    old_photos = _synthetic_photos(5, prefix="old")
+    dao.set_venue_photos_fresh("v1", old_photos)
+    new_photos = _synthetic_photos(5, prefix="new")
+    google = _FakeGoogle(photos=new_photos)
+    service = _service(dao, google)
+
+    result = await service.resolve_and_cache_fresh_photos("v1")
+
+    assert google.calls == 1, "Google must be called even though a full cache exists"
+    assert result == new_photos
+    assert dao.get_venue_photos_fresh("v1") == new_photos  # overwritten
+
+
+@pytest.mark.parametrize(
+    "cached_len,requested_n,expect_google_call,expected_label",
+    [
+        (None, 3, True, "resolved"),  # no cached entry -> resolve and write
+        (0, 3, False, "cache_hit"),  # cached [] is definitive -> no call
+        (2, 3, True, "upgraded"),  # cached < N -> upgrade in place
+        (3, 3, False, "cache_hit"),  # cached == N -> serve, no call
+        (5, 3, False, "cache_hit"),  # cached > N -> serve first N, no call
+    ],
+)
+async def test_upgrade_decision_table(
+    dao, cached_len, requested_n, expect_google_call, expected_label
+):
+    _seed_place_id(dao, "v1")
+    if cached_len is not None:
+        dao.set_venue_photos_fresh("v1", _synthetic_photos(cached_len, prefix="seed"))
+    google = _FakeGoogle(photos=_synthetic_photos(requested_n, prefix="fresh"))
+    service = _service(dao, google)
+
+    before = VENUE_PHOTO_RESOLVE_TOTAL.labels(result=expected_label)._value.get()
+
+    result = await service.resolve_and_cache_fresh_photos("v1", max_photos=requested_n)
+
+    assert google.calls == (1 if expect_google_call else 0)
+    assert VENUE_PHOTO_RESOLVE_TOTAL.labels(result=expected_label)._value.get() == before + 1
+    if expected_label == "cache_hit":
+        assert len(result) == min(cached_len, requested_n)
+    else:
+        assert len(result) == requested_n
+        assert dao.get_venue_photos_fresh("v1") == result  # written/overwritten
+
+
+async def test_force_true_ignores_sufficient_cache_and_overwrites(dao):
+    _seed_place_id(dao, "v1")
+    old_photos = _synthetic_photos(5, prefix="old")
+    dao.set_venue_photos_fresh("v1", old_photos)
+    new_photos = _synthetic_photos(5, prefix="new")
+    google = _FakeGoogle(photos=new_photos)
+    service = _service(dao, google)
+
+    result = await service.resolve_and_cache_fresh_photos("v1", force=True)
+
+    assert google.calls == 1
+    assert result == new_photos
+    assert dao.get_venue_photos_fresh("v1") == new_photos
+
+
+async def test_force_true_with_no_max_photos_resolves_photos_per_venue(dao):
+    """force alone (max_photos omitted) still resolves settings.photos_per_venue —
+    matching the endpoint's pre-cost-controls behaviour, just forced."""
+    _seed_place_id(dao, "v1")
+    pool = _synthetic_photos(settings.photos_per_venue, prefix="forced")
+    google = _FakeGoogle(photos=pool)
+    service = _service(dao, google)
+
+    result = await service.resolve_and_cache_fresh_photos("v1", force=True)
+
+    assert google.last_kwargs["max_photos"] == settings.photos_per_venue
+    assert result == pool
+
+
+async def test_force_true_with_google_exception_leaves_existing_cache_untouched(dao):
+    _seed_place_id(dao, "v1")
+    old_photos = _synthetic_photos(5, prefix="old")
+    dao.set_venue_photos_fresh("v1", old_photos)
+    google = _FakeGoogle(error=httpx.HTTPStatusError("boom", request=None, response=None))
+    service = _service(dao, google)
+
+    result = await service.resolve_and_cache_fresh_photos("v1", max_photos=5, force=True)
+
+    assert result == []
+    assert dao.get_venue_photos_fresh("v1") == old_photos  # untouched
+
+
+async def test_redis_read_failure_during_upgrade_check_degrades_to_resolve(dao, monkeypatch):
+    """A Redis read failure while checking the cache for the upgrade decision
+    must degrade to 'resolve and write', never raise and never 5xx."""
+    _seed_place_id(dao, "v1")
+    photos = _synthetic_photos(1, prefix="ok")
+    google = _FakeGoogle(photos=photos)
+    service = _service(dao, google)
+
+    def _raise(_venue_id):
+        raise RuntimeError("simulated Redis read failure")
+
+    monkeypatch.setattr(dao, "get_venue_photos_fresh", _raise)
+
+    result = await service.resolve_and_cache_fresh_photos("v1", max_photos=1)
+
+    assert result == photos
+    assert google.calls == 1
+
+
+async def test_photos_fetched_total_counts_billed_media_calls(dao):
+    _seed_place_id(dao, "v1")
+    google = _FakeGoogle(photos=_synthetic_photos(3))
+    service = _service(dao, google)
+
+    before = VENUE_PHOTOS_FETCHED_TOTAL._value.get()
+
+    await service.resolve_and_cache_fresh_photos("v1", max_photos=3)
+
+    assert VENUE_PHOTOS_FETCHED_TOTAL._value.get() == before + 3
+
+
+async def test_photos_fetched_total_unchanged_on_cache_hit(dao):
+    _seed_place_id(dao, "v1")
+    dao.set_venue_photos_fresh("v1", _synthetic_photos(5))
+    google = _FakeGoogle(photos=[])  # must never be called
+    service = _service(dao, google)
+
+    before = VENUE_PHOTOS_FETCHED_TOTAL._value.get()
+
+    result = await service.resolve_and_cache_fresh_photos("v1", max_photos=1)
+
+    assert google.calls == 0
+    assert len(result) == 1
+    assert VENUE_PHOTOS_FETCHED_TOTAL._value.get() == before
+
+
+class TestFreshTtlResolverDefault24h:
+    """settings.photo_fresh_cache_ttl_hours now defaults to 24 (was 6); the
+    existing TestFreshTtlResolver class already asserts against the live
+    settings value dynamically, so it covers the 86400s default and the admin
+    override automatically. This test pins the literal number so a future
+    accidental default change is caught even if that class is refactored."""
+
+    def test_default_is_24_hours_in_seconds(self, dao):
+        assert settings.photo_fresh_cache_ttl_hours == 24
+        assert dao._resolve_fresh_photos_cache_ttl_seconds() == 86400
