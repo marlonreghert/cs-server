@@ -65,6 +65,7 @@ test-unit:
 		tests/test_venue_photo_archive.py \
 		tests/test_instagram_cascade.py \
 		tests/test_pipeline_run_registry.py \
+		tests/test_website_uri_persistence.py \
 		tests/test_photo_archive_pipeline_v2.py \
 		tests/test_archive_sources.py \
 		tests/test_menu_extraction_from_archive.py \
