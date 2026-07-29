@@ -45,11 +45,20 @@ class TestBlockedVenueTypes:
         assert "GROCERY" in DEFAULT_BLOCKED_VENUE_TYPES
         assert "BAKERY" in DEFAULT_BLOCKED_VENUE_TYPES
 
-    def test_blocks_restaurants_and_cafes(self):
-        assert "RESTAURANT" in DEFAULT_BLOCKED_VENUE_TYPES
-        assert "CAFE" in DEFAULT_BLOCKED_VENUE_TYPES
+    def test_blocks_grab_and_go_food_but_not_places_you_sit(self):
+        # RESTAURANT and CAFE were blocked when this suite was written and are
+        # now served on purpose — a restaurant is a night out, and the `jantar`
+        # mode has nothing to recommend without them. What stays blocked is
+        # food you do not linger over.
         assert "COFFEE" in DEFAULT_BLOCKED_VENUE_TYPES
         assert "FAST_FOOD" in DEFAULT_BLOCKED_VENUE_TYPES
+        assert "BAKERY" in DEFAULT_BLOCKED_VENUE_TYPES
+        assert "RESTAURANT" not in DEFAULT_BLOCKED_VENUE_TYPES
+        assert "CAFE" not in DEFAULT_BLOCKED_VENUE_TYPES
+
+    def test_never_blocks_the_venues_the_product_exists_for(self):
+        for venue_type in ("BAR", "PUB", "NIGHT_CLUB", "RESTAURANT"):
+            assert venue_type not in DEFAULT_BLOCKED_VENUE_TYPES, venue_type
 
     def test_blocks_services(self):
         for t in ["HOSPITAL", "PHARMACY", "BANK", "GAS_STATION", "GYM", "FITNESS"]:
