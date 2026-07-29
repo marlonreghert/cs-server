@@ -26,7 +26,6 @@ APIFY_API_BASE = "https://api.apify.com/v2"
 
 # Actor IDs (use ~ separator for Apify REST API path)
 SEARCH_ACTOR = "apify~instagram-search-scraper"
-PROFILE_ACTOR = "apify~instagram-profile-scraper"
 
 
 class ApifyCreditExhaustedError(Exception):
@@ -113,58 +112,6 @@ class ApifyInstagramClient:
                 continue
 
         return results
-
-    async def get_profile(self, username: str) -> Optional[InstagramProfile]:
-        """Get full profile data for a single Instagram user.
-
-        Uses apify/instagram-profile-scraper actor.
-        Only needed as a fallback — search_users() already returns full profile data.
-
-        Args:
-            username: Instagram username (without @)
-
-        Returns:
-            InstagramProfile or None on error
-        """
-        run_input = {
-            "usernames": [username],
-        }
-
-        items = await self._run_actor_sync(
-            PROFILE_ACTOR, run_input, endpoint_label="get_profile"
-        )
-
-        if not items or len(items) == 0:
-            return None
-
-        item = items[0]
-
-        # Skip error items
-        if "error" in item:
-            logger.debug(
-                f"[ApifyInstagram] Profile error for @{username}: {item.get('error')}"
-            )
-            return None
-
-        try:
-            # externalUrls is an array in Apify response
-            external_urls = item.get("externalUrls") or []
-            external_url = external_urls[0] if external_urls else None
-
-            return InstagramProfile(
-                username=item.get("username", username),
-                full_name=item.get("fullName"),
-                biography=item.get("biography"),
-                external_url=external_url,
-                followers_count=item.get("followersCount"),
-                following_count=item.get("followsCount"),
-                is_business_account=item.get("isBusinessAccount"),
-                business_category_name=item.get("businessCategoryName"),
-                is_verified=item.get("verified"),
-            )
-        except Exception as e:
-            logger.error(f"[ApifyInstagram] Failed to parse profile for @{username}: {e}")
-            return None
 
     async def fetch_recent_posts(
         self, username: str, results_limit: int = 10

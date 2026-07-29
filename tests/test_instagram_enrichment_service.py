@@ -17,7 +17,6 @@ def mock_apify_client():
     client = Mock()
     # search_users now returns InstagramProfile objects directly
     client.search_users = AsyncMock(return_value=[])
-    client.get_profile = AsyncMock(return_value=None)
     return client
 
 
@@ -116,7 +115,7 @@ class TestDiscoverInstagramForVenue:
         self, service, mock_apify_client, mock_validator, mock_venue_dao
     ):
         """High confidence candidate -> status=found."""
-        # search_users returns InstagramProfile directly (no separate get_profile)
+        # search_users returns full InstagramProfile data in one call
         mock_apify_client.search_users.return_value = [
             InstagramProfile(
                 username="barconchittas",
@@ -139,8 +138,10 @@ class TestDiscoverInstagramForVenue:
         assert result.instagram_handle == "barconchittas"
         assert result.confidence_score == 0.85
         mock_venue_dao.set_venue_instagram.assert_called_once()
-        # No get_profile call needed
-        mock_apify_client.get_profile.assert_not_called()
+        # The search actor returns full profile data, so discovery is ONE actor
+        # run per venue. There is no second profile call to guard against — the
+        # profile-scraper path no longer exists.
+        assert mock_apify_client.search_users.await_count == 1
 
     @pytest.mark.asyncio
     async def test_low_confidence_match(

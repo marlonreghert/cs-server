@@ -161,6 +161,7 @@ class Container:
         self.venue_photo_archive_service = None
         self.openai_photo_classifier_client = None
         self.photo_classification_service = None
+        self.instagram_cascade_service = None
 
         # SearchApi photo client — the category-aware source. Built before the
         # archive service, which is constructed below.
@@ -291,6 +292,47 @@ class Container:
                 not_found_ttl_days=settings.instagram_not_found_cache_ttl_days,
             )
             logger.info("[Container] Instagram Enrichment service initialized")
+
+            # Handle cascade: two free sources before the paid one, each
+            # candidate verified against the real profile. The paid tier is the
+            # SAME Apify client above — the cascade just reaches it last.
+            if settings.instagram_cascade_enabled:
+                from app.api.instagram_profile_probe import InstagramProfileProbe
+                from app.services.instagram_cascade_adapters import (
+                    ApifySearchSource,
+                    ArchivedGmapsWebsiteSource,
+                    ArchivedVenuePhotoSource,
+                    GoogleListingWebsiteSource,
+                )
+                from app.services.instagram_cascade_service import InstagramCascadeService
+                from app.services.instagram_enrichment_service import (
+                    InstagramEnrichmentService as _IES,
+                )
+
+                probe = (
+                    InstagramProfileProbe(
+                        user_agent=settings.instagram_probe_user_agent,
+                        timeout_seconds=settings.instagram_profile_probe_timeout_seconds,
+                    )
+                    if settings.instagram_profile_probe_enabled
+                    else None
+                )
+                self.instagram_cascade_service = InstagramCascadeService(
+                    venue_dao=self.pipeline_repository,
+                    google_listing=GoogleListingWebsiteSource(self.pipeline_repository),
+                    archive=ArchivedGmapsWebsiteSource(self.media_archive_store),
+                    paid_search=ApifySearchSource(
+                        self.apify_instagram_client,
+                        city_resolver=_IES._extract_city,
+                        candidates=settings.instagram_search_candidates,
+                    ),
+                    probe=probe,
+                    judge=None,  # opt-in; wired when a judge client is configured
+                    photo_archive=ArchivedVenuePhotoSource(self.media_archive_store),
+                    accept_threshold=settings.instagram_auto_accept_threshold,
+                    ambiguous_low=settings.instagram_min_confidence,
+                )
+                logger.info("[Container] Instagram handle cascade initialized")
         else:
             logger.warning(
                 "[Container] Apify API token not configured. "

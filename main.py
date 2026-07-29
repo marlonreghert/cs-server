@@ -9,7 +9,6 @@ Startup is split into two phases for zero-downtime deploys:
 import asyncio
 import logging
 import time
-import uuid
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -22,6 +21,11 @@ from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
 from app.config import Settings
 from app.container import Container
 from app.dao.datalake_writer import set_job_context as set_datalake_job_context
+from app.services.pipeline_run_registry import (
+    install_run_id_logging,
+    new_run_id,
+    run_scope,
+)
 from app.routers import venue_router, set_venue_handler, debug_router, set_debug_dependencies, admin_trigger_router, set_admin_container, engagement_router, set_engagement_service, internal_router, set_internal_container
 from app.middleware import PrometheusMiddleware
 from app.services.refresh_interval_watch import (
@@ -48,6 +52,9 @@ logging.basicConfig(
 from app.log_redaction import install_secret_redaction  # noqa: E402
 
 install_secret_redaction()
+# Stamp `job=<id>` onto every line emitted inside a pipeline run, so existing
+# pipelines gain log correlation without editing a single log statement.
+install_run_id_logging()
 logger = logging.getLogger(__name__)
 
 # Global container and scheduler
@@ -103,6 +110,7 @@ def make_job(
             a finally so a failed/disabled run never leaves it stuck.
     """
     async def _job():
+        run_ctx = None
         if require_container and container is None:
             return
         if lock_name is not None and not job_lock.try_acquire(lock_name):
@@ -115,10 +123,13 @@ def make_job(
         try:
             logger.info(start_log)
             start_time = time.perf_counter()
-            # Name this run for the data lake: every response archived while it
-            # runs is attributed to (job_name, run_id), so a bad batch can be
-            # traced back to the exact scheduler run that fetched it.
-            set_datalake_job_context(job_name, uuid.uuid4().hex)
+            # One identity per run, shared by the data lake, the log filter and
+            # the run registry — so a batch, a log line and a dashboard row all
+            # name the SAME run. Previously this minted its own uuid here.
+            run_id = new_run_id()
+            set_datalake_job_context(job_name, run_id)
+            run_ctx = run_scope(job_name, job_id=run_id)
+            run_ctx.__enter__()
             if service_attr is not None and getattr(container, service_attr) is None:
                 logger.warning(disabled_log)
                 return
@@ -136,7 +147,11 @@ def make_job(
                 BACKGROUND_JOB_DURATION_SECONDS.labels(job_name=job_name).observe(duration)
                 BACKGROUND_JOB_RUNS_TOTAL.labels(job_name=job_name, status="error").inc()
                 logger.error(f"[Scheduler] {error_label} failed: {e}")
+                run_ctx.__exit__(type(e), e, None)
+                run_ctx = None
         finally:
+            if run_ctx is not None:
+                run_ctx.__exit__(None, None, None)
             if lock_name is not None:
                 job_lock.release(lock_name)
 

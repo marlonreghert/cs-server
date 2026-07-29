@@ -263,6 +263,28 @@ class Settings(BaseSettings):
     instagram_search_candidates: int = 3
     instagram_enrichment_limit: int = 0  # Max venues per run (0 = unlimited)
     instagram_cache_ttl_days: int = 30
+
+    # Instagram handle cascade. Sources run cheapest-first; only the Apify
+    # search costs money, so tier_apify_search_enabled=false gives a zero-cost
+    # pass over the whole catalog.
+    instagram_cascade_enabled: bool = True
+    instagram_profile_probe_enabled: bool = True
+    instagram_profile_probe_timeout_seconds: float = 10.0
+    # A crawler UA is what makes Instagram serve og: tags at all; a browser UA
+    # gets a JS shell with no profile data.
+    instagram_probe_user_agent: str = (
+        "facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)"
+    )
+    # The LLM adjudicator is opt-in: it costs money and only helps in the
+    # ambiguous band.
+    instagram_judge_enabled: bool = False
+    instagram_judge_model: str = "gpt-4o-mini"
+    instagram_judge_max_venue_photos: int = 3
+
+    # Pipeline run registry: how many recent runs per pipeline stay selectable
+    # in Grafana. This is the cardinality ceiling — series = pipelines x size.
+    pipeline_run_registry_enabled: bool = True
+    pipeline_run_registry_size: int = 10
     instagram_not_found_cache_ttl_days: int = 7
 
     # Instagram Posts Scraping (feeds post captions into vibe classifier)
