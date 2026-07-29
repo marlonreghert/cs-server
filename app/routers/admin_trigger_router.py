@@ -29,6 +29,7 @@ from app.services.admin_config_service import AdminConfigService
 from app.services.eligibility_rules import EligibilityRuleService
 from app.models.venue_category import effective_category_map, representative_google_type
 from app.services import job_lock
+from app.services.pipeline_run_registry import run_scope
 from app.metrics import JOB_LOCK_REJECTED_TOTAL
 
 logger = logging.getLogger(__name__)
@@ -262,10 +263,16 @@ async def _run_job(job_name: str, config: Optional[dict] = None):
     if service_attr is not None and getattr(c, service_attr) is None:
         raise ValueError(entry["unavailable_detail"])
 
-    await entry["runner"](c, cfg)
-
-    duration = time.perf_counter() - start
-    logger.info(f"[AdminTrigger] Job '{job_name}' completed in {duration:.1f}s (config={cfg})")
+    # Same run scope as the scheduler's make_job, so an admin-triggered run is
+    # indistinguishable from its scheduled twin to a dashboard: same metric,
+    # same `job=<id>` log correlation, same registry entry.
+    with run_scope(job_name) as run_id:
+        await entry["runner"](c, cfg)
+        duration = time.perf_counter() - start
+        logger.info(
+            f"[AdminTrigger] Job '{job_name}' completed in {duration:.1f}s "
+            f"(config={cfg}) job={run_id}"
+        )
 
 
 @router.get("/jobs")

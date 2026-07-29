@@ -552,6 +552,23 @@ INSTAGRAM_JUDGE_TOTAL = Counter(
     ["mode", "verdict"],  # mode: vision_both, vision_partial, text_only, unavailable
 )
 
+# =============================================================================
+# Pipeline run identity
+# =============================================================================
+# One series per RECENT run, bounded by the registry's ring (see
+# app/services/pipeline_run_registry.py). The value is the run's start time, so
+# `sort_desc` orders runs newest-first and Grafana can build a run picker with
+# `label_values(pipeline_run_info{pipeline="X"}, job_id)`.
+#
+# job_id is a label HERE and deliberately not in Loki: Prometheus lets the
+# registry bound cardinality with .remove(); a Loki label would mean one stream
+# per run on a 2.9.8/schema-v11 stack with no structured metadata.
+PIPELINE_RUN_INFO = Gauge(
+    "pipeline_run_info",
+    "Recent pipeline runs; value is the run start time (unix seconds)",
+    ["pipeline", "job_id", "status"],  # status: running, success, error
+)
+
 # OpenAI API metrics
 OPENAI_API_CALLS_TOTAL = Counter(
     "openai_api_calls_total",
