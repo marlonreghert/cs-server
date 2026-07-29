@@ -8,11 +8,15 @@ permission failure that would otherwise look like "this venue has no menu".
 from __future__ import annotations
 
 import asyncio
+import json
 
 import pytest
 
 from app.dao.media_archive_store import MediaArchiveStore
-from app.services.menu_extraction_service import MenuExtractionService
+from app.services.menu_extraction_service import (
+    MenuExtractionService,
+    selectable_menu_photos,
+)
 
 SOURCE = "searchapi_gmaps_photos"
 ROOT = f"retrieved/source={SOURCE}/year=2026/month=07/day=28/"
@@ -47,11 +51,27 @@ class _FakeS3:
             out["Contents"] = [{"Key": k} for k in keys[:MaxKeys]]
         return out
 
+    def get_object(self, Bucket=None, Key=None, **kw):
+        # Reading the manifest is how extraction learns which photos are
+        # legible. A venue with no manifest must still extract, so a miss
+        # raises exactly as S3 would rather than returning something empty.
+        if Key not in self.objects:
+            raise RuntimeError(f"NoSuchKey: {Key}")
+        return {"Body": _Body(self.objects[Key])}
+
     def generate_presigned_url(self, op, Params=None, ExpiresIn=None):
         if self.fail_presign:
             raise RuntimeError("AccessDenied: s3:GetObject")
         self.presigned.append((Params["Key"], ExpiresIn))
         return f"https://signed/{Params['Key']}?exp={ExpiresIn}"
+
+
+class _Body:
+    def __init__(self, data):
+        self._data = data
+
+    def read(self):
+        return self._data
 
 
 def _store(keys=(), **kw):
@@ -76,7 +96,7 @@ def _menu_keys(run, venue=VENUE, n=2):
 class TestNewestRun:
     def test_it_reads_the_newest_run(self):
         store = _store(_menu_keys(OLD_RUN, n=1) + _menu_keys(NEW_RUN, n=1))
-        urls, _ = asyncio.run(_service(store)._archive_photo_urls(VENUE))
+        urls, _, _ = asyncio.run(_service(store)._archive_photo_urls(VENUE))
         assert len(urls) == 1
         assert NEW_RUN in urls[0]
 
@@ -84,22 +104,22 @@ class TestNewestRun:
         # Runs are snapshots. Preferring the fuller one would pair a fresh menu
         # with a stale photo and give no sign it happened.
         store = _store(_menu_keys(OLD_RUN, n=9) + _menu_keys(NEW_RUN, n=1))
-        urls, _ = asyncio.run(_service(store)._archive_photo_urls(VENUE))
+        urls, _, _ = asyncio.run(_service(store)._archive_photo_urls(VENUE))
         assert len(urls) == 1 and NEW_RUN in urls[0]
 
     def test_a_venue_absent_from_the_newest_run_has_no_photos(self):
         store = _store(_menu_keys(OLD_RUN) + _menu_keys(NEW_RUN, venue="ven_other"))
-        assert asyncio.run(_service(store)._archive_photo_urls(VENUE)) == (None, None)
+        assert asyncio.run(_service(store)._archive_photo_urls(VENUE)) == (None, None, False)
 
     def test_no_runs_at_all_is_not_an_error(self):
-        assert asyncio.run(_service(_store())._archive_photo_urls(VENUE)) == (None, None)
+        assert asyncio.run(_service(_store())._archive_photo_urls(VENUE)) == (None, None, False)
 
     def test_a_missing_media_store_is_reported_not_crashed(self):
         svc = MenuExtractionService(
             openai_client=object(), s3_client=object(), venue_dao=object(),
             media_store=None, photo_source="archive",
         )
-        assert asyncio.run(svc._archive_photo_urls(VENUE)) == (None, None)
+        assert asyncio.run(svc._archive_photo_urls(VENUE)) == (None, None, False)
 
 
 # ── choosing the photos ───────────────────────────────────────────────────────
@@ -110,7 +130,7 @@ class TestPhotoSelection:
             + [f"{NEW_RUN}venue_id={VENUE}/media/vibe/v0.jpg",
                f"{NEW_RUN}venue_id={VENUE}/media/all/a0.jpg"]
         )
-        urls, _ = asyncio.run(_service(store)._archive_photo_urls(VENUE))
+        urls, _, _ = asyncio.run(_service(store)._archive_photo_urls(VENUE))
         assert all("/media/menu/" in u for u in urls), urls
         assert len(urls) == 2
 
@@ -121,18 +141,18 @@ class TestPhotoSelection:
             f"{NEW_RUN}venue_id={VENUE}/info/place.json",
             f"{NEW_RUN}venue_id={VENUE}/info/_manifest.json",
         ])
-        urls, _ = asyncio.run(_service(store)._archive_photo_urls(VENUE))
+        urls, _, _ = asyncio.run(_service(store)._archive_photo_urls(VENUE))
         assert all(u.endswith(".jpg?exp=900") or ".jpg?" in u for u in urls)
         assert not any(".json" in u for u in urls)
 
     def test_another_venue_is_never_included(self):
         store = _store(_menu_keys(NEW_RUN) + _menu_keys(NEW_RUN, venue="ven_zzz"))
-        urls, _ = asyncio.run(_service(store)._archive_photo_urls(VENUE))
+        urls, _, _ = asyncio.run(_service(store)._archive_photo_urls(VENUE))
         assert all(f"venue_id={VENUE}/" in u for u in urls)
 
     def test_photo_ids_come_from_the_filenames(self):
         store = _store(_menu_keys(NEW_RUN, n=2))
-        _, ids = asyncio.run(_service(store)._archive_photo_urls(VENUE))
+        _, ids, _ = asyncio.run(_service(store)._archive_photo_urls(VENUE))
         assert ids == ["p0", "p1"]
 
 
@@ -145,7 +165,7 @@ class TestPresigning:
 
     def test_the_model_never_receives_a_raw_bucket_url(self):
         store = _store(_menu_keys(NEW_RUN, n=1))
-        urls, _ = asyncio.run(_service(store)._archive_photo_urls(VENUE))
+        urls, _, _ = asyncio.run(_service(store)._archive_photo_urls(VENUE))
         assert urls[0].startswith("https://signed/")
         assert "s3.amazonaws.com" not in urls[0]
 
@@ -161,18 +181,101 @@ class TestPresigning:
             return real(op, Params=Params, ExpiresIn=ExpiresIn)
 
         store._s3.generate_presigned_url = flaky
-        urls, ids = asyncio.run(_service(store)._archive_photo_urls(VENUE))
+        urls, ids, _ = asyncio.run(_service(store)._archive_photo_urls(VENUE))
         assert len(urls) == 2 and len(ids) == 2
 
     def test_denied_read_access_yields_no_photos_rather_than_bad_urls(self):
         # The likeliest cause is the IAM grant missing; the service must not
         # hand the model urls that will 403.
         store = _store(_menu_keys(NEW_RUN), fail_presign=True)
-        assert asyncio.run(_service(store)._archive_photo_urls(VENUE)) == (None, None)
+        assert asyncio.run(_service(store)._archive_photo_urls(VENUE)) == (None, None, False)
 
     def test_a_listing_failure_is_survivable(self):
         store = _store(_menu_keys(NEW_RUN), deny_list=True)
-        assert asyncio.run(_service(store)._archive_photo_urls(VENUE)) == (None, None)
+        assert asyncio.run(_service(store)._archive_photo_urls(VENUE)) == (None, None, False)
+
+
+# ── paying only for menus that can be read ────────────────────────────────────
+class TestLegibilityGate:
+    """`legible` is where the classifier pays for itself: no OCR on a blur.
+
+    The rule is asymmetric on purpose — only what the manifest POSITIVELY marks
+    illegible is dropped, so an archive from before the classifier existed
+    behaves exactly as it did before.
+    """
+
+    def _store_with_manifest(self, entries, keys=None):
+        keys = keys if keys is not None else [e["key"] for e in entries]
+        store = _store(keys)
+        store._s3.objects[f"{NEW_RUN}venue_id={VENUE}/info/_manifest.json"] = (
+            json.dumps({"photos": entries}).encode()
+        )
+        return store
+
+    def test_an_illegible_photo_is_never_sent_to_extraction(self):
+        legible, blurred = _menu_keys(NEW_RUN)
+        store = self._store_with_manifest([
+            {"key": legible, "attributes": {"legible": "yes"}},
+            {"key": blurred, "attributes": {"legible": "no"}},
+        ])
+        urls, _, _ = asyncio.run(_service(store)._archive_photo_urls(VENUE))
+        assert len(urls) == 1 and legible in urls[0]
+
+    def test_a_partly_legible_photo_is_still_worth_reading(self):
+        key = _menu_keys(NEW_RUN, n=1)[0]
+        store = self._store_with_manifest([
+            {"key": key, "attributes": {"legible": "partial"}},
+        ])
+        urls, _, _ = asyncio.run(_service(store)._archive_photo_urls(VENUE))
+        assert len(urls) == 1
+
+    def test_a_photo_with_no_verdict_is_kept(self):
+        # Unknown is not unreadable.
+        key = _menu_keys(NEW_RUN, n=1)[0]
+        store = self._store_with_manifest([{"key": key}])
+        urls, _, _ = asyncio.run(_service(store)._archive_photo_urls(VENUE))
+        assert len(urls) == 1
+
+    def test_a_photo_the_classifier_could_not_judge_is_kept(self):
+        # `not_classified` means "asked, could not tell" — which is exactly the
+        # case where the extractor deserves its shot at the photo.
+        key = _menu_keys(NEW_RUN, n=1)[0]
+        store = self._store_with_manifest([
+            {"key": key, "attributes": {"legible": "not_classified"}},
+        ])
+        urls, _, _ = asyncio.run(_service(store)._archive_photo_urls(VENUE))
+        assert len(urls) == 1
+
+    def test_a_photo_the_manifest_never_mentions_is_kept(self):
+        listed, unlisted = _menu_keys(NEW_RUN)
+        store = self._store_with_manifest(
+            [{"key": listed, "attributes": {"legible": "yes"}}],
+            keys=[listed, unlisted],
+        )
+        urls, _, _ = asyncio.run(_service(store)._archive_photo_urls(VENUE))
+        assert len(urls) == 2
+
+    def test_a_run_with_no_manifest_extracts_exactly_as_before(self):
+        store = _store(_menu_keys(NEW_RUN))
+        urls, _, _ = asyncio.run(_service(store)._archive_photo_urls(VENUE))
+        assert len(urls) == 2
+
+    def test_a_venue_whose_every_menu_is_illegible_costs_nothing(self):
+        store = self._store_with_manifest([
+            {"key": k, "attributes": {"legible": "no"}} for k in _menu_keys(NEW_RUN)
+        ])
+        assert asyncio.run(
+            _service(store)._archive_photo_urls(VENUE)
+        ) == (None, None, False)
+        assert store._s3.presigned == [], "an illegible photo was signed anyway"
+
+    def test_the_selector_is_a_pure_function_of_the_entries(self):
+        entries = [
+            {"key": "a", "attributes": {"legible": "yes"}},
+            {"key": "b", "attributes": {"legible": "no"}},
+            {"key": "c"},
+        ]
+        assert [e["key"] for e in selectable_menu_photos(entries)] == ["a", "c"]
 
 
 # ── the seam ──────────────────────────────────────────────────────────────────
@@ -180,6 +283,7 @@ class TestPhotoSourceSeam:
     def test_the_redis_path_is_still_selectable(self):
         class _Photos:
             photos = [type("P", (), {"s3_key": "k1", "photo_id": "pid1"})()]
+            source = "google_places"  # not one of the pre-filtered sources
             def has_photos(self): return True
 
         class _Dao:
@@ -192,8 +296,11 @@ class TestPhotoSourceSeam:
             openai_client=object(), s3_client=_S3(), venue_dao=_Dao(),
             media_store=_store(_menu_keys(NEW_RUN)), photo_source="redis",
         )
-        urls, ids = asyncio.run(svc._photo_urls(VENUE))
+        urls, ids, needs_filter = asyncio.run(svc._photo_urls(VENUE))
         assert urls == ["https://old/k1"] and ids == ["pid1"]
+        # The Redis path still owes the pre-filter a decision; the archive path
+        # does not, because the category and the legibility are already known.
+        assert needs_filter is True
 
     def test_the_archive_path_is_the_default(self):
         svc = MenuExtractionService(
@@ -205,7 +312,7 @@ class TestPhotoSourceSeam:
 
     def test_both_paths_return_the_same_shape(self):
         store = _store(_menu_keys(NEW_RUN, n=2))
-        urls, ids = asyncio.run(_service(store)._photo_urls(VENUE))
+        urls, ids, _ = asyncio.run(_service(store)._photo_urls(VENUE))
         assert isinstance(urls, list) and isinstance(ids, list)
         assert len(urls) == len(ids)
 

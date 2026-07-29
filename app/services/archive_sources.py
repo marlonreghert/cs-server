@@ -72,6 +72,10 @@ class ArchiveSource:
     unit_cost_usd: Callable[..., float]
     config_schema: list[ConfigField] = field(default_factory=list)
     cost_note: str = ""
+    # True when the source returns Google's own tab for a photo. That label is
+    # authoritative, so the classifier must not overwrite it with a guess — an
+    # attribute of the SOURCE, not an if-branch in the pipeline.
+    provides_categories: bool = False
 
     def to_public(self, source_id: str, available: bool) -> dict:
         return {
@@ -270,6 +274,7 @@ ARCHIVE_SOURCES: dict[str, ArchiveSource] = {
             "Billed per search: one per category, per venue. No discovery call "
             "— the category ids are constants."
         ),
+        provides_categories=True,
     ),
 }
 

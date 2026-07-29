@@ -182,6 +182,126 @@ used — one page is 20 photos, above the usual per-venue cap.
 Category names reach an S3 key, so they are **untrusted input**: `_safe_category`
 collapses traversal (`../../raw` → `raw`) and empties to `uncategorised`.
 
+### Our own categories: the photo classifier
+
+Google's four tabs do not include the signals worth most to this product. They
+cannot say who is in the room, whether there are children, whether a menu is
+even legible, or whether that terrace has a roof when it rains. So a vision pass
+labels every photo with **our** taxonomy (`app/models/photo_taxonomy.py`) —
+`menu`, `food_drinks`, `interior`, `exterior`, `crowd`, `other` — plus a short
+set of attributes that category can carry.
+
+It runs **between the fetch and the store**, so a photo lands in the right
+folder the first time: no second write, no object copy. **One call** returns the
+category, its attributes and the people block: the schema is small enough to fit
+one prompt without blunting it, and a second pass would send every image twice
+when image tokens are the bill.
+
+**Deliberately generic and coarse.** This is not the product's pt-BR vocabulary
+and does not try to be — `taxonomy.py` describes a venue, this describes a
+photograph. A model reading a thumbnail can tell beer from a cocktail; it cannot
+reliably tell a caipirinha from a batida, so `drink_type` is
+`beer | cocktails | wine | non_alcoholic | other` and stops there. Every list is
+short on purpose, and a venue-level opinion is somebody else's job.
+
+Five rules hold the cost and the correctness down:
+
+- **An attribute is written only when the model is confident about *that*
+  attribute.** Confidence is reported per attribute, not per photo: a model can
+  be certain a room is a bar and unsure whether it has screens, and those two
+  facts do not share a fate. Under `photo_attribute_confidence` (0.8, higher
+  than the category's 0.6 — a wrong category misfiles a photo, a wrong attribute
+  is read as a fact about the venue) the value becomes `not_classified`.
+- **A non-answer is stored, not omitted, and there are two of them.**
+  `not_classified` means "asked, could not tell"; `not_applicable` means the
+  question does not arise — a dessert photo has no drink in it. Keeping them
+  apart matters: on the first live run `drink_type` scored 4/13 and read as a
+  broken field, when in fact nine of those photos simply had no drink and the
+  model had failed at nothing. Both must clear the confidence bar, because
+  "there is no drink here" is an assertion about the photo, not a shrug. Every
+  field of the schema is present on every classified photo.
+- **A source that names its own tabs is never classified.** `ArchiveSource.
+  provides_categories` is `True` for `searchapi_gmaps_photos`: its category is
+  Google's own answer, and a guess would be a downgrade. Apify and the Places
+  API return no per-image category, so those are classified.
+- **Classification is an enhancement, never a dependency.** A model failure
+  leaves every photo archived under the category its source gave it. Losing a
+  photo already paid for because a classifier was unavailable is the wrong
+  trade.
+- **`authorship` is the provider's fact and classification never writes it.**
+  The model's read goes to `likely_authorship`, only where the provider had no
+  answer, and only when it clears the same confidence bar — an early version
+  without that gate returned `by_visitor` for 20 photos out of 20, and a field
+  with one possible answer is a constant rather than a signal.
+
+A low-confidence *category* files the photo as `other` with an `other_kind`
+saying why, so those photos can be found and reclassified later without
+re-billing.
+
+**Extending the schema** re-runs the same call over the archived copies
+(`rederive_attributes`, which is what the `GetObject` grant on `retrieved/*`
+exists for) and never re-pays a provider. That path **discards the category the
+model returns**: the category is in the S3 key of an object that already exists,
+so writing a new one would leave a manifest entry disagreeing with its own key.
+Recategorizing means moving objects, which is a different job.
+
+### What classification costs, measured
+
+**~$9 for the full ~17k-photo catalogue** — about $0.54 per 1,000 photos, from
+token counts the API reports rather than a per-photo constant.
+
+An earlier figure of $1 was wrong by roughly 9x, and the reason is worth
+keeping: it assumed a `detail: "low"` image costs **85 tokens**, which is
+**gpt-4o's** number. **gpt-4o-mini bills the same thumbnail at ~2,833 tokens**,
+around 33x more. Measured at batch_size=10: ~2,974 input tokens per photo, of
+which the ~1,400-token prompt is a rounding error spread across the batch.
+
+Three consequences:
+
+- **Input tracks the photo count, not the batch count.** Raising `batch_size`
+  amortizes only the prompt, so it saves far less than it looks like it should —
+  20 per batch measured ~8% cheaper than 10, not half.
+- **Batches above ~10 lose photos.** At 20 the model returned 16 verdicts for 20
+  images. The missing ones are padded to "no verdict" and keep their source
+  category, so nothing is lost from the archive, but they are unclassified and
+  still billed. `photo_classification_fallbacks_total{reason="no_verdict"}` is
+  where that shows up. **10 is the default for this reason, not by accident.**
+- **`max_tokens` scales with the batch.** It was a flat 2048, which truncated a
+  batch of 20 mid-string; the JSON then failed to parse and the *whole batch*
+  fell back to no verdict — a run that classified nothing, reported success, and
+  paid for every image it sent.
+
+Worth re-checking whether gpt-4o-mini is even the right model here: at list
+rates its image tokens make it **dearer than gpt-4o** for low-detail vision.
+That comparison needs current rate-card numbers before acting on it.
+
+Cost is metered, not assumed: `photo_classification_cost_usd` and
+`openai_tokens_total{endpoint="photo_classify"}` split by direction. The
+attribute half can be switched off on its own (`photo_attributes_enabled`,
+`derive_photo_attributes` per run) since the attribute JSON is most of the
+output cost.
+
+Dashboard: **Photo Classification & Model Spend** (`photo-classification`) in
+Grafana, beside **Photo Archive Pipeline**. Same convention — every Prometheus
+panel is a fleet-wide aggregate and only the Loki panels honour `$job_id`,
+because a uuid is not a metric label.
+
+**Every question is asked only where a photo can answer it.** `time_of_day`
+was briefly asked of all six categories and came back answered on 5 photos of
+20, because a menu close-up and a plated dish show nothing of the outside
+world; it now belongs to `interior`, `exterior` and `crowd` alone. A field that
+is usually unanswerable is not cheap — it costs output tokens on every photo and
+it drags the coverage figure down until nobody trusts the figure.
+
+Measured on 80 real Recife photos: 281 attributes answered, 50 `not_applicable`,
+1 `not_classified`. Worth reading with suspicion rather than satisfaction — a
+confidence bar that drops nothing is a bar that has not been tested.
+
+The first consumer is menu extraction: a photo whose `legible` is `no` is never
+sent to the extractor, so the classifier pays for itself in OCR calls not made.
+Only a confident `no` drops a photo — `not_classified` is kept, because "could
+not tell" is not "unreadable".
+
 ### Photo dates
 
 `info/_manifest.json` carries `uploaded_at` per photo, plus a `media` digest

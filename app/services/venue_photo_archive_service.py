@@ -374,6 +374,13 @@ def parse_config(config: Optional[dict], *, default_max_venues: int,
         "skip_scope": skip_scope,
         "overwrite": overwrite,
         "dry_run": bool(cfg.get("dry_run")),
+        # Classification is on by default and separately switchable from the
+        # attribute pass, which is the expensive half. Both default True so a
+        # saved config from before the classifier existed still classifies.
+        "classify_photos": cfg.get("classify_photos", True) is not False,
+        "derive_photo_attributes": (
+            cfg.get("derive_photo_attributes", True) is not False
+        ),
         # Per-source fields, validated by the source that owns them.
         "source_config": dict(cfg.get("source_config") or {}),
     }
@@ -457,6 +464,7 @@ class VenuePhotoArchiveService:
         downloader=None,
         apify_gmaps_extractor_client=None,
         searchapi_photos_client=None,
+        photo_classifier=None,
         settings=None,
         max_photos_per_venue: int = 10,
         photo_timeout_seconds: float = 15.0,
@@ -477,6 +485,9 @@ class VenuePhotoArchiveService:
         # dispatch both resolve by attribute rather than by an if-ladder.
         self.apify_gmaps_extractor_client = apify_gmaps_extractor_client
         self.searchapi_photos_client = searchapi_photos_client
+        # Optional: absent, photos keep whatever category their source gave
+        # them and the pipeline behaves exactly as it did before.
+        self.photo_classifier = photo_classifier
         self.venue_dao = venue_dao
         self.media_store = media_store
         self.downloader = downloader or HttpPhotoDownloader()
@@ -747,6 +758,12 @@ class VenuePhotoArchiveService:
             "credit_exhausted": False,
             "aborted": False,
             "throttled": 0,
+            "photos_classified": 0,
+            "classification_cost_usd": 0.0,
+            # What the model actually consumed, so a run can be priced from the
+            # provider's own numbers rather than a per-photo guess.
+            "classification_input_tokens": 0,
+            "classification_output_tokens": 0,
             "unknown_venue_ids": unknown,
             "config": cfg,
         }
@@ -992,6 +1009,11 @@ class VenuePhotoArchiveService:
             MEDIA_ARCHIVE_VENUES_TOTAL.labels(source=source, result="info_only").inc()
             return
 
+        # 5. Label the photos BEFORE storing, so each lands in the right folder
+        #    with no second write and no object copy. The provider urls are
+        #    public, so nothing needs presigning here.
+        await self._classify_photos(venue_id, source, photos, cfg, summary)
+
         entries = []
         per_category = cfg.get("max_photos_per_category")
         per_venue = cfg["max_photos_per_venue"]
@@ -1038,6 +1060,121 @@ class VenuePhotoArchiveService:
 
         summary["archived"] += 1
         MEDIA_ARCHIVE_VENUES_TOTAL.labels(source=source, result="archived").inc()
+
+    def _should_classify(self, source: str, cfg: dict) -> bool:
+        """Whether this run classifies at all.
+
+        A source that returns Google's own tab is never classified: that label
+        is authoritative and a guess would be a downgrade, not an improvement.
+        """
+        if self.photo_classifier is None or not cfg.get("classify_photos", True):
+            return False
+        return not get_source(source).provides_categories
+
+    async def _classify_photos(
+        self, venue_id: str, source: str, photos: list[dict], cfg: dict, summary: dict
+    ) -> None:
+        """Annotate the fetched photos, or leave them exactly as they came.
+
+        Wrapped because classification is an enhancement: a classifier that
+        blows up must not cost this venue photos that are already paid for and
+        in hand.
+        """
+        if not photos or not self._should_classify(source, cfg):
+            return
+        try:
+            stats = await self.photo_classifier.annotate(
+                photos,
+                # Both gates must be open: the deployment-level switch and this
+                # run's. The attribute JSON is most of the output cost, so it is
+                # the half that can be closed on its own.
+                derive_attributes=bool(cfg.get("derive_photo_attributes", True))
+                and getattr(self._settings, "photo_attributes_enabled", True),
+                venue_id=venue_id,
+            )
+        except Exception as e:  # noqa: BLE001 — never lose a fetched photo
+            logger.error(
+                f"[VenuePhotoArchive] job={summary['job_id']} classification "
+                f"failed for {venue_id}; photos keep their source category: {e}"
+            )
+            return
+        summary["photos_classified"] += int(stats.get("classified") or 0)
+        summary["classification_cost_usd"] = round(
+            summary["classification_cost_usd"] + float(stats.get("cost_usd") or 0.0), 6
+        )
+        summary["classification_input_tokens"] += int(stats.get("input_tokens") or 0)
+        summary["classification_output_tokens"] += int(stats.get("output_tokens") or 0)
+
+    # ── re-deriving attributes over an archived run ──────────────────────────
+    async def rederive_attributes(
+        self, source: str, *, venue_ids: Optional[list[str]] = None
+    ) -> dict:
+        """Attach attributes to an already-archived run, reading it back from S3.
+
+        This is what makes the attribute schema cheap to extend: adding a field
+        re-runs the attribute pass over stored copies rather than re-fetching
+        from a provider, so the second pass costs vision tokens and nothing
+        else. Requires `s3:GetObject` on `retrieved/*` — the grant that exists
+        for exactly this.
+
+        The manifest is rewritten in place; the images are untouched.
+        """
+        summary = {
+            "source": source, "prefix": None, "venues": 0,
+            "photos_attributed": 0, "failed": 0,
+        }
+        if self.photo_classifier is None:
+            logger.warning("[VenuePhotoArchive] no classifier wired; nothing to re-derive")
+            return summary
+        prefix = await self.media_store.latest_run_prefix(source)
+        if not prefix:
+            logger.info(f"[VenuePhotoArchive] no {source} run to re-derive")
+            return summary
+        summary["prefix"] = prefix
+
+        targets = venue_ids or await self.media_store.list_run_venue_ids(prefix)
+        for venue_id in targets:
+            try:
+                summary["photos_attributed"] += await self._rederive_venue(
+                    prefix, venue_id
+                )
+                summary["venues"] += 1
+            except Exception as e:  # noqa: BLE001 — one venue must not end the pass
+                summary["failed"] += 1
+                logger.error(
+                    f"[VenuePhotoArchive] re-derive failed for {venue_id}: {e}"
+                )
+        logger.info(
+            f"[VenuePhotoArchive] re-derived {summary['photos_attributed']} photo(s) "
+            f"across {summary['venues']} venue(s) under {prefix}"
+        )
+        return summary
+
+    async def _rederive_venue(self, prefix: str, venue_id: str) -> int:
+        manifest = await self.media_store.read_manifest(prefix, venue_id)
+        entries = (manifest or {}).get("photos") or []
+        if not entries:
+            return 0
+        signed, signed_entries = [], []
+        for entry in entries:
+            url = await self.media_store.presign(entry.get("key"))
+            if url:
+                signed.append(url)
+                signed_entries.append(entry)
+        if not signed:
+            logger.error(
+                f"[VenuePhotoArchive] could not sign any archived photo for "
+                f"{venue_id}; check s3:GetObject on retrieved/* for this role"
+            )
+            return 0
+        attributed = await self.photo_classifier.derive_for_archived(
+            signed_entries, signed
+        )
+        manifest["photos"] = entries
+        await self.media_store.put_manifest(
+            prefix=prefix, venue_id=venue_id, manifest=manifest
+        )
+        return attributed
 
     def _venue_context(self, venue_id: str) -> dict:
         """What a source needs to address this venue.
@@ -1126,10 +1263,26 @@ class VenuePhotoArchiveService:
             "key": key,
             "content_type": content_type,
             "bytes": len(data),
-            # Where we filed it (may later come from a classifier) vs who took
-            # it (a fact about the photo, never overwritten by classification).
+            # Where we filed it (the classifier's answer when one ran) vs what
+            # the SOURCE called it — kept so a classifier failure is visible and
+            # reversible — vs who took it, which classification never touches.
             "category": photo.get("category"),
+            # Falls back to the category itself when nothing classified this run
+            # — a source that names its own tabs, or a run with the classifier
+            # off. The field then always answers "what did the SOURCE call it",
+            # instead of being absent exactly where it is trivially known.
+            "source_category": photo.get("source_category") or photo.get("category"),
+            "classification_confidence": photo.get("classification_confidence"),
+            "quality": photo.get("quality"),
+            "attributes": photo.get("attributes"),
+            # Extracted from any photo with visible people, whatever its
+            # category, so a crowd in an interior shot is not thrown away.
+            "people": photo.get("people"),
             "authorship": photo.get("authorship"),
+            # The model's read, present ONLY where the provider had no answer.
+            # Never merged into `authorship`: a guess must not be mistaken for
+            # the fact.
+            "likely_authorship": photo.get("likely_authorship"),
             "author_name": photo.get("author_name"),
             "author_uri": photo.get("author_uri"),
             "author_photo_uri": photo.get("author_photo_uri"),

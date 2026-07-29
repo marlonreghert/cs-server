@@ -12,6 +12,7 @@ reached.
 from __future__ import annotations
 
 import asyncio
+import io
 import json
 
 from behave import given, then, use_step_matcher, when  # type: ignore[import-untyped]
@@ -41,6 +42,16 @@ class _FakeS3:
             raise RuntimeError("s3 put failed")
         self.objects[Key] = Body
         return {}
+
+    def get_object(self, Bucket=None, Key=None, **kw):
+        # Only the JSON sidecars are ever read back — the writer role's
+        # GetObject grant is scoped to `retrieved/*` for exactly that.
+        if Key not in self.objects:
+            raise KeyError(Key)
+        return {"Body": io.BytesIO(self.objects[Key])}
+
+    def generate_presigned_url(self, operation, Params=None, ExpiresIn=None, **kw):
+        return f"https://presigned.example/{(Params or {}).get('Key')}"
 
     def list_objects_v2(self, Bucket=None, Prefix="", Delimiter=None, MaxKeys=1000, **kw):
         keys = sorted(k for k in self.objects if k.startswith(Prefix))

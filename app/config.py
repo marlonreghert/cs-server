@@ -383,6 +383,38 @@ class Settings(BaseSettings):
     searchapi_api_key: str = ""
     searchapi_cost_per_1k_usd: float = 4.0
 
+    # Per-photo classification (our own taxonomy + per-category attributes).
+    # Runs between fetch and store, and ONLY for sources that do not return
+    # Google's real tab — SearchApi's category is a fact and must not be
+    # overwritten by a guess. Needs `openai_api_key`; without it the archive
+    # runs exactly as before, because classification is an enhancement and
+    # never a dependency.
+    photo_classification_enabled: bool = True
+    photo_classification_model: str = "gpt-4o-mini"
+    # Below this, a photo is filed as `other` rather than guessed. Matches the
+    # menu filter's threshold: a wrong label is worse than an honest unknown,
+    # because everything downstream will trust it.
+    photo_classification_confidence: float = 0.6
+    # The bar for ONE attribute, and higher than the category's on purpose: a
+    # wrong category misfiles a photo, a wrong attribute is read as a fact about
+    # the venue. Confidence is reported per attribute, so a model that is sure
+    # about the room and unsure about the screens keeps the first and loses only
+    # the second — anything under this becomes `not_classified`.
+    photo_attribute_confidence: float = 0.8
+    photo_classification_batch_size: int = 10
+    # The attributes half of the single classification call. Switchable on its
+    # own so a run can categorize cheaply without paying for the attribute JSON,
+    # which is most of the output cost.
+    photo_attributes_enabled: bool = True
+    # Unit prices used ONLY to report what a run cost, never to change what it
+    # does. The token rates are the real ones — the API reports exactly what it
+    # consumed — and gpt-4o-mini's list rates are UNVERIFIED against OpenAI's
+    # current card, which is why they are settings. The per-photo figure is now
+    # only a fallback, for a client that cannot report token usage at all.
+    photo_classification_cost_per_photo_usd: float = 0.00006
+    photo_classification_cost_per_1k_input_usd: float = 0.00015
+    photo_classification_cost_per_1k_output_usd: float = 0.0006
+
     # Menu Data Extraction (OpenAI GPT-4o-mini)
     openai_api_key: str = ""
     menu_extraction_enabled: bool = False

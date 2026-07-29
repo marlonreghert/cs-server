@@ -4,7 +4,7 @@ Covers:
 - RedisVenueDAO menu methods (set/get/delete/list/count)
 - OpenAIMenuClient (extraction parsing, photo classification parsing)
 - SerpApiClient (category matching)
-- MenuPhotoEnrichmentService (SerpApi primary + Apify fallback)
+- MenuPhotoEnrichmentService (Instagram highlights primary + GMaps extractor fallback)
 - MenuExtractionService (orchestration with GPT-4o-mini pre-filter)
 - Pydantic models (serialization, defaults)
 """
@@ -116,40 +116,27 @@ def sample_menu_data():
 
 
 @pytest.fixture
-def mock_google_places_client():
+def mock_instagram_highlights_client():
+    """Primary menu-photo source: a venue's own Instagram highlight reels."""
     client = Mock()
-    client.search_place_id = AsyncMock(return_value="ChIJtest123")
-    return client
-
-
-@pytest.fixture
-def mock_serpapi_client():
-    client = Mock()
-    client.resolve_data_id = AsyncMock(return_value="0xabc:0xdef")
-    client.fetch_photos = AsyncMock(return_value={
-        "photos": [
-            {"image": "https://lh5.googleusercontent.com/p/img1.jpg", "thumbnail": "thumb1", "user": {"name": "Author A"}},
-            {"image": "https://lh5.googleusercontent.com/p/img2.jpg", "thumbnail": "thumb2", "user": {"name": "Author B"}},
-        ],
-        "categories": [
-            {"id": "CgIYIQ", "title": "Menu"},
-            {"id": "CgIYAg", "title": "Ambiente"},
-        ],
-    })
-    client.find_menu_category = SerpApiClient.find_menu_category  # Use real static method
-    return client
-
-
-@pytest.fixture
-def mock_apify_menu_photos_client():
-    client = Mock()
-    client.fetch_venue_photos = AsyncMock(return_value=[
-        {"photo_url": "https://apify.com/photo1.jpg", "photo_id": "ap1"},
-        {"photo_url": "https://apify.com/photo2.jpg", "photo_id": "ap2"},
+    client.fetch_menu_highlights = AsyncMock(return_value=[
+        {"image_url": "https://instagram.com/p/ig1.jpg", "highlight_title": "Cardápio"},
+        {"image_url": "https://instagram.com/p/ig2.jpg", "highlight_title": "Cardápio"},
     ])
     client.close = AsyncMock()
     return client
 
+
+@pytest.fixture
+def mock_gmaps_extractor_client():
+    """Fallback source: the compass Google Maps extractor, via Apify."""
+    client = Mock()
+    client.fetch_venue_menu_photos = AsyncMock(return_value=[
+        {"image_url": "https://lh5.googleusercontent.com/p/gm1.jpg", "category": "Menu"},
+        {"image_url": "https://lh5.googleusercontent.com/p/gm2.jpg", "category": "Menu"},
+    ])
+    client.close = AsyncMock()
+    return client
 
 @pytest.fixture
 def mock_s3_client():
@@ -199,45 +186,71 @@ def mock_venue_dao():
     dao.set_venue_menu_data = Mock()
     dao.list_all_venue_ids.return_value = ["v1", "v2", "v3"]
     dao.list_active_venue_ids.return_value = ["v1", "v2", "v3"]
+    # The gate extraction actually reads: active AND eligible. Ineligible venues
+    # are excluded so junk never burns OpenAI budget.
+    dao.list_servable_venue_ids.return_value = ["v1", "v2", "v3"]
     dao.list_cached_menu_photos_venue_ids.return_value = ["v1"]
     dao.count_venues_with_menu_photos.return_value = 0
     return dao
 
 
+def _fake_downloader():
+    """Stand-in for the service's httpx client.
+
+    `_download_and_upload` holds a REAL AsyncClient, so a suite that does not
+    replace it makes live requests to instagram.com and googleusercontent.com —
+    slow, flaky, and dependent on somebody else's uptime.
+    """
+    client = Mock()
+    response = Mock()
+    response.content = b"\xff\xd8\xff-not-really-a-jpeg"
+    response.headers = {"content-type": "image/jpeg"}
+    response.raise_for_status = Mock()
+    client.get = AsyncMock(return_value=response)
+    return client
+
+
 @pytest.fixture
 def photo_enrichment_service(
-    mock_serpapi_client, mock_s3_client, mock_venue_dao,
-    mock_google_places_client, mock_apify_menu_photos_client,
+    mock_instagram_highlights_client, mock_gmaps_extractor_client,
+    mock_s3_client, mock_venue_dao,
 ):
-    return MenuPhotoEnrichmentService(
-        serpapi_client=mock_serpapi_client,
+    service = MenuPhotoEnrichmentService(
+        instagram_highlights_client=mock_instagram_highlights_client,
+        gmaps_extractor_client=mock_gmaps_extractor_client,
         s3_client=mock_s3_client,
         venue_dao=mock_venue_dao,
-        google_places_client=mock_google_places_client,
-        apify_client=mock_apify_menu_photos_client,
         enrichment_limit=5,
         photos_per_venue=2,
         menu_categories=["menu", "cardápio", "cardapio", "preços", "valores"],
     )
+    service._download_client = _fake_downloader()
+    return service
 
 
 @pytest.fixture
-def photo_enrichment_service_no_apify(
-    mock_serpapi_client, mock_s3_client, mock_venue_dao,
-    mock_google_places_client,
+def photo_enrichment_service_gmaps_only(
+    mock_gmaps_extractor_client, mock_s3_client, mock_venue_dao,
 ):
-    """Photo enrichment service without Apify fallback."""
-    return MenuPhotoEnrichmentService(
-        serpapi_client=mock_serpapi_client,
+    """No Instagram client at all — the fallback must carry the venue alone."""
+    service = MenuPhotoEnrichmentService(
+        instagram_highlights_client=None,
+        gmaps_extractor_client=mock_gmaps_extractor_client,
         s3_client=mock_s3_client,
         venue_dao=mock_venue_dao,
-        google_places_client=mock_google_places_client,
-        apify_client=None,
         enrichment_limit=5,
         photos_per_venue=2,
     )
+    service._download_client = _fake_downloader()
+    return service
 
 
+
+# These exercise the REDIS photo path — the DAO, the presigning and the
+# GPT pre-filter. `photo_source` has to be stated: it defaults to `archive`
+# now, and an archive-sourced service with no media store finds no photos at
+# all, which turned every assertion below into `assert None is not None`.
+# The archive path has its own file, tests/test_menu_extraction_from_archive.py.
 @pytest.fixture
 def extraction_service(mock_openai_client, mock_s3_client, mock_venue_dao):
     return MenuExtractionService(
@@ -247,6 +260,7 @@ def extraction_service(mock_openai_client, mock_s3_client, mock_venue_dao):
         extraction_model="gpt-4o",
         photo_filter_enabled=True,
         photo_filter_confidence=0.6,
+        photo_source="redis",
     )
 
 
@@ -259,6 +273,7 @@ def extraction_service_no_filter(mock_openai_client, mock_s3_client, mock_venue_
         extraction_model="gpt-4o",
         photo_filter_enabled=False,
         photo_filter_confidence=0.6,
+        photo_source="redis",
     )
 
 
@@ -565,300 +580,235 @@ class TestSerpApiClientCategoryMatching:
 
 
 # =============================================================================
-# MENU PHOTO ENRICHMENT SERVICE (SerpApi + Apify fallback)
+# MENU PHOTO ENRICHMENT  (Instagram highlights primary -> GMaps extractor)
 # =============================================================================
 
 
+@pytest.mark.asyncio
 class TestMenuPhotoEnrichmentService:
-    """Test menu photo enrichment with SerpApi primary + Apify fallback."""
+    """The two-source cascade that finds a venue's menu photos.
 
-    async def test_cache_hit_returns_cached(
-        self, photo_enrichment_service, mock_venue_dao, sample_menu_photos
+    Rewritten in July 2026. The suite that lived here tested a SerpApi-primary
+    cascade with a Google Places lookup, which the service stopped having in
+    February — it had been failing at construction ever since, so none of it
+    protected anything. The intent is preserved against the sources that exist.
+    """
+
+    def _with_instagram(self, dao, handle="bomsabor"):
+        dao.get_venue_instagram.return_value = Mock(instagram_handle=handle)
+
+    def _without_instagram(self, dao):
+        dao.get_venue_instagram.return_value = None
+
+    # ── the cascade ──────────────────────────────────────────────────────────
+    async def test_instagram_is_preferred_and_stops_the_cascade(
+        self, photo_enrichment_service, mock_venue_dao,
+        mock_instagram_highlights_client, mock_gmaps_extractor_client,
+    ):
+        # A venue's own highlight reel is the venue telling us what its menu is;
+        # the extractor is a guess from strangers' uploads. Never pay for the
+        # second when the first answered.
+        self._with_instagram(mock_venue_dao)
+
+        result = await photo_enrichment_service.enrich_venue("v1")
+
+        assert result.source == "instagram_highlights"
+        mock_instagram_highlights_client.fetch_menu_highlights.assert_awaited_once()
+        mock_gmaps_extractor_client.fetch_venue_menu_photos.assert_not_awaited()
+
+    async def test_a_venue_with_no_instagram_handle_falls_through_to_gmaps(
+        self, photo_enrichment_service, mock_venue_dao,
+        mock_instagram_highlights_client, mock_gmaps_extractor_client,
+    ):
+        self._without_instagram(mock_venue_dao)
+
+        result = await photo_enrichment_service.enrich_venue("v1")
+
+        assert result.source == "gmaps_extractor"
+        mock_instagram_highlights_client.fetch_menu_highlights.assert_not_awaited()
+        mock_gmaps_extractor_client.fetch_venue_menu_photos.assert_awaited_once()
+
+    async def test_instagram_finding_nothing_falls_through_to_gmaps(
+        self, photo_enrichment_service, mock_venue_dao,
+        mock_instagram_highlights_client, mock_gmaps_extractor_client,
+    ):
+        self._with_instagram(mock_venue_dao)
+        mock_instagram_highlights_client.fetch_menu_highlights.return_value = []
+
+        result = await photo_enrichment_service.enrich_venue("v1")
+
+        assert result.source == "gmaps_extractor"
+        mock_gmaps_extractor_client.fetch_venue_menu_photos.assert_awaited_once()
+
+    async def test_an_instagram_error_falls_through_rather_than_failing(
+        self, photo_enrichment_service, mock_venue_dao,
+        mock_instagram_highlights_client,
+    ):
+        self._with_instagram(mock_venue_dao)
+        mock_instagram_highlights_client.fetch_menu_highlights.side_effect = (
+            RuntimeError("apify actor timed out")
+        )
+
+        result = await photo_enrichment_service.enrich_venue("v1")
+
+        assert result.source == "gmaps_extractor"
+
+    async def test_the_service_works_with_no_instagram_client_at_all(
+        self, photo_enrichment_service_gmaps_only, mock_venue_dao,
+    ):
+        result = await photo_enrichment_service_gmaps_only.enrich_venue("v1")
+        assert result.source == "gmaps_extractor"
+
+    async def test_both_sources_empty_stores_an_empty_result(
+        self, photo_enrichment_service, mock_venue_dao,
+        mock_instagram_highlights_client, mock_gmaps_extractor_client,
+    ):
+        # Stored, not skipped: an empty result is what stops the venue being
+        # re-fetched from two paid APIs on every run.
+        self._with_instagram(mock_venue_dao)
+        mock_instagram_highlights_client.fetch_menu_highlights.return_value = []
+        mock_gmaps_extractor_client.fetch_venue_menu_photos.return_value = []
+
+        result = await photo_enrichment_service.enrich_venue("v1")
+
+        assert result.photos == []
+        mock_venue_dao.set_venue_menu_photos.assert_called_once()
+
+    async def test_exhausted_apify_credits_stop_the_run_rather_than_degrade(
+        self, photo_enrichment_service, mock_venue_dao,
+        mock_instagram_highlights_client,
+    ):
+        from app.api.apify_instagram_client import ApifyCreditExhaustedError
+
+        self._with_instagram(mock_venue_dao)
+        mock_instagram_highlights_client.fetch_menu_highlights.side_effect = (
+            ApifyCreditExhaustedError("out of credits")
+        )
+
+        # Falling back here would spend the OTHER Apify budget on a venue we
+        # already know we cannot afford, so this one exception is not swallowed.
+        with pytest.raises(ApifyCreditExhaustedError):
+            await photo_enrichment_service.enrich_venue("v1")
+
+    # ── caching ──────────────────────────────────────────────────────────────
+    async def test_a_cache_hit_calls_neither_source(
+        self, photo_enrichment_service, mock_venue_dao, sample_menu_photos,
+        mock_instagram_highlights_client, mock_gmaps_extractor_client,
     ):
         mock_venue_dao.get_venue_menu_photos.return_value = sample_menu_photos
 
         result = await photo_enrichment_service.enrich_venue("v1")
 
         assert result == sample_menu_photos
-        mock_venue_dao.get_venue.assert_not_called()
+        mock_instagram_highlights_client.fetch_menu_highlights.assert_not_awaited()
+        mock_gmaps_extractor_client.fetch_venue_menu_photos.assert_not_awaited()
 
-    async def test_force_refresh_bypasses_cache(
-        self, photo_enrichment_service, mock_venue_dao, mock_serpapi_client
+    async def test_force_refresh_bypasses_the_cache(
+        self, photo_enrichment_service, mock_venue_dao, sample_menu_photos,
+        mock_instagram_highlights_client,
     ):
-        mock_venue_dao.get_venue_menu_photos.return_value = VenueMenuPhotos(
-            venue_id="v1", photos=[]
-        )
-        mock_serpapi_client.fetch_photos.return_value = {"photos": [], "categories": []}
+        mock_venue_dao.get_venue_menu_photos.return_value = sample_menu_photos
+        self._with_instagram(mock_venue_dao)
 
-        result = await photo_enrichment_service.enrich_venue("v1", force_refresh=True)
+        await photo_enrichment_service.enrich_venue("v1", force_refresh=True)
 
-        mock_venue_dao.get_venue.assert_called_once()
+        mock_instagram_highlights_client.fetch_menu_highlights.assert_awaited_once()
 
-    async def test_venue_not_found(self, photo_enrichment_service, mock_venue_dao):
+    async def test_an_unknown_venue_is_reported_not_crashed(
+        self, photo_enrichment_service, mock_venue_dao,
+    ):
         mock_venue_dao.get_venue.return_value = None
+        assert await photo_enrichment_service.enrich_venue("nope") is None
 
-        result = await photo_enrichment_service.enrich_venue("v999", force_refresh=True)
-
-        assert result is None
-
-    async def test_no_place_id(
-        self, photo_enrichment_service, mock_google_places_client
+    # ── downloading ──────────────────────────────────────────────────────────
+    async def test_every_photo_is_uploaded_and_recorded(
+        self, photo_enrichment_service, mock_venue_dao, mock_s3_client,
     ):
-        mock_google_places_client.search_place_id.return_value = None
+        self._without_instagram(mock_venue_dao)
 
-        result = await photo_enrichment_service.enrich_venue("v1", force_refresh=True)
+        result = await photo_enrichment_service.enrich_venue("v1")
 
-        assert result is None
-
-    async def test_serpapi_with_menu_category(
-        self, photo_enrichment_service, mock_serpapi_client, mock_s3_client, mock_venue_dao
-    ):
-        """SerpApi finds 'Menu' category → re-fetches with category_id filter."""
-        # First call returns categories + unfiltered photos
-        initial_result = {
-            "photos": [
-                {"image": "https://img/all1.jpg", "user": {"name": "A"}},
-            ],
-            "categories": [
-                {"id": "CgIYIQ", "title": "Menu"},
-                {"id": "CgIYAg", "title": "Ambiente"},
-            ],
-        }
-        # Second call (with category_id) returns filtered menu photos
-        filtered_result = {
-            "photos": [
-                {"image": "https://img/menu1.jpg", "user": {"name": "Author A"}},
-                {"image": "https://img/menu2.jpg", "user": {"name": "Author B"}},
-            ],
-            "categories": [],
-        }
-        mock_serpapi_client.fetch_photos.side_effect = [initial_result, filtered_result]
-
-        with patch.object(photo_enrichment_service, '_download_client') as mock_dl:
-            mock_response = Mock()
-            mock_response.content = b"fake-image-bytes"
-            mock_response.headers = {"content-type": "image/jpeg"}
-            mock_response.raise_for_status = Mock()
-            mock_dl.get = AsyncMock(return_value=mock_response)
-
-            result = await photo_enrichment_service.enrich_venue("v1", force_refresh=True)
-
-        assert result is not None
         assert len(result.photos) == 2
-        assert result.has_menu_category is True
-        mock_venue_dao.set_venue_menu_photos.assert_called_once()
-        # Verify fetch_photos called twice (initial + filtered)
-        assert mock_serpapi_client.fetch_photos.call_count == 2
+        assert mock_s3_client.upload_photo_bytes.await_count == 2
+        assert all(p.s3_key for p in result.photos)
 
-    async def test_serpapi_without_menu_category(
-        self, photo_enrichment_service, mock_serpapi_client, mock_s3_client, mock_venue_dao
+    async def test_the_per_venue_photo_cap_is_respected(
+        self, photo_enrichment_service, mock_venue_dao, mock_gmaps_extractor_client,
     ):
-        """SerpApi has no 'Menu' category → uses unfiltered photos."""
-        mock_serpapi_client.fetch_photos.return_value = {
-            "photos": [
-                {"image": "https://img/photo1.jpg", "user": {"name": "A"}},
-            ],
-            "categories": [
-                {"id": "CgIYAg", "title": "Ambiente"},
-                {"id": "CgIYAw", "title": "Comida"},
-            ],
-        }
-
-        with patch.object(photo_enrichment_service, '_download_client') as mock_dl:
-            mock_response = Mock()
-            mock_response.content = b"fake-image-bytes"
-            mock_response.headers = {"content-type": "image/jpeg"}
-            mock_response.raise_for_status = Mock()
-            mock_dl.get = AsyncMock(return_value=mock_response)
-
-            result = await photo_enrichment_service.enrich_venue("v1", force_refresh=True)
-
-        assert result is not None
-        assert len(result.photos) == 1
-        assert result.has_menu_category is False
-        # Only one fetch_photos call (no re-fetch)
-        assert mock_serpapi_client.fetch_photos.call_count == 1
-
-    async def test_serpapi_fetch_photos_failure_apify_fallback(
-        self, photo_enrichment_service, mock_serpapi_client, mock_apify_menu_photos_client
-    ):
-        """SearchApi fetch_photos returns None → falls back to Apify."""
-        mock_serpapi_client.fetch_photos.return_value = None
-
-        with patch.object(photo_enrichment_service, '_download_client') as mock_dl:
-            mock_response = Mock()
-            mock_response.content = b"fake-image-bytes"
-            mock_response.headers = {"content-type": "image/jpeg"}
-            mock_response.raise_for_status = Mock()
-            mock_dl.get = AsyncMock(return_value=mock_response)
-
-            result = await photo_enrichment_service.enrich_venue("v1", force_refresh=True)
-
-        assert result is not None
-        mock_apify_menu_photos_client.fetch_venue_photos.assert_called_once()
-
-    async def test_serpapi_failure_apify_fallback(
-        self, photo_enrichment_service, mock_serpapi_client, mock_apify_menu_photos_client,
-        mock_s3_client, mock_venue_dao,
-    ):
-        """SerpApi returns no photos → falls back to Apify."""
-        mock_serpapi_client.fetch_photos.return_value = None
-
-        with patch.object(photo_enrichment_service, '_download_client') as mock_dl:
-            mock_response = Mock()
-            mock_response.content = b"fake-image-bytes"
-            mock_response.headers = {"content-type": "image/jpeg"}
-            mock_response.raise_for_status = Mock()
-            mock_dl.get = AsyncMock(return_value=mock_response)
-
-            result = await photo_enrichment_service.enrich_venue("v1", force_refresh=True)
-
-        assert result is not None
-        assert len(result.photos) == 2
-        mock_apify_menu_photos_client.fetch_venue_photos.assert_called_once()
-        mock_venue_dao.set_venue_menu_photos.assert_called_once()
-
-    async def test_both_sources_fail_stores_empty(
-        self, photo_enrichment_service, mock_serpapi_client, mock_apify_menu_photos_client,
-        mock_venue_dao,
-    ):
-        """Both SerpApi and Apify return nothing → stores empty result."""
-        mock_serpapi_client.fetch_photos.return_value = None
-        mock_apify_menu_photos_client.fetch_venue_photos.return_value = None
-
-        result = await photo_enrichment_service.enrich_venue("v1", force_refresh=True)
-
-        assert result is not None
-        assert len(result.photos) == 0
-        mock_venue_dao.set_venue_menu_photos.assert_called_once()
-
-    async def test_no_apify_fallback_serpapi_fails(
-        self, photo_enrichment_service_no_apify, mock_serpapi_client, mock_venue_dao,
-    ):
-        """SerpApi fails with no Apify configured → stores empty result."""
-        mock_serpapi_client.fetch_photos.return_value = None
-
-        result = await photo_enrichment_service_no_apify.enrich_venue("v1", force_refresh=True)
-
-        assert result is not None
-        assert len(result.photos) == 0
-
-    async def test_author_name_from_serpapi(
-        self, photo_enrichment_service, mock_serpapi_client, mock_s3_client
-    ):
-        """Author name from SerpApi user field is preserved."""
-        mock_serpapi_client.fetch_photos.return_value = {
-            "photos": [
-                {"image": "https://img/1.jpg", "user": {"name": "Maria Silva"}},
-            ],
-            "categories": [],
-        }
-
-        with patch.object(photo_enrichment_service, '_download_client') as mock_dl:
-            mock_response = Mock()
-            mock_response.content = b"fake-image-bytes"
-            mock_response.headers = {"content-type": "image/jpeg"}
-            mock_response.raise_for_status = Mock()
-            mock_dl.get = AsyncMock(return_value=mock_response)
-
-            result = await photo_enrichment_service.enrich_venue("v1", force_refresh=True)
-
-        assert result.photos[0].author_name == "Maria Silva"
-
-    async def test_respects_photos_per_venue_limit(
-        self, photo_enrichment_service, mock_serpapi_client, mock_s3_client
-    ):
-        """Should stop downloading after reaching photos_per_venue limit (2)."""
-        mock_serpapi_client.fetch_photos.return_value = {
-            "photos": [
-                {"image": "https://img/1.jpg", "user": {"name": "A"}},
-                {"image": "https://img/2.jpg", "user": {"name": "B"}},
-                {"image": "https://img/3.jpg", "user": {"name": "C"}},
-            ],
-            "categories": [],
-        }
-
-        with patch.object(photo_enrichment_service, '_download_client') as mock_dl:
-            mock_response = Mock()
-            mock_response.content = b"fake-image-bytes"
-            mock_response.headers = {"content-type": "image/jpeg"}
-            mock_response.raise_for_status = Mock()
-            mock_dl.get = AsyncMock(return_value=mock_response)
-
-            result = await photo_enrichment_service.enrich_venue("v1", force_refresh=True)
-
-        assert len(result.photos) == 2  # Limited to photos_per_venue=2
-
-    async def test_download_failure_skips_photo(
-        self, photo_enrichment_service, mock_serpapi_client, mock_s3_client
-    ):
-        """If download/upload fails for one photo, continues with others."""
-        mock_serpapi_client.fetch_photos.return_value = {
-            "photos": [
-                {"image": "https://img/1.jpg", "user": {"name": "A"}},
-                {"image": "https://img/2.jpg", "user": {"name": "B"}},
-            ],
-            "categories": [],
-        }
-        # First upload fails, second succeeds
-        mock_s3_client.upload_photo_bytes.side_effect = [
-            Exception("S3 upload failed"),
-            ("photo-uuid-2", "places/v1/photos/menu/photo-uuid-2.jpg",
-             "https://vibesense.s3.us-east-1.amazonaws.com/places/v1/photos/menu/photo-uuid-2.jpg"),
+        self._without_instagram(mock_venue_dao)
+        mock_gmaps_extractor_client.fetch_venue_menu_photos.return_value = [
+            {"image_url": f"https://lh5.googleusercontent.com/p/gm{i}.jpg",
+             "category": "Menu"}
+            for i in range(10)
         ]
 
-        with patch.object(photo_enrichment_service, '_download_client') as mock_dl:
-            mock_response = Mock()
-            mock_response.content = b"fake-image-bytes"
-            mock_response.headers = {"content-type": "image/jpeg"}
-            mock_response.raise_for_status = Mock()
-            mock_dl.get = AsyncMock(return_value=mock_response)
+        result = await photo_enrichment_service.enrich_venue("v1")
 
-            result = await photo_enrichment_service.enrich_venue("v1", force_refresh=True)
+        assert len(result.photos) == 2  # photos_per_venue
+
+    async def test_one_failed_download_does_not_lose_the_others(
+        self, photo_enrichment_service, mock_venue_dao, mock_s3_client,
+    ):
+        self._without_instagram(mock_venue_dao)
+        mock_s3_client.upload_photo_bytes.side_effect = [
+            RuntimeError("s3 refused"),
+            ("photo-2", "places/v1/photos/menu/photo-2.jpg", "https://s3/photo-2.jpg"),
+        ]
+
+        result = await photo_enrichment_service.enrich_venue("v1")
 
         assert len(result.photos) == 1
 
-    async def test_enrich_all_respects_limit(
-        self, photo_enrichment_service, mock_venue_dao, mock_serpapi_client
+    async def test_an_instagram_photo_keeps_its_highlight_title_as_a_category(
+        self, photo_enrichment_service, mock_venue_dao,
     ):
-        """enrich_all_venues stops after enrichment_limit venues."""
-        mock_venue_dao.list_all_venue_ids.return_value = ["v1", "v2", "v3", "v4", "v5", "v6"]
-        mock_venue_dao.list_active_venue_ids.return_value = ["v1", "v2", "v3", "v4", "v5", "v6"]
-        mock_venue_dao.get_venue_menu_photos.return_value = None
-        mock_serpapi_client.fetch_photos.return_value = {"photos": [], "categories": []}
+        self._with_instagram(mock_venue_dao)
 
-        await photo_enrichment_service.enrich_all_venues()
+        result = await photo_enrichment_service.enrich_venue("v1")
 
-        # limit is 5, all 6 should be attempted but max 5 processed
-        assert mock_venue_dao.get_venue.call_count == 5
+        assert result.available_categories == ["Cardápio"]
+        assert result.has_menu_category is True
 
-    async def test_enrich_all_skips_cached(
-        self, photo_enrichment_service, mock_venue_dao, mock_serpapi_client
+    # ── the batch job ────────────────────────────────────────────────────────
+    async def test_enrich_all_reads_the_servable_venues(
+        self, photo_enrichment_service, mock_venue_dao,
     ):
-        """Already-cached venues are skipped."""
-        mock_venue_dao.get_venue_menu_photos.return_value = VenueMenuPhotos(
-            venue_id="v1", photos=[]
+        # The serving view — active AND eligible — so an ineligible venue never
+        # burns a paid fetch.
+        self._without_instagram(mock_venue_dao)
+        # The loop paces itself between venues to be polite to the providers;
+        # a unit test should not sit through it.
+        with patch("app.services.menu_photo_enrichment_service.INTER_VENUE_DELAY", 0):
+            await photo_enrichment_service.enrich_all_venues()
+        mock_venue_dao.list_servable_venue_ids.assert_called_once()
+
+    async def test_enrich_all_respects_the_enrichment_limit(
+        self, mock_instagram_highlights_client, mock_gmaps_extractor_client,
+        mock_s3_client, mock_venue_dao,
+    ):
+        mock_venue_dao.list_servable_venue_ids.return_value = [f"v{i}" for i in range(10)]
+        mock_venue_dao.get_venue_instagram.return_value = None
+        service = MenuPhotoEnrichmentService(
+            instagram_highlights_client=mock_instagram_highlights_client,
+            gmaps_extractor_client=mock_gmaps_extractor_client,
+            s3_client=mock_s3_client,
+            venue_dao=mock_venue_dao,
+            enrichment_limit=3,
+            photos_per_venue=1,
         )
+        service._download_client = _fake_downloader()
 
-        await photo_enrichment_service.enrich_all_venues()
+        with patch("app.services.menu_photo_enrichment_service.INTER_VENUE_DELAY", 0):
+            await service.enrich_all_venues()
 
-        mock_serpapi_client.fetch_photos.assert_not_called()
+        assert mock_gmaps_extractor_client.fetch_venue_menu_photos.await_count <= 3
 
-    async def test_enrich_all_empty_venues(
-        self, photo_enrichment_service, mock_venue_dao
+    async def test_enrich_all_with_no_venues_is_not_an_error(
+        self, photo_enrichment_service, mock_venue_dao,
     ):
-        """No venues returns 0."""
-        mock_venue_dao.list_all_venue_ids.return_value = []
-        mock_venue_dao.list_active_venue_ids.return_value = []
+        mock_venue_dao.list_servable_venue_ids.return_value = []
+        assert await photo_enrichment_service.enrich_all_venues() == 0
 
-        result = await photo_enrichment_service.enrich_all_venues()
-
-        assert result == 0
-
-
-# =============================================================================
-# MENU EXTRACTION SERVICE (with GPT-4o-mini pre-filter)
-# =============================================================================
 
 
 class TestMenuExtractionService:

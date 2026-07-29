@@ -509,6 +509,40 @@ MEDIA_ARCHIVE_VENUES_WITH_MEDIA = Gauge(
     ["source"],
 )
 
+# Photo classification. `fallbacks` is the one to watch: it separates "the model
+# failed" (photos keep their source category) from "the model was unsure" (filed
+# as `other`), which look identical in the category counts but mean opposite
+# things about whether the classifier is working.
+PHOTO_CLASSIFICATION_TOTAL = Counter(
+    "photo_classification_total",
+    "Photos classified, by the category they were filed under",
+    ["category"],
+)
+
+PHOTO_CLASSIFICATION_FALLBACKS_TOTAL = Counter(
+    "photo_classification_fallbacks_total",
+    "Photos that did not get a confident category, by reason",
+    ["reason"],
+)
+
+PHOTO_CLASSIFICATION_COST_USD = Counter(
+    "photo_classification_cost_usd",
+    "Cumulative vision-model spend on photo classification, in USD, priced from "
+    "the token counts the API reports",
+)
+
+# What the model ACTUALLY consumed, straight off `response.usage` — not a
+# per-photo guess. Input and output are separated because they are billed at
+# very different rates (output is several times dearer) and because they move
+# for different reasons: input grows when the prompt or the batch size grows,
+# output grows when the schema grows. A cost surprise is always one or the
+# other, and a single total cannot tell you which.
+OPENAI_TOKENS_TOTAL = Counter(
+    "openai_tokens_total",
+    "Tokens reported by the OpenAI API, by endpoint and direction",
+    ["endpoint", "direction"],
+)
+
 # =============================================================================
 # Instagram handle cascade
 # =============================================================================
