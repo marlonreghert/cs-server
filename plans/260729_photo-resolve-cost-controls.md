@@ -89,8 +89,19 @@ never poisons the cache.
    - cached list is non-empty but has `< N` entries → re-resolve `N` and
      overwrite the key, so the richer list replaces the poorer one;
    - no cached entry → resolve `N` and write.
-3. The TTL default becomes 24 hours. A resolved URL therefore survives a full
-   day, cutting repeat purchases of the same venue by 4×.
+3. The TTL default becomes 24 hours. A resolved URL survives a full day, so a
+   venue is re-purchased at most once per day instead of up to four times.
+
+   **Where that saving actually comes from.** The billed event is the *resolve*
+   (`_resolve_photo_media_uri` → `places.googleapis.com/.../media`), not the
+   display — the app fetches the image itself from `lh3.googleusercontent.com`,
+   keyless and free, however many times it renders. So a longer TTL saves
+   nothing on a venue seen once and everything on a venue seen across several
+   windows. Because the list is ranked identically for every user, the head of
+   the ranking is re-resolved in nearly every active window, and after the
+   mobile paging change most sessions never leave that head. The saving is
+   therefore up to 4× and it concentrates on precisely the venues that dominate
+   the bill. It is monotonic: a longer TTL can never cost more.
 4. A forced re-resolve (vibes_bot's dead-URL retry) always calls Google and
    always overwrites, ignoring the cache — this is the existing behaviour of the
    endpoint and must not regress, because it is the only way a dead URL is
