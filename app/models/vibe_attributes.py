@@ -26,6 +26,12 @@ class VibeAttributes(BaseModel):
     # type override; re-enrichment must not overwrite it. See
     # google_places_enrichment_service (enrichment guard).
     primary_type_locked: bool = False
+    # The venue's own website, as Google reports it. Persisted because a LATER
+    # pass needs to re-read it: the Instagram cascade's free tier resolves a
+    # handle from this URL. Previously the value existed only on the transient
+    # GooglePlacesDetailsResponse — fetched, used inline, then dropped — so
+    # reading it back off the stored attributes always returned None.
+    website_uri: Optional[str] = None
 
     # LGBTQ+ Related
     lgbtq_friendly: Optional[bool] = None

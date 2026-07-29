@@ -477,6 +477,11 @@ class GooglePlacesAPIClient:
         """
         return VibeAttributes(
             venue_id=venue_id,
+            # Carried through so it is PERSISTED, not just used inline: the
+            # Instagram cascade's free tier re-reads this later to resolve a
+            # handle. It was previously dropped here, which made that tier
+            # structurally dead — it read a field nothing ever stored.
+            website_uri=details.website_uri,
             # LGBTQ+ - Google doesn't have specific fields yet, may need to parse from summary
             lgbtq_friendly=None,  # TODO: Parse from generative_summary if available
             transgender_safespace=None,
