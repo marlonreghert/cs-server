@@ -384,9 +384,14 @@ class Settings(BaseSettings):
     # own so a run can categorize cheaply without paying for the attribute JSON,
     # which is most of the output cost.
     photo_attributes_enabled: bool = True
-    # Unit price used ONLY to report what a run cost: 85 image tokens at
-    # detail="low", plus the prompt share and the JSON written back.
+    # Unit prices used ONLY to report what a run cost, never to change what it
+    # does. The token rates are the real ones — the API reports exactly what it
+    # consumed — and gpt-4o-mini's list rates are UNVERIFIED against OpenAI's
+    # current card, which is why they are settings. The per-photo figure is now
+    # only a fallback, for a client that cannot report token usage at all.
     photo_classification_cost_per_photo_usd: float = 0.00006
+    photo_classification_cost_per_1k_input_usd: float = 0.00015
+    photo_classification_cost_per_1k_output_usd: float = 0.0006
 
     # Menu Data Extraction (OpenAI GPT-4o-mini)
     openai_api_key: str = ""

@@ -401,6 +401,19 @@ class TestOnePass(unittest.TestCase):
         self.assertNotIn("attributes", photos[0])
         self.assertEqual(client.attribute_requests, [False])
 
+    def test_the_output_budget_grows_with_the_batch(self):
+        # A flat 2048 truncated a batch of 20 mid-string: the JSON would not
+        # parse, the whole batch fell back to no verdict, and the run reported
+        # success having classified nothing while paying for every image.
+        from app.api.openai_photo_classifier_client import (
+            MIN_OUTPUT_TOKENS, OUTPUT_TOKENS_PER_PHOTO, _output_budget,
+        )
+        self.assertEqual(_output_budget(20), 20 * OUTPUT_TOKENS_PER_PHOTO)
+        self.assertGreater(_output_budget(20), _output_budget(10))
+        # Small batches still get room for the JSON scaffolding.
+        self.assertEqual(_output_budget(1), MIN_OUTPUT_TOKENS)
+        self.assertEqual(_output_budget(0), MIN_OUTPUT_TOKENS)
+
     def test_batches_split_by_size_with_a_remainder(self):
         self.assertEqual(_batched(list(range(5)), 2), [[0, 1], [2, 3], [4]])
         self.assertEqual(_batched([], 10), [])
@@ -418,6 +431,76 @@ class TestOnePass(unittest.TestCase):
         stats = _run(_service(client, cost_per_photo_usd=0.001).annotate(_photos(3)))
         self.assertEqual(stats["classified"], 3)
         self.assertEqual(stats["cost_usd"], 0.003)
+
+
+class TestPricingFromRealTokens(unittest.TestCase):
+    """A run is priced from what the API says it consumed, not from a guess."""
+
+    class _Metered(FakeClient):
+        def __init__(self, verdicts=None, tokens=None, **kw):
+            super().__init__(verdicts=verdicts, **kw)
+            self._tokens = tokens or {"input": 0, "output": 0}
+            self.takes = 0
+
+        def take_tokens(self):
+            self.takes += 1
+            used, self._tokens = self._tokens, {"input": 0, "output": 0}
+            return used
+
+    def test_cost_comes_from_the_reported_token_counts(self):
+        client = self._Metered(
+            verdicts=[{"category": "interior", "confidence": 0.9}] * 2,
+            tokens={"input": 2000, "output": 500},
+        )
+        stats = _run(_service(
+            client, cost_per_1k_input_usd=0.001, cost_per_1k_output_usd=0.01,
+        ).annotate(_photos(2)))
+        # 2000/1000*0.001 + 500/1000*0.01 = 0.002 + 0.005
+        self.assertEqual(stats["cost_usd"], 0.007)
+        self.assertEqual(stats["input_tokens"], 2000)
+        self.assertEqual(stats["output_tokens"], 500)
+        self.assertFalse(stats["cost_is_estimated"])
+
+    def test_input_and_output_are_priced_separately(self):
+        # Output is several times dearer, so a schema change and a batch-size
+        # change move the bill for different reasons and by different amounts.
+        def cost(tokens):
+            client = self._Metered(
+                verdicts=[{"category": "interior", "confidence": 0.9}],
+                tokens=tokens)
+            return _run(_service(
+                client, cost_per_1k_input_usd=0.001, cost_per_1k_output_usd=0.01,
+            ).annotate(_photos(1)))["cost_usd"]
+
+        self.assertEqual(cost({"input": 1000, "output": 0}), 0.001)
+        self.assertEqual(cost({"input": 0, "output": 1000}), 0.01)
+
+    def test_a_client_that_cannot_report_tokens_falls_back_and_says_so(self):
+        # The plain FakeClient has no take_tokens, like an older client would.
+        stats = _run(_service(
+            FakeClient(verdicts=[{"category": "interior", "confidence": 0.9}] * 4),
+            cost_per_photo_usd=0.001,
+        ).annotate(_photos(4)))
+        self.assertEqual(stats["cost_usd"], 0.004)
+        self.assertTrue(stats["cost_is_estimated"])
+
+    def test_a_failed_call_reporting_no_tokens_falls_back(self):
+        client = self._Metered(tokens={"input": 0, "output": 0}, fail=True)
+        stats = _run(_service(client, cost_per_photo_usd=0.001).annotate(_photos(3)))
+        self.assertTrue(stats["cost_is_estimated"])
+        self.assertEqual(stats["cost_usd"], 0.003)
+
+    def test_tokens_are_read_and_reset_so_venues_do_not_accumulate(self):
+        # A cumulative counter would make every venue after the first look
+        # progressively more expensive than it was.
+        client = self._Metered(
+            verdicts=[{"category": "interior", "confidence": 0.9}],
+            tokens={"input": 1000, "output": 0})
+        service = _service(client, cost_per_1k_input_usd=0.001)
+        first = _run(service.annotate(_photos(1)))
+        second = _run(service.annotate(_photos(1)))
+        self.assertEqual(first["input_tokens"], 1000)
+        self.assertEqual(second["input_tokens"], 0)
 
 
 class TestReDerivingAnArchivedRun(unittest.TestCase):

@@ -32,6 +32,7 @@ from openai import AsyncOpenAI
 from app.metrics import (
     OPENAI_API_CALLS_TOTAL,
     OPENAI_API_CALL_DURATION_SECONDS,
+    OPENAI_TOKENS_TOTAL,
 )
 from app.models.photo_taxonomy import (
     CATEGORY_OTHER,
@@ -135,12 +136,44 @@ def _batched(items: list, size: int) -> list[list]:
     return [items[i:i + size] for i in range(0, len(items), size)]
 
 
+# One photo's verdict is ~150 output tokens measured on real runs; 250 leaves
+# room for the longest schema (crowd) plus the JSON scaffolding.
+OUTPUT_TOKENS_PER_PHOTO = 250
+MIN_OUTPUT_TOKENS = 1024
+
+
+def _output_budget(photo_count: int) -> int:
+    """`max_tokens` scaled to the batch, because a fixed cap silently truncates.
+
+    This was a flat 2048, which is fine for a batch of 10 and catastrophic for a
+    batch of 20: the response stops mid-string, the JSON will not parse, and the
+    WHOLE batch falls back to no verdict — a run that classifies nothing while
+    reporting success and still paying for every image it sent.
+    """
+    return max(MIN_OUTPUT_TOKENS, OUTPUT_TOKENS_PER_PHOTO * max(1, photo_count))
+
+
 class OpenAIPhotoClassifierClient:
     """Async vision client for the photo classifier."""
 
     def __init__(self, api_key: str, model: str = DEFAULT_MODEL):
         self.model = model
         self.client = AsyncOpenAI(api_key=api_key)
+        # Running totals for THIS client, so a caller can price a run without
+        # scraping Prometheus. The metric is the fleet-wide view; this is the
+        # per-process one the service reads to cost a single job.
+        self.tokens = {"input": 0, "output": 0}
+
+    def take_tokens(self) -> dict:
+        """The tokens consumed since the last call, and reset.
+
+        Read-and-reset rather than a running total because the caller wants
+        "what did THIS venue cost", and a cumulative number would make every
+        venue after the first look progressively more expensive.
+        """
+        used = dict(self.tokens)
+        self.tokens = {"input": 0, "output": 0}
+        return used
 
     async def close(self) -> None:
         await self.client.close()
@@ -183,12 +216,13 @@ class OpenAIPhotoClassifierClient:
                 model=model or self.model,
                 messages=[{"role": "user", "content": content}],
                 temperature=0.1,
-                max_tokens=2048,
+                max_tokens=_output_budget(len(urls)),
                 response_format={"type": "json_object"},
             )
             duration = time.perf_counter() - started
             OPENAI_API_CALL_DURATION_SECONDS.labels(endpoint=endpoint).observe(duration)
             OPENAI_API_CALLS_TOTAL.labels(endpoint=endpoint, status="success").inc()
+            self._record_usage(response, endpoint)
             return self._parse(response.choices[0].message.content or "")
         except Exception as e:  # noqa: BLE001 — the caller degrades, never fails
             OPENAI_API_CALL_DURATION_SECONDS.labels(endpoint=endpoint).observe(
@@ -197,6 +231,40 @@ class OpenAIPhotoClassifierClient:
             OPENAI_API_CALLS_TOTAL.labels(endpoint=endpoint, status="error").inc()
             logger.error(f"[PhotoClassifier] batch failed: {e}")
             return []
+
+    def _record_usage(self, response: Any, endpoint: str) -> dict:
+        """Bank the token counts the API just reported, and hand them back.
+
+        The response carries exactly what was consumed; estimating it from a
+        per-photo constant, as this used to, is guesswork about a number the
+        provider already told us — and the guess was 9x low, because the "85
+        tokens for a detail=low image" figure it rested on is gpt-4o's, while
+        gpt-4o-mini bills the same thumbnail at roughly 2,833 tokens.
+
+        Images dominate the input side so completely that the ~1,400-token
+        prompt is noise beside them: input tracks the photo COUNT, not the batch
+        count, and bigger batches save far less than they look like they should.
+        Output tracks how much schema the model has to fill in.
+
+        Never raises: a missing or malformed `usage` block must not cost a run
+        the classification it already paid for.
+        """
+        counts = {"input": 0, "output": 0}
+        try:
+            usage = getattr(response, "usage", None)
+            counts["input"] = int(getattr(usage, "prompt_tokens", 0) or 0)
+            counts["output"] = int(getattr(usage, "completion_tokens", 0) or 0)
+        except (TypeError, ValueError):  # noqa: BLE001 — telemetry is not the job
+            logger.debug("[PhotoClassifier] could not read token usage")
+            return counts
+        for direction, value in counts.items():
+            if value:
+                OPENAI_TOKENS_TOTAL.labels(
+                    endpoint=endpoint, direction=direction
+                ).inc(value)
+        self.tokens["input"] += counts["input"]
+        self.tokens["output"] += counts["output"]
+        return counts
 
     def _parse(self, raw_text: str) -> list[dict]:
         try:

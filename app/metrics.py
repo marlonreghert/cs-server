@@ -527,7 +527,20 @@ PHOTO_CLASSIFICATION_FALLBACKS_TOTAL = Counter(
 
 PHOTO_CLASSIFICATION_COST_USD = Counter(
     "photo_classification_cost_usd",
-    "Estimated cumulative vision-model spend on photo classification, in USD",
+    "Cumulative vision-model spend on photo classification, in USD, priced from "
+    "the token counts the API reports",
+)
+
+# What the model ACTUALLY consumed, straight off `response.usage` — not a
+# per-photo guess. Input and output are separated because they are billed at
+# very different rates (output is several times dearer) and because they move
+# for different reasons: input grows when the prompt or the batch size grows,
+# output grows when the schema grows. A cost surprise is always one or the
+# other, and a single total cannot tell you which.
+OPENAI_TOKENS_TOTAL = Counter(
+    "openai_tokens_total",
+    "Tokens reported by the OpenAI API, by endpoint and direction",
+    ["endpoint", "direction"],
 )
 
 # OpenAI API metrics

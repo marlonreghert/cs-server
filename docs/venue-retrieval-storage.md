@@ -245,12 +245,46 @@ model returns**: the category is in the S3 key of an object that already exists,
 so writing a new one would leave a manifest entry disagreeing with its own key.
 Recategorizing means moving objects, which is a different job.
 
-Cost is roughly **$1 for the full ~17k-photo catalogue** now that each photo is
-sent once — one fortieth of a single month of SearchApi's plan, and one-off
-rather than a subscription. It is metered (`photo_classification_cost_usd`)
-rather than assumed, and the attribute half can be switched off on its own
-(`photo_attributes_enabled`, `derive_photo_attributes` per run) since the
-attribute JSON is most of the output cost.
+### What classification costs, measured
+
+**~$9 for the full ~17k-photo catalogue** — about $0.54 per 1,000 photos, from
+token counts the API reports rather than a per-photo constant.
+
+An earlier figure of $1 was wrong by roughly 9x, and the reason is worth
+keeping: it assumed a `detail: "low"` image costs **85 tokens**, which is
+**gpt-4o's** number. **gpt-4o-mini bills the same thumbnail at ~2,833 tokens**,
+around 33x more. Measured at batch_size=10: ~2,974 input tokens per photo, of
+which the ~1,400-token prompt is a rounding error spread across the batch.
+
+Three consequences:
+
+- **Input tracks the photo count, not the batch count.** Raising `batch_size`
+  amortizes only the prompt, so it saves far less than it looks like it should —
+  20 per batch measured ~8% cheaper than 10, not half.
+- **Batches above ~10 lose photos.** At 20 the model returned 16 verdicts for 20
+  images. The missing ones are padded to "no verdict" and keep their source
+  category, so nothing is lost from the archive, but they are unclassified and
+  still billed. `photo_classification_fallbacks_total{reason="no_verdict"}` is
+  where that shows up. **10 is the default for this reason, not by accident.**
+- **`max_tokens` scales with the batch.** It was a flat 2048, which truncated a
+  batch of 20 mid-string; the JSON then failed to parse and the *whole batch*
+  fell back to no verdict — a run that classified nothing, reported success, and
+  paid for every image it sent.
+
+Worth re-checking whether gpt-4o-mini is even the right model here: at list
+rates its image tokens make it **dearer than gpt-4o** for low-detail vision.
+That comparison needs current rate-card numbers before acting on it.
+
+Cost is metered, not assumed: `photo_classification_cost_usd` and
+`openai_tokens_total{endpoint="photo_classify"}` split by direction. The
+attribute half can be switched off on its own (`photo_attributes_enabled`,
+`derive_photo_attributes` per run) since the attribute JSON is most of the
+output cost.
+
+Dashboard: **Photo Classification & Model Spend** (`photo-classification`) in
+Grafana, beside **Photo Archive Pipeline**. Same convention — every Prometheus
+panel is a fleet-wide aggregate and only the Loki panels honour `$job_id`,
+because a uuid is not a metric label.
 
 **Every question is asked only where a photo can answer it.** `time_of_day`
 was briefly asked of all six categories and came back answered on 5 photos of

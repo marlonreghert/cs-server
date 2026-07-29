@@ -42,10 +42,22 @@ from app.models.photo_taxonomy import (
 
 logger = logging.getLogger(__name__)
 
-# gpt-4o-mini at detail="low" is 85 image tokens plus prompt share and the JSON
-# it writes back. Used ONLY to report what a run cost — it is an estimate, and
-# the metric is what makes it checkable rather than assumed.
-DEFAULT_COST_PER_PHOTO_USD = 0.00006
+# Fallback unit price, used only when a client cannot report token usage.
+#
+# MEASURED, not assumed: ~2,974 input tokens per photo at batch_size=10. The
+# "85 tokens for a detail=low image" figure this was originally built on is the
+# **gpt-4o** number — gpt-4o-mini bills a low-detail image at roughly 2,833
+# tokens, about 33x more, and that single wrong constant made the whole
+# catalogue estimate ~9x too cheap. Which is precisely why cost is now read off
+# `response.usage` instead of multiplied out from a constant.
+DEFAULT_COST_PER_PHOTO_USD = 0.00054
+
+# gpt-4o-mini list rates. UNVERIFIED against OpenAI's current rate card, which is
+# exactly why they are settings — the same call the Google photo unit price makes
+# next door. Wrong rates make the cost panel wrong; they never make a run behave
+# differently.
+DEFAULT_COST_PER_1K_INPUT_USD = 0.00015
+DEFAULT_COST_PER_1K_OUTPUT_USD = 0.0006
 
 UNKNOWN_AUTHORSHIP = ("", "unknown", None)
 
@@ -62,6 +74,8 @@ class PhotoClassificationService:
         attribute_confidence_threshold: float = 0.8,
         batch_size: int = 10,
         cost_per_photo_usd: float = DEFAULT_COST_PER_PHOTO_USD,
+        cost_per_1k_input_usd: float = DEFAULT_COST_PER_1K_INPUT_USD,
+        cost_per_1k_output_usd: float = DEFAULT_COST_PER_1K_OUTPUT_USD,
     ):
         self.client = client
         self.model = model
@@ -70,7 +84,11 @@ class PhotoClassificationService:
         self.confidence_threshold = float(confidence_threshold)
         self.attribute_confidence_threshold = float(attribute_confidence_threshold)
         self.batch_size = max(1, int(batch_size))
+        # Priced from the token counts the API reports. `cost_per_photo_usd`
+        # survives only as the fallback for a client that cannot report them.
         self.cost_per_photo_usd = float(cost_per_photo_usd)
+        self.cost_per_1k_input_usd = float(cost_per_1k_input_usd)
+        self.cost_per_1k_output_usd = float(cost_per_1k_output_usd)
 
     # ── the live path ────────────────────────────────────────────────────────
     async def annotate(
@@ -82,7 +100,8 @@ class PhotoClassificationService:
         Photos are annotated IN PLACE — the archive pipeline then files each one
         under `photo["category"]`. Returns the counts and the estimated cost.
         """
-        stats = {"classified": 0, "attributed": 0, "cost_usd": 0.0}
+        stats = {"classified": 0, "attributed": 0, "cost_usd": 0.0,
+                 "input_tokens": 0, "output_tokens": 0}
         if not photos:
             return stats
 
@@ -101,11 +120,36 @@ class PhotoClassificationService:
             stats["classified"] += int(classified)
             stats["attributed"] += int(attributed)
 
-        stats["cost_usd"] = round(
-            stats["classified"] * self.cost_per_photo_usd, 6
-        )
+        stats.update(self._price(len(photos)))
         PHOTO_CLASSIFICATION_COST_USD.inc(stats["cost_usd"])
         return stats
+
+    def _price(self, photo_count: int) -> dict:
+        """What the call actually cost, from the tokens the API reported.
+
+        Falls back to the per-photo estimate only when the client cannot report
+        tokens — an old client, or a failed call that never got a usage block.
+        The estimate is a stand-in for a number we normally have exactly, so a
+        run that quietly falls back should be visible rather than silently
+        plausible.
+        """
+        take = getattr(self.client, "take_tokens", None)
+        used = take() if callable(take) else None
+        if not used or not (used.get("input") or used.get("output")):
+            return {
+                "cost_usd": round(photo_count * self.cost_per_photo_usd, 6),
+                "input_tokens": 0, "output_tokens": 0, "cost_is_estimated": True,
+            }
+        cost = (
+            used["input"] / 1000 * self.cost_per_1k_input_usd
+            + used["output"] / 1000 * self.cost_per_1k_output_usd
+        )
+        return {
+            "cost_usd": round(cost, 6),
+            "input_tokens": used["input"],
+            "output_tokens": used["output"],
+            "cost_is_estimated": False,
+        }
 
     async def _classify(
         self, urls: list[str], venue_id: str, with_attributes: bool

@@ -563,6 +563,8 @@ class Container:
             attribute_confidence_threshold=settings.photo_attribute_confidence,
             batch_size=settings.photo_classification_batch_size,
             cost_per_photo_usd=settings.photo_classification_cost_per_photo_usd,
+            cost_per_1k_input_usd=settings.photo_classification_cost_per_1k_input_usd,
+            cost_per_1k_output_usd=settings.photo_classification_cost_per_1k_output_usd,
         )
         logger.info(
             f"[Container] Photo classification initialized "

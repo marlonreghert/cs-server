@@ -760,6 +760,10 @@ class VenuePhotoArchiveService:
             "throttled": 0,
             "photos_classified": 0,
             "classification_cost_usd": 0.0,
+            # What the model actually consumed, so a run can be priced from the
+            # provider's own numbers rather than a per-photo guess.
+            "classification_input_tokens": 0,
+            "classification_output_tokens": 0,
             "unknown_venue_ids": unknown,
             "config": cfg,
         }
@@ -1098,6 +1102,8 @@ class VenuePhotoArchiveService:
         summary["classification_cost_usd"] = round(
             summary["classification_cost_usd"] + float(stats.get("cost_usd") or 0.0), 6
         )
+        summary["classification_input_tokens"] += int(stats.get("input_tokens") or 0)
+        summary["classification_output_tokens"] += int(stats.get("output_tokens") or 0)
 
     # ── re-deriving attributes over an archived run ──────────────────────────
     async def rederive_attributes(
