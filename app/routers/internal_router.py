@@ -9,8 +9,10 @@ Questions / the coordination decision), matching the existing internal surface.
 import logging
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
+
+from app.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -56,11 +58,35 @@ class ResolvePhotosResponse(BaseModel):
     description=(
         "Resolve a single venue's Google Places photos on demand into FRESH, "
         "KEYLESS CDN URLs, cache them under venue_photos_fresh_v1:{venue_id} "
-        "(short TTL), and return the list. Degrades to an empty list on missing "
-        "google_place_id, zero photos, or a Google failure — never a dead URL."
+        "(TTL from photo_fresh_cache_ttl_hours), and return the list. Degrades "
+        "to an empty list on missing google_place_id, zero photos, or a Google "
+        "failure — never a dead URL. Omitting both max_photos and force "
+        "reproduces the pre-cost-controls behaviour exactly: resolves "
+        "photos_per_venue and always overwrites the cache."
     ),
 )
-async def resolve_venue_photos(venue_id: str) -> ResolvePhotosResponse:
+async def resolve_venue_photos(
+    venue_id: str,
+    max_photos: Optional[int] = Query(
+        None,
+        ge=1,
+        le=settings.photos_per_venue,
+        description=(
+            "Cap the number of photos to resolve/bill (e.g. 1 for a list "
+            "hero). A sufficient or empty cached entry short-circuits the "
+            "Google call; a cached entry holding fewer than this is "
+            "re-resolved and overwritten. Omitted = settings.photos_per_venue "
+            "with no cache check (today's behaviour)."
+        ),
+    ),
+    force: bool = Query(
+        False,
+        description=(
+            "Ignore the cache entirely: always call Google and always "
+            "overwrite the cached entry. The dead-URL repair path."
+        ),
+    ),
+) -> ResolvePhotosResponse:
     """Resolve + cache a venue's fresh keyless photo URLs.
 
     503 only when the photo service is unconfigured (no Google Places API key).
@@ -76,7 +102,9 @@ async def resolve_venue_photos(venue_id: str) -> ResolvePhotosResponse:
             detail="Photo resolution not configured (missing Google Places API key)",
         )
 
-    photos = await service.resolve_and_cache_fresh_photos(venue_id)
+    photos = await service.resolve_and_cache_fresh_photos(
+        venue_id, max_photos=max_photos, force=force
+    )
     return ResolvePhotosResponse(
         venue_photos=[
             # Pass `category` only when present so response_model_exclude_unset

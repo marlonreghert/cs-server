@@ -1,4 +1,3 @@
-@wip
 Feature: Photo resolve cost controls
 
   Every photo fetched from Google is a billed call. A caller must be able to ask

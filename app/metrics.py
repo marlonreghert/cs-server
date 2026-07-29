@@ -138,13 +138,27 @@ VIBE_ATTRIBUTES_FETCH_RESULTS = Counter(
 VENUE_PHOTO_RESOLVE_TOTAL = Counter(
     "venue_photo_resolve_total",
     "Outcomes of on-demand venue photo resolution",
-    ["result"],  # resolved (>=1 photo) | empty (no place_id or zero photos) | error
+    ["result"],  # resolved (>=1 photo, full Google resolve) | empty (no place_id
+                 # or zero photos) | error (Google exception) | cache_hit (served
+                 # from the cached entry, no Google call) | upgraded (cached entry
+                 # held fewer than requested; re-resolved and overwritten)
 )
 
 VENUE_PHOTO_RESOLVE_DURATION_SECONDS = Histogram(
     "venue_photo_resolve_duration_seconds",
     "Latency of on-demand venue photo resolution (Google fetch + cache write)",
     buckets=(0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0),
+)
+
+# Photos actually fetched from Google (billed media calls) across on-demand
+# resolves. VENUE_PHOTO_RESOLVE_TOTAL counts *resolve calls*; this counts
+# *photos* — a cache_hit/empty/error outcome contributes 0, a resolve of
+# max_photos=N contributes up to N. This is the number that tracks the
+# invoice: watch it, not the resolve count.
+VENUE_PHOTOS_FETCHED_TOTAL = Counter(
+    "venue_photos_fetched_total",
+    "Photos actually fetched (billed Google Places media calls) via on-demand "
+    "venue photo resolution",
 )
 
 # Venues with vibe attributes

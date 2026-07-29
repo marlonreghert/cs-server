@@ -10,6 +10,7 @@ from app.config import settings
 from app.metrics import (
     VENUE_PHOTO_RESOLVE_TOTAL,
     VENUE_PHOTO_RESOLVE_DURATION_SECONDS,
+    VENUE_PHOTOS_FETCHED_TOTAL,
 )
 from app.services.photo_category import category_for_url
 
@@ -145,37 +146,45 @@ class PhotoEnrichmentService:
                 f"[PhotoEnrichmentService] Failed to cache fresh photos for {venue_id}: {e}"
             )
 
-    async def resolve_and_cache_fresh_photos(self, venue_id: str) -> list[dict]:
-        """Resolve a single venue's Google photos ON DEMAND to FRESH, KEYLESS CDN
-        URLs, cache them under venue_photos_fresh_v1:{venue_id}, and return them.
+    def _read_cached_fresh_photos(self, venue_id: str) -> Optional[list[dict]]:
+        """Read the fresh-photo cache for the partial-cache upgrade decision.
 
-        Contract:
-          - No stored google_place_id -> cache an empty list (deterministic within
-            the short TTL) and return [].
-          - Google returns zero photos -> cache an empty list and return [].
-          - Any Google/resolution exception -> return [] WITHOUT writing the fresh
-            key, so a later open can retry and a dead URL is never served.
-
-        Returns:
-            List of [{url: <keyless>, author_name: str | None}], capped at
-            settings.photos_per_venue.
+        Best-effort: any failure degrades to "treat as uncached" (the caller
+        then resolves and writes) rather than raising, so a Redis hiccup during
+        this READ can never turn a good resolve into a 5xx.
+        RedisVenueDAO.get_venue_photos_fresh already swallows redis.RedisError
+        internally and returns None on a real Redis error; this try/except
+        additionally covers a DAO that raises directly (e.g. a test double).
         """
-        start = time.perf_counter()
-        place_id = self._lookup_google_place_id(venue_id)
-        if not place_id:
-            logger.info(
-                f"[PhotoEnrichmentService] No google_place_id for {venue_id}; "
-                f"caching empty fresh-photo list"
+        try:
+            return self.venue_dao.get_venue_photos_fresh(venue_id)
+        except Exception as e:
+            logger.warning(
+                f"[PhotoEnrichmentService] Fresh-cache read failed for {venue_id} "
+                f"during the upgrade check; treating as uncached: "
+                f"{type(e).__name__}: {e}"
             )
-            self._cache_fresh(venue_id, [])
-            VENUE_PHOTO_RESOLVE_TOTAL.labels(result="empty").inc()
-            VENUE_PHOTO_RESOLVE_DURATION_SECONDS.observe(time.perf_counter() - start)
-            return []
+            return None
 
+    async def _resolve_fresh_from_google(
+        self,
+        venue_id: str,
+        place_id: str,
+        max_photos: int,
+        start: float,
+        success_result: str = "resolved",
+    ) -> list[dict]:
+        """Call Google for up to max_photos, overwrite the fresh cache on
+        success, and never write on a hard exception.
+
+        Shared by every path that decides to actually call Google: the
+        byte-for-byte legacy path (both new params omitted), the partial-cache
+        upgrade path (success_result="upgraded"), and a forced re-resolve.
+        """
         try:
             photos = await self.google_places_client.get_place_photos(
                 place_id=place_id,
-                max_photos=settings.photos_per_venue,
+                max_photos=max_photos,
                 max_width=800,
             )
         except Exception as e:
@@ -191,12 +200,97 @@ class PhotoEnrichmentService:
         photos = photos or []
         self._attach_categories(venue_id, photos)
         self._cache_fresh(venue_id, photos)
-        VENUE_PHOTO_RESOLVE_TOTAL.labels(result="resolved" if photos else "empty").inc()
+        VENUE_PHOTOS_FETCHED_TOTAL.inc(len(photos))
+        result = success_result if photos else "empty"
+        VENUE_PHOTO_RESOLVE_TOTAL.labels(result=result).inc()
         VENUE_PHOTO_RESOLVE_DURATION_SECONDS.observe(time.perf_counter() - start)
         logger.info(
-            f"[PhotoEnrichmentService] Resolved {len(photos)} fresh photos for {venue_id}"
+            f"[PhotoEnrichmentService] Resolved {len(photos)} fresh photos for "
+            f"{venue_id} (max_photos={max_photos}, outcome={result})"
         )
         return photos
+
+    async def resolve_and_cache_fresh_photos(
+        self,
+        venue_id: str,
+        max_photos: Optional[int] = None,
+        force: bool = False,
+    ) -> list[dict]:
+        """Resolve a single venue's Google photos ON DEMAND to FRESH, KEYLESS CDN
+        URLs, cache them under venue_photos_fresh_v1:{venue_id}, and return them.
+
+        Args:
+            venue_id: Our internal venue ID.
+            max_photos: Cap on the number of photos to resolve/bill, in
+                1..settings.photos_per_venue (the router validates the range;
+                out-of-range never reaches here). When BOTH max_photos is None
+                and force is False, this method takes the exact legacy code
+                path below — no cache read, no upgrade decision, always
+                resolve settings.photos_per_venue and overwrite — so a caller
+                that has not adopted the new query params observes today's
+                behaviour byte-for-byte. Combined with force=True, None means
+                "force a full settings.photos_per_venue re-resolve".
+            force: Always call Google and always overwrite the cached entry,
+                ignoring whatever is cached. The dead-URL repair path — the
+                only way a rotated/dead URL is replaced before the TTL rolls.
+
+        Partial-cache upgrade rule (force=False, effective request size N):
+          - cached list has >= N entries -> serve the first N, no Google call
+            (metric: cache_hit).
+          - cached list is empty [] -> serve [] as-is, no Google call (empty is
+            a definitive answer, not a shortfall; metric: cache_hit).
+          - cached list is non-empty but < N -> re-resolve N and OVERWRITE the
+            key (metric: upgraded).
+          - no cached entry, or the cache read itself fails -> resolve N and
+            write (metric: resolved/empty/error as usual).
+
+        Contract, preserved on every path:
+          - No stored google_place_id -> cache an empty list (deterministic
+            within the TTL) and return [].
+          - Google returns zero photos -> cache an empty list and return [].
+          - Any Google/resolution exception -> return [] WITHOUT writing the
+            fresh key, so a later open can retry and a dead URL is never
+            served (a previously cached entry, if any, is left untouched).
+
+        Returns:
+            List of [{url: <keyless>, author_name: str | None}], capped at the
+            effective max_photos (settings.photos_per_venue when not given).
+        """
+        start = time.perf_counter()
+        place_id = self._lookup_google_place_id(venue_id)
+        if not place_id:
+            logger.info(
+                f"[PhotoEnrichmentService] No google_place_id for {venue_id}; "
+                f"caching empty fresh-photo list"
+            )
+            self._cache_fresh(venue_id, [])
+            VENUE_PHOTO_RESOLVE_TOTAL.labels(result="empty").inc()
+            VENUE_PHOTO_RESOLVE_DURATION_SECONDS.observe(time.perf_counter() - start)
+            return []
+
+        # Byte-for-byte legacy path: neither new param given. No cache read —
+        # today's endpoint always resolves photos_per_venue and overwrites.
+        if max_photos is None and not force:
+            return await self._resolve_fresh_from_google(
+                venue_id, place_id, settings.photos_per_venue, start
+            )
+
+        n = max_photos if max_photos is not None else settings.photos_per_venue
+
+        if not force:
+            cached = self._read_cached_fresh_photos(venue_id)
+            if cached is not None:
+                if len(cached) == 0 or len(cached) >= n:
+                    VENUE_PHOTO_RESOLVE_TOTAL.labels(result="cache_hit").inc()
+                    VENUE_PHOTO_RESOLVE_DURATION_SECONDS.observe(time.perf_counter() - start)
+                    return cached[:n]
+                # Non-empty but short of what the caller needs: upgrade in place.
+                return await self._resolve_fresh_from_google(
+                    venue_id, place_id, n, start, success_result="upgraded"
+                )
+            # No cached entry, or the read failed -> fall through to resolve+write.
+
+        return await self._resolve_fresh_from_google(venue_id, place_id, n, start)
 
     def _attach_categories(self, venue_id: str, photos: list[dict]) -> None:
         """Best-effort: tag each photo with its vibe-profile evidence category
