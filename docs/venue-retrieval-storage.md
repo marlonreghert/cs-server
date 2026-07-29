@@ -212,10 +212,14 @@ Five rules hold the cost and the correctness down:
   facts do not share a fate. Under `photo_attribute_confidence` (0.8, higher
   than the category's 0.6 — a wrong category misfiles a photo, a wrong attribute
   is read as a fact about the venue) the value becomes `not_classified`.
-- **`not_classified` is stored, not omitted.** It means "asked, could not tell",
-  which an absent key does not, and it is what makes "how much of the catalogue
-  can we actually read" a query rather than a guess. Every field of the schema
-  is present on every classified photo.
+- **A non-answer is stored, not omitted, and there are two of them.**
+  `not_classified` means "asked, could not tell"; `not_applicable` means the
+  question does not arise — a dessert photo has no drink in it. Keeping them
+  apart matters: on the first live run `drink_type` scored 4/13 and read as a
+  broken field, when in fact nine of those photos simply had no drink and the
+  model had failed at nothing. Both must clear the confidence bar, because
+  "there is no drink here" is an assertion about the photo, not a shrug. Every
+  field of the schema is present on every classified photo.
 - **A source that names its own tabs is never classified.** `ArchiveSource.
   provides_categories` is `True` for `searchapi_gmaps_photos`: its category is
   Google's own answer, and a guess would be a downgrade. Apify and the Places
@@ -225,8 +229,10 @@ Five rules hold the cost and the correctness down:
   photo already paid for because a classifier was unavailable is the wrong
   trade.
 - **`authorship` is the provider's fact and classification never writes it.**
-  The model's read goes to `likely_authorship`, and only where the provider had
-  no answer.
+  The model's read goes to `likely_authorship`, only where the provider had no
+  answer, and only when it clears the same confidence bar — an early version
+  without that gate returned `by_visitor` for 20 photos out of 20, and a field
+  with one possible answer is a constant rather than a signal.
 
 A low-confidence *category* files the photo as `other` with an `other_kind`
 saying why, so those photos can be found and reclassified later without
@@ -245,6 +251,17 @@ rather than a subscription. It is metered (`photo_classification_cost_usd`)
 rather than assumed, and the attribute half can be switched off on its own
 (`photo_attributes_enabled`, `derive_photo_attributes` per run) since the
 attribute JSON is most of the output cost.
+
+**Every question is asked only where a photo can answer it.** `time_of_day`
+was briefly asked of all six categories and came back answered on 5 photos of
+20, because a menu close-up and a plated dish show nothing of the outside
+world; it now belongs to `interior`, `exterior` and `crowd` alone. A field that
+is usually unanswerable is not cheap — it costs output tokens on every photo and
+it drags the coverage figure down until nobody trusts the figure.
+
+Measured on 80 real Recife photos: 281 attributes answered, 50 `not_applicable`,
+1 `not_classified`. Worth reading with suspicion rather than satisfaction — a
+confidence bar that drops nothing is a bar that has not been tested.
 
 The first consumer is menu extraction: a photo whose `legible` is `no` is never
 sent to the extractor, so the classifier pays for itself in OCR calls not made.

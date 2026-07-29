@@ -44,7 +44,8 @@ And one rule this plan did not have:
    deliberately higher than the category's 0.6) the value becomes
    `not_classified` on its own, without dragging its neighbours down.
    `not_classified` is **stored**, not omitted: it means "asked, could not
-   tell", which an absent key does not say.
+   tell", which an absent key does not say. A second non-answer,
+   `not_applicable`, marks the question that does not arise at all.
 
 
 ## Non-goals
@@ -124,7 +125,7 @@ generated from `app/models/photo_taxonomy.py`:
 
 | Category | Attributes |
 |---|---|
-| *(every photo)* | `time_of_day`: day · night |
+| *(interior, exterior, crowd only)* | `time_of_day`: day · night |
 | `menu` | `legible`: yes · partial · no — **gates menu extraction**<br>`has_prices`: yes · no — gates the price tier<br>`covers`: food · drinks · both |
 | `food_drinks` | `subject`: food · drinks · both<br>`drink_type`: beer · cocktails · wine · non_alcoholic · other<br>`food_type`: snacks · main_dish · dessert · other<br>`portion`: individual · shareable |
 | `interior` | `space_type`: dining · bar · dance_floor · stage · other<br>`lighting`: bright · dim · dark<br>`has_screens`: yes · no<br>`music_setup`: live_music · dj · none_visible |
@@ -143,8 +144,11 @@ person in every interior shot is thrown away, and `has_kids`, the one thing
 something else. A photo with nobody in it has no people block at all, which is
 different from one whose people could not be read.
 
-Every attribute also accepts `not_classified`, and every field of the category's
-schema is written on every classified photo. Cardinality is single-valued
+Every attribute also accepts `not_applicable` ("the question does not arise for
+this photo") and `not_classified` ("asked, could not tell"), and every field of
+the category's schema is written on every classified photo. The two are kept
+apart because conflating them makes an accurate classifier read as a failing
+one. Cardinality is single-valued
 throughout: an array invites the model to hedge by listing everything plausible,
 which is the imprecision this schema exists to avoid.
 

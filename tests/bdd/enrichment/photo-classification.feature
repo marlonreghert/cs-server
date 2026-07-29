@@ -169,6 +169,17 @@ Feature: Classify archived photos into our own generic categories
     When the photo archive job runs for that venue
     Then every attribute of the "interior" schema is present in the manifest entry
 
+  Scenario: Separate a question that does not arise from one that cannot be answered
+    Given a fetched photo of a dessert with no drink in the frame
+    When the photo archive job runs for that venue
+    Then the manifest entry records the attribute "food_type" as "dessert"
+    And the manifest entry records the attribute "drink_type" as "not_applicable"
+
+  Scenario: Hold not applicable to the same confidence bar as any other answer
+    Given the classifier is unsure whether a drink is even in the frame
+    When the photo archive job runs for that venue
+    Then the manifest entry records the attribute "drink_type" as "not_classified"
+
   Scenario: Reject a label that is not in the vocabulary
     Given the classifier returns a lighting value that is not in the vocabulary
     When the photo archive job runs for that venue
@@ -190,6 +201,11 @@ Feature: Classify archived photos into our own generic categories
 
   Scenario: Never guess over a provider's answer
     Given a fetched photo the provider attributes to a visitor
+    When the photo archive job runs for that venue
+    Then the manifest entry records no likely authorship
+
+  Scenario: Drop an unsure guess at who took the photo rather than storing it
+    Given a fetched photo whose author the classifier cannot confidently read
     When the photo archive job runs for that venue
     Then the manifest entry records no likely authorship
 

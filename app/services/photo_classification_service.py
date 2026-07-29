@@ -146,7 +146,9 @@ class PhotoClassificationService:
         # Only where the provider was silent. A provider answer is a fact and
         # outranks the model's read every time.
         if photo.get("authorship") in UNKNOWN_AUTHORSHIP:
-            guess = validate_authorship_guess(verdict.get("likely_authorship"))
+            guess = validate_authorship_guess(
+                verdict.get("likely_authorship"), self.attribute_confidence_threshold
+            )
             if guess:
                 photo["likely_authorship"] = guess
 

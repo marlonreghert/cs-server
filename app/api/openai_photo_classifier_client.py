@@ -34,6 +34,8 @@ from app.metrics import (
     OPENAI_API_CALL_DURATION_SECONDS,
 )
 from app.models.photo_taxonomy import (
+    CATEGORY_OTHER,
+    NOT_APPLICABLE,
     NOT_CLASSIFIED,
     QUALITY_VALUES,
     describe_categories,
@@ -54,9 +56,23 @@ def _prompt(with_attributes: bool = True) -> str:
         f"{describe_categories()}\n\n"
         "Also report for each image:\n"
         "- quality: good or poor — is this worth showing in an app\n"
-        "- likely_authorship: by_owner or by_visitor. Staged, empty, evenly lit "
-        "and professionally plated reads as by_owner; handheld, candid, with "
-        "people and mixed light reads as by_visitor. Omit if unsure.\n"
+        # Spelled out as opposing checklists because a vaguer version of this
+        # returned `by_visitor` for 20 photos out of 20 on a real run: the model
+        # will pick the safer-sounding label for everything unless the two are
+        # made concretely distinguishable, and a constant is not a signal.
+        "- likely_authorship: WHO TOOK THIS PHOTO, as an object with a value "
+        "and a confidence.\n"
+        "    by_owner  — looks commissioned: even/studio lighting, deliberate "
+        "composition, empty of customers, food styled and centred, wide "
+        "architectural shot of the room, a logo or branding in frame.\n"
+        "    by_visitor — looks handheld: phone framing, flash or mixed light, "
+        "other diners visible, a half-eaten plate, a tilted horizon, a drink "
+        "held up to the camera.\n"
+        "    Most Google Maps photos are by_visitor, so only say by_owner when "
+        "the staged cues are actually there — but a venue's own gallery is "
+        "usually by_owner, and both DO occur. Give a LOW confidence when the "
+        "cues are mixed; a low-confidence guess is dropped, which is the right "
+        "outcome for a photo that could be either.\n"
         f"- confidence: 0 to 1 for the category. Be honest — a low confidence "
         f"is filed as `other`, which is better than a wrong label.\n"
     )
@@ -78,14 +94,29 @@ def _prompt(with_attributes: bool = True) -> str:
         "EVERY attribute is an object with a value AND your confidence in that "
         f"one attribute: {{\"value\": ..., \"confidence\": 0.0-1.0}}. Confidence "
         "is per attribute, not for the whole photo — be sure about one field "
-        "and unsure about the next.\n"
-        f"Answer `{NOT_CLASSIFIED}` whenever you cannot tell from the image. "
-        f"`{NOT_CLASSIFIED}` is always a better answer than a guess, and it is "
-        "an expected outcome, not a failure.\n\n"
+        "and unsure about the next.\n\n"
+        # These two get conflated constantly, and conflating them makes an
+        # accurate classifier read as a failing one: `drink_type` scored 4/13 on
+        # a real run almost entirely because nine of those photos were food with
+        # no drink in them at all.
+        "Two different ways of not answering, and the difference matters:\n"
+        f"- `{NOT_APPLICABLE}` — the question DOES NOT ARISE for this photo. A "
+        "plate of dessert has no drink in it, so drink_type is "
+        f"`{NOT_APPLICABLE}`. Use this whenever the thing being asked about is "
+        "simply not in the frame. It is a confident answer: give it a HIGH "
+        "confidence.\n"
+        f"- `{NOT_CLASSIFIED}` — the question arises but you CANNOT TELL. The "
+        "glass is there but too dark to identify. Use this only when the "
+        "subject is present and you genuinely cannot read it.\n"
+        f"Both are expected outcomes, not failures. Never guess to avoid "
+        f"them.\n\n"
+        f"When the category is `{CATEGORY_OTHER}`, other_kind is REQUIRED — it "
+        "is the only record of why the photo could not be categorized, and "
+        f"`{NOT_CLASSIFIED}` there means the photo is lost to us.\n\n"
         "Reply ONLY with JSON:\n"
         '{"results": [{"index": 0, "category": "interior", "confidence": 0.93,\n'
         '  "quality": {"value": "good", "confidence": 0.95},\n'
-        '  "likely_authorship": "by_visitor",\n'
+        '  "likely_authorship": {"value": "by_visitor", "confidence": 0.82},\n'
         '  "attributes": {"space_type": {"value": "bar", "confidence": 0.91},\n'
         '                 "lighting": {"value": "dim", "confidence": 0.88}},\n'
         '  "people": {"crowd_level": {"value": "busy", "confidence": 0.9}}}]}\n\n'

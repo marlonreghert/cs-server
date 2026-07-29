@@ -402,6 +402,33 @@ def step_photo_partial_description(context):
                attributes={"space_type": "bar"})
 
 
+@given("a fetched photo of a dessert with no drink in the frame")
+def step_photo_dessert(context):
+    # `not_applicable` is a fact about the photograph, not a shrug: there is no
+    # drink to identify, which is a different thing from a drink too dark to read.
+    _one_photo(context, "ven_dessert",
+               verdict={"category": "food_drinks", "confidence": 0.9},
+               attributes={"subject": "food", "food_type": "dessert",
+                           "drink_type": "not_applicable"})
+
+
+@given("the classifier is unsure whether a drink is even in the frame")
+def step_unsure_drink(context):
+    _one_photo(context, "ven_unsure_drink",
+               verdict={"category": "food_drinks", "confidence": 0.9},
+               attributes={"drink_type": {"value": "not_applicable",
+                                          "confidence": UNSURE}})
+
+
+@given("a fetched photo whose author the classifier cannot confidently read")
+def step_unsure_authorship(context):
+    _one_photo(context, "ven_unsure_author",
+               verdict={"category": "interior", "confidence": 0.9,
+                        "likely_authorship": {"value": "by_visitor",
+                                              "confidence": UNSURE}},
+               authorship="unknown")
+
+
 @given("the classifier returns a lighting value that is not in the vocabulary")
 def step_invented_label(context):
     _one_photo(context, "ven_invented",
@@ -420,7 +447,7 @@ def step_photo_by_owner(context):
 def step_photo_unknown_author(context):
     _one_photo(context, "ven_unknown_author",
                verdict={"category": "interior", "confidence": 0.9,
-                        "likely_authorship": "by_owner"},
+                        "likely_authorship": _sure("by_owner")},
                authorship="unknown")
 
 
@@ -428,7 +455,7 @@ def step_photo_unknown_author(context):
 def step_photo_by_visitor(context):
     _one_photo(context, "ven_visitor",
                verdict={"category": "interior", "confidence": 0.9,
-                        "likely_authorship": "by_owner"},
+                        "likely_authorship": _sure("by_owner")},
                authorship="by_visitor")
 
 

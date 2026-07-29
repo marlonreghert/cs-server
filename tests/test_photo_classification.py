@@ -16,14 +16,17 @@ import unittest
 from app.api.openai_photo_classifier_client import _batched, _prompt
 from app.models.photo_taxonomy import (
     CATEGORY_CROWD,
+    CATEGORY_EXTERIOR,
+    CATEGORY_FOOD_DRINKS,
     CATEGORY_INTERIOR,
     CATEGORY_MENU,
     CATEGORY_OTHER,
     NOT_CLASSIFIED,
     PEOPLE_ATTRIBUTES,
     PHOTO_ATTRIBUTES,
+    NOT_APPLICABLE,
     PHOTO_CATEGORIES,
-    SHARED_ATTRIBUTES,
+    TIME_OF_DAY,
     attributes_for,
     validate_attributes,
     validate_authorship_guess,
@@ -122,8 +125,9 @@ class TestVocabulary(unittest.TestCase):
     def test_quality_and_authorship_guess_reject_anything_unlisted(self):
         self.assertEqual(validate_quality(_sure("good"), THRESHOLD), "good")
         self.assertEqual(validate_quality(_sure("beautiful"), THRESHOLD), NOT_CLASSIFIED)
-        self.assertEqual(validate_authorship_guess("by_owner"), "by_owner")
-        self.assertIsNone(validate_authorship_guess("unknown"))
+        self.assertEqual(
+            validate_authorship_guess(_sure("by_owner"), THRESHOLD), "by_owner")
+        self.assertIsNone(validate_authorship_guess(_sure("unknown"), THRESHOLD))
 
 
 class TestEveryFieldIsAnswered(unittest.TestCase):
@@ -141,11 +145,42 @@ class TestEveryFieldIsAnswered(unittest.TestCase):
         self.assertEqual(set(out), {s.name for s in attributes_for(CATEGORY_MENU)})
         self.assertEqual(set(out.values()), {NOT_CLASSIFIED})
 
-    def test_shared_attributes_are_asked_of_every_category(self):
+    def test_not_applicable_is_a_distinct_answer_from_not_classified(self):
+        # A dessert photo has no drink in it. Recording that as "could not tell"
+        # would blame the model for a fact about the photograph — and it is why
+        # drink_type read 4/13 on a real run while being almost entirely right.
+        out = validate_attributes(CATEGORY_FOOD_DRINKS, _wrap({
+            "subject": "food",
+            "food_type": "dessert",
+            "drink_type": NOT_APPLICABLE,
+        }), THRESHOLD)
+        self.assertEqual(out["drink_type"], NOT_APPLICABLE)
+        self.assertNotEqual(out["drink_type"], NOT_CLASSIFIED)
+
+    def test_every_attribute_can_say_either(self):
+        for category in PHOTO_CATEGORIES:
+            for spec in attributes_for(category):
+                self.assertIn(NOT_APPLICABLE, spec.allowed())
+                self.assertIn(NOT_CLASSIFIED, spec.allowed())
+
+    def test_not_applicable_still_has_to_clear_the_confidence_bar(self):
+        # It is an assertion about the photo, not a shrug, so it is held to the
+        # same standard as any other answer.
+        out = validate_attributes(
+            CATEGORY_FOOD_DRINKS,
+            {"drink_type": {"value": NOT_APPLICABLE, "confidence": UNSURE}},
+            THRESHOLD)
+        self.assertEqual(out["drink_type"], NOT_CLASSIFIED)
+
+    def test_time_of_day_is_asked_only_where_a_photo_can_answer_it(self):
+        # It was asked of every photo and answered on 5 of 20, because a menu
+        # close-up and a plated dish show nothing of the outside world.
+        can_see_outside = {CATEGORY_INTERIOR, CATEGORY_EXTERIOR, CATEGORY_CROWD}
         for category in PHOTO_CATEGORIES:
             names = {spec.name for spec in attributes_for(category)}
-            for shared in SHARED_ATTRIBUTES:
-                self.assertIn(shared.name, names, f"{category} lost {shared.name}")
+            self.assertEqual(
+                TIME_OF_DAY.name in names, category in can_see_outside,
+                f"{category} has the wrong answer on time_of_day")
 
 
 class TestPerAttributeConfidence(unittest.TestCase):
@@ -227,10 +262,9 @@ class TestPeopleBlock(unittest.TestCase):
                                  THRESHOLD)
         self.assertEqual(people["has_kids"], NOT_CLASSIFIED)
 
-    def test_crowd_attributes_are_the_people_block_plus_the_shared_ones(self):
+    def test_crowd_attributes_are_exactly_the_people_block(self):
         self.assertEqual(PHOTO_ATTRIBUTES[CATEGORY_CROWD], PEOPLE_ATTRIBUTES)
-        self.assertEqual(attributes_for(CATEGORY_CROWD),
-                         PEOPLE_ATTRIBUTES + SHARED_ATTRIBUTES)
+        self.assertEqual(attributes_for(CATEGORY_CROWD), PEOPLE_ATTRIBUTES)
 
     def test_nothing_in_the_vocabulary_profiles_individuals(self):
         # A guardrail, not a formality: these must not reappear by accident.
@@ -276,7 +310,7 @@ class TestAuthorship(unittest.TestCase):
     def _for(self, authorship):
         photo, _ = _annotate(
             {"category": "interior", "confidence": 0.9,
-             "likely_authorship": "by_owner"},
+             "likely_authorship": _sure("by_owner")},
             photo_fields={"authorship": authorship},
         )
         return photo
@@ -288,6 +322,25 @@ class TestAuthorship(unittest.TestCase):
     def test_a_provider_answer_is_never_overwritten_or_guessed_over(self):
         photo = self._for("by_visitor")
         self.assertEqual(photo["authorship"], "by_visitor")
+        self.assertNotIn("likely_authorship", photo)
+
+    def test_an_unsure_guess_is_dropped_rather_than_stored(self):
+        # It came back `by_visitor` for 20 photos out of 20 on a real run. A
+        # field with one possible answer is a constant, not a signal, so a weak
+        # guess must leave no trace at all.
+        photo, _ = _annotate(
+            {"category": "interior", "confidence": 0.9,
+             "likely_authorship": {"value": "by_visitor", "confidence": UNSURE}},
+            photo_fields={"authorship": "unknown"},
+        )
+        self.assertNotIn("likely_authorship", photo)
+
+    def test_a_guess_with_no_confidence_is_dropped(self):
+        photo, _ = _annotate(
+            {"category": "interior", "confidence": 0.9,
+             "likely_authorship": "by_visitor"},
+            photo_fields={"authorship": "unknown"},
+        )
         self.assertNotIn("likely_authorship", photo)
 
     def test_classification_never_writes_authorship(self):
@@ -427,6 +480,21 @@ class TestPromptStaysInSyncWithTheSchema(unittest.TestCase):
     def test_the_prompt_asks_for_a_confidence_per_attribute(self):
         self.assertIn("per attribute", _prompt())
         self.assertIn(NOT_CLASSIFIED, _prompt())
+
+    def test_the_prompt_distinguishes_the_two_ways_of_not_answering(self):
+        prompt = _prompt()
+        self.assertIn(NOT_APPLICABLE, prompt)
+        self.assertIn("DOES NOT ARISE", prompt)
+        self.assertIn("CANNOT TELL", prompt)
+
+    def test_the_prompt_gives_concrete_cues_for_both_authorship_reads(self):
+        # A vaguer version returned by_visitor 20 times out of 20.
+        prompt = _prompt()
+        for cue in ("by_owner", "by_visitor", "commissioned", "handheld"):
+            self.assertIn(cue, prompt)
+
+    def test_the_prompt_requires_other_kind_when_the_category_is_other(self):
+        self.assertIn("other_kind is REQUIRED", _prompt())
 
     def test_the_cheap_prompt_omits_the_attribute_schema(self):
         cheap = _prompt(with_attributes=False)

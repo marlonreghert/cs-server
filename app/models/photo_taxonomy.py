@@ -11,9 +11,15 @@ Three rules shape every entry below:
    cocktail; it cannot reliably tell a caipirinha from a batida, and a label it
    gets wrong is worse than one it never emitted, because everything downstream
    will trust it. Every list is short on purpose.
-2. **Every attribute can say `not_classified`.** It is a real answer — "asked,
-   could not tell" — and it is stored rather than omitted, so an unknown is
-   visible instead of looking like a field nobody asked about.
+2. **Every attribute can say `not_classified` or `not_applicable`.** Both are
+   real answers and both are stored rather than omitted, so an unknown is
+   visible instead of looking like a field nobody asked about. They are kept
+   apart because they mean opposite things about the photo: a dessert photo has
+   no drink in it (`not_applicable` — the question does not arise), which is not
+   the same as a dim bar shot where a glass might be a beer or a caipirinha
+   (`not_classified` — the question arises and could not be answered). Counting
+   the second as coverage would understate the model; counting the first as a
+   failure would slander it.
 3. **An attribute is only written when the model is confident about THAT
    attribute.** Confidence is per-attribute, not per-photo: a model can be
    certain a room is a bar and unsure whether it has screens, and those two
@@ -28,6 +34,15 @@ from typing import Any, Optional
 # "Asked, could not tell." Appended to every attribute's vocabulary, and what a
 # low-confidence, unparseable, or unlisted answer collapses to.
 NOT_CLASSIFIED = "not_classified"
+
+# "The question does not arise for this photo" — there is no drink in a photo of
+# a dessert. Distinct from `not_classified` because it is a fact about the
+# photo, not a limit of the model, and lumping the two together makes an
+# accurate classifier look like a failing one.
+NOT_APPLICABLE = "not_applicable"
+
+# Appended to every attribute, so the model always has an honest way out.
+UNIVERSAL_VALUES: tuple[str, ...] = (NOT_APPLICABLE, NOT_CLASSIFIED)
 
 CATEGORY_MENU = "menu"
 CATEGORY_FOOD_DRINKS = "food_drinks"
@@ -65,7 +80,10 @@ QUALITY_VALUES: tuple[str, ...] = ("good", "poor", NOT_CLASSIFIED)
 
 # The provider's authorship is a fact; this is a guess, and is only ever written
 # where the provider had no answer. Kept under a different name so the two can
-# never be confused.
+# never be confused — and confidence-gated like every other guess, because on a
+# real run it came back `by_visitor` for 20 photos out of 20. A field with one
+# possible answer is not a signal, it is a constant with a story attached, and
+# storing it on every photo would be storing noise.
 AUTHORSHIP_GUESS_VALUES: tuple[str, ...] = ("by_owner", "by_visitor")
 
 
@@ -84,13 +102,17 @@ class Attr:
     why: str = ""
 
     def allowed(self) -> tuple[str, ...]:
-        return self.values + (NOT_CLASSIFIED,)
+        return self.values + UNIVERSAL_VALUES
 
 
-# ── asked of every photo, whatever its category ──────────────────────────────
-SHARED_ATTRIBUTES: tuple[Attr, ...] = (
-    Attr("time_of_day", values=("day", "night"),
-         why="a daytime venue and a nighttime venue are different venues"),
+# Asked only where a photo can answer it. It was briefly asked of every photo,
+# which put it on menu close-ups and plated dishes that show nothing of the
+# outside world — measured at 5/20 answered on a real run, by far the worst
+# field in the schema, because most of the time the question was unanswerable
+# rather than hard.
+TIME_OF_DAY = Attr(
+    "time_of_day", values=("day", "night"),
+    why="a daytime venue and a nighttime venue are different venues",
 )
 
 # ── the people block ─────────────────────────────────────────────────────────
@@ -113,6 +135,7 @@ PEOPLE_ATTRIBUTES: tuple[Attr, ...] = (
          why="couples -> date; friends -> resenha"),
     Attr("activity", values=("dancing", "eating_drinking", "watching", "other"),
          why="dancing is the best role_agitado signal available"),
+    TIME_OF_DAY,
 )
 
 PHOTO_ATTRIBUTES: dict[str, tuple[Attr, ...]] = {
@@ -144,6 +167,7 @@ PHOTO_ATTRIBUTES: dict[str, tuple[Attr, ...]] = {
                  "Brazilian bar"),
         Attr("music_setup", values=("live_music", "dj", "none_visible"),
              why="a stage or a DJ booth — music has no photo evidence today"),
+        TIME_OF_DAY,
     ),
     CATEGORY_EXTERIOR: (
         Attr("exterior_kind", values=("facade", "open_air_area", "other"),
@@ -152,6 +176,7 @@ PHOTO_ATTRIBUTES: dict[str, tuple[Attr, ...]] = {
         Attr("covered", values=("covered", "partial", "uncovered"),
              why="the rain question, which nothing else answers"),
         Attr("view", values=("sea", "city", "nature", "none")),
+        TIME_OF_DAY,
     ),
     CATEGORY_CROWD: PEOPLE_ATTRIBUTES,
     CATEGORY_OTHER: (
@@ -165,11 +190,8 @@ PHOTO_ATTRIBUTES: dict[str, tuple[Attr, ...]] = {
 
 
 def attributes_for(category: str) -> tuple[Attr, ...]:
-    """The full schema for a category, shared attributes included."""
-    own = PHOTO_ATTRIBUTES.get(category)
-    if own is None:
-        return ()
-    return own + SHARED_ATTRIBUTES
+    """The schema for a category. Empty for a category we do not know."""
+    return PHOTO_ATTRIBUTES.get(category, ())
 
 
 # ── validation ───────────────────────────────────────────────────────────────
@@ -229,9 +251,16 @@ def validate_quality(raw: Any, threshold: float) -> str:
     return _confident_value(spec, raw, threshold)
 
 
-def validate_authorship_guess(value: Any) -> Optional[str]:
-    text = str(value or "")
-    return text if text in AUTHORSHIP_GUESS_VALUES else None
+def validate_authorship_guess(raw: Any, threshold: float) -> Optional[str]:
+    """The model's read of who took the photo, or None.
+
+    Returns None rather than `not_classified`: this is an optional guess, not a
+    schema field, and an absent key says "no opinion" more honestly than a
+    stored non-answer would.
+    """
+    spec = Attr("likely_authorship", values=AUTHORSHIP_GUESS_VALUES)
+    value = _confident_value(spec, raw, threshold)
+    return value if value in AUTHORSHIP_GUESS_VALUES else None
 
 
 # ── prompt text, generated from the schema ───────────────────────────────────
