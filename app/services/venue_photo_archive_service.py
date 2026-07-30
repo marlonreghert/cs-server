@@ -104,6 +104,33 @@ FETCH_FAILED = object()
 # differs — a timeout is worth re-running, a no-match is not.
 FETCH_TIMED_OUT = object()
 
+# Venues that were selected but produced no archived content. A run with any of
+# these did not do what it was asked, whatever else went right.
+UNDELIVERED_BUCKETS = ("failed", "timeout", "no_query", "no_result", "no_place_id")
+
+
+def run_status(summary: dict) -> str:
+    """What this run should be reported as: success, partial, or error.
+
+    Derived from the summary at the end rather than asserted at the start, so the
+    label cannot drift from what actually happened — the previous code
+    incremented `status="success"` unconditionally, which meant a run that
+    archived 1 of 8 venues was indistinguishable from a perfect one, and
+    `status="error"` was never emitted by any path at all.
+
+    Total by construction: an unexpected summary shape resolves to `error`
+    rather than raising, because a run nobody can classify is precisely the one
+    an operator needs to look at.
+    """
+    try:
+        if summary.get("credit_exhausted") or summary.get("aborted"):
+            return "error"
+        undelivered = sum(int(summary.get(k) or 0) for k in UNDELIVERED_BUCKETS)
+        return "partial" if undelivered else "success"
+    except Exception:  # noqa: BLE001 — an unclassifiable run is an error, not a crash
+        return "error"
+
+
 # Crockford base32 — no I/L/O/U, so a run id can be read aloud or copied out of a
 # bucket listing without ambiguity.
 _CROCKFORD = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
@@ -759,7 +786,8 @@ class VenuePhotoArchiveService:
             "photo_failures": 0,
             "bytes_stored": 0,
             "source_calls": 0,
-            "no_match": 0,
+            "no_query": 0,
+            "no_result": 0,
             "timeout": 0,
             "info_stored": 0,
             "info_only": 0,
@@ -845,8 +873,14 @@ class VenuePhotoArchiveService:
 
         duration = time.perf_counter() - started
         MEDIA_ARCHIVE_RUN_DURATION_SECONDS.labels(source=source).observe(duration)
-        MEDIA_ARCHIVE_RUNS_TOTAL.labels(source=source, status="success").inc()
-        MEDIA_ARCHIVE_LAST_SUCCESS_TIMESTAMP.set_to_current_time()
+        status = run_status(summary)
+        summary["status"] = status
+        MEDIA_ARCHIVE_RUNS_TOTAL.labels(source=source, status=status).inc()
+        if status == "success":
+            # Only a genuinely clean run moves the freshness signal. Advancing it
+            # on a run that lost most of its venues makes any staleness alert
+            # built on it permanently unfireable.
+            MEDIA_ARCHIVE_LAST_SUCCESS_TIMESTAMP.set_to_current_time()
         MEDIA_ARCHIVE_VENUES_WITH_MEDIA.labels(source=source).set(summary["archived"])
         summary["duration_seconds"] = round(duration, 2)
 
@@ -986,8 +1020,11 @@ class VenuePhotoArchiveService:
             MEDIA_ARCHIVE_VENUES_TOTAL.labels(source=source, result="no_place_id").inc()
             return
         if not venue_ctx.get("search_query") and source == SOURCE_APIFY_GMAPS:
-            summary["no_match"] += 1
-            MEDIA_ARCHIVE_VENUES_TOTAL.labels(source=source, result="no_match").inc()
+            # The venue cannot be ADDRESSED — no name/address to search with. A
+            # catalog-data problem: it costs nothing and re-running never fixes
+            # it. Kept apart from `no_result`, which is the billed case.
+            summary["no_query"] += 1
+            MEDIA_ARCHIVE_VENUES_TOTAL.labels(source=source, result="no_query").inc()
             return
 
         # 3. Now, and only now, spend.
@@ -1001,8 +1038,10 @@ class VenuePhotoArchiveService:
             MEDIA_ARCHIVE_VENUES_TOTAL.labels(source=source, result="google_error").inc()
             return
         if not result:
-            summary["no_match"] += 1
-            MEDIA_ARCHIVE_VENUES_TOTAL.labels(source=source, result="no_match").inc()
+            # The source WAS called and billed, and found nothing. A coverage
+            # problem worth re-running — unlike `no_query`, which never spends.
+            summary["no_result"] += 1
+            MEDIA_ARCHIVE_VENUES_TOTAL.labels(source=source, result="no_result").inc()
             return
 
         photos = result.get("photos") or []

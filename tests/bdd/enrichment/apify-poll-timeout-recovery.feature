@@ -43,10 +43,10 @@ Feature: Recover Apify archive runs that outlive the poll budget
     Then the venue outcome must be reported as "timeout"
     And the archive run must finish rather than block indefinitely
 
-  Scenario: A genuinely empty result is still reported as no match
+  Scenario: A genuinely empty result is reported as no_result, not a timeout
     Given the actor run for "v-cuscuz" reaches SUCCEEDED with an empty dataset
     When I archive the venue
-    Then the venue outcome must be reported as "no_match"
+    Then the venue outcome must be reported as "no_result"
     And the venue outcome must not be reported as "timeout"
 
   Scenario: A timed-out venue must never start a second actor run
