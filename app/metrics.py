@@ -1022,6 +1022,16 @@ ENGAGEMENT_SESSION_TOTAL = Counter(
     ["result"],  # success | error
 )
 
+# Outcomes of DELETE /v1/user-data (account-deletion erasure). A silently broken
+# erasure path is an App Store compliance risk, not just a bug — it must be
+# observable here rather than inferred from client retries. As with the session
+# counter, the raw user_id is never a label.
+ENGAGEMENT_USER_DELETION_TOTAL = Counter(
+    "engagement_user_deletion_total",
+    "Outcomes of DELETE /v1/user-data account-data erasures",
+    ["result"],  # ok | invalid | error
+)
+
 # A retried hot-like write (vibes_bot retries on 5xx per the engagement_router
 # contract) is deduped by the RDS unique index on
 # (user_pseudo, venue_id, business_period) + ON CONFLICT DO NOTHING. Counts

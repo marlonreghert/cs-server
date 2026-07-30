@@ -8,9 +8,9 @@ import logging
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
-from app.metrics import ENGAGEMENT_SESSION_TOTAL
+from app.metrics import ENGAGEMENT_SESSION_TOTAL, ENGAGEMENT_USER_DELETION_TOTAL
 
 logger = logging.getLogger(__name__)
 
@@ -106,3 +106,37 @@ def remove_hot_like(req: EngagementRequest):
         logger.error(f"[Engagement] remove_hot_like failed: {e}")
         raise HTTPException(status_code=502, detail="hot-like remove failed; retry")
     return {"status": "ok"}
+
+
+class UserDataRequest(BaseModel):
+    # Erasure is user-scoped, not venue-scoped, so EngagementRequest (which
+    # requires venue_id) won't do — same reason SessionRequest exists.
+    # min_length rejects "" at the Pydantic boundary: a blank id must be a 422,
+    # never a request that reports success while purging nothing.
+    user_id: str = Field(min_length=1)
+
+
+@router.delete("/user-data")
+def delete_user_data(req: UserDataRequest):
+    """Erase every trace of one user (App Store Guideline 5.1.1(v) support).
+
+    Idempotent: an unknown or already-erased user returns 200 with zero counts,
+    so vibes_bot can safely retry after a network failure. A failure here must
+    surface as 5xx rather than a partial success, because the caller retrying is
+    what makes the operation converge.
+    """
+    try:
+        removed = _svc().delete_user_data(req.user_id)
+    except HTTPException:
+        raise
+    except ValueError as e:
+        ENGAGEMENT_USER_DELETION_TOTAL.labels(result="invalid").inc()
+        raise HTTPException(status_code=422, detail=str(e))
+    except Exception as e:
+        ENGAGEMENT_USER_DELETION_TOTAL.labels(result="error").inc()
+        # Never log req.user_id — the raw id is the PII pseudonymization exists
+        # to keep out of storage, and that includes logs.
+        logger.error(f"[Engagement] delete_user_data failed: {e}")
+        raise HTTPException(status_code=502, detail="user-data deletion failed; retry")
+    ENGAGEMENT_USER_DELETION_TOTAL.labels(result="ok").inc()
+    return {"status": "ok", "removed": removed}

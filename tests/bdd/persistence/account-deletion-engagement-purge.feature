@@ -1,4 +1,4 @@
-@wip
+
 Feature: Erasing a user removes every trace of their engagement data
   Apple requires an in-app account deletion that actually deletes. Given a raw
   user id, cs-server must erase that user's rows from the system of record and

@@ -604,6 +604,45 @@ class RdsVenueStore:
             return result.rowcount > 0
 
     # ── app activity (one row per user per Recife day) ────────────────────────
+    # ── erasure (account deletion) ────────────────────────────────────────────
+    def list_user_hot_like_venue_ids(self, user_pseudo) -> list[str]:
+        """DISTINCT venues this user hot-liked. The unique index is per business
+        period, so one (user, venue) pair legitimately holds many rows — DISTINCT
+        keeps the caller from re-cleaning the same Redis set repeatedly."""
+        with self.engine.connect() as conn:
+            return [
+                r[0] for r in conn.execute(
+                    text(
+                        "SELECT DISTINCT venue_id FROM engagement.hot_like_event "
+                        "WHERE user_pseudo = :p ORDER BY venue_id"
+                    ),
+                    {"p": user_pseudo},
+                )
+            ]
+
+    def purge_user_engagement(self, user_pseudo) -> dict:
+        """HARD-delete every engagement row bearing this pseudonym, in one
+        transaction. Deliberately not a soft delete: a surviving pseudonymized
+        row makes the operation a deactivation rather than an erasure."""
+        with self.engine.begin() as conn:
+            favorites = conn.execute(
+                text("DELETE FROM engagement.favorite WHERE user_pseudo = :p"),
+                {"p": user_pseudo},
+            ).rowcount or 0
+            hot_likes = conn.execute(
+                text("DELETE FROM engagement.hot_like_event WHERE user_pseudo = :p"),
+                {"p": user_pseudo},
+            ).rowcount or 0
+            sessions = conn.execute(
+                text("DELETE FROM engagement.app_session_day WHERE user_pseudo = :p"),
+                {"p": user_pseudo},
+            ).rowcount or 0
+        return {
+            "favorites": favorites,
+            "hot_like_events": hot_likes,
+            "app_sessions": sessions,
+        }
+
     def record_app_session(self, user_pseudo, activity_date) -> None:
         # Idempotent per (user, day): the PK + DO NOTHING absorbs repeat pings.
         with self.engine.begin() as conn:
