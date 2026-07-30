@@ -136,6 +136,19 @@ def _google_unit_cost(settings, cfg) -> float:
     return float(getattr(settings, "google_photo_cost_per_1k_usd", 7.0)) / 1000.0
 
 
+def _as_bool(value: Any, *, default: bool) -> bool:
+    """Coerce an admin-panel config value to a bool.
+
+    A `select` field arrives as the STRING "yes"/"no", and `bool("no")` is True —
+    so the off switch would silently be an on switch without this.
+    """
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() not in ("no", "false", "0", "off", "")
+
+
 # ── apify_gmaps_extractor ────────────────────────────────────────────────────
 async def _fetch_apify(client, venue, cfg):
     """One actor run per venue; the actor bills per place, not per photo.
@@ -161,6 +174,9 @@ async def _fetch_apify(client, venue, cfg):
             query,
             max_photos=cfg["max_photos_per_venue"],
             language=str(source_cfg.get("language") or "pt-BR"),
+            scrape_image_authors=_as_bool(
+                source_cfg.get("scrape_image_authors"), default=True
+            ),
         )
     except ApifyPollTimeoutError as e:
         # Translated to the source-neutral type so the service stays ignorant of
@@ -266,6 +282,17 @@ ARCHIVE_SOURCES: dict[str, ArchiveSource] = {
                 name="language", label="Result language", type="text",
                 default="pt-BR",
                 help="Passed to the actor as the Google Maps locale.",
+            ),
+            ConfigField(
+                name="scrape_image_authors", label="Fetch photo authors",
+                type="select", default="yes", options=["yes", "no"],
+                help=(
+                    "The actor looks up an author for EVERY image, which "
+                    "dominates the run time on photo-heavy venues (1,941 images: "
+                    "1,729s on vs 135s off). Turn OFF for venues that time out — "
+                    "same photos, but they are all filed as by_visitor with "
+                    "unknown authorship."
+                ),
             ),
         ],
         cost_note=(

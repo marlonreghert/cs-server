@@ -116,7 +116,7 @@ class TestCostModels:
         seen = {}
 
         class _Client:
-            async def fetch_venue_photos(self, query, max_photos=20, language="pt-BR"):
+            async def fetch_venue_photos(self, query, max_photos=20, language="pt-BR", **_kw):
                 seen["max_photos"] = max_photos
                 return {"photos": [], "info": {}}
 
@@ -345,7 +345,7 @@ class TestSearchApiCategorySource:
             calls = []
 
             async def fetch_venue_photos(self, place_id, categories=None,
-                                         max_photos=20, hl="pt-BR"):
+                                         max_photos=20, hl="pt-BR", **_kw):
                 self.calls.append((place_id, tuple(categories or ()), hl))
                 photos, found = [], []
                 for c in categories or []:
