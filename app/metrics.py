@@ -633,7 +633,7 @@ INSTAGRAM_SEARCH_CANDIDATES_DROPPED_TOTAL = Counter(
 INSTAGRAM_PROFILE_PROBE_TOTAL = Counter(
     "instagram_profile_probe_total",
     "Instagram profile existence probes",
-    ["result"],  # present, absent, unknown
+    ["result"],  # present, absent, unknown, blocked
 )
 
 INSTAGRAM_JUDGE_TOTAL = Counter(

@@ -1,4 +1,3 @@
-@wip
 Feature: The Instagram probe fails open
   As the operator of the Instagram handle pipeline
   I want a probe that cannot see an answer to say so
@@ -10,20 +9,23 @@ Feature: The Instagram probe fails open
     Then the probe reports the profile as present
     And the probe reports the display name from the page
 
-  Scenario: Report a login wall as unknown
+  Scenario: Report a login wall as blocked
     Given Instagram serves its login wall instead of the profile
     When the profile is probed
-    Then the probe reports the profile existence as unknown
+    Then the probe reports that Instagram would not answer
+    And the probe does not report the profile as absent
 
-  Scenario: Report a challenge page as unknown
+  Scenario: Report a challenge page as blocked
     Given Instagram serves a challenge page
     When the profile is probed
-    Then the probe reports the profile existence as unknown
+    Then the probe reports that Instagram would not answer
+    And the probe does not report the profile as absent
 
-  Scenario: Report a redirect away from the profile as unknown
+  Scenario: Report a redirect away from the profile as blocked
     Given Instagram redirects the request to its login page
     When the profile is probed
-    Then the probe reports the profile existence as unknown
+    Then the probe reports that Instagram would not answer
+    And the probe does not report the profile as absent
 
   Scenario: Report an empty response as unknown
     Given Instagram serves an empty response
