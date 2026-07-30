@@ -34,6 +34,7 @@ from app.services.instagram_handle_sources import (
     SOURCE_ARCHIVED_GMAPS,
     SOURCE_GOOGLE_WEBSITE,
     SOURCE_ORDER,
+    SOURCE_VENUE_WEBSITE,
     extract_handle,
     normalize_handle,
 )
@@ -47,6 +48,13 @@ logger = logging.getLogger(__name__)
 PROVENANCE_WEIGHT = {
     SOURCE_GOOGLE_WEBSITE: 0.75,
     SOURCE_ARCHIVED_GMAPS: 0.70,
+    # A link on the venue's own site is good evidence but not proof of ownership:
+    # it is often the agency that built the site, the franchise, or the mall. 0.40
+    # requires name similarity >= 0.62 to clear the unverifiable bar, which sits
+    # between the worst measured noise (0.348) and the weakest measured true match
+    # (0.76). Raising it re-admits the noise — see the fit table in
+    # plans/260730_venue-website-instagram-tier.md.
+    SOURCE_VENUE_WEBSITE: 0.40,
     SOURCE_APIFY_SEARCH: 0.20,
 }
 
@@ -118,6 +126,7 @@ class InstagramCascadeService:
         venue_dao,
         google_listing=None,
         archive=None,
+        venue_website=None,
         paid_search=None,
         probe=None,
         judge=None,
@@ -128,6 +137,7 @@ class InstagramCascadeService:
         self.venue_dao = venue_dao
         self.google_listing = google_listing
         self.archive = archive
+        self.venue_website = venue_website
         self.paid_search = paid_search
         self.probe = probe
         self.judge = judge
@@ -155,7 +165,11 @@ class InstagramCascadeService:
                     out.append((handle, c.get("display_name")))
             return out
 
-        reader = self.google_listing if source == SOURCE_GOOGLE_WEBSITE else self.archive
+        reader = {
+            SOURCE_GOOGLE_WEBSITE: self.google_listing,
+            SOURCE_ARCHIVED_GMAPS: self.archive,
+            SOURCE_VENUE_WEBSITE: self.venue_website,
+        }.get(source)
         if reader is None:
             result.tier_unavailable.append(source)
             return None

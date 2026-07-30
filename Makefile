@@ -74,6 +74,7 @@ test-unit:
 		tests/test_instagram_cascade_run_scope.py \
 		tests/test_instagram_probe_fail_open.py \
 		tests/test_cascade_scoring_without_probe.py \
+		tests/test_venue_website_source.py \
 		-v
 
 test-integration:
