@@ -206,6 +206,7 @@ class ApifyGMapsExtractorClient:
         search_query: str,
         max_photos: int = 20,
         language: str = "pt-BR",
+        scrape_image_authors: bool = True,
     ) -> Optional[list[dict]]:
         """Fetch ALL available photos for a venue — the archive's entry point.
 
@@ -224,7 +225,13 @@ class ApifyGMapsExtractorClient:
             "maxImages": max_photos,
             "language": language,
             "includeImages": True,
-            "scrapeImageAuthors": True,
+            # The single biggest cost driver on a photo-heavy venue: the actor
+            # looks up an author PER IMAGE. Measured on Bar do Cuscuz (1,941
+            # images): 1,729s with authors, 135s without — 12.8x, and the same
+            # images either way. Venues that large cannot finish inside the poll
+            # budget with this on, so it is a per-run choice: attribution, or
+            # those venues at all.
+            "scrapeImageAuthors": scrape_image_authors,
         }
         endpoint_label = "gmaps_archive_photos"
         start_time = time.perf_counter()

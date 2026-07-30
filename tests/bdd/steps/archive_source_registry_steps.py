@@ -37,11 +37,14 @@ class _FakeApify:
         # Queries the fake should answer with a poll timeout or a hard failure,
         # so a scenario can build a run with a MIX of outcomes — which is the
         # only way to test that a partly-failed run is not reported as clean.
+        self.author_flags: list[bool] = []
         self.timeout_queries: set[str] = set()
         self.error_queries: set[str] = set()
 
-    async def fetch_venue_photos(self, search_query, max_photos=20, language="pt-BR"):
+    async def fetch_venue_photos(self, search_query, max_photos=20, language="pt-BR",
+                                 scrape_image_authors=True):
         self.calls.append(search_query)
+        self.author_flags.append(scrape_image_authors)
         for needle in self.timeout_queries:
             if needle in (search_query or ""):
                 raise ApifyPollTimeoutError(
