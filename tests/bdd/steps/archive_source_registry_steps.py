@@ -13,10 +13,10 @@ from types import SimpleNamespace
 
 from behave import given, then, when  # type: ignore[import-untyped]
 
+from app.api.apify_instagram_client import ApifyCreditExhaustedError
 from app.services.archive_sources import (
     SOURCE_APIFY_GMAPS,
     SOURCE_GOOGLE_PHOTOS,
-    ArchiveCreditExhausted,
     public_catalog,
 )
 from app.services.venue_photo_archive_service import InvalidArchivePath
@@ -37,7 +37,12 @@ class _FakeApify:
     async def fetch_venue_photos(self, search_query, max_photos=20, language="pt-BR"):
         self.calls.append(search_query)
         if self.no_credit:
-            raise ArchiveCreditExhausted("Apify credits exhausted (402)")
+            # What the REAL client raises. This fake previously raised the
+            # service-layer ArchiveCreditExhausted, so the scenario passed while
+            # production silently absorbed exhaustion as one venue's failure and
+            # kept calling an empty balance. Faking the vendor's own exception
+            # keeps the translation under test.
+            raise ApifyCreditExhaustedError("Apify credits exhausted (402)")
         for key, photos in self.photos_by_query.items():
             if key in (search_query or ""):
                 # The real client returns photos AND the non-image place data.

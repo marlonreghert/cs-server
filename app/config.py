@@ -383,6 +383,16 @@ class Settings(BaseSettings):
     # charge is NOT published, so an Apify estimate is a floor.
     apify_place_scraped_cost_usd: float = 0.004
     apify_place_details_cost_usd: float = 0.002
+    # How much longer to keep polling an Apify actor run that is STILL ALIVE when
+    # the 300s base poll budget runs out. Continuing costs nothing extra — the
+    # scrape is already billed — whereas abandoning it loses the venue and
+    # re-running it bills a second time.
+    #
+    # Ships at 0 (disabled) on purpose. Whether stalled runs need more time or
+    # less concurrency depends on whether they sit in READY or RUNNING, which
+    # apify_poll_timeouts_total now reports; size this from that data rather than
+    # guessing. Suggested first value once measured: 300.
+    apify_poll_continuation_seconds: float = 0.0
     # SearchApi.io — the only source that can name a photo's Google tab. Billed
     # per search, one per category per venue. Developer plan rate.
     searchapi_api_key: str = ""

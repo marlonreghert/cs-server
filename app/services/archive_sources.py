@@ -21,6 +21,9 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
+from app.api.apify_gmaps_extractor_client import ApifyPollTimeoutError
+from app.api.apify_instagram_client import ApifyCreditExhaustedError
+
 logger = logging.getLogger(__name__)
 
 SOURCE_GOOGLE_PHOTOS = "google_photos"
@@ -34,6 +37,23 @@ class ArchiveCreditExhausted(Exception):
     Distinct from a fetch failure: the run must stop rather than keep trying,
     and the operator needs to be told which budget, not just "it failed".
     """
+
+
+class ArchiveFetchTimeout(Exception):
+    """The source was still working on this venue when we stopped waiting.
+
+    Distinct from "not found": the venue exists and the request was billed, we
+    simply have no result yet. Reporting it as a no-match claimed 35 mid-scrape
+    venues were absent from Google Maps.
+
+    Distinct from a fetch failure too — it must NOT be retried by the caller's
+    ladder, because the source-level retry starts a fresh billable request while
+    the original is still running. Any waiting happens inside the source.
+    """
+
+    def __init__(self, message: str, last_status: str = "UNKNOWN"):
+        super().__init__(message)
+        self.last_status = last_status
 
 
 @dataclass(frozen=True)
@@ -136,11 +156,23 @@ async def _fetch_apify(client, venue, cfg):
     if not query:
         return None
     source_cfg = cfg.get("source_config") or {}
-    result = await client.fetch_venue_photos(
-        query,
-        max_photos=cfg["max_photos_per_venue"],
-        language=str(source_cfg.get("language") or "pt-BR"),
-    )
+    try:
+        result = await client.fetch_venue_photos(
+            query,
+            max_photos=cfg["max_photos_per_venue"],
+            language=str(source_cfg.get("language") or "pt-BR"),
+        )
+    except ApifyPollTimeoutError as e:
+        # Translated to the source-neutral type so the service stays ignorant of
+        # which vendor it is talking to.
+        raise ArchiveFetchTimeout(str(e), last_status=e.last_status) from e
+    except ApifyCreditExhaustedError as e:
+        # The client's own contract says this must stop the run, but the service
+        # catches ArchiveCreditExhausted — an unrelated class. Without this
+        # translation the exception fell through to the generic handler, was
+        # counted as one venue's failure, and the run carried on calling into an
+        # exhausted balance for every venue that remained.
+        raise ArchiveCreditExhausted(str(e)) from e
     if result is None:
         return None
     # Tolerate a client that still returns a bare photo list.

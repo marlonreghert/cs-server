@@ -180,6 +180,7 @@ class Container:
         if settings.apify_api_token:
             self.apify_gmaps_extractor_client = ApifyGMapsExtractorClient(
                 api_token=settings.apify_api_token,
+                poll_continuation_seconds=settings.apify_poll_continuation_seconds,
             )
             logger.info("[Container] Apify Google Maps Extractor client initialized")
 

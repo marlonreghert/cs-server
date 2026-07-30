@@ -266,6 +266,21 @@ APIFY_API_ERRORS_TOTAL = Counter(
     ["endpoint", "error_type"],
 )
 
+# Poll-budget exhaustion, broken down by the last NON-TERMINAL status the run was
+# seen in. A separate series rather than a third label on APIFY_API_ERRORS_TOTAL:
+# that counter is shared by four Apify clients across 14 call sites, and widening
+# its label set would churn all of them for a dimension only this path has.
+#
+# The distinction is the whole point of the metric. READY means the run was still
+# queued and never started — lower the concurrency. RUNNING means it started and
+# was genuinely slow — raise the budget. Same symptom, opposite fixes, and
+# without this label they are indistinguishable after the fact.
+APIFY_POLL_TIMEOUTS_TOTAL = Counter(
+    "apify_poll_timeouts_total",
+    "Apify runs still non-terminal when the poll budget was exhausted",
+    ["endpoint", "last_status"],
+)
+
 # Instagram enrichment results
 INSTAGRAM_ENRICHMENT_RESULTS = Counter(
     "instagram_enrichment_results_total",
@@ -442,8 +457,15 @@ MEDIA_ARCHIVE_RUNS_TOTAL = Counter(
 MEDIA_ARCHIVE_VENUES_TOTAL = Counter(
     "media_archive_venues_total",
     "Venues processed by the photo archive, by outcome",
-    ["source", "result"],  # result: archived, skipped_existing, no_place_id,
-                           # google_error, failed
+    # result: archived, skipped_existing, no_place_id, google_error, no_match,
+    #         info_only, timeout
+    #
+    # `no_match` and `timeout` are deliberately distinct. `no_match` means the
+    # source could not address or find the venue; `timeout` means the source was
+    # still working on it when we stopped waiting. Conflating them once reported
+    # 35 mid-scrape venues as "not on Google Maps" and sent an investigation
+    # after the wrong cause entirely.
+    ["source", "result"],
 )
 
 MEDIA_ARCHIVE_PHOTOS_STORED_TOTAL = Counter(

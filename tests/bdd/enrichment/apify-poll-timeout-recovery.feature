@@ -1,4 +1,3 @@
-@wip
 Feature: Recover Apify archive runs that outlive the poll budget
   As the venue platform operator
   I must recover a venue whose Apify actor run is still working when the poll
@@ -7,8 +6,9 @@ Feature: Recover Apify archive runs that outlive the poll budget
   run I already paid for is never bought twice.
 
   Background:
-    Given the archive source is the Apify Google Maps extractor
-    And the venue "v-cuscuz" has the search query "Bar do Cuscuz, Recife"
+    Given the media archive is enabled with a configured bucket
+    And the archive source is the real Apify Google Maps extractor
+    And the venue "v-cuscuz" is in the catalog
 
   Scenario: A run that finishes inside the poll budget is archived unchanged
     Given the actor run for "v-cuscuz" reaches SUCCEEDED inside the poll budget
