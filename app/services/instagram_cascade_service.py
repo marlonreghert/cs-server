@@ -38,6 +38,7 @@ from app.services.instagram_handle_sources import (
     normalize_handle,
 )
 from app.services.instagram_judge import MODE_UNAVAILABLE, cap_for_mode
+from app.services.venue_photo_archive_service import parse_venue_ids
 
 logger = logging.getLogger(__name__)
 
@@ -324,10 +325,27 @@ class InstagramCascadeService:
     # ── whole catalog ────────────────────────────────────────────────────────
     async def run(self, config: Optional[dict] = None) -> dict:
         config = dict(config or {})
-        venue_ids = list(self.venue_dao.list_servable_venue_ids() or [])
+        catalogue = list(self.venue_dao.list_servable_venue_ids() or [])
+        # The operator's subset is a COST CONTROL, not a hint. Ignoring it turns
+        # a two-venue check into a full-catalogue run — with force_refresh, ~451
+        # paid searches. An unknown id is reported, never fatal: a typo in one
+        # id must not cancel the rest of the run.
+        requested = parse_venue_ids(config.get("venue_ids"))
+        if requested:
+            known = set(catalogue)
+            venue_ids = [v for v in requested if v in known]
+            unknown = [v for v in requested if v not in known]
+            if unknown:
+                logger.warning(
+                    f"[InstagramCascade] {len(unknown)} requested venue id(s) are "
+                    f"not servable and were skipped: {unknown[:10]}"
+                )
+        else:
+            venue_ids = catalogue
+            unknown = []
         summary = {
             "considered": 0, "accepted": 0, "not_found": 0, "errors": 0,
-            "paid_calls_before": 0,
+            "paid_calls_before": 0, "unknown_venue_ids": len(unknown),
         }
         for venue_id in venue_ids:
             summary["considered"] += 1

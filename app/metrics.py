@@ -588,6 +588,17 @@ INSTAGRAM_HANDLE_REJECTED_TOTAL = Counter(
 
 # `unknown` is a probe failure, NOT evidence of absence — kept as its own label
 # so a spike (Instagram changing its crawler response) is visible immediately.
+# A candidate discarded before it is ever weighed. This exists because the loss
+# was previously INVISIBLE: a per-profile WARNING and an empty list, which is
+# indistinguishable from "the search found nothing". When Apify changed
+# externalUrls from a string to an object, every linked profile was dropped and
+# the pipeline looked merely unlucky for weeks.
+INSTAGRAM_SEARCH_CANDIDATES_DROPPED_TOTAL = Counter(
+    "instagram_search_candidates_dropped_total",
+    "Instagram search results discarded before becoming a candidate",
+    ["reason"],  # parse_error, no_username, error_item
+)
+
 INSTAGRAM_PROFILE_PROBE_TOTAL = Counter(
     "instagram_profile_probe_total",
     "Instagram profile existence probes",

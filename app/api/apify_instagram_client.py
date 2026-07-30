@@ -18,6 +18,7 @@ from app.metrics import (
     APIFY_API_CALLS_TOTAL,
     APIFY_API_CALL_DURATION_SECONDS,
     APIFY_API_ERRORS_TOTAL,
+    INSTAGRAM_SEARCH_CANDIDATES_DROPPED_TOTAL,
 )
 
 logger = logging.getLogger(__name__)
@@ -26,6 +27,42 @@ APIFY_API_BASE = "https://api.apify.com/v2"
 
 # Actor IDs (use ~ separator for Apify REST API path)
 SEARCH_ACTOR = "apify~instagram-search-scraper"
+
+# Keys Apify has used for the URL inside an externalUrls entry, most specific
+# first. `lynx_url` is the outbound wrapper Instagram itself serves.
+_URL_KEYS = ("lynx_url", "url", "external_url", "href")
+
+
+def _count_dropped(reason: str) -> None:
+    """Discarding a search result must be COUNTED, not only logged.
+
+    A silent drop is what let a total outage read as "no results found": when
+    the payload shape changed, every linked profile failed validation and the
+    only trace was a per-profile WARNING nobody was watching.
+    """
+    try:
+        INSTAGRAM_SEARCH_CANDIDATES_DROPPED_TOTAL.labels(reason=reason).inc()
+    except Exception:  # pragma: no cover - instrumentation must never raise
+        pass
+
+
+def _external_url(entry) -> Optional[str]:
+    """The URL out of one `externalUrls` entry, whatever shape it arrives in.
+
+    Apify changed this from a bare string to an object
+    (`{title, lynx_url, link_type}`) with no notice. The model keeps its simple
+    `Optional[str]` contract; the tolerance lives here, at the edge where
+    foreign data lands. An entry we cannot read yields None — a link we can't
+    parse is not a reason to throw the whole profile away.
+    """
+    if isinstance(entry, str):
+        return entry or None
+    if isinstance(entry, dict):
+        for key in _URL_KEYS:
+            value = entry.get(key)
+            if isinstance(value, str) and value:
+                return value
+    return None
 
 
 class ApifyCreditExhaustedError(Exception):
@@ -84,17 +121,19 @@ class ApifyInstagramClient:
                 logger.debug(
                     f"[ApifyInstagram] Skipping error item: {item.get('error')}"
                 )
+                _count_dropped("error_item")
                 continue
 
             username = item.get("username", "")
             if not username:
                 logger.debug("[ApifyInstagram] Skipping item with empty username")
+                _count_dropped("no_username")
                 continue
 
             try:
                 # externalUrls is an array in Apify response
                 external_urls = item.get("externalUrls") or []
-                external_url = external_urls[0] if external_urls else None
+                external_url = _external_url(external_urls[0]) if external_urls else None
 
                 results.append(InstagramProfile(
                     username=username,
@@ -109,6 +148,7 @@ class ApifyInstagramClient:
                 ))
             except Exception as e:
                 logger.warning(f"[ApifyInstagram] Failed to parse search result: {e}")
+                _count_dropped("parse_error")
                 continue
 
         return results
