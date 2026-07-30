@@ -109,16 +109,27 @@ class TestProfileParse:
         assert r.followers_count == "23K"
         assert r.image_url.endswith("pic.jpg")
 
-    def test_absent_when_there_are_no_og_tags(self):
-        """A handle that does not exist gets the JS shell — no og:title at all."""
+    def test_the_bare_js_shell_proves_nothing(self):
+        """This used to assert ABSENT. It was wrong, and the error was not
+        theoretical: from a datacenter IP Instagram serves a shell like this for
+        EVERY handle, so "no og tags means deleted" marked the entire catalogue
+        as fake and overwrote real handles with NULL."""
         assert parse_profile_body("<html><title>Instagram</title></html>").existence == (
-            EXIST_ABSENT
+            EXIST_UNKNOWN
         )
 
-    def test_absent_when_og_type_is_not_a_profile(self):
+    def test_a_non_profile_og_type_proves_nothing(self):
         body = (
             '<meta property="og:type" content="website" />'
             '<meta property="og:title" content="x" />'
+        )
+        assert parse_profile_body(body).existence != EXIST_ABSENT
+
+    def test_absent_only_when_instagram_says_so(self):
+        """Absence is now PROVEN, not inferred: Instagram's own page, saying it."""
+        body = (
+            '<meta property="og:site_name" content="Instagram" />'
+            "<div>Sorry, this page isn't available.</div>"
         )
         assert parse_profile_body(body).existence == EXIST_ABSENT
 
