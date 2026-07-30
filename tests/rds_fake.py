@@ -476,6 +476,45 @@ class InMemoryRdsVenueStore:
         })
         return True
 
+    # ── erasure (account deletion) ────────────────────────────────────────────
+    def list_user_hot_like_venue_ids(self, user_pseudo) -> list[str]:
+        """DISTINCT venues this user hot-liked. One user legitimately holds
+        several event rows per venue (the unique index is per business period),
+        so this must dedupe or the caller would srem the same set repeatedly."""
+        self._guard()
+        return sorted({
+            e["venue_id"] for e in self.hot_like_events
+            if e.get("user_pseudo") == user_pseudo
+        })
+
+    def purge_user_engagement(self, user_pseudo) -> dict:
+        """HARD-delete every row bearing this pseudonym, across all three
+        engagement stores. Unlike `soft_delete_favorite`, nothing is left behind:
+        a surviving pseudonymized row would make this a deactivation."""
+        self._guard()
+        fav_keys = [k for k in self.favorites if k[0] == user_pseudo]
+        for key in fav_keys:
+            del self.favorites[key]
+
+        hot_before = len(self.hot_like_events)
+        self.hot_like_events = [
+            e for e in self.hot_like_events if e.get("user_pseudo") != user_pseudo
+        ]
+        # Keep the dedup index consistent with the rows, or a later re-like of the
+        # same (user, venue, day) would be silently suppressed as a retry.
+        self._hot_like_keys = {
+            k for k in self._hot_like_keys if k[0] != user_pseudo
+        }
+
+        session_rows = {s for s in self.app_sessions if s[0] == user_pseudo}
+        self.app_sessions -= session_rows
+
+        return {
+            "favorites": len(fav_keys),
+            "hot_like_events": hot_before - len(self.hot_like_events),
+            "app_sessions": len(session_rows),
+        }
+
     # ── app activity (one row per user per day; total + active-window counts) ──
     def record_app_session(self, user_pseudo, activity_date) -> None:
         self._guard()

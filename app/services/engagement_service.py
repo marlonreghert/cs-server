@@ -86,6 +86,64 @@ class EngagementService:
     def record_session(self, user_id: str) -> None:
         self.rds_store.record_app_session(self.pseudonymize(user_id), recife_today())
 
+    # ── erasure (account deletion) ────────────────────────────────────────────
+    def delete_user_data(self, user_id: str) -> dict:
+        """Erase every trace of one user, given their RAW id.
+
+        This is deliberately NOT the ordinary remove path. `remove_favorite`
+        soft-deletes (the row, and so the pseudonym, survives) and
+        `remove_hot_like` keeps the `hot_like_event` history on purpose. Both are
+        right for un-favoriting and wrong for an erasure request: a surviving
+        pseudonymized row is a deactivation, which Apple's Guideline 5.1.1(v)
+        explicitly rejects. Erasure therefore hard-deletes.
+
+        Step order is load-bearing, and it deliberately INVERTS the
+        projection-after-truth ordering the write path uses:
+
+        1. Read the user's hot-liked venue ids from RDS. `hot_likes:v1:{venue_id}`
+           is keyed by VENUE with user ids as members, so Redis cannot answer
+           "which venues did this user like?" — only these rows can.
+        2. Strip the projections (every hot-likes membership, then the favorites
+           key). Idempotent: re-running `srem`/`delete` on an already-clean key is
+           a no-op.
+        3. Hard-delete the RDS rows.
+
+        Steps 2 and 3 are in this order **so a retry can converge**. The write
+        path commits RDS then projects, but erasure cannot: if the rows were
+        deleted first and the projection write then failed, the retry would
+        re-enumerate an empty venue list and could never reach the hot-likes
+        sets — the user would stay a member of them forever. Enumerating from
+        rows that still exist is the only thing that makes the operation
+        recoverable, so the rows must outlive the projection cleanup.
+
+        Raises on a blank id (a silent no-op would report success while deleting
+        nothing) and propagates a projection failure so the caller retries.
+        """
+        if not user_id or not str(user_id).strip():
+            raise ValueError("user_id is required for erasure")
+
+        pseudo = self.pseudonymize(user_id)
+
+        # 1. Enumerate while the rows still exist — they are the only index from
+        #    this user to the venue-keyed hot-likes sets.
+        venue_ids = list(self.rds_store.list_user_hot_like_venue_ids(pseudo))
+
+        # 2. Projections this service owns. Before the purge, so a failure here
+        #    leaves the rows intact and the retry can re-enumerate.
+        for venue_id in venue_ids:
+            self.redis.srem(self._hot_key(venue_id), user_id)
+        self.redis.delete(self._fav_key(user_id))
+
+        # 3. System of record.
+        removed = dict(self.rds_store.purge_user_engagement(pseudo))
+        removed["hot_like_sets"] = len(venue_ids)
+        # Log the pseudonym and the counts, never the raw id — keeping the raw id
+        # out of storage is the whole point of pseudonymizing it.
+        logger.info(
+            "[Engagement] erased user pseudo=%s removed=%s", pseudo, removed
+        )
+        return removed
+
     def activity_counts(self) -> dict:
         # "Active in the last N days" is inclusive of today, so the window starts
         # N-1 days back (1d == today only; 7d == today and the prior 6; etc).
