@@ -451,20 +451,29 @@ DATALAKE_LAST_SUCCESS_TIMESTAMP = Gauge(
 MEDIA_ARCHIVE_RUNS_TOTAL = Counter(
     "media_archive_runs_total",
     "Venue photo archive runs",
-    ["source", "status"],  # status: success, error
+    # status: success (every selected venue reached a good terminal state),
+    #         partial (completed, but some venue failed/timed out/found nothing),
+    #         error   (did not complete: credit exhausted, aborted, exception)
+    #
+    # `partial` exists because this counter previously only ever emitted
+    # "success" — from a single hardcoded call site — so a run that archived 1 of
+    # 8 venues looked identical to a perfect one, and "error" was dead.
+    ["source", "status"],
 )
 
 MEDIA_ARCHIVE_VENUES_TOTAL = Counter(
     "media_archive_venues_total",
     "Venues processed by the photo archive, by outcome",
-    # result: archived, skipped_existing, no_place_id, google_error, no_match,
-    #         info_only, timeout
+    # result: archived, skipped_existing, no_place_id, google_error, info_only,
+    #         timeout, no_query, no_result
     #
-    # `no_match` and `timeout` are deliberately distinct. `no_match` means the
-    # source could not address or find the venue; `timeout` means the source was
-    # still working on it when we stopped waiting. Conflating them once reported
-    # 35 mid-scrape venues as "not on Google Maps" and sent an investigation
-    # after the wrong cause entirely.
+    # These are deliberately distinct, and `no_match` was retired because it
+    # absorbed all three. `no_query` = the venue has no name/address to search
+    # with, so nothing was spent and a re-run cannot help. `no_result` = the
+    # source was called and BILLED and found nothing, so a re-run might. `timeout`
+    # = the source was still working when we stopped waiting. Conflating them
+    # once reported 35 mid-scrape venues as "not on Google Maps" and sent an
+    # investigation after the wrong cause entirely.
     ["source", "result"],
 )
 

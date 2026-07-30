@@ -178,7 +178,8 @@ def _capture_logs(context):
 def _snapshot(context):
     context.before = {
         result: _metric(TIMEOUT_METRIC, source=SOURCE_APIFY_GMAPS, result=result)
-        for result in ("archived", "no_match", "timeout", "google_error")
+        for result in ("archived", "no_query", "no_result", "timeout",
+                       "google_error", "no_match")
     }
     context.duration_before = _metric(
         "apify_api_call_duration_seconds_count", endpoint="gmaps_archive_photos"

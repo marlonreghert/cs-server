@@ -13,6 +13,7 @@ from types import SimpleNamespace
 
 from behave import given, then, when  # type: ignore[import-untyped]
 
+from app.api.apify_gmaps_extractor_client import ApifyPollTimeoutError
 from app.api.apify_instagram_client import ApifyCreditExhaustedError
 from app.services.archive_sources import (
     SOURCE_APIFY_GMAPS,
@@ -33,9 +34,22 @@ class _FakeApify:
         self.photos_by_query: dict[str, list[dict]] = {}
         self.calls: list[str] = []
         self.no_credit = False
+        # Queries the fake should answer with a poll timeout or a hard failure,
+        # so a scenario can build a run with a MIX of outcomes — which is the
+        # only way to test that a partly-failed run is not reported as clean.
+        self.timeout_queries: set[str] = set()
+        self.error_queries: set[str] = set()
 
     async def fetch_venue_photos(self, search_query, max_photos=20, language="pt-BR"):
         self.calls.append(search_query)
+        for needle in self.timeout_queries:
+            if needle in (search_query or ""):
+                raise ApifyPollTimeoutError(
+                    f"still RUNNING for {search_query!r}", last_status="RUNNING"
+                )
+        for needle in self.error_queries:
+            if needle in (search_query or ""):
+                raise RuntimeError(f"upstream blew up for {search_query!r}")
         if self.no_credit:
             # What the REAL client raises. This fake previously raised the
             # service-layer ArchiveCreditExhausted, so the scenario passed while
@@ -179,7 +193,9 @@ def step_stored_under_apify(context):
 
 @then("the unmatched venue is counted as unmatched")
 def step_unmatched_counted(context):
-    assert context.summary["no_match"] >= 1, context.summary
+    # `no_match` was split: this venue WAS searched for and billed, so the
+    # outcome is `no_result` (a coverage gap), not `no_query` (unaddressable).
+    assert context.summary["no_result"] >= 1, context.summary
 
 
 @then("the matched venue is archived")
