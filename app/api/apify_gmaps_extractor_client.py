@@ -30,9 +30,27 @@ from app.metrics import (
     APIFY_API_CALLS_TOTAL,
     APIFY_API_CALL_DURATION_SECONDS,
     APIFY_API_ERRORS_TOTAL,
+    APIFY_POLL_TIMEOUTS_TOTAL,
 )
 
 logger = logging.getLogger(__name__)
+
+
+class ApifyPollTimeoutError(Exception):
+    """The actor run was still non-terminal when we stopped waiting.
+
+    Raised rather than returned so the caller cannot mistake it for "no result".
+    A bare `None` reported a mid-scrape venue as one that does not exist on
+    Google Maps, and the caller had no way to tell the two apart.
+
+    `last_status` carries the last non-terminal status observed (`READY` or
+    `RUNNING`) — the field that decides whether the remedy is more time or less
+    concurrency.
+    """
+
+    def __init__(self, message: str, last_status: str = "UNKNOWN"):
+        super().__init__(message)
+        self.last_status = last_status
 
 APIFY_API_BASE = "https://api.apify.com/v2"
 
@@ -42,6 +60,11 @@ GMAPS_EXTRACTOR_ACTOR = "compass~google-maps-extractor"
 # Polling settings for async runs
 POLL_INTERVAL_SECONDS = 5.0
 MAX_POLL_ATTEMPTS = 60  # 5 min max wait
+
+# Local sentinel for "we stopped waiting", kept distinct from Apify's own
+# TIMED-OUT terminal status so the caller can tell "the actor gave up" from
+# "we gave up on the actor".
+POLL_BUDGET_EXHAUSTED = "POLL_BUDGET_EXHAUSTED"
 
 # Request more photos from the API than max_photos to get a better pool
 # for owner-photo prioritization. Owner photos are sorted first.
@@ -64,8 +87,18 @@ class ApifyGMapsExtractorClient:
     Filters photos by menu-related categories.
     """
 
-    def __init__(self, api_token: str, timeout: float = 30.0):
+    def __init__(
+        self,
+        api_token: str,
+        timeout: float = 30.0,
+        poll_continuation_seconds: float = 0.0,
+    ):
         self.api_token = api_token
+        # How much longer to keep polling a run that is still alive when the base
+        # budget runs out. Zero disables it, which is the shipped default: the
+        # right size depends on whether stalled runs are READY or RUNNING, and
+        # that is measured by APIFY_POLL_TIMEOUTS_TOTAL before it is guessed.
+        self.poll_continuation_seconds = poll_continuation_seconds
         self.client = httpx.AsyncClient(
             timeout=timeout,
             limits=httpx.Limits(max_keepalive_connections=5, max_connections=10),
@@ -122,7 +155,7 @@ class ApifyGMapsExtractorClient:
             dataset_id = run_data.get("defaultDatasetId")
 
             # 2. Poll until finished
-            final_status = await self._poll_run(run_id, endpoint_label)
+            final_status, _ = await self._poll_run(run_id, endpoint_label)
             if final_status != "SUCCEEDED":
                 logger.error(
                     f"[ApifyGMaps] Run {run_id} ended with status: {final_status}"
@@ -200,7 +233,25 @@ class ApifyGMapsExtractorClient:
             run_data = await self._start_run(run_input, endpoint_label)
             if not run_data:
                 return None
-            status = await self._poll_run(run_data["id"], endpoint_label)
+            status, last_status = await self._poll_run(
+                run_data["id"], endpoint_label
+            )
+            if status == POLL_BUDGET_EXHAUSTED:
+                # Observed here as well as on the success path: without it the
+                # histogram counted only the calls that finished, which is why 89
+                # real calls showed up as 54 observations and the slow tail was
+                # invisible in the latency data.
+                APIFY_API_CALL_DURATION_SECONDS.labels(
+                    endpoint=endpoint_label
+                ).observe(time.perf_counter() - start_time)
+                APIFY_API_CALLS_TOTAL.labels(
+                    endpoint=endpoint_label, status="error"
+                ).inc()
+                raise ApifyPollTimeoutError(
+                    f"Apify run for {search_query!r} still {last_status} when the "
+                    f"poll budget was exhausted",
+                    last_status=last_status,
+                )
             if status != "SUCCEEDED":
                 logger.error(f"[ApifyGMaps] archive run ended as {status}")
                 APIFY_API_CALLS_TOTAL.labels(
@@ -229,6 +280,11 @@ class ApifyGMapsExtractorClient:
         except ApifyCreditExhaustedError:
             # Propagated, never swallowed: the caller must stop the whole run
             # rather than keep paying into an exhausted balance.
+            raise
+        except ApifyPollTimeoutError:
+            # Also propagated. Swallowing it here would collapse back into the
+            # bare `None` this exception exists to replace, and the duration and
+            # error counters were already recorded at the raise site.
             raise
         except Exception as e:  # noqa: BLE001 — one venue must not end a run
             APIFY_API_CALL_DURATION_SECONDS.labels(endpoint=endpoint_label).observe(
@@ -445,22 +501,71 @@ class ApifyGMapsExtractorClient:
         response.raise_for_status()
         return response.json().get("data")
 
-    async def _poll_run(self, run_id: str, endpoint_label: str) -> str:
-        """Poll an actor run until it finishes. Returns final status."""
+    async def _poll_run(self, run_id: str, endpoint_label: str) -> tuple[str, str]:
+        """Poll an actor run until it finishes.
+
+        Returns `(final_status, last_non_terminal_status)`.
+
+        The final status is one of Apify's four terminal states, or the local
+        sentinel `POLL_BUDGET_EXHAUSTED` when we stopped waiting on a run that was
+        still alive. That sentinel is not Apify's `TIMED-OUT`: Apify's means the
+        actor itself hit its own limit and is a real terminal answer, ours means
+        only that we gave up watching. Returning `"TIMED-OUT"` for both made them
+        indistinguishable to the caller.
+
+        When the budget is exhausted the run is, by definition, still `READY` or
+        `RUNNING` — it has not failed. If a continuation window is configured we
+        keep polling THE SAME run rather than abandoning it, because the scrape is
+        already paid for and starting a replacement run would bill a second time
+        for the same venue.
+        """
         url = f"{APIFY_API_BASE}/actor-runs/{run_id}"
         params = {"token": self.api_token}
 
-        for _ in range(MAX_POLL_ATTEMPTS):
+        continuation_attempts = 0
+        if self.poll_continuation_seconds > 0 and POLL_INTERVAL_SECONDS > 0:
+            continuation_attempts = int(
+                self.poll_continuation_seconds / POLL_INTERVAL_SECONDS
+            )
+        base_budget = MAX_POLL_ATTEMPTS * POLL_INTERVAL_SECONDS
+        total_attempts = MAX_POLL_ATTEMPTS + continuation_attempts
+        last_non_terminal = "UNKNOWN"
+
+        for attempt in range(1, total_attempts + 1):
             await asyncio.sleep(POLL_INTERVAL_SECONDS)
+
+            if attempt == MAX_POLL_ATTEMPTS + 1:
+                logger.warning(
+                    f"[ApifyGMaps] Run {run_id} still {last_non_terminal} after "
+                    f"{base_budget:.1f}s; continuing to poll the same run for up "
+                    f"to {self.poll_continuation_seconds:.1f}s more"
+                )
 
             try:
                 response = await self.client.get(url, params=params)
+                if getattr(response, "status_code", 200) == 402:
+                    # The balance can run out mid-poll, not just at start-run.
+                    # Propagated so the run stops rather than keeps polling and
+                    # starting more runs against an exhausted account.
+                    APIFY_API_ERRORS_TOTAL.labels(
+                        endpoint=endpoint_label, error_type="credit_exhausted"
+                    ).inc()
+                    raise ApifyCreditExhaustedError("Apify credits exhausted (402)")
                 response.raise_for_status()
                 data = response.json().get("data", {})
                 status = data.get("status", "UNKNOWN")
 
                 if status in ("SUCCEEDED", "FAILED", "ABORTED", "TIMED-OUT"):
-                    return status
+                    if status == "SUCCEEDED" and attempt > MAX_POLL_ATTEMPTS:
+                        elapsed = attempt * POLL_INTERVAL_SECONDS
+                        logger.info(
+                            f"[ApifyGMaps] Run {run_id} recovered after "
+                            f"{elapsed:.1f}s — {elapsed - base_budget:.1f}s past "
+                            f"the base budget; no second run was started"
+                        )
+                    return status, last_non_terminal
+
+                last_non_terminal = status
 
             except httpx.HTTPError as e:
                 logger.warning(
@@ -468,13 +573,17 @@ class ApifyGMapsExtractorClient:
                 )
 
         logger.error(
-            f"[ApifyGMaps] Run {run_id} timed out after "
-            f"{MAX_POLL_ATTEMPTS * POLL_INTERVAL_SECONDS}s"
+            f"[ApifyGMaps] Run {run_id} exhausted its "
+            f"{total_attempts * POLL_INTERVAL_SECONDS:.1f}s poll budget while "
+            f"still {last_non_terminal}"
         )
         APIFY_API_ERRORS_TOTAL.labels(
             endpoint=endpoint_label, error_type="timeout"
         ).inc()
-        return "TIMED-OUT"
+        APIFY_POLL_TIMEOUTS_TOTAL.labels(
+            endpoint=endpoint_label, last_status=last_non_terminal
+        ).inc()
+        return POLL_BUDGET_EXHAUSTED, last_non_terminal
 
     async def _fetch_dataset(
         self, dataset_id: str, endpoint_label: str

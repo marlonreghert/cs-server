@@ -66,6 +66,7 @@ from app.services.archive_sources import (  # noqa: E402
     SOURCE_GOOGLE_PHOTOS,
     SUPPORTED_SOURCES,
     ArchiveCreditExhausted,
+    ArchiveFetchTimeout,
     get_source,
 )
 
@@ -96,6 +97,12 @@ MAX_RADIUS_KM = 500.0
 # mean the source answered and simply had no photos — a failure and a miss
 # are different outcomes and must not be counted together.
 FETCH_FAILED = object()
+
+# And a third outcome, distinct from both: the source was still working when we
+# stopped waiting. Not a failure (nothing broke), not a miss (the venue exists and
+# the call was billed). It gets its own sentinel because the operator's response
+# differs — a timeout is worth re-running, a no-match is not.
+FETCH_TIMED_OUT = object()
 
 # Crockford base32 — no I/L/O/U, so a run id can be read aloud or copied out of a
 # bucket listing without ambiguity.
@@ -753,6 +760,7 @@ class VenuePhotoArchiveService:
             "bytes_stored": 0,
             "source_calls": 0,
             "no_match": 0,
+            "timeout": 0,
             "info_stored": 0,
             "info_only": 0,
             "credit_exhausted": False,
@@ -842,7 +850,13 @@ class VenuePhotoArchiveService:
         MEDIA_ARCHIVE_VENUES_WITH_MEDIA.labels(source=source).set(summary["archived"])
         summary["duration_seconds"] = round(duration, 2)
 
-        await self._write_latest_marker(source, prefix, run_id, summary)
+        # Only a run that actually finished gets to claim "latest". A run stopped
+        # by an exhausted budget covered part of the catalog, and a marker saying
+        # otherwise misreports a partial dump as a complete one. Cancellation
+        # already skips this by raising before it; exhaustion returns normally, so
+        # it needs the guard spelled out.
+        if not summary.get("credit_exhausted"):
+            await self._write_latest_marker(source, prefix, run_id, summary)
         self._save_run_record(job_id, summary)
 
         logger.info(
@@ -910,6 +924,17 @@ class VenuePhotoArchiveService:
                 # The source's own budget is gone. Stop the whole run rather
                 # than keep calling into an exhausted balance.
                 raise
+            except ArchiveFetchTimeout as e:
+                # Deliberately NOT retried. The source already waited as long as
+                # it was configured to on the request that was billed; looping
+                # here would start a second billable request for a venue whose
+                # first one may still be running. Report it and move on.
+                logger.error(
+                    f"[VenuePhotoArchive] job={summary['job_id']} {source} timed "
+                    f"out waiting for {venue_id} (last status {e.last_status}); "
+                    f"not retried — the paid request is still outstanding"
+                )
+                return FETCH_TIMED_OUT
             except Exception as e:  # noqa: BLE001
                 if is_throttled(e):
                     summary["throttled"] += 1
@@ -967,6 +992,10 @@ class VenuePhotoArchiveService:
 
         # 3. Now, and only now, spend.
         result = await self._fetch_photos(venue_id, venue_ctx, source, cfg, summary)
+        if result is FETCH_TIMED_OUT:
+            summary["timeout"] += 1
+            MEDIA_ARCHIVE_VENUES_TOTAL.labels(source=source, result="timeout").inc()
+            return
         if result is FETCH_FAILED:
             summary["failed"] += 1
             MEDIA_ARCHIVE_VENUES_TOTAL.labels(source=source, result="google_error").inc()
