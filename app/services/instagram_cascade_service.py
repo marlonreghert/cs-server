@@ -81,11 +81,33 @@ class CascadeResult:
     error: Optional[str] = None
 
 
-def name_similarity(venue_name: Optional[str], display_name: Optional[str]) -> float:
-    if not venue_name or not display_name:
+def handle_as_words(handle: Optional[str]) -> Optional[str]:
+    """`bar.do_cuscuz` -> `bar do cuscuz`. Instagram forbids spaces, so the
+    separators a venue uses in its handle are the words of its name."""
+    if not handle:
+        return None
+    return handle.replace(".", " ").replace("_", " ").strip() or None
+
+
+def name_similarity(
+    venue_name: Optional[str],
+    display_name: Optional[str],
+    handle: Optional[str] = None,
+) -> float:
+    """How much does this profile look like this venue?
+
+    Falls back to the HANDLE when no display name is available. That is the
+    common case in production, not an edge case: Instagram blocks the datacenter
+    IP, so the probe returns no display name for anything, and the comparison
+    used to score 0.0 while the handle sat unused. Measured on real venues the
+    fallback separates cleanly — `Entre Amigos O Bode` vs `@entreamigosobode`
+    scores 0.914.
+    """
+    other = display_name or handle_as_words(handle)
+    if not venue_name or not other:
         return 0.0
     return difflib.SequenceMatcher(
-        None, venue_name.strip().lower(), display_name.strip().lower()
+        None, venue_name.strip().lower(), other.strip().lower()
     ).ratio()
 
 
@@ -148,9 +170,32 @@ class InstagramCascadeService:
         return [(handle, None)]
 
     # ── scoring ──────────────────────────────────────────────────────────────
-    def _score(self, source, probe_result, venue, display_name) -> tuple[float, dict]:
+    def _existence_checked(self, probe_result) -> bool:
+        """Did the existence check actually produce an answer about this handle?
+
+        `unknown` and `blocked` are both non-answers. A candidate must not be
+        held to a bar that includes points for a check the platform could not
+        perform — from production that check NEVER succeeds, so requiring it
+        rejects every venue forever.
+        """
+        return probe_result is not None and probe_result.existence in (
+            EXIST_PRESENT,
+            EXIST_ABSENT,
+        )
+
+    def _threshold_for(self, probe_result) -> float:
+        """The bar this candidate is actually measured against.
+
+        Never above the configured threshold: when the probe works, the operator's
+        setting stands unchanged.
+        """
+        if self._existence_checked(probe_result):
+            return self.accept_threshold
+        return max(0.0, self.accept_threshold - EXISTENCE_BONUS)
+
+    def _score(self, source, probe_result, venue, display_name, handle=None) -> tuple[float, dict]:
         disp = display_name or (probe_result.display_name if probe_result else None)
-        sim = name_similarity(getattr(venue, "venue_name", None), disp)
+        sim = name_similarity(getattr(venue, "venue_name", None), disp, handle)
         exists_bonus = (
             EXISTENCE_BONUS
             if probe_result is not None and probe_result.existence == EXIST_PRESENT
@@ -160,6 +205,9 @@ class InstagramCascadeService:
             "provenance": PROVENANCE_WEIGHT.get(source, 0.2),
             "profile_exists": exists_bonus,
             "name_similarity": round(sim, 4),
+            # Recorded so a past acceptance can be explained without re-running.
+            "effective_threshold": round(self._threshold_for(probe_result), 4),
+            "existence_checked": self._existence_checked(probe_result),
         }
         confidence = signals["provenance"] + exists_bonus + NAME_WEIGHT * sim
         return min(confidence, 1.0), signals
@@ -202,7 +250,10 @@ class InstagramCascadeService:
 
             for handle, display in candidates:
                 probe_result = await self._probe(handle)
-                confidence, signals = self._score(source, probe_result, venue, display)
+                confidence, signals = self._score(
+                    source, probe_result, venue, display, handle
+                )
+                bar = signals["effective_threshold"]
                 cand = CascadeResult(
                     venue_id=venue_id, handle=handle, source=source,
                     confidence=confidence, signals=signals,
@@ -213,13 +264,15 @@ class InstagramCascadeService:
                 if probe_result is not None and probe_result.existence == EXIST_ABSENT:
                     # Verified NOT to exist — never accept, keep looking.
                     continue
-                if self.ambiguous_low <= confidence < self.accept_threshold:
+                if self.ambiguous_low <= confidence < bar:
                     cand = await self._adjudicate(cand, venue, probe_result)
                 if best is None or cand.confidence > best.confidence:
                     best = cand
-                if cand.confidence >= self.accept_threshold:
+                if cand.confidence >= bar:
                     break
-            if best is not None and best.confidence >= self.accept_threshold:
+            if best is not None and best.confidence >= best.signals.get(
+                "effective_threshold", self.accept_threshold
+            ):
                 break
 
         return self._finalize(result, best, venue_id)
@@ -280,7 +333,9 @@ class InstagramCascadeService:
         best.rejections = result.rejections
         best.tier_errors = result.tier_errors
         best.tier_unavailable = result.tier_unavailable
-        best.accepted = best.confidence >= self.accept_threshold
+        best.accepted = best.confidence >= best.signals.get(
+            "effective_threshold", self.accept_threshold
+        )
         status = "found" if best.accepted else (
             "low_confidence" if best.confidence >= self.ambiguous_low else "not_found"
         )
