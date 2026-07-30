@@ -70,6 +70,10 @@ test-unit:
 		tests/test_archive_sources.py \
 		tests/test_menu_extraction_from_archive.py \
 		tests/test_photo_metadata_fidelity.py \
+		tests/test_apify_profile_parsing.py \
+		tests/test_instagram_cascade_run_scope.py \
+		tests/test_instagram_probe_fail_open.py \
+		tests/test_cascade_scoring_without_probe.py \
 		-v
 
 test-integration:
