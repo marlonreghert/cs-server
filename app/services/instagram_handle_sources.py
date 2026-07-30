@@ -22,9 +22,18 @@ logger = logging.getLogger(__name__)
 SOURCE_GOOGLE_WEBSITE = "google_website"
 SOURCE_ARCHIVED_GMAPS = "archived_gmaps_website"
 SOURCE_APIFY_SEARCH = "apify_search"
+# The venue's OWN website, fetched and read for an Instagram link. Free (one HTTP
+# request), and the last free source before anything bills.
+SOURCE_VENUE_WEBSITE = "venue_website"
 
 # Cheapest first. The paid source is last on purpose.
-SOURCE_ORDER = (SOURCE_GOOGLE_WEBSITE, SOURCE_ARCHIVED_GMAPS, SOURCE_APIFY_SEARCH)
+# Cheapest first, and every free source is exhausted before the paid one.
+SOURCE_ORDER = (
+    SOURCE_GOOGLE_WEBSITE,
+    SOURCE_ARCHIVED_GMAPS,
+    SOURCE_VENUE_WEBSITE,
+    SOURCE_APIFY_SEARCH,
+)
 
 PAID_SOURCES = frozenset({SOURCE_APIFY_SEARCH})
 

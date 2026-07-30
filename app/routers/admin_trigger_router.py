@@ -146,7 +146,8 @@ JOB_REGISTRY = {
     "instagram": {
         "label": "Instagram Discovery",
         "description": "Find Instagram handles cheapest-source-first: the venue's "
-        "Google website, then the archived Google Maps payload (both free), then "
+        "Google website, then the archived Google Maps payload, then the venue's "
+        "own website (all free), then "
         "the paid Apify search. Every candidate is verified against the real "
         "profile. Turn the paid tier off for a zero-cost pass.",
         # Rendered by the vibesadmin Enrichments options modal — every key here
@@ -155,6 +156,7 @@ JOB_REGISTRY = {
             "force_refresh": False,
             "tier_google_website_enabled": True,
             "tier_archived_gmaps_website_enabled": True,
+            "tier_venue_website_enabled": True,
             "tier_apify_search_enabled": True,
             "judge_enabled": False,
             "venue_ids": "",

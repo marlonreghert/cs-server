@@ -1,4 +1,3 @@
-@wip
 Feature: Read the Instagram handle from the venue's own website
   As the operator of the Instagram handle pipeline
   I want the venue's own website consulted before the paid search
@@ -63,7 +62,7 @@ Feature: Read the Instagram handle from the venue's own website
     And the venue's listed website is "https://thefisherman.com.br"
     And that page links "https://www.instagram.com/smartfit/"
     When the cascade runs every free tier
-    Then the cascade does not accept a handle
+    Then the cascade rejects every free-tier candidate
 
   Scenario: Consult the venue's own Google listing first
     Given the venue's Google listing already links "https://instagram.com/bucatrattoria"
@@ -76,4 +75,4 @@ Feature: Read the Instagram handle from the venue's own website
     And that page links "https://www.instagram.com/bucatrattoria/"
     And the website tier is turned off for this run
     When the cascade runs every free tier
-    Then the cascade does not accept a handle
+    Then the cascade rejects every free-tier candidate

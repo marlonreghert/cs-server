@@ -304,7 +304,8 @@ class Container:
                     ArchivedGmapsWebsiteSource,
                     ArchivedVenuePhotoSource,
                     GoogleListingWebsiteSource,
-                )
+    VenueWebsiteScrapeSource,
+)
                 from app.services.instagram_cascade_service import InstagramCascadeService
                 from app.services.instagram_enrichment_service import (
                     InstagramEnrichmentService as _IES,
@@ -321,6 +322,11 @@ class Container:
                 self.instagram_cascade_service = InstagramCascadeService(
                     venue_dao=self.pipeline_repository,
                     google_listing=GoogleListingWebsiteSource(self.pipeline_repository),
+                    venue_website=VenueWebsiteScrapeSource(
+                        self.pipeline_repository,
+                        timeout_seconds=settings.instagram_website_timeout_seconds,
+                        max_bytes=settings.instagram_website_max_bytes,
+                    ),
                     archive=ArchivedGmapsWebsiteSource(self.media_archive_store),
                     paid_search=ApifySearchSource(
                         self.apify_instagram_client,

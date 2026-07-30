@@ -7,9 +7,18 @@ cascade against four small fakes.
 from __future__ import annotations
 
 import logging
+import re
 from typing import Optional
 
+import httpx
+
 from app.services.archive_sources import SOURCE_APIFY_GMAPS
+
+# Paths that look like a handle in a url but are not one.
+_NON_PROFILE_PATHS = frozenset(
+    {"p", "reel", "reels", "explore", "stories", "tv", "accounts", "about",
+     "legal", "privacy", "developer", "directory"}
+)
 
 logger = logging.getLogger(__name__)
 
@@ -114,3 +123,114 @@ class ArchivedVenuePhotoSource:
             return []
         photos = (info.get("photos") if isinstance(info, dict) else None) or []
         return [p.get("url") for p in photos[:limit] if isinstance(p, dict) and p.get("url")]
+
+
+class VenueWebsiteScrapeSource:
+    """The Instagram profile a venue links from its OWN website.
+
+    The largest free source of handles left, and nothing had ever looked at it:
+    measured on the top-250 Recife venues, 55 of the 129 that have a website
+    publish an Instagram link on it.
+
+    A footer link is NOT automatically the venue's — real cases include the
+    agency that built the site, the franchise, and the shopping mall. So this
+    tier carries a deliberately low provenance weight and lets name similarity
+    decide; see plans/260730_venue-website-instagram-tier.md for the fit.
+
+    Bounded by construction. This fetches arbitrary third-party pages from
+    production during a 1,400-venue run, so it takes ONE request per venue, with
+    a timeout, a byte cap, and a redirect limit. Every failure is "no candidate".
+    """
+
+    DEFAULT_TIMEOUT = 10.0
+    DEFAULT_MAX_BYTES = 1_500_000
+    # A browser UA: some sites serve a stub or a 403 to unknown agents.
+    USER_AGENT = (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/122.0 Safari/537.36"
+    )
+
+    _LINK = re.compile(r'instagram\.com/([A-Za-z0-9_.]{2,30})', re.I)
+
+    def __init__(
+        self,
+        venue_dao,
+        *,
+        client=None,
+        timeout_seconds: float = DEFAULT_TIMEOUT,
+        max_bytes: int = DEFAULT_MAX_BYTES,
+    ):
+        self.venue_dao = venue_dao
+        self.timeout_seconds = timeout_seconds
+        self.max_bytes = max_bytes
+        self._client = client or httpx.AsyncClient(
+            follow_redirects=True, max_redirects=5
+        )
+
+    async def website_for(self, venue_id: str, venue=None) -> Optional[str]:
+        site = self._listed_website(venue_id)
+        if not site:
+            return None
+        # Already an Instagram url: the Google-listing tier owns it, and fetching
+        # instagram.com here would spend a request to learn nothing.
+        if "instagram.com" in site.lower():
+            return None
+        if not site.lower().startswith(("http://", "https://")):
+            site = "https://" + site
+
+        body = await self._fetch(venue_id, site)
+        if not body:
+            return None
+        return self._first_profile_link(body)
+
+    def _listed_website(self, venue_id: str) -> Optional[str]:
+        try:
+            vibe = self.venue_dao.get_vibe_attributes(venue_id)
+        except Exception as e:
+            logger.warning(f"[VenueWebsiteSource] vibe read failed for {venue_id}: {e}")
+            return None
+        return getattr(vibe, "website_uri", None) if vibe else None
+
+    async def _fetch(self, venue_id: str, url: str) -> Optional[str]:
+        try:
+            response = await self._client.get(
+                url,
+                headers={"User-Agent": self.USER_AGENT},
+                timeout=self.timeout_seconds,
+            )
+        except Exception as e:
+            # A dead domain, a TLS error, a redirect loop, a timeout. All of it is
+            # ordinary for third-party sites and none of it may fail the venue.
+            logger.debug(f"[VenueWebsiteSource] {venue_id} fetch failed ({url}): {e}")
+            return None
+
+        content_type = (response.headers.get("content-type") or "").lower()
+        if content_type and "html" not in content_type and "text" not in content_type:
+            return None
+        body = response.text or ""
+        if len(body) > self.max_bytes:
+            logger.debug(
+                f"[VenueWebsiteSource] {venue_id} body over cap "
+                f"({len(body)} > {self.max_bytes}); skipped"
+            )
+            return None
+        return body
+
+    def _first_profile_link(self, body: str) -> Optional[str]:
+        """The first Instagram link on the page that is actually a profile.
+
+        Returns the URL, not the handle: the cascade hands it to `extract_handle`,
+        which already rejects shims and non-profile paths for every free tier.
+        """
+        for match in self._LINK.finditer(body):
+            window = body[max(0, match.start() - 40):match.end()]
+            if "l.instagram.com" in window:
+                continue
+            handle = match.group(1).strip(".")
+            if not handle or handle.lower() in _NON_PROFILE_PATHS:
+                continue
+            return f"https://www.instagram.com/{handle}/"
+        return None
+
+    async def close(self) -> None:
+        await self._client.aclose()

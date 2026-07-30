@@ -265,6 +265,10 @@ class Settings(BaseSettings):
     instagram_enrichment_on_startup: bool = False
     instagram_min_confidence: float = 0.50
     instagram_auto_accept_threshold: float = 0.75
+    # The venue-website tier fetches arbitrary third-party pages during a
+    # full-catalogue run; both bounds exist so one hostile site cannot stall it.
+    instagram_website_timeout_seconds: float = 10.0
+    instagram_website_max_bytes: int = 1_500_000
     instagram_search_candidates: int = 3
     instagram_enrichment_limit: int = 0  # Max venues per run (0 = unlimited)
     instagram_cache_ttl_days: int = 30
