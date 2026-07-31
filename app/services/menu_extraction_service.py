@@ -52,7 +52,7 @@ class MenuExtractionService:
         openai_client: OpenAIMenuClient,
         s3_client: S3Client,
         venue_dao: RedisVenueDAO,
-        extraction_model: str = "gpt-4o",
+        extraction_model: str = "gpt-5.4-nano",
         photo_filter_enabled: bool = True,
         photo_filter_confidence: float = 0.6,
         media_store=None,

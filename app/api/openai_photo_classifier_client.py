@@ -46,7 +46,7 @@ from app.models.photo_taxonomy import (
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_MODEL = "gpt-4o-mini"
+DEFAULT_MODEL = "gpt-5.4-nano"
 
 
 def _prompt(with_attributes: bool = True) -> str:

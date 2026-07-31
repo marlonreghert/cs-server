@@ -416,7 +416,7 @@ class Settings(BaseSettings):
     # runs exactly as before, because classification is an enhancement and
     # never a dependency.
     photo_classification_enabled: bool = True
-    photo_classification_model: str = "gpt-4o-mini"
+    photo_classification_model: str = "gpt-5.4-nano"
     # Below this, a photo is filed as `other` rather than guessed. Matches the
     # menu filter's threshold: a wrong label is worse than an honest unknown,
     # because everything downstream will trust it.
@@ -438,15 +438,15 @@ class Settings(BaseSettings):
     # current card, which is why they are settings. The per-photo figure is now
     # only a fallback, for a client that cannot report token usage at all.
     photo_classification_cost_per_photo_usd: float = 0.00006
-    photo_classification_cost_per_1k_input_usd: float = 0.00015
-    photo_classification_cost_per_1k_output_usd: float = 0.0006
+    photo_classification_cost_per_1k_input_usd: float = 0.0002
+    photo_classification_cost_per_1k_output_usd: float = 0.00125
 
     # Menu Data Extraction (OpenAI GPT-4o-mini)
     openai_api_key: str = ""
     menu_extraction_enabled: bool = False
     menu_extraction_on_startup: bool = False
     menu_extraction_cron: str = "0 6 1 * *"  # Monthly: 1st at 6 AM
-    menu_extraction_model: str = "gpt-4o-mini"
+    menu_extraction_model: str = "gpt-5.4-nano"
     # Where extraction gets its photos. `archive` reads the newest run of the
     # retrieval pipeline — real Google "Menu" tab shots, already paid for —
     # instead of a second private copy. `redis` restores the original path
@@ -465,8 +465,8 @@ class Settings(BaseSettings):
     vibe_classifier_target_photos: int = 10         # Photos to send to Stage A
     vibe_classifier_escalation_threshold: float = 0.80  # Below this -> Stage B
     vibe_classifier_stage_b_photos: int = 5         # Photos for Stage B (highest relevance)
-    vibe_classifier_stage_a_model: str = "gpt-4o-mini"
-    vibe_classifier_stage_b_model: str = "gpt-4o"
+    vibe_classifier_stage_a_model: str = "gpt-5.4-nano"
+    vibe_classifier_stage_b_model: str = "gpt-5.4-mini"
     vibe_classifier_early_stop_enabled: bool = True
     vibe_classifier_early_stop_min_photos: int = 6
     vibe_classifier_early_stop_confidence: float = 0.92
