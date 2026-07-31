@@ -1175,7 +1175,8 @@ class VenuePhotoArchiveService:
 
     # ── re-deriving attributes over an archived run ──────────────────────────
     async def rederive_attributes(
-        self, source: str, *, venue_ids: Optional[list[str]] = None
+        self, source: str, *, venue_ids: Optional[list[str]] = None,
+        recategorize: bool = False,
     ) -> dict:
         """Attach attributes to an already-archived run, reading it back from S3.
 
@@ -1204,7 +1205,7 @@ class VenuePhotoArchiveService:
         for venue_id in targets:
             try:
                 summary["photos_attributed"] += await self._rederive_venue(
-                    prefix, venue_id
+                    prefix, venue_id, recategorize=recategorize
                 )
                 summary["venues"] += 1
             except Exception as e:  # noqa: BLE001 — one venue must not end the pass
@@ -1218,7 +1219,9 @@ class VenuePhotoArchiveService:
         )
         return summary
 
-    async def _rederive_venue(self, prefix: str, venue_id: str) -> int:
+    async def _rederive_venue(
+        self, prefix: str, venue_id: str, *, recategorize: bool = False
+    ) -> int:
         manifest = await self.media_store.read_manifest(prefix, venue_id)
         entries = (manifest or {}).get("photos") or []
         if not entries:
@@ -1236,7 +1239,7 @@ class VenuePhotoArchiveService:
             )
             return 0
         attributed = await self.photo_classifier.derive_for_archived(
-            signed_entries, signed
+            signed_entries, signed, recategorize=recategorize
         )
         manifest["photos"] = entries
         await self.media_store.put_manifest(

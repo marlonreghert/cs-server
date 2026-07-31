@@ -21,6 +21,7 @@ Modelled on `OpenAIMenuClient.classify_menu_photos`: same batching, same
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -30,6 +31,7 @@ from typing import Any, Optional
 from openai import AsyncOpenAI
 
 from app.metrics import (
+    PHOTO_CLASSIFICATION_FALLBACKS_TOTAL,
     OPENAI_API_CALLS_TOTAL,
     OPENAI_API_CALL_DURATION_SECONDS,
     OPENAI_TOKENS_TOTAL,
@@ -138,6 +140,12 @@ def _batched(items: list, size: int) -> list[list]:
 
 # One photo's verdict is ~150 output tokens measured on real runs; 250 leaves
 # room for the longest schema (crowd) plus the JSON scaffolding.
+# A batch failure is transient far more often than not, so it is retried before
+# its photos are written off. Kept small: the caller degrades gracefully, so the
+# cost of giving up is a stale category, not a lost photo.
+BATCH_MAX_ATTEMPTS = 3
+BATCH_RETRY_BASE_SECONDS = 2.0
+
 OUTPUT_TOKENS_PER_PHOTO = 250
 MIN_OUTPUT_TOKENS = 1024
 
@@ -194,7 +202,34 @@ class OpenAIPhotoClassifierClient:
         for batch in _batched(list(photo_urls), batch_size):
             # A failed batch yields empty verdicts for ITS photos only. One bad
             # batch must not cost a venue the photos in every other batch.
-            results = await self._one_batch(batch, prompt, model)
+            #
+            # It IS retried, though. A batch failure is transient in practice —
+            # a rate limit, a timeout, a truncated body — and retrying zero
+            # times is why a real 250-venue run came back only 41% classified:
+            # whole blocks of `batch_size` photos silently kept their source
+            # category, and nothing above this line could tell that from success.
+            results: list[dict] = []
+            for attempt in range(1, BATCH_MAX_ATTEMPTS + 1):
+                results = await self._one_batch(batch, prompt, model)
+                if results:
+                    if attempt > 1:
+                        logger.info(
+                            f"[PhotoClassifier] batch recovered on attempt {attempt}"
+                        )
+                    break
+                if attempt < BATCH_MAX_ATTEMPTS:
+                    await asyncio.sleep(BATCH_RETRY_BASE_SECONDS * attempt)
+            if not results:
+                # Now countable: an exhausted batch is a distinct outcome from a
+                # model that answered and simply had nothing to say.
+                PHOTO_CLASSIFICATION_FALLBACKS_TOTAL.labels(
+                    reason="batch_exhausted"
+                ).inc(len(batch))
+                logger.error(
+                    f"[PhotoClassifier] batch of {len(batch)} gave up after "
+                    f"{BATCH_MAX_ATTEMPTS} attempts; those photos keep their "
+                    f"source category"
+                )
             by_index = {r.get("index"): r for r in results if isinstance(r, dict)}
             out.extend(dict(by_index.get(i) or {}) for i in range(len(batch)))
         return out
