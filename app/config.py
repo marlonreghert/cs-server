@@ -289,7 +289,6 @@ class Settings(BaseSettings):
     # The judge settles candidates the cheap signals cannot. Opt-in: it is the
     # only part of the cascade that costs money per venue beyond the paid search.
     instagram_judge_enabled: bool = False
-    instagram_judge_model: str = "gpt-4o-mini"
     # Worth a fraction of a cent to settle. Deliberately BELOW instagram_min_confidence:
     # a paid-search candidate tops out at 0.60 while the probe is blocked, and the
     # paid tier is the only one reaching venues with no website at all.

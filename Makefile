@@ -77,6 +77,7 @@ test-unit:
 		tests/test_venue_website_source.py \
 		tests/test_venue_name_matching.py \
 		tests/test_judge_adjudication_band.py \
+		tests/test_container_judge_wiring.py \
 		-v
 
 test-integration:
