@@ -293,7 +293,7 @@ class Settings(BaseSettings):
     # a paid-search candidate tops out at 0.60 while the probe is blocked, and the
     # paid tier is the only one reaching venues with no website at all.
     instagram_judge_floor: float = 0.30
-    instagram_judge_model: str = "gpt-4o-mini"
+    instagram_judge_model: str = "gpt-5.4-mini"
     instagram_judge_max_venue_photos: int = 3
 
     # Pipeline run registry: how many recent runs per pipeline stay selectable

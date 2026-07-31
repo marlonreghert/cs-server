@@ -296,7 +296,7 @@ class OpenAIVibeClient:
                 model=model,
                 messages=[{"role": "user", "content": content}],
                 temperature=0.2,
-                max_tokens=3072,
+                max_completion_tokens=3072,
                 response_format={"type": "json_object"},
             )
 
@@ -383,7 +383,7 @@ class OpenAIVibeClient:
                 model=model,
                 messages=[{"role": "user", "content": content}],
                 temperature=0.1,
-                max_tokens=3072,
+                max_completion_tokens=3072,
                 response_format={"type": "json_object"},
             )
 

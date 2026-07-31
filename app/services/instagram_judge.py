@@ -84,7 +84,7 @@ _IMAGE_NOTES = {
 class InstagramJudge:
     """Wraps an OpenAI-compatible client. Never raises into the cascade."""
 
-    def __init__(self, openai_client, *, model: str = "gpt-4o-mini", max_photos: int = 3):
+    def __init__(self, openai_client, *, model: str = "gpt-5.4-mini", max_photos: int = 3):
         self.client = openai_client
         self.model = model
         self.max_photos = max_photos

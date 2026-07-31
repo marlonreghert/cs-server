@@ -94,7 +94,7 @@ class OpenAIMenuClient:
                 model=self.model,
                 messages=[{"role": "user", "content": content}],
                 temperature=0.1,
-                max_tokens=4096,
+                max_completion_tokens=4096,
                 response_format={"type": "json_object"},
             )
 
@@ -219,7 +219,7 @@ class OpenAIMenuClient:
                 model=model,
                 messages=[{"role": "user", "content": content}],
                 temperature=0.1,
-                max_tokens=1024,
+                max_completion_tokens=1024,
                 response_format={"type": "json_object"},
             )
 

@@ -143,7 +143,7 @@ MIN_OUTPUT_TOKENS = 1024
 
 
 def _output_budget(photo_count: int) -> int:
-    """`max_tokens` scaled to the batch, because a fixed cap silently truncates.
+    """`max_completion_tokens` scaled to the batch, because a fixed cap silently truncates.
 
     This was a flat 2048, which is fine for a batch of 10 and catastrophic for a
     batch of 20: the response stops mid-string, the JSON will not parse, and the
@@ -216,7 +216,7 @@ class OpenAIPhotoClassifierClient:
                 model=model or self.model,
                 messages=[{"role": "user", "content": content}],
                 temperature=0.1,
-                max_tokens=_output_budget(len(urls)),
+                max_completion_tokens=_output_budget(len(urls)),
                 response_format={"type": "json_object"},
             )
             duration = time.perf_counter() - started
