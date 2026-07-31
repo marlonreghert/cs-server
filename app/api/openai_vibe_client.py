@@ -249,7 +249,7 @@ class OpenAIVibeClient:
         photo_urls: list[str],
         venue_name: str = "",
         venue_type: str = "",
-        model: str = "gpt-4o-mini",
+        model: str = "gpt-5.4-nano",
         instagram_bio: str = "",
         instagram_posts: list[str] | None = None,
         google_reviews: list[dict] | None = None,
@@ -296,7 +296,7 @@ class OpenAIVibeClient:
                 model=model,
                 messages=[{"role": "user", "content": content}],
                 temperature=0.2,
-                max_tokens=3072,
+                max_completion_tokens=3072,
                 response_format={"type": "json_object"},
             )
 
@@ -326,7 +326,7 @@ class OpenAIVibeClient:
         stage_a_result: dict,
         uncertain_facets: list[str],
         venue_name: str = "",
-        model: str = "gpt-4o",
+        model: str = "gpt-5.4-mini",
         instagram_bio: str = "",
         instagram_posts: list[str] | None = None,
         google_reviews: list[dict] | None = None,
@@ -383,7 +383,7 @@ class OpenAIVibeClient:
                 model=model,
                 messages=[{"role": "user", "content": content}],
                 temperature=0.1,
-                max_tokens=3072,
+                max_completion_tokens=3072,
                 response_format={"type": "json_object"},
             )
 

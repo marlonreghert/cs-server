@@ -71,7 +71,7 @@ class VenueVibeProfile(BaseModel):
     # ── Pipeline Metadata ──
     stage_b_triggered: bool = False
     uncertainty_reasons: list[str] = []
-    classification_trace: list[str] = []  # e.g. ["gpt-4o-mini:stage_a", "gpt-4o:stage_b"]
+    classification_trace: list[str] = []  # e.g. ["gpt-5.4-nano:stage_a", "gpt-5.4-mini:stage_b"]
     classified_at: datetime = Field(default_factory=datetime.utcnow)
 
     def has_profile(self) -> bool:

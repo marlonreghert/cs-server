@@ -54,8 +54,8 @@ class VibeClassifierService:
         early_stop_enabled: bool = True,
         early_stop_min_photos: int = 6,
         early_stop_confidence: float = 0.92,
-        stage_a_model: str = "gpt-4o-mini",
-        stage_b_model: str = "gpt-4o",
+        stage_a_model: str = "gpt-5.4-nano",
+        stage_b_model: str = "gpt-5.4-mini",
         priority_venues: list[str] | None = None,
     ):
         self.openai_client = openai_vibe_client

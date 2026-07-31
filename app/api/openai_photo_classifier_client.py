@@ -46,7 +46,7 @@ from app.models.photo_taxonomy import (
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_MODEL = "gpt-4o-mini"
+DEFAULT_MODEL = "gpt-5.4-nano"
 
 
 def _prompt(with_attributes: bool = True) -> str:
@@ -143,7 +143,7 @@ MIN_OUTPUT_TOKENS = 1024
 
 
 def _output_budget(photo_count: int) -> int:
-    """`max_tokens` scaled to the batch, because a fixed cap silently truncates.
+    """`max_completion_tokens` scaled to the batch, because a fixed cap silently truncates.
 
     This was a flat 2048, which is fine for a batch of 10 and catastrophic for a
     batch of 20: the response stops mid-string, the JSON will not parse, and the
@@ -216,7 +216,7 @@ class OpenAIPhotoClassifierClient:
                 model=model or self.model,
                 messages=[{"role": "user", "content": content}],
                 temperature=0.1,
-                max_tokens=_output_budget(len(urls)),
+                max_completion_tokens=_output_budget(len(urls)),
                 response_format={"type": "json_object"},
             )
             duration = time.perf_counter() - started

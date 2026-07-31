@@ -61,7 +61,7 @@ If none of the images contain menu data, return an empty menu_sections array.
 class OpenAIMenuClient:
     """Async client for OpenAI GPT-4o menu extraction."""
 
-    def __init__(self, api_key: str, model: str = "gpt-4o"):
+    def __init__(self, api_key: str, model: str = "gpt-5.4-nano"):
         self.model = model
         self.client = AsyncOpenAI(api_key=api_key)
 
@@ -94,7 +94,7 @@ class OpenAIMenuClient:
                 model=self.model,
                 messages=[{"role": "user", "content": content}],
                 temperature=0.1,
-                max_tokens=4096,
+                max_completion_tokens=4096,
                 response_format={"type": "json_object"},
             )
 
@@ -169,7 +169,7 @@ class OpenAIMenuClient:
     async def classify_menu_photos(
         self,
         photo_urls: list[str],
-        model: str = "gpt-4o-mini",
+        model: str = "gpt-5.4-nano",
         confidence_threshold: float = 0.6,
     ) -> list[int]:
         """Classify which photos are menus using GPT-4o-mini vision.
@@ -219,7 +219,7 @@ class OpenAIMenuClient:
                 model=model,
                 messages=[{"role": "user", "content": content}],
                 temperature=0.1,
-                max_tokens=1024,
+                max_completion_tokens=1024,
                 response_format={"type": "json_object"},
             )
 

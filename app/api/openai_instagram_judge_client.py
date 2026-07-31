@@ -62,7 +62,7 @@ class OpenAIInstagramJudgeClient:
                 model=model,
                 messages=[{"role": "user", "content": content}],
                 response_format={"type": "json_object"},
-                max_tokens=200,
+                max_completion_tokens=200,
                 temperature=0,
             )
             status = "success"

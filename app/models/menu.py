@@ -57,6 +57,6 @@ class VenueMenuData(BaseModel):
     sections: list[MenuSection] = []
     currency_detected: Optional[str] = None
     source_photo_ids: list[str] = []
-    extraction_model: str = "gpt-4o"
+    extraction_model: str = "gpt-5.4-nano"
     extracted_at: datetime = Field(default_factory=datetime.utcnow)
     raw_response: Optional[str] = None   # Raw GPT output for debugging
