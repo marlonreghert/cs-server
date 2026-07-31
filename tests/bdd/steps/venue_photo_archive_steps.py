@@ -44,11 +44,12 @@ class _FakeS3:
         return {}
 
     def get_object(self, Bucket=None, Key=None, **kw):
-        # Only the JSON sidecars are ever read back — the writer role's
-        # GetObject grant is scoped to `retrieved/*` for exactly that.
+        # The JSON sidecars AND the images are read back: a re-derive hands the
+        # model the stored bytes inline rather than a url it must fetch itself.
         if Key not in self.objects:
             raise KeyError(Key)
-        return {"Body": io.BytesIO(self.objects[Key])}
+        content_type = "image/jpeg" if Key.endswith(".jpg") else "application/json"
+        return {"Body": io.BytesIO(self.objects[Key]), "ContentType": content_type}
 
     def generate_presigned_url(self, operation, Params=None, ExpiresIn=None, **kw):
         return f"https://presigned.example/{(Params or {}).get('Key')}"

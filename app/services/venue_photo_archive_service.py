@@ -1228,13 +1228,17 @@ class VenuePhotoArchiveService:
             return 0
         signed, signed_entries = [], []
         for entry in entries:
-            url = await self.media_store.presign(entry.get("key"))
+            # Inlined rather than presigned: see read_image_data_uri. A presigned
+            # url built from the instance role's temporary credentials is ~1,900
+            # chars and OpenAI refuses it, so a re-derive silently classified
+            # nothing while reporting success.
+            url = await self.media_store.read_image_data_uri(entry.get("key"))
             if url:
                 signed.append(url)
                 signed_entries.append(entry)
         if not signed:
             logger.error(
-                f"[VenuePhotoArchive] could not sign any archived photo for "
+                f"[VenuePhotoArchive] could not read any archived photo for "
                 f"{venue_id}; check s3:GetObject on retrieved/* for this role"
             )
             return 0
