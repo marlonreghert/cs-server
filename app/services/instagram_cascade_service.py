@@ -14,7 +14,9 @@ from __future__ import annotations
 
 import difflib
 import logging
+import re
 import time
+import unicodedata
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
@@ -97,6 +99,62 @@ def handle_as_words(handle: Optional[str]) -> Optional[str]:
     return handle.replace(".", " ").replace("_", " ").strip() or None
 
 
+# Words that appear in a venue's Google name and never in its handle: what it
+# sells, and where it is. Fitted to this catalogue (Brazilian venue categories,
+# Recife localities) — a heuristic list, not a general solution, and it will need
+# extending when the product leaves Recife.
+_GENERIC_NAME_WORDS = frozenset({
+    "restaurante", "restaurant", "pizzaria", "bar", "cafe", "cafeteria", "boteco",
+    "botequim", "lounge", "pub", "club", "clube", "churrascaria", "trattoria",
+    "bistro", "bistr", "gastrobar", "burguer", "burger", "lanches", "sushi",
+    "self", "service", "oficial", "academia", "shopping", "teatro",
+    "recife", "boaviagem", "riomar", "marcozero", "gracas", "pina", "olinda",
+    "pernambuco", "pe", "brasil", "brazil", "do", "da", "de", "e", "o", "a",
+})
+
+# Locality names are PHRASES, so they have to go before tokenising — "boa" and
+# "viagem" are only noise together.
+_GENERIC_NAME_PHRASES = (
+    "boa viagem", "marco zero", "rio mar", "santo antonio", "casa forte",
+    "jardim paulista", "zona sul", "zona norte",
+)
+
+# Below this, a "core" is too generic for containment to mean anything.
+_MIN_CORE_FOR_CONTAINMENT = 5
+# Containment must mean "this handle IS the venue's name", not merely "this
+# handle mentions it". Without this the core `bercy` matches `@bercyvillage` at
+# 0.95 and auto-accepts, when that pair is the measured AMBIGUOUS case the judge
+# exists to settle. The measured true matches all sit at 0.53 or above
+# (`atlantico`/`pizzariaatlantico`); `bercy`/`bercyvillage` sits at 0.42.
+_MIN_CONTAINMENT_COVERAGE = 0.5
+
+
+def _fold(value: Optional[str]) -> str:
+    """Lowercase, strip accents, drop everything that is not a letter or digit.
+    A handle cannot carry accents, spaces or punctuation, so neither should the
+    thing it is compared against."""
+    if not value:
+        return ""
+    decomposed = unicodedata.normalize("NFKD", value)
+    ascii_only = decomposed.encode("ascii", "ignore").decode()
+    return re.sub(r"[^a-z0-9]+", "", ascii_only.lower())
+
+
+def venue_core(name: Optional[str]) -> str:
+    """A venue's distinctive part: its name minus what it sells and where it is.
+
+    `Bode do No Boa Viagem - Restaurante` -> `bodeno`. Character-ratio similarity
+    punishes those extra words hardest on the LONGEST names, which are exactly
+    the prominent venues worth finding.
+    """
+    stripped = (name or "").lower()
+    for phrase in _GENERIC_NAME_PHRASES:
+        stripped = stripped.replace(phrase, " ")
+    tokens = re.split(r"[\s\-|,/]+", stripped)
+    kept = [t for t in (_fold(tok) for tok in tokens) if t and t not in _GENERIC_NAME_WORDS]
+    return "".join(kept) or _fold(name)
+
+
 def name_similarity(
     venue_name: Optional[str],
     display_name: Optional[str],
@@ -107,16 +165,45 @@ def name_similarity(
     Falls back to the HANDLE when no display name is available. That is the
     common case in production, not an edge case: Instagram blocks the datacenter
     IP, so the probe returns no display name for anything, and the comparison
-    used to score 0.0 while the handle sat unused. Measured on real venues the
-    fallback separates cleanly — `Entre Amigos O Bode` vs `@entreamigosobode`
-    scores 0.914.
+    used to score 0.0 while the handle sat unused.
+
+    Takes the BEST of three comparisons, so it can only ever add evidence:
+    the folded full name, the folded distinctive core, and containment. Measured
+    rejections this recovers, each of which had already found the right link —
+    `Restaurante Parraxaxa Boa Viagem` vs `@parraxaxaoficial` (0.44 -> match),
+    `Bode do No Boa Viagem - Restaurante` vs `@bodedono` (0.37 -> match).
+
+    Containment is deliberately generous. A venue whose core is a common word
+    could match an unrelated business using it; the minimum length blunts that,
+    and provenance bounds the damage, since the candidate still had to appear on
+    the venue's own website or its own Google listing.
     """
     other = display_name or handle_as_words(handle)
     if not venue_name or not other:
         return 0.0
-    return difflib.SequenceMatcher(
+
+    plain = difflib.SequenceMatcher(
         None, venue_name.strip().lower(), other.strip().lower()
     ).ratio()
+
+    folded_venue, folded_other = _fold(venue_name), _fold(other)
+    if not folded_venue or not folded_other:
+        return plain
+
+    core = venue_core(venue_name)
+    if len(core) >= _MIN_CORE_FOR_CONTAINMENT and (
+        core in folded_other or folded_other in core
+    ):
+        longer = max(len(core), len(folded_other))
+        coverage = min(len(core), len(folded_other)) / longer if longer else 0.0
+        if coverage >= _MIN_CONTAINMENT_COVERAGE:
+            return max(plain, 0.95)
+
+    return max(
+        plain,
+        difflib.SequenceMatcher(None, folded_venue, folded_other).ratio(),
+        difflib.SequenceMatcher(None, core, folded_other).ratio() if core else 0.0,
+    )
 
 
 class InstagramCascadeService:
