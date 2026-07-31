@@ -254,7 +254,9 @@ class PhotoClassificationService:
         return bool(known)
 
     # ── the backfill path ────────────────────────────────────────────────────
-    async def derive_for_archived(self, entries: list[dict], urls: list[str]) -> int:
+    async def derive_for_archived(
+        self, entries: list[dict], urls: list[str], *, recategorize: bool = False
+    ) -> int:
         """Re-classify already-archived photos from their stored copies.
 
         Same single call, reading presigned S3 urls instead of provider links —
@@ -270,10 +272,17 @@ class PhotoClassificationService:
         """
         staged = [dict(entry, url=url) for entry, url in zip(entries, urls)]
         stats = await self.annotate(
-            staged, recategorize=False, venue_id="(archived)"
+            staged, recategorize=recategorize, venue_id="(archived)"
         )
+        fields = ["quality", "attributes", "people", "likely_authorship"]
+        if recategorize:
+            # Only for photos the classifier never reached: a live-path failure
+            # leaves `category` equal to `source_category`, and those entries
+            # carry no classifier fields at all. Rewriting a category that was
+            # already decided would be churn, not repair.
+            fields += ["category", "classification_confidence"]
         for entry, photo in zip(entries, staged):
-            for field in ("quality", "attributes", "people", "likely_authorship"):
+            for field in fields:
                 if photo.get(field) is not None:
                     entry[field] = photo[field]
-        return stats["attributed"]
+        return stats["attributed"] if not recategorize else stats["classified"]
