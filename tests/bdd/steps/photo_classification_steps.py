@@ -525,14 +525,15 @@ def _register_for_stored_copies(context, verdict):
     """Program the model's answer for the STORED copies, not the provider link.
 
     A re-derive pass never sees the provider url again — that is the point of it
-    — so the second answer is registered against the presigned S3 url the
-    pipeline will actually send.
+    — so the second answer is registered against the `data:` URI the pipeline
+    actually sends. It inlines the stored bytes rather than presigning, because
+    a presigned url built from temporary credentials is ~1,900 chars and the
+    vision API rejects it outright.
     """
+    import base64
     for key in _image_keys(context, context.venue_id):
-        signed = context.fake_s3.generate_presigned_url(
-            "get_object", Params={"Key": key}
-        )
-        context.classifier_client.verdicts[signed] = verdict
+        payload = base64.b64encode(context.fake_s3.objects[key]).decode("ascii")
+        context.classifier_client.verdicts[f"data:image/jpeg;base64,{payload}"] = verdict
 
 
 @given("the attribute schema gains a field the model can read from them")
@@ -758,7 +759,11 @@ def step_read_from_bucket(context):
     calls = context.classifier_client.classify_calls
     assert calls, "no pass ran over the archived run"
     urls = [u for batch in calls for u in batch]
-    assert all("presigned" in u for u in urls), urls
+    # Inlined bytes, not a url the model has to go and fetch — and therefore
+    # carrying no credentials off to a third party.
+    assert all(u.startswith("data:image/") for u in urls), [u[:40] for u in urls]
+    for marker in ("AWSAccessKeyId", "x-amz-security-token", "Signature"):
+        assert not any(marker in u for u in urls), f"{marker} leaked into the payload"
 
 
 @then("no provider request is made")

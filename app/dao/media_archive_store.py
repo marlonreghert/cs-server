@@ -24,6 +24,7 @@ can never read archived content back.
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import logging
 from typing import Any, Optional
@@ -251,6 +252,33 @@ class MediaArchiveStore:
             return json.loads(response["Body"].read())
         except Exception as e:
             logger.warning(f"[MediaArchiveStore] manifest read failed for {key}: {e}")
+            return None
+
+    async def read_image_data_uri(self, key: str) -> Optional[str]:
+        """One archived image as a `data:` URI, or None.
+
+        The alternative to `presign` for handing an archived photo to a vision
+        model, and the one that actually works here. A presigned url signed with
+        the instance role's TEMPORARY credentials carries the whole STS session
+        token in its query string — ~1,900 characters — and OpenAI rejects it
+        with `invalid_image_url` even though the url fetches fine (200,
+        image/jpeg) from inside the VPC. Inlining the bytes removes the third
+        party's fetch from the path entirely: no url length limit, no egress
+        from a private bucket, and nothing expiring mid-run.
+
+        Returns None rather than raising: one unreadable photo must not cost the
+        venue its others.
+        """
+        try:
+            response = await asyncio.to_thread(
+                self._s3.get_object, Bucket=self.bucket, Key=key
+            )
+            body = response["Body"].read()
+            content_type = response.get("ContentType") or "image/jpeg"
+            encoded = base64.b64encode(body).decode("ascii")
+            return f"data:{content_type};base64,{encoded}"
+        except Exception as e:
+            logger.warning(f"[MediaArchiveStore] image read failed for {key}: {e}")
             return None
 
     async def presign(self, key: str, expires_in: int = 900) -> Optional[str]:
