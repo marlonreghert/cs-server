@@ -76,6 +76,7 @@ test-unit:
 		tests/test_cascade_scoring_without_probe.py \
 		tests/test_venue_website_source.py \
 		tests/test_venue_name_matching.py \
+		tests/test_judge_adjudication_band.py \
 		-v
 
 test-integration:

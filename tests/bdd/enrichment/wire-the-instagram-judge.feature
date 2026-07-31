@@ -1,4 +1,3 @@
-@wip
 Feature: Settle ambiguous Instagram candidates with a judge
   As the operator of the Instagram handle pipeline
   I want a judge consulted when the cheap signals cannot decide

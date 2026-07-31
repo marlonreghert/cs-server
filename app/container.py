@@ -46,6 +46,33 @@ class Container:
     Initializes and wires up all application dependencies.
     """
 
+
+    def _build_instagram_judge(self):
+        """The judge, or None. Opt-in and dependency-aware, like every other
+        optional enrichment path: no key or not enabled means the cascade runs
+        exactly as before rather than failing to start."""
+        from app.services.instagram_judge import InstagramJudge
+
+        if not settings.instagram_judge_enabled:
+            logger.info("[Container] Instagram judge disabled")
+            return None
+        if not settings.openai_api_key:
+            logger.warning(
+                "[Container] Instagram judge enabled but no OpenAI key is "
+                "configured; ambiguous candidates will go unadjudicated"
+            )
+            return None
+        from app.api.openai_instagram_judge_client import OpenAIInstagramJudgeClient
+
+        logger.info(
+            f"[Container] Instagram judge initialized (model="
+            f"{settings.instagram_judge_model})"
+        )
+        return InstagramJudge(
+            OpenAIInstagramJudgeClient(settings.openai_api_key),
+            model=settings.instagram_judge_model,
+        )
+
     def __init__(self, settings: Settings):
         """Initialize container with all dependencies.
 
@@ -334,10 +361,11 @@ class Container:
                         candidates=settings.instagram_search_candidates,
                     ),
                     probe=probe,
-                    judge=None,  # opt-in; wired when a judge client is configured
+                    judge=self._build_instagram_judge(),
                     photo_archive=ArchivedVenuePhotoSource(self.media_archive_store),
                     accept_threshold=settings.instagram_auto_accept_threshold,
                     ambiguous_low=settings.instagram_min_confidence,
+                    judge_floor=settings.instagram_judge_floor,
                 )
                 logger.info("[Container] Instagram handle cascade initialized")
         else:
