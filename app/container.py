@@ -53,10 +53,10 @@ class Container:
         exactly as before rather than failing to start."""
         from app.services.instagram_judge import InstagramJudge
 
-        if not settings.instagram_judge_enabled:
+        if not self.settings.instagram_judge_enabled:
             logger.info("[Container] Instagram judge disabled")
             return None
-        if not settings.openai_api_key:
+        if not self.settings.openai_api_key:
             logger.warning(
                 "[Container] Instagram judge enabled but no OpenAI key is "
                 "configured; ambiguous candidates will go unadjudicated"
@@ -66,11 +66,12 @@ class Container:
 
         logger.info(
             f"[Container] Instagram judge initialized (model="
-            f"{settings.instagram_judge_model})"
+            f"{self.settings.instagram_judge_model})"
         )
         return InstagramJudge(
-            OpenAIInstagramJudgeClient(settings.openai_api_key),
-            model=settings.instagram_judge_model,
+            OpenAIInstagramJudgeClient(self.settings.openai_api_key),
+            model=self.settings.instagram_judge_model,
+            max_photos=self.settings.instagram_judge_max_venue_photos,
         )
 
     def __init__(self, settings: Settings):
