@@ -1,4 +1,3 @@
-@wip
 Feature: Match venue names the way venues name themselves
   As the operator of the Instagram handle pipeline
   I want a name check that tolerates prefixes, suffixes and accents
