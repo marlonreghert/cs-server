@@ -70,6 +70,13 @@ NAME_WEIGHT = 0.40
 
 DEFAULT_ACCEPT = 0.75
 DEFAULT_AMBIGUOUS_LOW = 0.50
+# The judge floor is NOT ambiguous_low. `ambiguous_low` means "good enough to
+# store as a weak result"; this means "worth a fraction of a cent to settle".
+# They must differ, because a paid-search candidate maxes out at 0.60 while the
+# probe is blocked (0.20 provenance + 0.40 x a perfect name match) and would
+# otherwise be discarded unseen — and the paid tier is the ONLY one that reaches
+# the venues with no website at all.
+DEFAULT_JUDGE_FLOOR = 0.30
 
 
 @dataclass
@@ -220,6 +227,7 @@ class InstagramCascadeService:
         photo_archive=None,
         accept_threshold: float = DEFAULT_ACCEPT,
         ambiguous_low: float = DEFAULT_AMBIGUOUS_LOW,
+        judge_floor: float = DEFAULT_JUDGE_FLOOR,
     ):
         self.venue_dao = venue_dao
         self.google_listing = google_listing
@@ -231,6 +239,7 @@ class InstagramCascadeService:
         self.photo_archive = photo_archive
         self.accept_threshold = accept_threshold
         self.ambiguous_low = ambiguous_low
+        self.judge_floor = judge_floor
 
     # ── sources ──────────────────────────────────────────────────────────────
     async def _candidates_from(self, source: str, venue_id: str, venue, result: CascadeResult):
@@ -365,7 +374,7 @@ class InstagramCascadeService:
                 if probe_result is not None and probe_result.existence == EXIST_ABSENT:
                     # Verified NOT to exist — never accept, keep looking.
                     continue
-                if self.ambiguous_low <= confidence < bar:
+                if self._should_adjudicate(confidence, bar, config):
                     cand = await self._adjudicate(cand, venue, probe_result)
                 if best is None or cand.confidence > best.confidence:
                     best = cand
@@ -389,6 +398,18 @@ class InstagramCascadeService:
         probe_result = await self.probe.fetch(handle)
         INSTAGRAM_PROFILE_PROBE_TOTAL.labels(result=probe_result.existence).inc()
         return probe_result
+
+    def _should_adjudicate(self, confidence: float, bar: float, config: dict) -> bool:
+        """Worth asking the judge about?
+
+        Not if it is already decided — above the bar it is accepted, and a
+        confirmed-absent profile never reaches here. Not if the operator turned
+        the judge off for this run. Otherwise: anything from the floor up to the
+        bar, which is where the cheap signals genuinely cannot tell.
+        """
+        if config.get("judge_enabled") is False:
+            return False
+        return self.judge_floor <= confidence < bar
 
     async def _adjudicate(self, cand: CascadeResult, venue, probe_result) -> CascadeResult:
         if self.judge is None:
