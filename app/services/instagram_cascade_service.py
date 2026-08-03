@@ -35,6 +35,7 @@ from app.services.instagram_handle_sources import (
     SOURCE_APIFY_SEARCH,
     SOURCE_ARCHIVED_GMAPS,
     SOURCE_GOOGLE_WEBSITE,
+    SOURCE_GOOGLE_SEARCH,
     SOURCE_ORDER,
     SOURCE_VENUE_WEBSITE,
     extract_handle,
@@ -58,6 +59,14 @@ PROVENANCE_WEIGHT = {
     # plans/260730_venue-website-instagram-tier.md.
     SOURCE_VENUE_WEBSITE: 0.40,
     SOURCE_APIFY_SEARCH: 0.20,
+    # A web-search hit is a GUESS, and this is the arithmetic that makes it safe:
+    # 0.20 + NAME_WEIGHT (0.40) = 0.60, which is BELOW the production bar of 0.65
+    # (0.8 accept minus the existence bonus that cannot be collected while
+    # Instagram blocks the datacenter IP). So a google_search candidate cannot
+    # reach the bar at ANY name similarity, however perfect — the judge is the
+    # only path to acceptance. Raising this above 0.25 breaks that guarantee and
+    # would let a search result name a venue's account on its own.
+    SOURCE_GOOGLE_SEARCH: 0.20,
 }
 
 EXISTENCE_BONUS = 0.15
@@ -221,6 +230,7 @@ class InstagramCascadeService:
         google_listing=None,
         archive=None,
         venue_website=None,
+        google_search=None,
         paid_search=None,
         probe=None,
         judge=None,
@@ -233,6 +243,7 @@ class InstagramCascadeService:
         self.google_listing = google_listing
         self.archive = archive
         self.venue_website = venue_website
+        self.google_search = google_search
         self.paid_search = paid_search
         self.probe = probe
         self.judge = judge
@@ -265,6 +276,7 @@ class InstagramCascadeService:
             SOURCE_GOOGLE_WEBSITE: self.google_listing,
             SOURCE_ARCHIVED_GMAPS: self.archive,
             SOURCE_VENUE_WEBSITE: self.venue_website,
+            SOURCE_GOOGLE_SEARCH: self.google_search,
         }.get(source)
         if reader is None:
             result.tier_unavailable.append(source)

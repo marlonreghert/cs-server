@@ -25,6 +25,9 @@ SOURCE_APIFY_SEARCH = "apify_search"
 # The venue's OWN website, fetched and read for an Instagram link. Free (one HTTP
 # request), and the last free source before anything bills.
 SOURCE_VENUE_WEBSITE = "venue_website"
+# Last resort: what Google surfaces for the venue. Paid, and a GUESS — it can
+# never clear the accept bar without the judge (see PROVENANCE_WEIGHT).
+SOURCE_GOOGLE_SEARCH = "google_search"
 
 # Cheapest first. The paid source is last on purpose.
 # Cheapest first, and every free source is exhausted before the paid one.
@@ -33,9 +36,10 @@ SOURCE_ORDER = (
     SOURCE_ARCHIVED_GMAPS,
     SOURCE_VENUE_WEBSITE,
     SOURCE_APIFY_SEARCH,
+    SOURCE_GOOGLE_SEARCH,
 )
 
-PAID_SOURCES = frozenset({SOURCE_APIFY_SEARCH})
+PAID_SOURCES = frozenset({SOURCE_APIFY_SEARCH, SOURCE_GOOGLE_SEARCH})
 
 # Instagram's own outbound link wrapper. Anything behind it is a THIRD PARTY
 # site, not the profile — treating it as a handle yields `?u=https%3A%2F%2F…`.
