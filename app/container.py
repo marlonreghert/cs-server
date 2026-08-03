@@ -47,6 +47,30 @@ class Container:
     """
 
 
+    def _build_google_search_source(self):
+        """The Google-search tier, or None. Opt-in and dependency-aware."""
+        if not self.settings.instagram_google_search_enabled:
+            return None
+        if not self.settings.apify_api_token:
+            logger.warning(
+                "[Container] Google search tier enabled but no Apify token; "
+                "venues with no web presence stay unreachable"
+            )
+            return None
+        from app.api.apify_google_search_client import ApifyGoogleSearchClient
+        from app.services.instagram_cascade_adapters import GoogleSearchInstagramSource
+
+        logger.info("[Container] Instagram Google-search tier initialized")
+        return GoogleSearchInstagramSource(
+            self.pipeline_repository,
+            search_client=ApifyGoogleSearchClient(
+                self.settings.apify_api_token,
+                actor=self.settings.instagram_google_search_actor,
+                country_code=self.settings.instagram_google_search_country,
+            ),
+            results=self.settings.instagram_google_search_results,
+        )
+
     def _build_instagram_judge(self):
         """The judge, or None. Opt-in and dependency-aware, like every other
         optional enrichment path: no key or not enabled means the cascade runs
@@ -350,6 +374,7 @@ class Container:
                 self.instagram_cascade_service = InstagramCascadeService(
                     venue_dao=self.pipeline_repository,
                     google_listing=GoogleListingWebsiteSource(self.pipeline_repository),
+                    google_search=self._build_google_search_source(),
                     venue_website=VenueWebsiteScrapeSource(
                         self.pipeline_repository,
                         timeout_seconds=settings.instagram_website_timeout_seconds,

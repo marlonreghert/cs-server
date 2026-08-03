@@ -1,4 +1,3 @@
-@wip
 Feature: Find the Instagram handle through Google, and never trust it alone
   As the operator of the Instagram handle pipeline
   I want venues with no web presence found through search, but always adjudicated

@@ -15,6 +15,8 @@ import httpx
 from app.services.archive_sources import SOURCE_APIFY_GMAPS
 
 # Paths that look like a handle in a url but are not one.
+_IG_LINK = re.compile(r"instagram\.com/([A-Za-z0-9_.]{2,30})", re.I)
+
 _NON_PROFILE_PATHS = frozenset(
     {"p", "reel", "reels", "explore", "stories", "tv", "accounts", "about",
      "legal", "privacy", "developer", "directory"}
@@ -234,3 +236,76 @@ class VenueWebsiteScrapeSource:
 
     async def close(self) -> None:
         await self._client.aclose()
+
+
+class GoogleSearchInstagramSource:
+    """The Instagram profile Google surfaces for a venue.
+
+    The last resort, and the only source that reaches a venue with no web
+    presence at all: 191 Recife venues have no website, so every earlier tier has
+    nothing to read, and Instagram's own user search does not surface them.
+
+    A search result is a GUESS. Provenance is set so this tier can never clear
+    the accept bar on its own — see PROVENANCE_WEIGHT in
+    instagram_cascade_service.py — so a handle from here is only ever accepted
+    after the judge confirms it. Two of the first five real results were
+    plausible but wrong-looking (a public square, a monastery in a different
+    city), which is exactly why.
+    """
+
+    def __init__(self, venue_dao, *, search_client, results: int = 10):
+        self.venue_dao = venue_dao
+        self.search_client = search_client
+        self.results = results
+
+    async def website_for(self, venue_id: str, venue=None) -> Optional[str]:
+        name = getattr(venue, "venue_name", None)
+        if not name:
+            return None
+        query = self._query(venue, name)
+        try:
+            items = await self.search_client.search(query, results=self.results)
+        except Exception as e:
+            # A failed actor run, a timeout, a quota error. Ordinary, and none of
+            # it may fail the venue.
+            logger.warning(f"[GoogleSearchSource] search failed for {venue_id}: {e}")
+            return None
+        return self._first_profile_link(items)
+
+    def _query(self, venue, name: str) -> str:
+        """Name, place, and the word that makes Google surface the profile.
+
+        The neighbourhood is what separates venues sharing a name — Recife has
+        several — so it is included whenever the address carries one.
+        """
+        where = getattr(venue, "neighborhood", None) or getattr(venue, "city", None)
+        parts = [name, where or "Recife", "instagram"]
+        return " ".join(str(p) for p in parts if p)
+
+    def _first_profile_link(self, items) -> Optional[str]:
+        for item in items or []:
+            for value in self._strings(item):
+                match = _IG_LINK.search(value)
+                if not match:
+                    continue
+                window = value[max(0, match.start() - 40):match.end()]
+                if "l.instagram.com" in window:
+                    continue
+                handle = match.group(1).strip(".")
+                if not handle or handle.lower() in _NON_PROFILE_PATHS:
+                    continue
+                return f"https://www.instagram.com/{handle}/"
+        return None
+
+    @staticmethod
+    def _strings(item):
+        """Every string in a result row: the handle can be in the url, the title
+        or the snippet, and which one varies by how Google rendered it."""
+        if isinstance(item, str):
+            yield item
+        elif isinstance(item, dict):
+            for value in item.values():
+                yield from GoogleSearchInstagramSource._strings(value)
+        elif isinstance(item, (list, tuple)):
+            for value in item:
+                yield from GoogleSearchInstagramSource._strings(value)

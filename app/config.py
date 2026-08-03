@@ -293,6 +293,13 @@ class Settings(BaseSettings):
     # a paid-search candidate tops out at 0.60 while the probe is blocked, and the
     # paid tier is the only one reaching venues with no website at all.
     instagram_judge_floor: float = 0.30
+    # Google-search tier: the only source that reaches a venue with no web
+    # presence. Paid per venue, so opt-in, and it can never accept a handle on
+    # its own — the judge must confirm it (see PROVENANCE_WEIGHT).
+    instagram_google_search_enabled: bool = False
+    instagram_google_search_actor: str = "apify~google-search-scraper"
+    instagram_google_search_results: int = 10
+    instagram_google_search_country: str = "br"
     instagram_judge_model: str = "gpt-5.4-mini"
     instagram_judge_max_venue_photos: int = 3
 

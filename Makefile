@@ -79,6 +79,8 @@ test-unit:
 		tests/test_judge_adjudication_band.py \
 		tests/test_container_judge_wiring.py \
 		tests/test_openai_call_shape.py \
+		tests/test_google_search_cannot_self_accept.py \
+		tests/test_container_google_search_wiring.py \
 		-v
 
 test-integration:
