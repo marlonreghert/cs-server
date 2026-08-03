@@ -127,6 +127,29 @@ Manual or integration checks:
 - A failed actor run cannot fail a venue.
 - `make test-bdd` and `make test-unit` pass; `@wip` removed.
 
+## Measured (30 Recife venues, none of which had a handle)
+
+    found a handle        30/30
+    cost                  $0.0580 total  ->  $0.0019 per venue (batched)
+    judge accepted        28
+    judge rejected         2
+
+The two rejections are the two that were doubtful by inspection:
+
+    Patio de Sao Pedro (a public square)  -> @saopedrorestaurante   rejected
+    Basilica e Mosteiro de Sao Bento      -> @mosteirosaobentolinda rejected
+                                             (that account is in Olinda)
+
+The judge caught both without being told they were suspect, which is the whole
+argument for the provenance ceiling: the tier finds, the judge decides.
+
+Batching matters. One actor run per venue cost roughly 30x more than ten queries
+in a single run; queries are newline-separated in one `queries` string.
+
+Two accepted results are the right business but not the right location:
+`Entre Amigos O Bode Espinheiro -> @entreamigosobode` (the chain account) and
+`Galetus Av. Recife -> @rodizius` (a sister brand, similarity 0.36). Recorded
+rather than fixed — branch-level precision is a separate problem.
+
 ## Open Questions
-- None blocking. Precision and cost per venue are to be measured on the ~30
-  venue sample before a wide run, and recorded here.
+- None.
