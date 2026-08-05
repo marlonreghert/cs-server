@@ -8,6 +8,15 @@ loudly instead.
 GPT-5.4 list rates (2026-07):
     gpt-5.4-nano   $0.20 / 1M input   $1.25 / 1M output
     gpt-5.4-mini   $0.75 / 1M input   $4.50 / 1M output
+
+As of the gpt-5.6-luna migration (see
+plans/260805_model-upgrade-gpt-5-6-luna.md), all five paths default to the same
+model, `LUNA`. That collapses the old nano/mini escalation tiering — Stage B no
+longer buys a stronger read than Stage A on the same call — which is a real,
+deliberate consequence of this migration, not an oversight; the plan keeps
+every path an individually overridable setting specifically so a regressing
+one (Stage B is the most likely candidate) can be pinned back to a stronger
+5.4-family model without a redeploy.
 """
 from __future__ import annotations
 
@@ -19,6 +28,7 @@ from app.config import Settings
 
 NANO = "gpt-5.4-nano"
 MINI = "gpt-5.4-mini"
+LUNA = "gpt-5.6-luna"
 
 
 def _settings():
@@ -30,19 +40,21 @@ class TestConfiguredModels:
         "photo_classification_model",
         "menu_extraction_model",
         "vibe_classifier_stage_a_model",
+        "vibe_classifier_stage_b_model",
+        "instagram_judge_model",
     ])
-    def test_high_volume_paths_use_nano(self, field):
-        # Classification and extraction over many photos: nano is the tier
-        # OpenAI positions for exactly this, and the cheapest input rate.
-        assert getattr(_settings(), field) == NANO
+    def test_every_path_defaults_to_luna(self, field):
+        assert getattr(_settings(), field) == LUNA
 
-    def test_vibe_stage_b_is_stronger_than_stage_a(self):
-        # Stage B exists to settle what Stage A could not. If both tiers were
-        # the same model, escalation would cost a second call and buy nothing —
-        # the two-stage design collapses into one weak stage.
+    def test_vibe_stages_are_intentionally_collapsed_onto_the_same_model(self):
+        # Documents the migration's known consequence rather than silently
+        # losing the coverage the old inequality assertion gave: escalation
+        # from Stage A to Stage B currently buys nothing, because both stages
+        # now call the identical model. Each stays independently overridable
+        # precisely so this can be revisited without a redeploy if Stage B
+        # needs a stronger tier again.
         s = _settings()
-        assert s.vibe_classifier_stage_b_model == MINI
-        assert s.vibe_classifier_stage_b_model != s.vibe_classifier_stage_a_model
+        assert s.vibe_classifier_stage_b_model == s.vibe_classifier_stage_a_model == LUNA
 
     def test_no_setting_is_left_on_a_gpt4_model(self):
         # Instagram is deliberately excluded: it is owned elsewhere right now.
@@ -83,14 +95,14 @@ class TestConstructorDefaultsAgree:
 
     def test_photo_classifier_client_default(self):
         from app.api import openai_photo_classifier_client as m
-        assert m.DEFAULT_MODEL == NANO
+        assert m.DEFAULT_MODEL == LUNA
 
-    def test_vibe_service_defaults_preserve_the_tiering(self):
+    def test_vibe_service_defaults_agree_with_settings(self):
         from app.services.vibe_classifier_service import VibeClassifierService
         a = self._default(VibeClassifierService.__init__, "stage_a_model")
         b = self._default(VibeClassifierService.__init__, "stage_b_model")
-        assert (a, b) == (NANO, MINI)
+        assert (a, b) == (LUNA, LUNA)
 
     def test_menu_extraction_service_default(self):
         from app.services.menu_extraction_service import MenuExtractionService
-        assert self._default(MenuExtractionService.__init__, "extraction_model") == NANO
+        assert self._default(MenuExtractionService.__init__, "extraction_model") == LUNA

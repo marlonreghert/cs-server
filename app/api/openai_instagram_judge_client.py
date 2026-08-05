@@ -20,6 +20,7 @@ from typing import Any, Optional
 
 from openai import AsyncOpenAI
 
+from app.api.openai_compat import sampling_kwargs
 from app.metrics import (
     OPENAI_API_CALLS_TOTAL,
     OPENAI_API_CALL_DURATION_SECONDS,
@@ -63,7 +64,7 @@ class OpenAIInstagramJudgeClient:
                 messages=[{"role": "user", "content": content}],
                 response_format={"type": "json_object"},
                 max_completion_tokens=200,
-                temperature=0,
+                **sampling_kwargs(model, 0),
             )
             status = "success"
             return json.loads(response.choices[0].message.content or "{}")

@@ -10,6 +10,7 @@ import time
 
 from openai import AsyncOpenAI
 
+from app.api.openai_compat import sampling_kwargs
 from app.models.menu import MenuSection, MenuItem
 from app.metrics import (
     OPENAI_API_CALLS_TOTAL,
@@ -93,7 +94,7 @@ class OpenAIMenuClient:
             response = await self.client.chat.completions.create(
                 model=self.model,
                 messages=[{"role": "user", "content": content}],
-                temperature=0.1,
+                **sampling_kwargs(self.model, 0.1),
                 max_completion_tokens=4096,
                 response_format={"type": "json_object"},
             )
@@ -218,7 +219,7 @@ class OpenAIMenuClient:
             response = await self.client.chat.completions.create(
                 model=model,
                 messages=[{"role": "user", "content": content}],
-                temperature=0.1,
+                **sampling_kwargs(model, 0.1),
                 max_completion_tokens=1024,
                 response_format={"type": "json_object"},
             )

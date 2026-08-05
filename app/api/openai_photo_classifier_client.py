@@ -28,8 +28,9 @@ import re
 import time
 from typing import Any, Optional
 
-from openai import AsyncOpenAI
+from openai import AsyncOpenAI, BadRequestError
 
+from app.api.openai_compat import sampling_kwargs
 from app.metrics import (
     PHOTO_CLASSIFICATION_FALLBACKS_TOTAL,
     OPENAI_API_CALLS_TOTAL,
@@ -48,7 +49,7 @@ from app.models.photo_taxonomy import (
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_MODEL = "gpt-5.4-nano"
+DEFAULT_MODEL = "gpt-5.6-luna"
 
 
 def _prompt(with_attributes: bool = True) -> str:
@@ -246,11 +247,12 @@ class OpenAIPhotoClassifierClient:
 
         started = time.perf_counter()
         endpoint = "photo_classify"
+        resolved_model = model or self.model
         try:
             response = await self.client.chat.completions.create(
-                model=model or self.model,
+                model=resolved_model,
                 messages=[{"role": "user", "content": content}],
-                temperature=0.1,
+                **sampling_kwargs(resolved_model, 0.1),
                 max_completion_tokens=_output_budget(len(urls)),
                 response_format={"type": "json_object"},
             )
@@ -259,6 +261,21 @@ class OpenAIPhotoClassifierClient:
             OPENAI_API_CALLS_TOTAL.labels(endpoint=endpoint, status="success").inc()
             self._record_usage(response, endpoint)
             return self._parse(response.choices[0].message.content or "")
+        except BadRequestError as e:
+            # A rejected parameter is a call-site bug, not a transient blip: a
+            # rate limit or timeout is worth retrying, but every retry of this
+            # would 400 again identically. Surface it loudly and immediately
+            # instead of burning the retry ladder and reporting a silent
+            # "batch_exhausted" fallback that hides the real cause.
+            OPENAI_API_CALL_DURATION_SECONDS.labels(endpoint=endpoint).observe(
+                time.perf_counter() - started
+            )
+            OPENAI_API_CALLS_TOTAL.labels(endpoint=endpoint, status="error").inc()
+            logger.error(
+                f"[PhotoClassifier] request rejected parameter "
+                f"'{e.param or '?'}' for model {resolved_model}: {e}"
+            )
+            raise
         except Exception as e:  # noqa: BLE001 — the caller degrades, never fails
             OPENAI_API_CALL_DURATION_SECONDS.labels(endpoint=endpoint).observe(
                 time.perf_counter() - started
@@ -281,14 +298,25 @@ class OpenAIPhotoClassifierClient:
         count, and bigger batches save far less than they look like they should.
         Output tracks how much schema the model has to fill in.
 
+        A reasoning model's `completion_tokens` already bills the reasoning
+        tokens as part of the output total — they are a SUBSET, not an
+        addition — so `self.tokens["output"]` and the "output" series need no
+        change to stay accurate. What they lack is visibility: without a
+        breakout, the reasoning share of that total is billed and invisible.
+        `direction="reasoning"` makes it countable on its own, alongside (not
+        instead of) the existing output series.
+
         Never raises: a missing or malformed `usage` block must not cost a run
         the classification it already paid for.
         """
         counts = {"input": 0, "output": 0}
+        reasoning = 0
         try:
             usage = getattr(response, "usage", None)
             counts["input"] = int(getattr(usage, "prompt_tokens", 0) or 0)
             counts["output"] = int(getattr(usage, "completion_tokens", 0) or 0)
+            details = getattr(usage, "completion_tokens_details", None)
+            reasoning = int(getattr(details, "reasoning_tokens", 0) or 0)
         except (TypeError, ValueError):  # noqa: BLE001 — telemetry is not the job
             logger.debug("[PhotoClassifier] could not read token usage")
             return counts
@@ -297,6 +325,8 @@ class OpenAIPhotoClassifierClient:
                 OPENAI_TOKENS_TOTAL.labels(
                     endpoint=endpoint, direction=direction
                 ).inc(value)
+        if reasoning:
+            OPENAI_TOKENS_TOTAL.labels(endpoint=endpoint, direction="reasoning").inc(reasoning)
         self.tokens["input"] += counts["input"]
         self.tokens["output"] += counts["output"]
         return counts
