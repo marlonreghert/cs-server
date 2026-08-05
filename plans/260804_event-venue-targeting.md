@@ -39,8 +39,15 @@ Redis mirror, read through `RdsVenueStore.get_admin_config` /
 by `venue_category_map`, `venue_eligibility` and `venue_geofence`. A new key
 follows it exactly.
 
-**A priority ordering already exists**, so "top N" needs no new ranking:
-`RdsVenueStore.list_servable_venue_ids_by_priority(limit)`.
+**A priority ordering exists, but the obvious function is the wrong one.**
+`RdsVenueStore.list_servable_venue_ids_by_priority(limit)` orders servable
+venues by `priority`, then reviews, rating and id — the ranking this plan wants.
+But since `0021_venue_source` it also filters `venue_source <> 'google_only'`,
+and its docstring says why: it "backs the bounded live/weekly refresh" and a
+google-only venue "carries no BestTime id to query". That exclusion is right for
+BestTime and **wrong for event targeting** (see §B below). The unbounded
+`list_servable_venue_ids()` reads `serving.eligible_venue` and does **not**
+exclude them, so using the two together would gate one way and evaluate another.
 
 **The vibe profile already knows who plays live.** `app/models/taxonomy.py`
 holds `music_format` (`DJ`, `Banda ao vivo`, `Roda de samba`, `Karaokê`,
@@ -113,9 +120,8 @@ next run. The two modules answer different questions and must not share a
 default.
 
 ### B. Stage 2 — the evidence gate (bounded to top N)
-Order the category survivors by `list_servable_venue_ids_by_priority` and take
-`max_evidence_venues` (default small). For each, score from data the repo
-already holds:
+Order the category survivors by priority and take `max_evidence_venues` (default
+small). For each, score from data the repo already holds:
 
 - how many of its archived photos classified as `flyer`
   (`260804_instagram-media-archive.md`) within `lookback_days`;
@@ -126,6 +132,22 @@ already holds:
 A venue clearing `min_evidence_posts` is `evidence_confirmed`; one evaluated and
 falling short is `evidence_rejected`; one the bound never reached stays
 `category_candidate`.
+
+**The ordering needs its own selection, and google-only venues must be in it.**
+Add `RdsVenueStore.list_event_candidate_ids_by_priority(limit)` — the same
+`priority, reviews, rating, venue_id` ordering over `serving.eligible_venue`,
+**without** the `venue_source <> 'google_only'` filter. A new method rather than
+a flag on the existing one: that filter protects BestTime refresh from being fed
+ids that do not exist there, and a boolean someone can pass wrong is a worse
+guard than two functions that cannot be confused.
+
+A `google_only` venue is one BestTime could not forecast. In this catalog that
+skews hard toward the small independent club and event space — precisely the
+venue most likely to run events, and precisely the one the BestTime-shaped
+filter would drop. The failure would also be silent: the function returns a
+shorter list, not an error, so the evidence gate would look like it ran
+correctly while never seeing the best candidates. Their `priority` may be unset,
+so they tie-break on reviews and rating, which Google supplies.
 
 **The evidence gate spends nothing on a model by default.** Both inputs were
 already paid for — the flyer label came free with a classification call the
@@ -140,7 +162,8 @@ evidence either way, and recording "no events here" from an absence of data is
 how a coverage gap becomes a permanent, invisible fact.
 
 ### C. Persistence
-Migration `0021_events_schema`: create schema `events` and table
+Migration `0022_events_schema` (revising `0021_venue_source`): create schema
+`events` and table
 `events.venue_event_profile`:
 
 | column | meaning |
@@ -182,8 +205,10 @@ nothing, matching the archive pipeline's dry-run contract.
 No cron. Operator-triggered, like every other job in the registry.
 
 ## Data, Config, And API Impact
-- **Migration:** `0021_events_schema` — new `events` schema, new
+- **Migration:** `0022_events_schema` — new `events` schema, new
   `events.venue_event_profile`, index on `tier`.
+- **DAO:** new `list_event_candidate_ids_by_priority(limit)`. Read-only,
+  additive; the existing BestTime-scoped selections are untouched.
 - **Admin config:** new key `admin_config:event_candidate_categories` (RDS row +
   Redis mirror), with in-code defaults.
 - **Run config:** new eligibility mode `event_candidates` accepted by
@@ -205,8 +230,11 @@ Metrics:
 - `event_targeting_venues_total{stage,verdict}` — `stage` is `category` or
   `evidence`.
 - `event_targeting_config_fallback_total{reason}`.
-- `event_candidate_venues` gauge by tier, so the size of the crawl set is
-  visible before someone triggers a run against it.
+- `event_candidate_venues` gauge by `tier` and `venue_source`. The second label
+  is two values, so it costs nothing, and it answers the question this plan
+  would otherwise leave unanswerable: whether the venues BestTime could not
+  forecast are actually reaching the evidence gate, or are being dropped by a
+  filter nobody remembers is there.
 
 ## Test Plan
 Feature file: `tests/bdd/enrichment/event-venue-targeting.feature`
@@ -222,6 +250,9 @@ Scenarios:
 - Evaluate only the top N by priority, and assert the venues past the bound stay
   `category_candidate` with a NULL `evaluated_at` — "never looked" is not
   "rejected".
+- Evidence-evaluate a `venue_source='google_only'` venue that passed the
+  category gate, proving the BestTime-scoped exclusion does not reach the event
+  pipeline.
 - Confirm a venue whose flyer count clears the threshold.
 - Reject a venue evaluated with evidence below the threshold, and record the
   sample that justified it.
@@ -235,6 +266,10 @@ Scenarios:
 
 Pytest unit tests:
 - The category gate across every category in `CATEGORIES`, including `OTHER`.
+- `list_event_candidate_ids_by_priority` returns `google_only` venues while
+  `list_servable_venue_ids_by_priority` still excludes them — asserted in one
+  test over one fixture, so the two selections can never silently converge.
+- A `google_only` venue with a NULL `priority` still orders deterministically.
 - The vibe-signal override, including a venue with no vibe profile.
 - The caption event-marker matcher: pt-BR date forms, weekday+time, ticketing
   terms, and a caption that must NOT match (a menu announcement, a holiday
@@ -254,7 +289,7 @@ Manual or integration checks:
 - A restaurant is excluded by category unless its vibe profile or the admin
   allow-list says otherwise.
 - Exactly `max_evidence_venues` venues are evidence-evaluated, chosen by
-  priority.
+  priority, and `google_only` venues are eligible to be among them.
 - A venue never reached by the bound has `evaluated_at` NULL and is
   distinguishable from a rejected one in both the API and the metrics.
 - `eligibility.mode = event_candidates` resolves to the confirmed set and honours

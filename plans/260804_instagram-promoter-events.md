@@ -78,7 +78,7 @@ invisible to the pipeline, and nothing can map a location string to a venue.
 ## Implementation Approach
 
 ### A. The promoter registry
-Migration `0023_promoter_accounts`:
+Migration `0024_promoter_accounts`:
 
 - `events.promoter_account` — `handle` PK, `display_name`, `status`,
   `discovery_source` (`manual` | `mention` | `tag`), `discovered_from_event_id`,
@@ -162,7 +162,7 @@ A manual link is never overwritten by a later crawl, for the same reason a
 confirmed extraction is not: the operator's answer outranks the model's.
 
 ## Data, Config, And API Impact
-- **Migration:** `0023_promoter_accounts` — two new tables and four additive
+- **Migration:** `0024_promoter_accounts` — two new tables and four additive
   columns on `events.event`.
 - **Settings:** `promoter_link_confidence_floor`, `promoter_link_margin`,
   `promoter_max_posts_per_account`, `promoter_mention_threshold`.

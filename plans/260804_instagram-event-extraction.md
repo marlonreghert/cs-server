@@ -131,7 +131,7 @@ Rules the extractor must follow, in order:
   are the same instant.
 
 ### D. Persistence
-Migration `0022_event_table` — `events.event`:
+Migration `0023_event_table` — `events.event`:
 
 | column | notes |
 |---|---|
@@ -175,7 +175,7 @@ Admin API: `GET /admin/events` (filter by venue, status, date range),
 `POST /admin/events/{id}/confirm`, `POST /admin/events/{id}/reject`.
 
 ## Data, Config, And API Impact
-- **Migration:** `0022_event_table` — `events.event` plus indexes on
+- **Migration:** `0023_event_table` — `events.event` plus indexes on
   `(venue_id, starts_at)`, `status`, and the uniqueness constraint above.
 - **Settings:** `event_extraction_model`, `event_extraction_min_confidence`,
   `event_extraction_max_tokens`.
