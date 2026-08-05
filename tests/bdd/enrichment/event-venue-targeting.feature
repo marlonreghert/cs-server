@@ -45,6 +45,14 @@ Feature: Event venue targeting
     And the remaining 7 keep the tier "category_candidate"
     And the remaining 7 have no evaluation timestamp
 
+  Scenario: Evidence-evaluate a venue BestTime cannot forecast
+    Given a venue whose source is "google_only"
+    And it passes the category gate
+    And it is within the top N by priority
+    When event targeting runs
+    Then that venue is evidence-evaluated
+    And it is not excluded for having no BestTime id
+
   Scenario: Confirm a venue whose flyer evidence clears the threshold
     Given a venue that passed the category gate
     And it has 4 photos classified as "flyer" within the lookback window
