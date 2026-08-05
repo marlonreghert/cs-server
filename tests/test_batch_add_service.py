@@ -33,6 +33,8 @@ def _clean_batch_lock():
     (AddVenueOutcome(201, {"status": "created", "venue_id": "v1"}), "created"),
     (AddVenueOutcome(201, {"status": "created", "recovered_from_timeout": True,
                            "venue_id": "v2"}), "created_recovered_timeout"),
+    (AddVenueOutcome(201, {"status": "created_google_only", "source": "google_places",
+                           "venue_id": "vsg_abc"}), "created_google_only"),
     (AddVenueOutcome(200, {"status": "already_exists", "venue_id": "v3"}),
      "already_exists"),
     (AddVenueOutcome(200, {"status": "matched_via_geo_fallback",
@@ -60,6 +62,25 @@ def test_classify_geo_link_carries_reason():
                                         "match_reason": "exact", "venue_id": "vX"}))
     assert r["newly_linked"] is True and r["match_reason"] == "exact"
     assert r["venue_id"] == "vX"
+
+
+def test_classify_created_google_only_is_not_confused_with_timeout_recovery():
+    """A 201 with status=created_google_only must classify distinctly from a
+    plain 'created' even though both are 201s — the batch job summary needs
+    to tell the two apart (no BestTime venue exists for the Google-only row)."""
+    r = _classify(AddVenueOutcome(201, {
+        "status": "created_google_only", "source": "google_places",
+        "venue_id": "vsg_xyz",
+    }))
+    assert r["outcome"] == "created_google_only"
+    assert r["venue_id"] == "vsg_xyz"
+
+
+def test_created_google_only_is_not_a_stop_outcome():
+    """created_google_only is a success state (no BestTime credit was drawn,
+    nothing failed) — it must never appear in _STOP_OUTCOMES, or a batch job
+    of mostly-unforecastable venues would halt on its own first success."""
+    assert "created_google_only" not in bas._STOP_OUTCOMES
 
 
 # ── service harness ──────────────────────────────────────────────────────────

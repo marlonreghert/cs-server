@@ -1,4 +1,3 @@
-@wip
 Feature: Catalog a venue from Google metadata when BestTime cannot forecast it
   As the venue platform
   I must persist a venue that Google knows about but BestTime cannot forecast,
@@ -155,10 +154,10 @@ Feature: Catalog a venue from Google metadata when BestTime cannot forecast it
     Then the add-venue counter records the result <result>
 
     Examples:
-      | path state | google outcome | result                        |
-      | enabled    | resolves       | created_google_only           |
-      | disabled   | resolves       | google_only_disabled          |
-      | enabled    | cannot resolve | google_only_enrichment_failed |
+      | path state | google outcome | result                         |
+      | enabled    | resolves       | created_google_only            |
+      | disabled   | resolves       | besttime_rejected_no_geo_match |
+      | enabled    | cannot resolve | google_only_enrichment_failed  |
 
   Scenario: The count of Google-sourced venues is observable
     Given the Google-only add path is enabled

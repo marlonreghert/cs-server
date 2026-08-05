@@ -39,6 +39,7 @@ from app.metrics import (
     REFRESH_SELECTED_TOTAL,
     BESTTIME_READ_SKIPPED_TOTAL,
     BESTTIME_UNIQUE_VENUES_TOUCHED,
+    VENUES_GOOGLE_ONLY_TOTAL,
 )
 
 logger = logging.getLogger(__name__)
@@ -248,6 +249,7 @@ class VenuesRefresherService:
             VENUES_LIVE_FORECAST_AVAILABILITY_RATIO.set(0)
             VENUES_AVERAGE_RATING.set(0)
             VENUES_AVERAGE_REVIEWS.set(0)
+            VENUES_GOOGLE_ONLY_TOTAL.set(0)
             return
 
         # Count venues with various attributes
@@ -259,6 +261,7 @@ class VenuesRefresherService:
         with_type = 0
         with_dwell_time = 0
         with_forecast = 0
+        with_google_only = 0
 
         # For aggregations
         ratings = []
@@ -309,6 +312,10 @@ class VenuesRefresherService:
             if venue.venue_foot_traffic_forecast:
                 with_forecast += 1
 
+            # Google-only provenance (never selected for BestTime refresh)
+            if venue.venue_source == "google_only":
+                with_google_only += 1
+
         # Update attribute presence gauges
         VENUES_WITH_ATTRIBUTE.labels(attribute="address").set(with_address)
         VENUES_WITH_ATTRIBUTE.labels(attribute="lat_lng").set(with_lat_lng)
@@ -318,6 +325,7 @@ class VenuesRefresherService:
         VENUES_WITH_ATTRIBUTE.labels(attribute="type").set(with_type)
         VENUES_WITH_ATTRIBUTE.labels(attribute="dwell_time").set(with_dwell_time)
         VENUES_WITH_ATTRIBUTE.labels(attribute="forecast").set(with_forecast)
+        VENUES_GOOGLE_ONLY_TOTAL.set(with_google_only)
 
         # Update type breakdown
         for venue_type, count in type_counts.items():

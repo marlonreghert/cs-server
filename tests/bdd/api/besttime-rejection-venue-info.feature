@@ -5,7 +5,8 @@ Feature: BestTime rejections with partial venue info take the rejection path
   so operators see why a venue cannot be added instead of a fake parse error.
 
   Scenario: A rejection with idless venue info surfaces BestTime's message
-    Given BestTime rejects a create with an explanatory message and a venue info block without a venue id
+    Given the Google-only add path is disabled
+    And BestTime rejects a create with an explanatory message and a venue info block without a venue id
     And no nearby venue matches in the geo fallback
     When an operator adds the venue by name and address
     Then the add fails as a rejection, not as an unparseable response
@@ -25,7 +26,8 @@ Feature: BestTime rejections with partial venue info take the rejection path
     Then the add fails with a bad-response error that names an unparseable response
 
   Scenario: A rejection whose fallback area is empty is terminal, not a fake outage
-    Given BestTime rejects a create with an explanatory message and a venue info block without a venue id
+    Given the Google-only add path is disabled
+    And BestTime rejects a create with an explanatory message and a venue info block without a venue id
     And the geo fallback area has no venues at all
     When an operator adds the venue by name and address
     Then the add fails as a rejection, not as an unparseable response

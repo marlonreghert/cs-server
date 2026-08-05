@@ -179,6 +179,9 @@ def _install_real_besttime(context) -> None:
             status = getattr(context, "besttime_http_status", 200)
             return httpx.Response(status, json=body)
         if path.endswith("/venues/filter"):
+            filter_error = getattr(context, "besttime_filter_http_error", None)
+            if filter_error is not None:
+                raise filter_error
             if getattr(context, "besttime_filter_404_empty", False):
                 # The REAL BestTime zero-match reply (probed 2026-07-04):
                 # HTTP 404 with a parseable empty-venues envelope.
@@ -221,9 +224,14 @@ def _wire_inline_enrichment(context) -> None:
     recorder = _RecordingEnrichmentService()
     context.enrichment_recorder = recorder
     context.add_venue_handler.google_places_enrichment_service = recorder
-    context.google_places_client.search_place_id = AsyncMock(
-        return_value="place_real_add_001"
-    )
+    # A scenario that needs to control Google's own resolution outcome (e.g.
+    # the Google-only add path's quality gate) pre-sets search_place_id and
+    # marks this flag so its Given step's mock survives into the add() call
+    # instead of being clobbered by the harness default below.
+    if not getattr(context, "_google_search_place_id_overridden", False):
+        context.google_places_client.search_place_id = AsyncMock(
+            return_value="place_real_add_001"
+        )
 
 
 class _ListLogHandler(logging.Handler):

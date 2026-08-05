@@ -186,7 +186,10 @@ class InMemoryRdsVenueStore:
         """Mirror RdsVenueStore: top-`limit` active venues ordered by priority
         asc, reviews desc, rating desc, venue_id asc. priority/reviews/rating are
         read from the stored columns (priority defaults to 5; NULL reviews/rating
-        sort last). A non-positive limit selects nothing."""
+        sort last). A non-positive limit selects nothing.
+
+        Excludes venue_source='google_only' — mirrors RdsVenueStore: those venues
+        carry no BestTime id to query."""
         if limit <= 0:
             return []
 
@@ -202,6 +205,7 @@ class InMemoryRdsVenueStore:
         active = [
             (vid, row) for vid, row in self.venues.items()
             if row.get("lifecycle_status", "active") == "active"
+            and row.get("venue_source", "besttime") != "google_only"
         ]
         active.sort(key=_key)
         return [vid for vid, _ in active[:limit]]
@@ -285,7 +289,11 @@ class InMemoryRdsVenueStore:
         venue ids ordered by priority asc, reviews desc, rating desc, venue_id asc.
         Reuses list_servable_venue_ids() (the eligibility serving view, the single
         source of truth) and applies the same ordering keys as
-        list_active_venue_ids_by_priority. A non-positive limit selects nothing."""
+        list_active_venue_ids_by_priority. A non-positive limit selects nothing.
+
+        Excludes venue_source='google_only' — these venues stay servable (they
+        ARE in list_servable_venue_ids()); only bounded refresh selection skips
+        them, mirroring RdsVenueStore."""
         if limit <= 0:
             return []
         servable = set(self.list_servable_venue_ids())
@@ -299,7 +307,10 @@ class InMemoryRdsVenueStore:
             rating_key = -(rating if rating is not None else float("-inf"))
             return (priority, reviews_key, rating_key, vid)
 
-        rows = [(vid, row) for vid, row in self.venues.items() if vid in servable]
+        rows = [
+            (vid, row) for vid, row in self.venues.items()
+            if vid in servable and row.get("venue_source", "besttime") != "google_only"
+        ]
         rows.sort(key=_key)
         return [vid for vid, _ in rows[:limit]]
 

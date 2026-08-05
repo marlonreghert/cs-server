@@ -22,6 +22,7 @@ from app.api.besttime_client import (
     BestTimeInvalidResponseError,
     BestTimeRateLimitedError,
 )
+from app.config import settings
 from app.dao.redis_venue_dao import RedisVenueDAO
 from app.dao.venue_row import venue_from_row
 from app.metrics import (
@@ -77,6 +78,14 @@ GEO_LINK_UNDO_WINDOW_SECONDS = 24 * 60 * 60
 # resurrect it (RdsVenueStore._preserve_deprecation exemption).
 GEO_LINK_UNDO_REASON = "geo_link_undone"
 GEO_LINK_UNDO_SOURCE = "admin_geo_link_undo"
+# Admin-config kill switch for cataloging a venue from Google metadata alone
+# when the geo fallback finds no BestTime name match. Shape {"enabled": bool};
+# default off. See plans/260804_add-venue-google-only.md.
+ADD_VENUE_GOOGLE_ONLY_CONFIG_KEY = "add_venue_google_only"
+# Namespace prefix for a minted (non-BestTime) venue id: the SHA-1 folded
+# name+address hash, truncated. Cannot collide with BestTime's "ven_" ids.
+GOOGLE_ONLY_VENUE_ID_PREFIX = "vsg_"
+GOOGLE_ONLY_VENUE_ID_HASH_LEN = 24
 
 
 class AddVenueByAddressRequest(BaseModel):
@@ -117,6 +126,7 @@ class AddVenueHandler:
         google_places_enrichment_service=None,
         rds_store=None,
         timeout_recovery_grace_seconds: float = DEFAULT_TIMEOUT_RECOVERY_GRACE_SECONDS,
+        admin_config_service=None,
     ) -> None:
         self.venue_dao = venue_dao
         self.besttime = besttime_api
@@ -127,6 +137,11 @@ class AddVenueHandler:
         # venue from serving). Optional so non-RDS wirings still construct.
         self.rds_store = rds_store
         self.timeout_recovery_grace_seconds = timeout_recovery_grace_seconds
+        # Optional: gates the Google-only catalog path (_create_from_google_metadata).
+        # Read fresh on every request so the flag is reversible without a redeploy;
+        # absent -> falls back to settings.add_venue_google_only_enabled (also off
+        # by default).
+        self.admin_config_service = admin_config_service
         # Optional: when configured AND the request carries a `place_id`, the
         # manual-add flow re-sources the price tier from Google (enum + range) via
         # the shared derivation helper. Dependency-aware: absent client / place_id
@@ -315,13 +330,21 @@ class AddVenueHandler:
         analysis: list,
         result_label: str,
         recovered_from_timeout: bool = False,
+        mark_touched: bool = True,
+        status: str = "created",
+        source: str = "besttime_new",
     ) -> AddVenueOutcome:
-        """Shared success tail for a venue confirmed on BestTime's side —
-        whether the create returned inline or was recovered from the account
-        inventory after a timeout."""
+        """Shared success tail for a persisted venue: whether the create
+        returned inline from BestTime, was recovered from the account
+        inventory after a timeout, or was minted from Google metadata alone
+        (mark_touched=False — no BestTime venue exists to record a touch
+        against; see _create_from_google_metadata)."""
         # Record the unique BestTime interaction against the monthly ledger so
-        # the unique-venue count reflects manual adds, not just refresh.
-        self.budget.mark_touched(venue.venue_id)
+        # the unique-venue count reflects manual adds, not just refresh. Skipped
+        # for a Google-only mint: no BestTime venue was created, so no BestTime
+        # interaction happened to record.
+        if mark_touched:
+            self.budget.mark_touched(venue.venue_id)
 
         # Fully Google-enrich the venue inline so it carries real metadata (type,
         # hours, reviews, business status, rating) immediately — not just the
@@ -353,13 +376,13 @@ class AddVenueHandler:
 
         ADD_VENUE_BY_ADDRESS_TOTAL.labels(result=result_label).inc()
         body = {
-            "status": "created",
+            "status": status,
             "venue_id": venue.venue_id,
             "venue_name": venue.venue_name,
             "venue_address": venue.venue_address,
             "venue_lat": venue.venue_lat,
             "venue_lng": venue.venue_lng,
-            "source": "besttime_new",
+            "source": source,
         }
         if recovered_from_timeout:
             body["recovered_from_timeout"] = True
@@ -641,21 +664,16 @@ class AddVenueHandler:
             filter_response.venues or [], request.venue_name, request.venue_address
         )
         if match is None:
-            ADD_VENUE_BY_ADDRESS_TOTAL.labels(
-                result="besttime_rejected_no_geo_match"
-            ).inc()
-            return AddVenueOutcome(
-                status_code=502,
-                body={
-                    "detail": (
-                        "BestTime rejected the address and the geo fallback "
-                        f"found no matching venue near "
-                        f"({request.venue_lat},{request.venue_lng}) within {radius_m}m"
-                    ),
-                    "besttime_status": besttime_response.status,
-                    "besttime_message": besttime_response.message,
-                    "candidates_seen": len(filter_response.venues or []),
-                },
+            # No BestTime venue to link. Preferring the geo fallback first is
+            # deliberate (a real BestTime link beats a minted id), so this is
+            # the last resort, never a shortcut: catalog from Google metadata
+            # alone when the admin flag is on and Google can resolve the place;
+            # otherwise this is today's terminal rejection, unchanged.
+            return await self._create_from_google_metadata(
+                request,
+                radius_m,
+                besttime_response,
+                candidates_seen=len(filter_response.venues or []),
             )
 
         # Upsert the matched venue if not already in our geo index.
@@ -711,6 +729,180 @@ class AddVenueHandler:
                 "newly_linked": was_new,
                 "match_reason": match_reason,
             },
+        )
+
+    # ── Google-only catalog path (no BestTime venue exists) ──────────────────
+    def _google_only_enabled(self) -> bool:
+        """Admin-config kill switch, read fresh on every request. The admin
+        value always wins when present (including an explicit {"enabled":
+        false}); the Settings fallback applies only when the admin read fails
+        or the key is absent/malformed. Any read failure degrades to disabled
+        — failing open would create venues during a config outage."""
+        if self.admin_config_service is not None:
+            try:
+                raw = self.admin_config_service.get(ADD_VENUE_GOOGLE_ONLY_CONFIG_KEY)
+            except Exception as e:
+                logger.warning(
+                    "[AddVenueHandler] admin config read failed for "
+                    f"{ADD_VENUE_GOOGLE_ONLY_CONFIG_KEY!r}; treating the "
+                    f"Google-only add path as disabled: {type(e).__name__}: {e}"
+                )
+                return False
+            if isinstance(raw, dict) and "enabled" in raw:
+                return bool(raw.get("enabled"))
+        return bool(settings.add_venue_google_only_enabled)
+
+    def _no_geo_match_rejection_body(
+        self,
+        request: AddVenueByAddressRequest,
+        besttime_response,
+        radius_m: int,
+        candidates_seen: int,
+    ) -> dict:
+        """Today's exact 502 body for 'BestTime rejected the address and the
+        geo fallback found no match' — shared by the flag-disabled and the
+        Google-enrichment-failed branches so both degrade to byte-for-byte the
+        same rejection a Google-only-unaware caller already understands."""
+        return {
+            "detail": (
+                "BestTime rejected the address and the geo fallback "
+                f"found no matching venue near "
+                f"({request.venue_lat},{request.venue_lng}) within {radius_m}m"
+            ),
+            "besttime_status": besttime_response.status,
+            "besttime_message": besttime_response.message,
+            "candidates_seen": candidates_seen,
+        }
+
+    async def _create_from_google_metadata(
+        self,
+        request: AddVenueByAddressRequest,
+        radius_m: int,
+        besttime_response,
+        candidates_seen: int,
+    ) -> AddVenueOutcome:
+        """Catalog a venue Google knows about but BestTime cannot forecast,
+        instead of the terminal 502 — gated by ADD_VENUE_GOOGLE_ONLY_CONFIG_KEY
+        (default off). Only reached from _geo_fallback's `match is None`
+        branch: every other rejection outcome (monthly cap, transport failure,
+        a real geo-fallback match) never reaches here.
+
+        Zero BestTime credit: no second POST /forecasts, no ledger touch. The
+        venue is minted under a "vsg_"-prefixed id (never a BestTime "ven_"
+        id) deterministic on name+address, so a re-submit upserts the same row
+        rather than duplicating it. Google enrichment must succeed for the
+        venue to be created — a place Google cannot resolve, or whose details
+        fetch fails, carries almost no usable metadata, so it falls back to
+        today's exact 502 and persists nothing (the quality gate for this
+        path). See plans/260804_add-venue-google-only.md.
+        """
+        if not self._google_only_enabled():
+            # Flag off: byte-for-byte AND series-for-series today's rejection —
+            # the same label this branch has always emitted. The rollout plan
+            # deploys with the flag off and requires that deploy be a genuine
+            # no-op; a metric series that silently stopped emitting on that
+            # deploy would be exactly the surprise that requirement rules out.
+            ADD_VENUE_BY_ADDRESS_TOTAL.labels(
+                result="besttime_rejected_no_geo_match"
+            ).inc()
+            return AddVenueOutcome(
+                status_code=502,
+                body=self._no_geo_match_rejection_body(
+                    request, besttime_response, radius_m, candidates_seen
+                ),
+            )
+
+        place_id = request.place_id
+        if not place_id and self.google_places_client is not None:
+            try:
+                place_id = await self.google_places_client.search_place_id(
+                    venue_name=request.venue_name,
+                    venue_address=request.venue_address,
+                    lat=request.venue_lat,
+                    lng=request.venue_lng,
+                )
+            except Exception as e:
+                logger.warning(
+                    "[AddVenueHandler] Google-only add: place search failed "
+                    f"for {request.venue_name!r}: {type(e).__name__}: {e}"
+                )
+                place_id = None
+
+        details = None
+        if place_id and self.google_places_client is not None:
+            try:
+                details = await self.google_places_client.get_place_details(place_id)
+            except Exception as e:
+                logger.warning(
+                    "[AddVenueHandler] Google-only add: place details failed "
+                    f"for {place_id!r}: {type(e).__name__}: {e}"
+                )
+                details = None
+
+        if not place_id or details is None:
+            ADD_VENUE_BY_ADDRESS_TOTAL.labels(
+                result="google_only_enrichment_failed"
+            ).inc()
+            logger.warning(
+                "[AddVenueHandler] Google-only add: could not resolve Google "
+                f"metadata for {request.venue_name!r}; falling back to the "
+                "terminal rejection (nothing persisted)"
+            )
+            return AddVenueOutcome(
+                status_code=502,
+                body=self._no_geo_match_rejection_body(
+                    request, besttime_response, radius_m, candidates_seen
+                ),
+            )
+
+        # Carry the resolved place_id through so _finalize_created_venue's
+        # inline enrichment (_enrich_from_google) reuses it instead of paying
+        # for a second Google Text Search on the same venue.
+        request.place_id = place_id
+
+        info = besttime_response.venue_info if hasattr(besttime_response, "venue_info") else None
+        if info is None and isinstance(besttime_response, dict):
+            info = besttime_response.get("venue_info") or {}
+
+        minted_id = (
+            GOOGLE_ONLY_VENUE_ID_PREFIX
+            + _address_hash(request.venue_name, request.venue_address)[
+                :GOOGLE_ONLY_VENUE_ID_HASH_LEN
+            ]
+        )
+        venue = Venue(
+            processed=True,
+            forecast=False,
+            venue_id=minted_id,
+            venue_name=request.venue_name,
+            venue_address=request.venue_address,
+            venue_lat=request.venue_lat,
+            venue_lng=request.venue_lng,
+            rating=_field(info, "rating"),
+            reviews=_field(info, "reviews"),
+            besttime_price_level=_field(info, "price_level"),
+            venue_source="google_only",
+        )
+        # Same doubled-call avoidance as _persist_new_venue: when inline
+        # enrichment is wired, it owns the single Google Details fetch.
+        price_place_id = (
+            None if self.google_places_enrichment_service is not None else place_id
+        )
+        await self._derive_and_set_price(venue, price_place_id)
+        self.venue_dao.upsert_venue(venue)
+        logger.info(
+            f"[AddVenueHandler] Google-only mint: {minted_id} from Google "
+            f"place {place_id!r} for {request.venue_name!r}; no BestTime "
+            "credit drawn"
+        )
+        return await self._finalize_created_venue(
+            request,
+            venue,
+            analysis=[],
+            result_label="created_google_only",
+            mark_touched=False,
+            status="created_google_only",
+            source="google_places",
         )
 
     async def undo_geo_link(self, venue_id: str) -> AddVenueOutcome:

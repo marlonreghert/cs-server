@@ -1011,7 +1011,16 @@ ADD_VENUE_BY_ADDRESS_TOTAL = Counter(
                  # besttime_monthly_cap | besttime_error |
                  # besttime_bad_response | besttime_rejected_no_geo_match |
                  # timeout_unconfirmed | validation_error |
-                 # geo_link_undone | geo_link_undo_rejected
+                 # geo_link_undone | geo_link_undo_rejected |
+                 # created_google_only (the geo fallback found no match, the flag
+                 #   is on, and Google resolved the venue) |
+                 # google_only_enrichment_failed (the flag is on but Google could
+                 #   not resolve the place or fetch its details)
+                 #
+                 # NOTE: with the Google-only flag off, the geo-fallback-no-match
+                 # branch still emits besttime_rejected_no_geo_match (unchanged) —
+                 # it does NOT get its own label, so the flag-off deploy stays a
+                 # genuine metric no-op.
 )
 
 INVENTORY_SYNC_VENUES_TOTAL = Counter(
@@ -1039,6 +1048,15 @@ VENUE_MONTHLY_NEW_COUNT = Gauge(
 LIVE_REFRESH_INTERVAL_MINUTES = Gauge(
     "live_refresh_interval_minutes",
     "Currently effective live_forecast_refresh interval in minutes (admin override or settings default)",
+)
+
+# Active venues catalogued from Google metadata alone (venue_source='google_only',
+# no BestTime id, never selected for BestTime refresh). Refreshed by the same
+# stats pass as VENUES_WITH_ATTRIBUTE so the minority class's growth rate is
+# watchable (see plans/260804_add-venue-google-only.md Rollout And Rollback).
+VENUES_GOOGLE_ONLY_TOTAL = Gauge(
+    "venues_google_only_total",
+    "Active venues catalogued from Google Places metadata alone (venue_source='google_only')",
 )
 
 # =============================================================================

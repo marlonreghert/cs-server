@@ -62,11 +62,15 @@ def _classify(outcome: AddVenueOutcome) -> dict:
         "match_reason": None,
     }
     if code == 201:
-        res["outcome"] = (
-            "created_recovered_timeout"
-            if body.get("recovered_from_timeout")
-            else "created"
-        )
+        if status == "created_google_only":
+            # Catalogued from Google metadata alone (no BestTime venue, no
+            # credit drawn) — a success state, not a spend-stopping one. See
+            # plans/260804_add-venue-google-only.md.
+            res["outcome"] = "created_google_only"
+        elif body.get("recovered_from_timeout"):
+            res["outcome"] = "created_recovered_timeout"
+        else:
+            res["outcome"] = "created"
     elif code == 200 and status == "already_exists":
         res["outcome"] = "already_exists"
     elif code == 200 and status == "matched_via_geo_fallback":

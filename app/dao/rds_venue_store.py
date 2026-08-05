@@ -62,7 +62,8 @@ _VENUE_SELECT = (
     "v.besttime_price_level, v.price_level_source, "
     "v.rating, v.reviews, v.forecast, v.processed, "
     "v.priority, v.lifecycle_status, v.deprecated_at, v.deprecated_reason, "
-    "v.deprecated_source, v.google_business_status, v.created_at, v.extra "
+    "v.deprecated_source, v.google_business_status, v.venue_source, "
+    "v.created_at, v.extra "
     "FROM venues.venue v LEFT JOIN venues.address a ON a.venue_id = v.venue_id"
 )
 
@@ -138,13 +139,14 @@ class RdsVenueStore:
                 "venue_type, price_level, price_range, google_price_level, "
                 "besttime_price_level, price_level_source, rating, reviews, priority, "
                 "forecast, processed, lifecycle_status, deprecated_reason, "
-                "deprecated_source, deprecated_at, google_business_status, extra, updated_at) "
+                "deprecated_source, deprecated_at, google_business_status, venue_source, "
+                "extra, updated_at) "
                 "VALUES (:venue_id, :venue_name, "
                 ":venue_type, :price_level, CAST(:price_range AS jsonb), :google_price_level, "
                 ":besttime_price_level, :price_level_source, :rating, :reviews, :priority, "
                 ":forecast, :processed, "
                 ":lifecycle_status, :deprecated_reason, :deprecated_source, :deprecated_at, "
-                ":google_business_status, CAST(:extra AS jsonb), now()) "
+                ":google_business_status, :venue_source, CAST(:extra AS jsonb), now()) "
                 "ON CONFLICT (venue_id) DO UPDATE SET "
                 "venue_name=excluded.venue_name, "
                 "venue_type=excluded.venue_type, price_level=excluded.price_level, "
@@ -156,6 +158,7 @@ class RdsVenueStore:
                 "processed=excluded.processed, lifecycle_status=excluded.lifecycle_status, "
                 "deprecated_reason=excluded.deprecated_reason, deprecated_source=excluded.deprecated_source, "
                 "deprecated_at=excluded.deprecated_at, google_business_status=excluded.google_business_status, "
+                "venue_source=excluded.venue_source, "
                 "extra=excluded.extra, updated_at=now()"
             ), {
                 "venue_id": venue.venue_id, "venue_name": venue.venue_name,
@@ -173,6 +176,7 @@ class RdsVenueStore:
                 "deprecated_source": venue.deprecated_source,
                 "deprecated_at": venue.deprecated_at,
                 "google_business_status": venue.google_business_status,
+                "venue_source": venue.venue_source,
                 "extra": json.dumps(residual),
             })
             # venues.address is the sole address source of truth. Structured
@@ -212,12 +216,17 @@ class RdsVenueStore:
         """The top-`limit` active venues ordered by refresh priority ascending
         (0 first), tie-broken by reviews desc, rating desc, then venue_id for a
         stable, deterministic selection. Backs the bounded live/weekly refresh.
-        A non-positive limit selects nothing (strictly honours a zero budget)."""
+        A non-positive limit selects nothing (strictly honours a zero budget).
+
+        Excludes venue_source='google_only': those venues carry no BestTime id
+        to query, so feeding one to BestTime refresh would be a bug, not just a
+        wasted credit. See plans/260804_add-venue-google-only.md."""
         if limit <= 0:
             return []
         with self.engine.connect() as conn:
             return [r[0] for r in conn.execute(text(
-                "SELECT venue_id FROM venues.venue WHERE lifecycle_status='active' "
+                "SELECT venue_id FROM venues.venue "
+                "WHERE lifecycle_status='active' AND venue_source <> 'google_only' "
                 "ORDER BY priority ASC, reviews DESC NULLS LAST, rating DESC NULLS LAST, "
                 "venue_id ASC LIMIT :limit"
             ), {"limit": limit})]
@@ -314,13 +323,19 @@ class RdsVenueStore:
         list_active_venue_ids_by_priority that backs the bounded live/weekly
         refresh. serving.eligible_venue carries no priority column, so it is joined
         to venues.venue for the ordering keys. A non-positive limit selects
-        nothing (mirrors the active variant)."""
+        nothing (mirrors the active variant).
+
+        Excludes venue_source='google_only' — see list_active_venue_ids_by_priority;
+        these venues stay servable (a google_only venue IS eligible for serving
+        via serving.eligible_venue itself), only bounded refresh selection skips
+        them."""
         if limit <= 0:
             return []
         with self.engine.connect() as conn:
             return [r[0] for r in conn.execute(text(
                 "SELECT ev.venue_id FROM serving.eligible_venue ev "
                 "JOIN venues.venue v ON v.venue_id = ev.venue_id "
+                "WHERE v.venue_source <> 'google_only' "
                 "ORDER BY v.priority ASC, v.reviews DESC NULLS LAST, "
                 "v.rating DESC NULLS LAST, v.venue_id ASC LIMIT :limit"
             ), {"limit": limit})]

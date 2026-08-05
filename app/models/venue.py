@@ -146,6 +146,15 @@ class Venue(BaseModel):
     geo_linked: bool = False
     geo_linked_year_month: Optional[str] = None
 
+    # Discriminates a venue catalogued from Google Places metadata alone
+    # (AddVenueHandler._create_from_google_metadata, "vsg_"-prefixed minted id,
+    # no BestTime id anywhere) from the default "besttime" provenance. The sole
+    # SQL predicate the bounded live/weekly refresh selection excludes on every
+    # cycle — a google_only venue has no BestTime id to query, so sending one
+    # to BestTime would be a bug, not just a wasted credit. See
+    # plans/260804_add-venue-google-only.md.
+    venue_source: str = "besttime"
+
     model_config = ConfigDict(populate_by_name=True)
 
     def is_deprecated(self) -> bool:

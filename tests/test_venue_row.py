@@ -70,3 +70,54 @@ def test_reconstruct_handles_minimal_residual():
     assert out.venue_foot_traffic_forecast is None
     assert out.venue_dwell_time_min is None
     assert out.venue_id == "v2"
+
+
+# ── venue_source (plans/260804_add-venue-google-only.md) ────────────────────
+# The plan's single most likely silent bug: venue_source must round-trip as a
+# real column, not through `extra` — otherwise the SQL refresh-exclusion never
+# sees it and a google_only venue is fed to BestTime refresh.
+
+
+def test_venue_source_is_a_column_not_residual():
+    assert "venue_source" in COLUMN_FIELDS
+    assert "venue_source" not in RESIDUAL_FIELDS
+
+
+def test_venue_source_round_trips_as_a_column():
+    venue = _full_venue()
+    venue.venue_source = "google_only"
+    columns, residual = split_venue_for_storage(venue)
+    assert columns["venue_source"] == "google_only"
+    assert "venue_source" not in residual
+    row = dict(columns)
+    row["extra"] = residual
+    assert venue_from_row(row).venue_source == "google_only"
+
+
+def test_venue_source_defaults_to_besttime():
+    venue = _full_venue()
+    assert venue.venue_source == "besttime"
+    columns, _ = split_venue_for_storage(venue)
+    assert columns["venue_source"] == "besttime"
+
+
+def test_legacy_row_without_venue_source_reconstructs_as_besttime():
+    """A row from before migration 0021 (or a hand-built fixture) carries no
+    venue_source key at all — row.get() would turn that absence into an
+    explicit None, which the model's `str` field type would reject outright
+    if not handled."""
+    venue = _full_venue()
+    columns, residual = split_venue_for_storage(venue)
+    row = dict(columns)
+    del row["venue_source"]
+    row["extra"] = residual
+    assert venue_from_row(row).venue_source == "besttime"
+
+
+def test_legacy_row_with_explicit_none_venue_source_reconstructs_as_besttime():
+    venue = _full_venue()
+    columns, residual = split_venue_for_storage(venue)
+    row = dict(columns)
+    row["venue_source"] = None
+    row["extra"] = residual
+    assert venue_from_row(row).venue_source == "besttime"

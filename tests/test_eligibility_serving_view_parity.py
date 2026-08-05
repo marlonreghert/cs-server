@@ -75,6 +75,11 @@ _FIXTURES = [
     ("ambig_kw_good_besttime","Bar do Mercado",    "BAR",  None,             _IN_LAT,  _IN_LNG,  True),
     ("plain_bar",             "Boteco do Zé",      "BAR",  None,             _IN_LAT,  _IN_LNG,  True),
     ("unlabeled_unknown",     "Cantina XYZ",       None,   None,             _IN_LAT,  _IN_LNG,  True),
+    # A Google-only venue (plans/260804_add-venue-google-only.md): no BestTime
+    # type (BestTime never forecast it), a plain name that trips no keyword
+    # rule, and a Google primary type from inline enrichment. The view's
+    # NULL-guard on the BestTime-type predicate must not exclude it.
+    ("google_only_plain_bar", "Boteco Google Only", None,  "bar",            _IN_LAT,  _IN_LNG,  True),
     # ── geo dimension ────────────────────────────────────────────────────────
     ("plain_bar_outside_fence", "Boteco Fora",     "BAR",  None,             _OUT_LAT, _OUT_LNG, False),
     ("good_google_outside",   "Bar Paulista",      None,   "bar",            _OUT_LAT, _OUT_LNG, False),
@@ -131,6 +136,24 @@ def test_view_matches_evaluate(store, label, name, btype, gtype, lat, lng, expec
     assert (vid in servable) is expected, (
         f"{label}: view says servable={vid in servable}, expected {expected}"
     )
+
+
+def test_google_only_venue_shape_reaches_serving(store):
+    """The exact shape _create_from_google_metadata persists (forecast=False,
+    venue_type=None, venue_source='google_only') must reach serving — a
+    google_only venue is already a supported, projected, served state; only
+    bounded refresh selection treats it specially (see test_rds_venue_store.py)."""
+    vid = _vid()
+    store.upsert_venue(Venue(
+        venue_id=vid, venue_name="Boteco Minted", venue_address="a",
+        venue_lat=_IN_LAT, venue_lng=_IN_LNG,
+        processed=True, forecast=False, venue_source="google_only",
+    ))
+    store.upsert_enrichment(
+        _VA, vid, {"venue_id": vid, "google_primary_type": "bar", "google_place_id": "p"},
+        history=False, promoted={"google_primary_type": "bar", "google_place_id": "p"},
+    )
+    assert vid in set(store.list_servable_venue_ids())
 
 
 def test_view_excludes_deprecated_regardless_of_eligibility(store):

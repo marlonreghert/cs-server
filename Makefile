@@ -31,6 +31,7 @@ test-unit:
 		tests/test_instagram_validator.py \
 		tests/test_venue_budget.py \
 		tests/test_priority_bounded_refresh.py \
+		tests/test_rds_venue_store.py \
 		tests/test_add_venue_handler.py \
 		tests/test_besttime_inventory_sync.py \
 		tests/test_venue_eligibility.py \
