@@ -112,8 +112,12 @@ class _FakeDownloader:
     def __init__(self) -> None:
         self.fail_urls: set[str] = set()
         self.oversized_urls: set[str] = set()
+        # Every url actually downloaded, in order — the direct way to prove a
+        # cap stopped downloads rather than merely trimming stored results.
+        self.calls: list[str] = []
 
     async def download(self, url: str, *, timeout=None, max_bytes=None):
+        self.calls.append(url)
         if url in self.fail_urls:
             raise RuntimeError("download failed")
         data = b"\xff\xd8\xff" + url.encode()

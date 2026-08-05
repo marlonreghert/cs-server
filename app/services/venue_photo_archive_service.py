@@ -37,6 +37,7 @@ import httpx
 
 from app.dao.media_archive_store import MEDIA_ROOT, RETRIEVED_ROOT
 from app.metrics import (
+    INSTAGRAM_ARCHIVE_IMAGES_TOTAL,
     MEDIA_ARCHIVE_BYTES_STORED_TOTAL,
     MEDIA_ARCHIVE_ESTIMATED_COST_USD,
     MEDIA_ARCHIVE_GOOGLE_CALLS_TOTAL,
@@ -64,6 +65,7 @@ from app.services.archive_sources import (  # noqa: E402
     ARCHIVE_SOURCES,
     SOURCE_APIFY_GMAPS,
     SOURCE_GOOGLE_PHOTOS,
+    SOURCE_INSTAGRAM_POSTS,
     SUPPORTED_SOURCES,
     ArchiveCreditExhausted,
     ArchiveFetchTimeout,
@@ -106,7 +108,9 @@ FETCH_TIMED_OUT = object()
 
 # Venues that were selected but produced no archived content. A run with any of
 # these did not do what it was asked, whatever else went right.
-UNDELIVERED_BUCKETS = ("failed", "timeout", "no_query", "no_result", "no_place_id")
+UNDELIVERED_BUCKETS = (
+    "failed", "timeout", "no_query", "no_result", "no_place_id", "no_handle",
+)
 
 
 def run_status(summary: dict) -> str:
@@ -163,6 +167,21 @@ class InvalidArchiveConfig(InvalidArchivePath):
 
 class PhotoTooLarge(Exception):
     """A single image exceeded the per-photo byte cap and was not stored."""
+
+
+def _is_expired_signed_url(error: BaseException) -> bool:
+    """True when a download failure looks like a signed-url expiry (403/410).
+
+    Instagram signs each CDN url with a short-lived signature; if the gap
+    between the scrape and the download ever widens, every image in the run
+    starts failing this way at once. Reads both shapes a download failure
+    arrives in, the same tolerance `is_throttled` applies to a 429.
+    """
+    status = (
+        getattr(error, "status_code", None)
+        or getattr(getattr(error, "response", None), "status_code", None)
+    )
+    return status in (403, 410)
 
 
 def parse_venue_ids(raw: Any) -> list[str]:
@@ -266,16 +285,27 @@ def photo_token(url: str) -> str:
 def photo_id_for(photo: dict) -> str:
     """Stable id for a photo.
 
-    Derived from Google's photo resource name when available, else from the URL
-    TOKEN rather than the whole URL — so one image gets one id no matter which
-    source fetched it or at what size. That is what lets the same photo be
-    recognised across sources: SearchApi knows a photo's category and Apify
-    knows its upload date, and neither knows the other, so the shared id is the
-    only thing that can join them.
+    Instagram dispatches to its own literal id — `instagram_photo_id`, set by
+    `archive_sources._instagram_photo` to `<shortcode>` or `<shortcode>_<n>` —
+    rather than the URL: Instagram signs the url with a signature that rotates
+    on every scrape, so an id derived from it would change every run and defeat
+    the skip-before-spend gate. This id is also human-traceable straight back
+    to `instagram.com/p/<shortcode>`, so it is returned as-is, unhashed.
+
+    Every other source derives from Google's photo resource name when
+    available, else from the URL TOKEN rather than the whole URL — so one image
+    gets one id no matter which source fetched it or at what size. That is what
+    lets the same photo be recognised across sources: SearchApi knows a photo's
+    category and Apify knows its upload date, and neither knows the other, so
+    the shared id is the only thing that can join them. This half stays exactly
+    as it was before Instagram existed.
 
     Hashed to a fixed length because the raw resource name is long and not
     key-safe.
     """
+    instagram_id = photo.get("instagram_photo_id")
+    if instagram_id:
+        return str(instagram_id)
     seed = photo.get("photo_name") or photo_token(photo.get("url")) or ""
     return hashlib.sha256(seed.encode("utf-8")).hexdigest()[:16]
 
@@ -498,6 +528,7 @@ class VenuePhotoArchiveService:
         downloader=None,
         apify_gmaps_extractor_client=None,
         searchapi_photos_client=None,
+        apify_instagram_client=None,
         photo_classifier=None,
         settings=None,
         max_photos_per_venue: int = 10,
@@ -519,6 +550,7 @@ class VenuePhotoArchiveService:
         # dispatch both resolve by attribute rather than by an if-ladder.
         self.apify_gmaps_extractor_client = apify_gmaps_extractor_client
         self.searchapi_photos_client = searchapi_photos_client
+        self.apify_instagram_client = apify_instagram_client
         # Optional: absent, photos keep whatever category their source gave
         # them and the pipeline behaves exactly as it did before.
         self.photo_classifier = photo_classifier
@@ -781,6 +813,11 @@ class VenuePhotoArchiveService:
             "archived": 0,
             "skipped_existing": 0,
             "no_place_id": 0,
+            # A targeting result, not a scrape result: distinct from no_match /
+            # no_result so a catalog with thin Instagram-handle coverage does
+            # not read as a broken scraper (the same reasoning that split
+            # no_match from failed, and ArchiveFetchTimeout from both).
+            "no_handle": 0,
             "failed": 0,
             "photos_stored": 0,
             "photo_failures": 0,
@@ -831,9 +868,24 @@ class VenuePhotoArchiveService:
         async def _guarded(venue_id: str) -> None:
             # Once the source's budget is exhausted, stop starting new venues
             # rather than generating one failure per remaining venue.
+            #
+            # Checked TWICE, not once: every venue's task is created up front
+            # by `asyncio.gather` and each already passed this check — some of
+            # them queued waiting on the semaphore — before the FIRST venue
+            # could possibly finish and set the flag. Re-checking after the
+            # semaphore is acquired is what actually stops an already-queued
+            # venue from spending once its predecessor discovers the budget is
+            # gone; the pre-acquire check alone only helps a venue that has not
+            # been scheduled at all yet, which with a single `gather()` call is
+            # never true. Without this second check the run keeps calling into
+            # an exhausted balance for every venue that was already waiting —
+            # the exact failure mode that motivated this guard in the first
+            # place.
             if summary.get("credit_exhausted"):
                 return
             async with semaphore:
+                if summary.get("credit_exhausted"):
+                    return
                 try:
                     await self._archive_venue(
                         venue_id, source, prefix, reference_prefix, cfg, summary
@@ -1025,6 +1077,15 @@ class VenuePhotoArchiveService:
             # it. Kept apart from `no_result`, which is the billed case.
             summary["no_query"] += 1
             MEDIA_ARCHIVE_VENUES_TOTAL.labels(source=source, result="no_query").inc()
+            return
+        if not venue_ctx.get("instagram_handle") and source == SOURCE_INSTAGRAM_POSTS:
+            # A targeting problem, not a scrape problem: the handle lookup is a
+            # database read that already happened above, before any Apify call,
+            # so this venue has cost nothing. Kept apart from `no_result` for
+            # the same reason `no_query` is — a catalog with thin handle
+            # coverage must not read as a broken scraper.
+            summary["no_handle"] += 1
+            MEDIA_ARCHIVE_VENUES_TOTAL.labels(source=source, result="no_handle").inc()
             return
 
         # 3. Now, and only now, spend.
@@ -1258,7 +1319,11 @@ class VenuePhotoArchiveService:
         from a name + address string. Both are resolved here so the sources
         stay ignorant of the DAO.
         """
-        ctx: dict = {"venue_id": venue_id, "google_place_id": self._place_id_for(venue_id)}
+        ctx: dict = {
+            "venue_id": venue_id,
+            "google_place_id": self._place_id_for(venue_id),
+            "instagram_handle": self._instagram_handle_for(venue_id),
+        }
         try:
             venue = self.venue_dao.get_venue(venue_id)
         except Exception:
@@ -1269,6 +1334,24 @@ class VenuePhotoArchiveService:
         ctx["search_query"] = query or None
         ctx["venue_name"] = name
         return ctx
+
+    def _instagram_handle_for(self, venue_id: str) -> Optional[str]:
+        """The venue's confirmed Instagram handle, or None.
+
+        A database read, done unconditionally as part of resolving the venue
+        context — BEFORE any source-specific spend check runs — so a venue
+        without one is free to identify. `has_instagram()` requires both a
+        non-empty handle AND a "found"/"low_confidence" status, so a
+        low-confidence rejection never masquerades as a usable handle.
+        """
+        try:
+            ig = self.venue_dao.get_venue_instagram(venue_id)
+        except Exception as e:
+            logger.warning(
+                f"[VenuePhotoArchive] instagram-handle read failed for {venue_id}: {e}"
+            )
+            return None
+        return ig.instagram_handle if ig and ig.has_instagram() else None
 
     def _place_id_for(self, venue_id: str) -> Optional[str]:
         try:
@@ -1298,6 +1381,8 @@ class VenuePhotoArchiveService:
             MEDIA_ARCHIVE_PHOTO_FAILURES_TOTAL.labels(
                 source=source, reason="too_large"
             ).inc()
+            if source == SOURCE_INSTAGRAM_POSTS:
+                INSTAGRAM_ARCHIVE_IMAGES_TOTAL.labels(result="failed").inc()
             logger.warning(f"[VenuePhotoArchive] job={summary['job_id']} {venue_id} photo too large: {e}")
             return None
         except Exception as e:
@@ -1305,6 +1390,12 @@ class VenuePhotoArchiveService:
             MEDIA_ARCHIVE_PHOTO_FAILURES_TOTAL.labels(
                 source=source, reason="download_error"
             ).inc()
+            if source == SOURCE_INSTAGRAM_POSTS:
+                # Split out from the generic reason so an EXPIRY WAVE (the
+                # scrape-then-download gap widening) is visible as itself
+                # rather than reading as an ordinary download error.
+                result = "expired" if _is_expired_signed_url(e) else "failed"
+                INSTAGRAM_ARCHIVE_IMAGES_TOTAL.labels(result=result).inc()
             logger.warning(f"[VenuePhotoArchive] job={summary['job_id']} {venue_id} photo download failed: {e}")
             return None
 
@@ -1329,6 +1420,8 @@ class VenuePhotoArchiveService:
         summary["bytes_stored"] += len(data)
         MEDIA_ARCHIVE_PHOTOS_STORED_TOTAL.labels(source=source).inc()
         MEDIA_ARCHIVE_BYTES_STORED_TOTAL.labels(source=source).inc(len(data))
+        if source == SOURCE_INSTAGRAM_POSTS:
+            INSTAGRAM_ARCHIVE_IMAGES_TOTAL.labels(result="downloaded").inc()
         # Everything known about this photo. A field costs bytes in a JSON
         # sidecar; re-fetching it costs a billed request, and some of it —
         # authorship, attribution uris — cannot be recovered at all once the
@@ -1370,6 +1463,17 @@ class VenuePhotoArchiveService:
             "source_url": url,
             "photo_name": photo.get("photo_name"),
             "thumbnail_url": photo.get("thumbnail"),
+            # Instagram-only: joins an image back to the post that carried it,
+            # without a second scrape. None for every other source and dropped
+            # by the filter below, same as any other field a source has no
+            # answer for.
+            "caption": photo.get("caption"),
+            "permalink": photo.get("permalink"),
+            "shortcode": photo.get("shortcode"),
+            "carousel_index": photo.get("carousel_index"),
+            "likes_count": photo.get("likes_count"),
+            "comments_count": photo.get("comments_count"),
+            "post_type": photo.get("post_type"),
         }
         # The provider's own object, verbatim, for anything not modelled above.
         if photo.get("raw"):

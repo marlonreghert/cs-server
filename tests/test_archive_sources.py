@@ -7,13 +7,17 @@ descriptor, and each source's cost model being its own.
 """
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 
 import pytest
 
+from app.api.apify_instagram_client import ApifyCreditExhaustedError
 from app.services.archive_sources import (
     ARCHIVE_SOURCES,
+    ArchiveCreditExhausted,
     SOURCE_APIFY_GMAPS,
+    SOURCE_INSTAGRAM_POSTS,
     SOURCE_SEARCHAPI_PHOTOS,
     SOURCE_GOOGLE_PHOTOS,
     SUPPORTED_SOURCES,
@@ -25,6 +29,7 @@ SETTINGS = SimpleNamespace(
     google_photo_cost_per_1k_usd=7.0,
     apify_place_scraped_cost_usd=0.004,
     apify_place_details_cost_usd=0.002,
+    apify_instagram_post_cost_usd=0.003,
 )
 
 
@@ -666,3 +671,129 @@ class TestPhotoIdentityAcrossSources:
 
     def test_a_url_without_a_size_suffix_is_handled(self):
         assert self._id(self.TOKEN) == self._id(f"{self.TOKEN}=s0")
+
+
+def _ig_post(shortcode, image_urls, **over):
+    post = {
+        "caption": "", "likes_count": 0, "comments_count": 0,
+        "timestamp": "2026-08-01T00:00:00.000Z", "post_type": "image",
+        "shortcode": shortcode, "permalink": f"https://instagram.com/p/{shortcode}/",
+        "image_urls": image_urls,
+    }
+    post.update(over)
+    return post
+
+
+class _FakeIgSourceClient:
+    """Counts calls; can be told to run out of credit."""
+
+    def __init__(self, posts=None):
+        self.posts = posts if posts is not None else []
+        self.calls: list[tuple] = []
+        self.no_credit = False
+
+    async def fetch_recent_posts(self, username, results_limit=10):
+        self.calls.append((username, results_limit))
+        if self.no_credit:
+            raise ApifyCreditExhaustedError("Apify credits exhausted (402)")
+        return list(self.posts)[:results_limit]
+
+
+class TestInstagramSource:
+    """The instagram_posts source: carousel expansion, the image cap, and its
+    own per-post cost model."""
+
+    def _fetch(self, client, cfg=None, handle="somehandle"):
+        source = get_source(SOURCE_INSTAGRAM_POSTS)
+        return asyncio.run(source.fetch(
+            client, {"instagram_handle": handle},
+            {"max_photos_per_venue": 10, "source_config": {}, **(cfg or {})},
+        ))
+
+    def test_a_single_image_post_yields_one_photo(self):
+        client = _FakeIgSourceClient([_ig_post("sc1", ["https://x/sc1.jpg"])])
+        result = self._fetch(client)
+        assert len(result["photos"]) == 1
+        assert result["photos"][0]["instagram_photo_id"] == "sc1"
+        assert result["photos"][0]["carousel_index"] is None
+
+    def test_a_carousel_expands_into_one_photo_per_child(self):
+        urls = [f"https://x/car{i}.jpg" for i in range(4)]
+        client = _FakeIgSourceClient([_ig_post("car1", urls)])
+        result = self._fetch(client)
+        photos = result["photos"]
+        assert len(photos) == 4
+        assert [p["instagram_photo_id"] for p in photos] == [
+            "car1_1", "car1_2", "car1_3", "car1_4",
+        ]
+        assert [p["carousel_index"] for p in photos] == [1, 2, 3, 4]
+
+    def test_the_cap_bounds_images_not_posts(self):
+        # 3 posts x 5-image carousels = 15 candidate images; the venue cap of
+        # 6 must stop expansion at 6, never fetch-then-trim.
+        posts = [
+            _ig_post(f"car{i}", [f"https://x/car{i}_{j}.jpg" for j in range(5)])
+            for i in range(3)
+        ]
+        client = _FakeIgSourceClient(posts)
+        result = self._fetch(client, cfg={"max_photos_per_venue": 6})
+        assert len(result["photos"]) == 6
+
+    def test_include_carousel_children_false_keeps_only_the_cover(self):
+        urls = [f"https://x/car{i}.jpg" for i in range(4)]
+        client = _FakeIgSourceClient([_ig_post("car1", urls)])
+        result = self._fetch(
+            client, cfg={"source_config": {"include_carousel_children": "no"}}
+        )
+        assert len(result["photos"]) == 1
+        assert result["photos"][0]["instagram_photo_id"] == "car1"
+
+    def test_a_post_with_no_image_urls_is_skipped(self):
+        # A video post, or a payload shape this parser cannot read — either
+        # way there is nothing to archive, and it must not raise.
+        client = _FakeIgSourceClient([
+            _ig_post("video1", [], post_type="video"),
+            _ig_post("sc2", ["https://x/sc2.jpg"]),
+        ])
+        result = self._fetch(client)
+        assert [p["instagram_photo_id"] for p in result["photos"]] == ["sc2"]
+
+    def test_no_handle_costs_nothing(self):
+        client = _FakeIgSourceClient([_ig_post("sc1", ["https://x/sc1.jpg"])])
+        result = self._fetch(client, handle=None)
+        assert result is None
+        assert client.calls == [], "a venue without a handle must not be fetched"
+
+    def test_credit_exhaustion_is_translated_at_the_source_boundary(self):
+        client = _FakeIgSourceClient([_ig_post("sc1", ["https://x/sc1.jpg"])])
+        client.no_credit = True
+        with pytest.raises(ArchiveCreditExhausted):
+            self._fetch(client)
+
+    def test_it_is_billed_per_post_scraped_not_per_image(self):
+        source = get_source(SOURCE_INSTAGRAM_POSTS)
+        units, label = source.estimate_units(
+            250, {"source_config": {"posts_per_venue": 10}}
+        )
+        assert units == 2500
+        assert "post" in label.lower()
+
+    def test_cost_scales_with_posts_per_venue_not_carousel_settings(self):
+        source = get_source(SOURCE_INSTAGRAM_POSTS)
+        few, _ = source.estimate_units(100, {"source_config": {"posts_per_venue": 5}})
+        many, _ = source.estimate_units(100, {"source_config": {"posts_per_venue": 20}})
+        assert many == few * 4
+        # Carousel settings never change the bill — Apify bills per post
+        # scraped, independent of how many images ride inside it.
+        with_children, _ = source.estimate_units(
+            100, {"source_config": {"posts_per_venue": 5, "include_carousel_children": "yes"}}
+        )
+        assert with_children == few
+
+    def test_unit_cost_reads_the_apify_instagram_setting(self):
+        source = get_source(SOURCE_INSTAGRAM_POSTS)
+        assert source.unit_cost_usd(SETTINGS, {}) == pytest.approx(0.003)
+
+    def test_missing_settings_falls_back_to_a_documented_default(self):
+        source = get_source(SOURCE_INSTAGRAM_POSTS)
+        assert source.unit_cost_usd(None, {}) > 0

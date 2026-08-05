@@ -66,9 +66,10 @@ class _Downloader:
 
 
 class _Dao:
-    def __init__(self, venues, place_ids=None):
+    def __init__(self, venues, place_ids=None, instagram_handles=None):
         self._venues = venues
         self._place_ids = place_ids if place_ids is not None else {v: f"place_{v}" for v in venues}
+        self._instagram_handles = instagram_handles or {}
 
     def list_active_venue_ids(self):
         return list(self._venues)
@@ -76,6 +77,14 @@ class _Dao:
     def get_vibe_attributes(self, venue_id):
         pid = self._place_ids.get(venue_id)
         return type("V", (), {"google_place_id": pid})() if pid else None
+
+    def get_venue_instagram(self, venue_id):
+        from types import SimpleNamespace
+
+        handle = self._instagram_handles.get(venue_id)
+        if not handle:
+            return None
+        return SimpleNamespace(instagram_handle=handle, has_instagram=lambda: True)
 
 
 def _service(**over):
@@ -147,6 +156,41 @@ class TestPhotoId:
 
     def test_differs_between_photos(self):
         assert photo_id_for({"photo_name": "a"}) != photo_id_for({"photo_name": "b"})
+
+    # ── Instagram: post-identity, never the signed url ──────────────────────
+    def test_instagram_single_image_id_is_the_shortcode(self):
+        assert photo_id_for({"instagram_photo_id": "abc123", "url": "https://x"}) == "abc123"
+
+    def test_instagram_carousel_child_id_carries_its_index(self):
+        assert photo_id_for({"instagram_photo_id": "abc123_2", "url": "https://x"}) == "abc123_2"
+
+    def test_instagram_id_is_unhashed_and_traceable_to_the_post(self):
+        # Deliberately NOT hashed, unlike the Google path below — the raw
+        # shortcode is what lets an id be read straight back to
+        # instagram.com/p/<shortcode>.
+        assert photo_id_for({"instagram_photo_id": "abc123"}) == "abc123"
+
+    def test_instagram_id_is_stable_when_the_signed_url_rotates(self):
+        # The whole point: Instagram's CDN signature changes every scrape, so
+        # an id derived from the url would break the skip-before-spend gate.
+        a = {"instagram_photo_id": "abc123", "url": "https://cdn.example/x.jpg?sig=v1"}
+        b = {"instagram_photo_id": "abc123", "url": "https://cdn.example/x.jpg?sig=v2"}
+        assert photo_id_for(a) == photo_id_for(b) == "abc123"
+
+    def test_instagram_id_wins_over_any_google_style_fields(self):
+        # A photo carrying both an Instagram id and Google-style fields must
+        # dispatch to the Instagram id — the two derivations must never mix.
+        photo = {
+            "instagram_photo_id": "abc123", "photo_name": "places/X/photos/ref1",
+            "url": "https://lh3.googleusercontent.com/token=s0",
+        }
+        assert photo_id_for(photo) == "abc123"
+
+    def test_google_sources_are_unaffected_by_the_instagram_field(self):
+        # A photo with no instagram_photo_id key falls through to the
+        # untouched Google derivation.
+        photo = {"photo_name": "places/X/photos/ref1", "url": "https://one"}
+        assert photo_id_for(photo) == photo_id_for(dict(photo, url="https://two"))
 
 
 class TestStoreKeys:
@@ -326,3 +370,54 @@ class TestManifest:
         svc = _service(google_places_client=_CountingGoogle([]))
         await svc.run({"venue_ids": "ven_a"})
         assert not [k for k in svc._fake_s3.objects if k.endswith("_manifest.json")]
+
+
+class _FakeIgClient:
+    """Counts calls — the only thing that matters for the no_handle guarantee."""
+
+    def __init__(self, posts=None):
+        self.posts = posts if posts is not None else []
+        self.calls: list[str] = []
+
+    async def fetch_recent_posts(self, username, results_limit=10):
+        self.calls.append(username)
+        return list(self.posts)[:results_limit]
+
+
+class TestInstagramHandleCostsNothingWhenMissing:
+    """The handle lookup is a database read that must resolve BEFORE any
+    Apify call. Asserted on CALL COUNT, not just the `no_handle` outcome,
+    because the ordering — not the label — is what protects the spend."""
+
+    async def test_no_handle_reaches_zero_apify_calls(self):
+        apify = _FakeIgClient()
+        svc = _service(
+            venue_dao=_Dao(["ven_a"]),  # no instagram_handles entry
+            apify_instagram_client=apify,
+        )
+        summary = await svc.run({
+            "source": "instagram_posts", "venue_ids": "ven_a",
+            "max_photos_per_venue": 5,
+        })
+        assert summary["no_handle"] == 1
+        assert apify.calls == [], "the handle lookup did not happen before the fetch"
+        assert summary["archived"] == 0
+
+    async def test_a_confirmed_handle_is_used(self):
+        apify = _FakeIgClient(posts=[{
+            "caption": "", "likes_count": 0, "comments_count": 0,
+            "timestamp": "2026-08-01T00:00:00.000Z", "post_type": "image",
+            "shortcode": "sc1", "permalink": "https://instagram.com/p/sc1/",
+            "image_urls": ["https://instagram.cdn.example/sc1.jpg"],
+        }])
+        svc = _service(
+            venue_dao=_Dao(["ven_a"], instagram_handles={"ven_a": "somehandle"}),
+            apify_instagram_client=apify,
+        )
+        summary = await svc.run({
+            "source": "instagram_posts", "venue_ids": "ven_a",
+            "max_photos_per_venue": 5,
+        })
+        assert summary["no_handle"] == 0
+        assert apify.calls == ["somehandle"]
+        assert summary["archived"] == 1

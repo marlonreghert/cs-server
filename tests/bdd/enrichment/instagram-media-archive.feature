@@ -1,4 +1,3 @@
-@wip
 Feature: Instagram media archive
   As the operator of the photo archive pipeline
   I want Instagram post images and captions stored in their own source folder
@@ -49,8 +48,7 @@ Feature: Instagram media archive
 
   Scenario: Produce the same photo id across runs when the signed url changes
     Given a venue with a confirmed Instagram handle
-    And that handle has a post whose image url signature differs between two
-      observations
+    And that handle has a post whose image url signature differs between two observations
     When the archive runs twice for the source "instagram_posts"
     Then both runs derive the same photo id for that image
 
@@ -69,8 +67,7 @@ Feature: Instagram media archive
     And the failed image is counted with the result "failed"
 
   Scenario: Stop the run when Apify reports credit exhaustion
-    Given the Apify Instagram client reports credit exhaustion on the second
-      venue
+    Given the Apify Instagram client reports credit exhaustion on the second venue
     When the archive runs for the source "instagram_posts" over 5 venues
     Then the run stops after the second venue
     And no further Apify actor run is started

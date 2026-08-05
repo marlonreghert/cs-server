@@ -46,6 +46,45 @@ def _count_dropped(reason: str) -> None:
         pass
 
 
+# Keys Apify's instagram-scraper has documented for a carousel post's child
+# images, most specific first. Unverified against a live response — no
+# APIFY_API_TOKEN in this environment — so every documented shape is tried
+# rather than betting on one, the same tolerance `_external_url` applies to
+# `externalUrls`.
+_CHILD_KEYS = ("childPosts", "sidecarChildren", "children")
+
+
+def _child_display_urls(item: dict) -> list[str]:
+    """Every child image url of a carousel post, or [] for a single image."""
+    for key in _CHILD_KEYS:
+        children = item.get(key)
+        if isinstance(children, list) and children:
+            urls = [
+                url for child in children
+                if isinstance(child, dict)
+                for url in (child.get("displayUrl") or child.get("display_url"),)
+                if isinstance(url, str) and url
+            ]
+            if urls:
+                return urls
+    return []
+
+
+def _post_image_urls(item: dict) -> list[str]:
+    """Every archivable image for one post, main image first.
+
+    A carousel's top-level `displayUrl` mirrors its first child, so when
+    children are present they are the WHOLE list — using both would archive
+    the cover twice under two different photo ids. A single-image post has no
+    children, so its `displayUrl` is the only entry.
+    """
+    children = _child_display_urls(item)
+    if children:
+        return children
+    main = item.get("displayUrl")
+    return [main] if isinstance(main, str) and main else []
+
+
 def _external_url(entry) -> Optional[str]:
     """The URL out of one `externalUrls` entry, whatever shape it arrives in.
 
@@ -158,8 +197,15 @@ class ApifyInstagramClient:
     ) -> list[dict]:
         """Fetch recent posts for an Instagram profile.
 
-        Uses apify/instagram-scraper with resultsType="posts".
-        Only returns caption text + engagement metrics (no image URLs — they expire).
+        Uses apify/instagram-scraper with resultsType="posts". Returns caption
+        text, engagement metrics, AND the post's image urls — the media archive
+        pipeline is what needed these; `InstagramPostsEnrichmentService` reads
+        only the caption-era keys and keeps working unchanged.
+
+        The image urls are signed with a short-lived Instagram CDN signature:
+        they are only good within the run that fetched them, and a caller that
+        stores this dict for later must download them in the SAME run, not
+        read them back from a cache.
 
         Args:
             username: Instagram username (without @)
@@ -167,7 +213,8 @@ class ApifyInstagramClient:
 
         Returns:
             List of post dicts with keys: caption, likes_count, comments_count,
-            timestamp, post_type. Empty list on error.
+            timestamp, post_type, shortcode, permalink, image_urls. Empty list
+            on error.
         """
         run_input = {
             "directUrls": [f"https://www.instagram.com/{username}/"],
@@ -192,6 +239,9 @@ class ApifyInstagramClient:
                 "comments_count": item.get("commentsCount", 0),
                 "timestamp": item.get("timestamp", ""),
                 "post_type": item.get("type", "image"),
+                "shortcode": item.get("shortCode") or None,
+                "permalink": item.get("url") or None,
+                "image_urls": _post_image_urls(item),
             })
 
         logger.info(
