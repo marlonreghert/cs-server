@@ -26,7 +26,7 @@ from app.services.pipeline_run_registry import (
     new_run_id,
     run_scope,
 )
-from app.routers import venue_router, set_venue_handler, debug_router, set_debug_dependencies, admin_trigger_router, set_admin_container, engagement_router, set_engagement_service, internal_router, set_internal_container
+from app.routers import venue_router, set_venue_handler, debug_router, set_debug_dependencies, admin_trigger_router, set_admin_container, engagement_router, set_engagement_service, internal_router, set_internal_container, admin_events_router, set_admin_events_container
 from app.middleware import PrometheusMiddleware
 from app.services.refresh_interval_watch import (
     WATCH_INTERVAL_SECONDS,
@@ -638,6 +638,9 @@ async def startup_essential(settings: Settings):
     # Inject container for the internal on-demand photo-resolve router.
     set_internal_container(container)
 
+    # Inject container for the admin events review API.
+    set_admin_events_container(container)
+
     # Rebuild the eligibility serving mirror from its rows so a Redis flush before
     # this start does not leave filtering on the hardcoded defaults. Runs OFF the
     # event loop (blocking SQLAlchemy read, same pattern as the projector) so it
@@ -748,6 +751,7 @@ app.include_router(debug_router)
 app.include_router(admin_trigger_router)
 app.include_router(engagement_router)
 app.include_router(internal_router)
+app.include_router(admin_events_router)
 
 
 # Health check endpoint

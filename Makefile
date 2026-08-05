@@ -86,6 +86,9 @@ test-unit:
 		tests/test_events_schema_migration.py \
 		tests/test_event_caption_matcher.py \
 		tests/test_event_venue_targeting.py \
+		tests/test_event_date_resolver.py \
+		tests/test_event_table_migration.py \
+		tests/test_event_extraction_service.py \
 		-v
 
 test-integration:

@@ -495,6 +495,18 @@ class Settings(BaseSettings):
     vibe_classifier_stage_b_model: str = "gpt-5.6-luna"
     vibe_classifier_early_stop_enabled: bool = True
     vibe_classifier_early_stop_min_photos: int = 6
+
+    # Instagram Event Extraction (plans/260804_instagram-event-extraction.md).
+    # One OpenAI vision call per qualifying post (never a batch — see
+    # app/services/event_extraction_service.py for why). gpt-5.6 is a
+    # reasoning model whose reasoning tokens count against
+    # max_completion_tokens, so the default carries real headroom above a
+    # typical lineup+description payload.
+    event_extraction_model: str = "gpt-5.6-luna"
+    # Below this, an otherwise-successful extraction is queued for review
+    # rather than trusted — the operator outranks an unsure model.
+    event_extraction_min_confidence: float = 0.5
+    event_extraction_max_tokens: int = 4096
     vibe_classifier_early_stop_confidence: float = 0.92
 
     # Dev Mode - overrides default locations for venue discovery

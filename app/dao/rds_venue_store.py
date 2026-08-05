@@ -428,6 +428,115 @@ class RdsVenueStore:
         with self.engine.connect() as conn:
             return [dict(r) for r in conn.execute(text(_VENUE_SELECT)).mappings()]
 
+    # ── events.event (plans/260804_instagram-event-extraction.md) ────────────
+    _EVENT_COLUMNS = (
+        "event_id", "venue_id", "source_kind", "source_handle", "source_shortcode",
+        "source_permalink", "starts_at", "ends_at", "is_recurring", "recurrence_text",
+        "title", "description", "lineup", "ticket_url", "price_text", "location_text",
+        "cover_photo_key", "confidence", "status", "review_reason", "raw_extraction",
+        "first_seen_at", "last_seen_at",
+    )
+    _EVENT_JSONB_COLUMNS = ("lineup", "raw_extraction")
+    _EVENT_SELECT = (
+        "SELECT event_id, venue_id, source_kind, source_handle, source_shortcode, "
+        "source_permalink, starts_at, ends_at, is_recurring, recurrence_text, "
+        "title, description, lineup, ticket_url, price_text, location_text, "
+        "cover_photo_key, confidence, status, review_reason, raw_extraction, "
+        "first_seen_at, last_seen_at, updated_at FROM events.event"
+    )
+
+    def get_event(self, event_id: str) -> Optional[dict]:
+        with self.engine.connect() as conn:
+            row = conn.execute(
+                text(f"{self._EVENT_SELECT} WHERE event_id=:id"), {"id": event_id},
+            ).mappings().first()
+            return dict(row) if row else None
+
+    def get_event_by_source(self, source_handle: str, source_shortcode: str) -> Optional[dict]:
+        with self.engine.connect() as conn:
+            row = conn.execute(
+                text(
+                    f"{self._EVENT_SELECT} WHERE source_handle=:h AND source_shortcode=:s"
+                ),
+                {"h": source_handle, "s": source_shortcode},
+            ).mappings().first()
+            return dict(row) if row else None
+
+    def insert_event(self, fields: dict) -> dict:
+        """INSERT relying on the UNIQUE (source_handle, source_shortcode)
+        constraint (migration 0023) to reject a duplicate — the service is
+        expected to check get_event_by_source first; this is the backstop,
+        not the primary idempotency mechanism (a constraint, not a code path)."""
+        cols = [c for c in self._EVENT_COLUMNS if c in fields]
+        assign = {c: fields[c] for c in cols}
+        for c in self._EVENT_JSONB_COLUMNS:
+            if c in assign and assign[c] is not None:
+                assign[c] = json.dumps(assign[c])
+        col_list = ", ".join(cols)
+        val_list = ", ".join(
+            f"CAST(:{c} AS jsonb)" if c in self._EVENT_JSONB_COLUMNS else f":{c}"
+            for c in cols
+        )
+        with self.engine.begin() as conn:
+            conn.execute(
+                text(f"INSERT INTO events.event ({col_list}) VALUES ({val_list})"),
+                assign,
+            )
+        return self.get_event(fields["event_id"])
+
+    def update_event(self, event_id: str, fields: dict) -> Optional[dict]:
+        """Partial update: only the keys present in `fields` change. Always
+        bumps `updated_at`, matching the fake's contract."""
+        if not fields:
+            fields = {}
+        cols = [c for c in self._EVENT_COLUMNS if c in fields and c != "event_id"]
+        assign = {c: fields[c] for c in cols}
+        for c in self._EVENT_JSONB_COLUMNS:
+            if c in assign and assign[c] is not None:
+                assign[c] = json.dumps(assign[c])
+        set_clauses = [
+            f"{c}=CAST(:{c} AS jsonb)" if c in self._EVENT_JSONB_COLUMNS else f"{c}=:{c}"
+            for c in cols
+        ]
+        set_clauses.append("updated_at=now()")
+        assign["event_id"] = event_id
+        with self.engine.begin() as conn:
+            result = conn.execute(
+                text(
+                    f"UPDATE events.event SET {', '.join(set_clauses)} "
+                    "WHERE event_id=:event_id"
+                ),
+                assign,
+            )
+            if result.rowcount == 0:
+                return None
+        return self.get_event(event_id)
+
+    def list_events(
+        self, *, venue_id: Optional[str] = None, status: Optional[str] = None,
+        since=None, until=None,
+    ) -> list[dict]:
+        sql = self._EVENT_SELECT
+        clauses = []
+        params: dict = {}
+        if venue_id is not None:
+            clauses.append("venue_id=:venue_id")
+            params["venue_id"] = venue_id
+        if status is not None:
+            clauses.append("status=:status")
+            params["status"] = status
+        if since is not None:
+            clauses.append("starts_at >= :since")
+            params["since"] = since
+        if until is not None:
+            clauses.append("starts_at <= :until")
+            params["until"] = until
+        if clauses:
+            sql += " WHERE " + " AND ".join(clauses)
+        sql += " ORDER BY starts_at NULLS LAST, event_id"
+        with self.engine.connect() as conn:
+            return [dict(r) for r in conn.execute(text(sql), params).mappings()]
+
     # ── bulk per-table readers (projector rebuild, P1) ─────────────────────────
     # Replace the projector's former per-venue read loop (~18 SQL queries per
     # venue per cycle) with one query per table for the whole servable id set.

@@ -71,6 +71,11 @@ class InMemoryRdsVenueStore:
         # events.venue_event_profile: venue_id -> profile row (see
         # plans/260804_event-venue-targeting.md).
         self.event_profiles: dict[str, dict] = {}
+        # events.event: event_id -> row (see
+        # plans/260804_instagram-event-extraction.md). Mirrors the real table's
+        # UNIQUE (source_handle, source_shortcode) constraint via `_events_guard`
+        # rather than a second index, since the fake's volume never needs one.
+        self.events: dict[str, dict] = {}
         self._down = False
 
     # ── test controls ────────────────────────────────────────────────────────
@@ -375,6 +380,75 @@ class InMemoryRdsVenueStore:
             merged = dict(row)
             merged["venue_source"] = venue_row.get("venue_source", "besttime")
             out.append(merged)
+        return out
+
+    # ── events.event (plans/260804_instagram-event-extraction.md) ────────────
+    def get_event(self, event_id: str) -> Optional[dict]:
+        row = self.events.get(event_id)
+        return copy.deepcopy(row) if row else None
+
+    def get_event_by_source(self, source_handle: str, source_shortcode: str) -> Optional[dict]:
+        for row in self.events.values():
+            if (
+                row.get("source_handle") == source_handle
+                and row.get("source_shortcode") == source_shortcode
+            ):
+                return copy.deepcopy(row)
+        return None
+
+    def insert_event(self, fields: dict) -> dict:
+        """Mirrors the real UNIQUE (source_handle, source_shortcode) constraint:
+        raises rather than silently inserting a second row for a post already
+        extracted. The service is expected to check get_event_by_source first
+        (the same pattern as every ON-CONFLICT-free write elsewhere in this
+        fake) — this is the last-resort guard, not the primary mechanism."""
+        self._guard()
+        event_id = fields["event_id"]
+        existing = self.get_event_by_source(fields["source_handle"], fields["source_shortcode"])
+        if existing is not None:
+            raise ValueError(
+                f"duplicate (source_handle, source_shortcode): "
+                f"{fields['source_handle']!r}, {fields['source_shortcode']!r}"
+            )
+        now = _now()
+        row = dict(fields)
+        row.setdefault("first_seen_at", now)
+        row.setdefault("last_seen_at", now)
+        row["updated_at"] = now
+        self.events[event_id] = row
+        return copy.deepcopy(row)
+
+    def update_event(self, event_id: str, fields: dict) -> Optional[dict]:
+        """Partial update: only the keys in `fields` change. Returns None
+        (rather than raising) when the event does not exist, so a caller
+        racing a delete degrades the same way the real UPDATE...WHERE would
+        (zero rows affected)."""
+        self._guard()
+        row = self.events.get(event_id)
+        if row is None:
+            return None
+        row.update(fields)
+        row["updated_at"] = _now()
+        self.events[event_id] = row
+        return copy.deepcopy(row)
+
+    def list_events(
+        self, *, venue_id: Optional[str] = None, status: Optional[str] = None,
+        since=None, until=None,
+    ) -> list[dict]:
+        out = []
+        for row in self.events.values():
+            if venue_id is not None and row.get("venue_id") != venue_id:
+                continue
+            if status is not None and row.get("status") != status:
+                continue
+            starts_at = row.get("starts_at")
+            if since is not None and (starts_at is None or starts_at < since):
+                continue
+            if until is not None and (starts_at is None or starts_at > until):
+                continue
+            out.append(copy.deepcopy(row))
+        out.sort(key=lambda r: (r.get("starts_at") is None, r.get("starts_at"), r["event_id"]))
         return out
 
     def list_all_venue_rows(self) -> list[dict]:
