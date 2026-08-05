@@ -330,6 +330,16 @@ class Container:
             )
             logger.info("[Container] Apify Instagram client initialized")
 
+            # Third archive source. Wired here rather than alongside the other
+            # two above because this client does not exist yet at that point in
+            # startup — the archive service's attribute name matches
+            # `instagram_posts`'s `requires_attr`, so the source catalog and the
+            # dispatcher both resolve it by attribute the moment it appears.
+            if getattr(self, "venue_photo_archive_service", None) is not None:
+                self.venue_photo_archive_service.apify_instagram_client = (
+                    self.apify_instagram_client
+                )
+
             validator = InstagramValidator(
                 auto_accept_threshold=settings.instagram_auto_accept_threshold,
                 low_confidence_threshold=settings.instagram_min_confidence,

@@ -69,6 +69,7 @@ test-unit:
 		tests/test_website_uri_persistence.py \
 		tests/test_photo_archive_pipeline_v2.py \
 		tests/test_archive_sources.py \
+		tests/test_apify_instagram_media.py \
 		tests/test_menu_extraction_from_archive.py \
 		tests/test_photo_metadata_fidelity.py \
 		tests/test_apify_profile_parsing.py \

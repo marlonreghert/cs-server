@@ -23,12 +23,15 @@ from typing import Any, Callable, Optional
 
 from app.api.apify_gmaps_extractor_client import ApifyPollTimeoutError
 from app.api.apify_instagram_client import ApifyCreditExhaustedError
+from app.config import settings
+from app.metrics import INSTAGRAM_ARCHIVE_IMAGES_TOTAL
 
 logger = logging.getLogger(__name__)
 
 SOURCE_GOOGLE_PHOTOS = "google_photos"
 SOURCE_APIFY_GMAPS = "apify_gmaps_extractor"
 SOURCE_SEARCHAPI_PHOTOS = "searchapi_gmaps_photos"
+SOURCE_INSTAGRAM_POSTS = "instagram_posts"
 
 
 class ArchiveCreditExhausted(Exception):
@@ -250,6 +253,120 @@ def _searchapi_unit_cost(settings, cfg) -> float:
     return float(getattr(settings, "searchapi_cost_per_1k_usd", 4.0)) / 1000.0
 
 
+# ── instagram_posts ──────────────────────────────────────────────────────────
+def _instagram_photo(
+    post: dict, url: str, shortcode: Optional[str], child_index: Optional[int]
+) -> dict:
+    """One archivable image, carrying the post that produced it.
+
+    The photo id is derived from the POST's identity — `<shortcode>` for a
+    single image, `<shortcode>_<n>` for carousel child n — never from the url:
+    Instagram signs the url with a signature that rotates on every scrape, so
+    an id built from it would change every run and defeat the skip-before-spend
+    gate, which depends on a photo having the same id across runs.
+    """
+    photo_id = (
+        f"{shortcode}_{child_index}" if shortcode and child_index is not None
+        else shortcode
+    )
+    return {
+        "url": url,
+        "instagram_photo_id": photo_id,
+        "caption": post.get("caption"),
+        "permalink": post.get("permalink"),
+        "shortcode": shortcode,
+        "carousel_index": child_index,
+        "uploaded_at": post.get("timestamp") or None,
+        "likes_count": post.get("likes_count"),
+        "comments_count": post.get("comments_count"),
+        "post_type": post.get("post_type"),
+        # Instagram has no Google resource name; explicit None keeps
+        # `photo_id_for`'s Google fallback path from tripping on a stray key.
+        "photo_name": None,
+    }
+
+
+async def _fetch_instagram(client, venue, cfg):
+    """Scrape a venue's recent posts and expand every carousel into its images.
+
+    The handle is looked up and checked BEFORE this is ever reached — in the
+    service's `_archive_venue`, mirroring the Apify Maps `no_query` check — so
+    a venue without one costs nothing. This function can assume a handle is
+    present; the guard below is defensive, not the cost gate itself.
+
+    `max_photos_per_venue` bounds IMAGES here, not posts: a ten-post scrape
+    where every post is a ten-image carousel is a hundred images from one
+    venue if the cap only bounded posts. Expansion stops the moment the cap is
+    reached rather than fetching everything and trimming, so nothing past the
+    cap is ever downloaded — the loop below breaks before appending, not after.
+
+    The scrape and the download happen in the same run: Instagram signs each
+    image url with a short-lived signature, so returning urls for the caller to
+    download immediately (exactly how the shared pipeline already behaves) is a
+    constraint this function must preserve, not a mechanism it needs to build.
+    """
+    handle = venue.get("instagram_handle")
+    if not handle:
+        return None  # caller records `no_handle` before this is ever called
+
+    source_cfg = cfg.get("source_config") or {}
+    posts_per_venue = int(
+        source_cfg.get("posts_per_venue")
+        or settings.instagram_archive_posts_per_venue
+    )
+    include_children = _as_bool(
+        source_cfg.get("include_carousel_children"), default=True
+    )
+    cap = cfg["max_photos_per_venue"]
+
+    try:
+        posts = await client.fetch_recent_posts(handle, results_limit=posts_per_venue)
+    except ApifyCreditExhaustedError as e:
+        # Same translation the Maps source needed: without it this exception
+        # falls through as one venue's failure and the run keeps calling into
+        # an exhausted balance for every venue that remains.
+        raise ArchiveCreditExhausted(str(e)) from e
+
+    photos: list[dict] = []
+    skipped_cap = 0
+    for post in posts or []:
+        if len(photos) >= cap:
+            break
+        shortcode = post.get("shortcode")
+        urls = post.get("image_urls") or []
+        if not urls:
+            continue  # a video post, or a payload with nothing to archive
+        selected = urls if include_children else urls[:1]
+        is_carousel = len(selected) > 1
+        for idx, url in enumerate(selected, start=1):
+            if len(photos) >= cap:
+                skipped_cap += 1
+                continue
+            child_index = idx if is_carousel else None
+            photos.append(_instagram_photo(post, url, shortcode, child_index))
+
+    if skipped_cap:
+        INSTAGRAM_ARCHIVE_IMAGES_TOTAL.labels(result="skipped_cap").inc(skipped_cap)
+
+    return {"photos": photos, "info": {}}
+
+
+def _instagram_units(venues: int, cfg: dict) -> tuple[int, str]:
+    # Billed per RESULT ITEM (post) scraped — the Apify Instagram actor's own
+    # unit, unlike the Maps extractor, which bills per PLACE regardless of how
+    # many photos come back.
+    source_cfg = cfg.get("source_config") or {}
+    posts = int(
+        source_cfg.get("posts_per_venue")
+        or settings.instagram_archive_posts_per_venue
+    )
+    return venues * posts, "posts scraped"
+
+
+def _instagram_unit_cost(settings_obj, cfg) -> float:
+    return float(getattr(settings_obj, "apify_instagram_post_cost_usd", 0.003))
+
+
 ARCHIVE_SOURCES: dict[str, ArchiveSource] = {
     SOURCE_GOOGLE_PHOTOS: ArchiveSource(
         label="Google Places API",
@@ -334,6 +451,45 @@ ARCHIVE_SOURCES: dict[str, ArchiveSource] = {
             "— the category ids are constants."
         ),
         provides_categories=True,
+    ),
+    SOURCE_INSTAGRAM_POSTS: ArchiveSource(
+        label="Instagram posts (Apify)",
+        description=(
+            "Scrapes a venue's recent Instagram feed posts and archives every "
+            "image, expanding carousels into one object per child. A venue "
+            "needs a confirmed Instagram handle; without one it costs nothing."
+        ),
+        requires_attr="apify_instagram_client",
+        unavailable_reason="Apify API token not configured (APIFY_API_TOKEN)",
+        fetch=_fetch_instagram,
+        estimate_units=_instagram_units,
+        unit_cost_usd=_instagram_unit_cost,
+        config_schema=[
+            ConfigField(
+                name="posts_per_venue", label="Recent posts per venue",
+                type="number", default=settings.instagram_archive_posts_per_venue,
+                help="How many of the venue's most recent posts to scrape. "
+                     "Each post scraped is the Apify actor's billed unit, "
+                     "independent of how many images it carries.",
+            ),
+            ConfigField(
+                name="include_carousel_children",
+                label="Archive carousel children", type="select",
+                default="yes", options=["yes", "no"],
+                help="Turn OFF to archive only a carousel's cover image. "
+                     "Either way, the per-venue photo cap bounds IMAGES, "
+                     "including carousel children — a run never downloads "
+                     "past it.",
+            ),
+        ],
+        cost_note=(
+            "Billed per post scraped, not per image — a ten-image carousel "
+            "costs the same as a single-image post. The per-post price is not "
+            "published, so the estimate is a floor, like the Maps extractor's."
+        ),
+        # Instagram returns no per-image category; every photo goes through
+        # the classifier, which is what lets a poster be filed as `flyer`.
+        provides_categories=False,
     ),
 }
 

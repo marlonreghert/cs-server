@@ -424,6 +424,16 @@ class Settings(BaseSettings):
     # per search, one per category per venue. Developer plan rate.
     searchapi_api_key: str = ""
     searchapi_cost_per_1k_usd: float = 4.0
+    # Apify's instagram-scraper bills per RESULT ITEM (post), unlike the Maps
+    # extractor which bills per place regardless of photo count. Unverified
+    # against Apify's current rate card — no APIFY_API_TOKEN was available to
+    # confirm it against a live run — so, like the Google unit price, this is a
+    # setting and the estimate that uses it carries a caveat.
+    apify_instagram_post_cost_usd: float = 0.003
+    # Default for the instagram_posts archive source's `posts_per_venue` config
+    # field, used both as the admin-panel default and the runtime fallback when
+    # a saved config omits it.
+    instagram_archive_posts_per_venue: int = 10
 
     # Per-photo classification (our own taxonomy + per-category attributes).
     # Runs between fetch and store, and ONLY for sources that do not return

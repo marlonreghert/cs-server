@@ -64,12 +64,27 @@ class VenueInstagram(BaseModel):
 
 
 class InstagramPost(BaseModel):
-    """A single Instagram post (caption-only, no image URLs — they expire)."""
+    """A single Instagram post.
+
+    Caption/engagement fields are cached indefinitely in `instagram.posts` —
+    they never expire. `image_urls` is the exception: Instagram signs those
+    urls with a short-lived signature, so they are only ever meaningful within
+    the same scrape run that produced them (the media archive pipeline
+    downloads them immediately) and are never read back from this cached
+    payload days later.
+    """
     caption: Optional[str] = None
     likes_count: int = 0
     comments_count: int = 0
     timestamp: Optional[str] = None
     post_type: str = "image"  # image | video | carousel
+    # Additive — existing cached rows simply lack these, and every reader must
+    # tolerate that (no migration; these ride in the existing payload jsonb).
+    shortcode: Optional[str] = None
+    permalink: Optional[str] = None
+    # The main image plus every carousel child, in display order. Empty for a
+    # video post or a payload that predates this field.
+    image_urls: list[str] = Field(default_factory=list)
 
 
 class VenueInstagramPosts(BaseModel):

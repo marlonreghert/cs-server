@@ -17,6 +17,7 @@ from app.api.openai_photo_classifier_client import _batched, _prompt
 from app.models.photo_taxonomy import (
     CATEGORY_CROWD,
     CATEGORY_EXTERIOR,
+    CATEGORY_FLYER,
     CATEGORY_FOOD_DRINKS,
     CATEGORY_INTERIOR,
     CATEGORY_MENU,
@@ -128,6 +129,34 @@ class TestVocabulary(unittest.TestCase):
         self.assertEqual(
             validate_authorship_guess(_sure("by_owner"), THRESHOLD), "by_owner")
         self.assertIsNone(validate_authorship_guess(_sure("unknown"), THRESHOLD))
+
+
+class TestFlyerCategory(unittest.TestCase):
+    """Instagram archives are the first source to hand this classifier a
+    poster rather than a photograph — without its own category every flyer
+    fell into `other`, indistinguishable from a logo or a document."""
+
+    def test_flyer_is_a_known_category(self):
+        self.assertIn(CATEGORY_FLYER, PHOTO_CATEGORIES)
+
+    def test_flyer_has_its_own_shallow_attributes(self):
+        names = {spec.name for spec in attributes_for(CATEGORY_FLYER)}
+        self.assertEqual(names, {"announces_event", "names_time"})
+
+    def test_flyer_attribute_values_validate(self):
+        out = validate_attributes(
+            CATEGORY_FLYER,
+            _wrap({"announces_event": "yes", "names_time": "no"}),
+            THRESHOLD,
+        )
+        self.assertEqual(out, {"announces_event": "yes", "names_time": "no"})
+
+    def test_adding_flyer_does_not_disturb_the_existing_categories(self):
+        # Every OTHER category's schema must be exactly what it was before —
+        # a new tuple entry must not perturb dict iteration order elsewhere.
+        for category in (CATEGORY_MENU, CATEGORY_FOOD_DRINKS, CATEGORY_INTERIOR,
+                          CATEGORY_EXTERIOR, CATEGORY_CROWD, CATEGORY_OTHER):
+            self.assertTrue(attributes_for(category), category)
 
 
 class TestEveryFieldIsAnswered(unittest.TestCase):

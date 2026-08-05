@@ -554,6 +554,18 @@ MEDIA_ARCHIVE_VENUES_WITH_MEDIA = Gauge(
     ["source"],
 )
 
+# Instagram-specific image outcomes, split out from the generic
+# media_archive_photo_failures_total{reason="download_error"} so an EXPIRY WAVE
+# is visible as itself. Instagram signs its CDN urls with a short-lived
+# signature: if the scrape-then-download gap ever widens, every image in the
+# run starts failing the same way, and that must not read as an ordinary
+# download error.
+INSTAGRAM_ARCHIVE_IMAGES_TOTAL = Counter(
+    "instagram_archive_images_total",
+    "Instagram post images, by what happened to them",
+    ["result"],  # downloaded | expired | failed | skipped_cap
+)
+
 # Photo classification. `fallbacks` is the one to watch: it separates "the model
 # failed" (photos keep their source category) from "the model was unsure" (filed
 # as `other`), which look identical in the category counts but mean opposite

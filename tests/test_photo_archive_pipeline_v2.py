@@ -72,7 +72,7 @@ class TestParseConfig:
 
     def test_unknown_source_is_rejected(self):
         with pytest.raises(InvalidArchiveConfig):
-            cfg(source="instagram_posts")
+            cfg(source="carrier_pigeon")
 
     def test_unknown_path_mode_is_rejected(self):
         with pytest.raises(InvalidArchiveConfig):

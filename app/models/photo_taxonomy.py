@@ -50,10 +50,16 @@ CATEGORY_INTERIOR = "interior"
 CATEGORY_EXTERIOR = "exterior"
 CATEGORY_CROWD = "crowd"
 CATEGORY_OTHER = "other"
+# A promotional poster or flyer — mostly graphic design and text rather than a
+# photograph. Instagram archives are the first source to feed this classifier
+# images that are not photographs at all; without this category every event
+# flyer landed in `other`, indistinguishable from a logo or a document. It is
+# the free pre-filter the event extractor spends its vision calls behind.
+CATEGORY_FLYER = "flyer"
 
 PHOTO_CATEGORIES: tuple[str, ...] = (
     CATEGORY_MENU, CATEGORY_FOOD_DRINKS, CATEGORY_INTERIOR,
-    CATEGORY_EXTERIOR, CATEGORY_CROWD, CATEGORY_OTHER,
+    CATEGORY_EXTERIOR, CATEGORY_CROWD, CATEGORY_OTHER, CATEGORY_FLYER,
 )
 
 # What separates the two spatial categories. Stated as a rule about the SKY
@@ -72,6 +78,10 @@ CATEGORY_RULES: dict[str, str] = {
         "edges of a room shot do not make it a crowd photo"
     ),
     CATEGORY_OTHER: "none of the above",
+    CATEGORY_FLYER: (
+        "the subject is a promotional poster, flyer or event announcement — "
+        "the image is mostly graphic design and text rather than a photograph"
+    ),
 }
 
 # Is this good enough to show in the app. Two buckets, because the difference
@@ -185,6 +195,17 @@ PHOTO_ATTRIBUTES: dict[str, tuple[Attr, ...]] = {
              why="knowing WHY it is `other` lets us reclassify later without "
                  "re-billing. event_flyer is the likeliest future promotion: a "
                  "flyer carries the event, the date and the cover"),
+    ),
+    # Deliberately shallow: only what a poster can actually answer. Reading the
+    # date itself is a purpose-built prompt for a later extraction pass — asking
+    # a coarse classifier to parse it would repeat the `time_of_day` mistake
+    # above, asking a question most photos in the category cannot answer.
+    CATEGORY_FLYER: (
+        Attr("announces_event", values=("yes", "no"),
+             why="the free pre-filter that decides which images the event "
+                 "extractor is allowed to spend a vision call on"),
+        Attr("names_time", values=("yes", "no"),
+             why="whether a time appears on the flyer at all, not what it is"),
     ),
 }
 
