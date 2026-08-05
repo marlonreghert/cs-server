@@ -142,6 +142,24 @@ class VenueRepository(RedisVenueDAO):
     def list_venue_event_profiles(self, tiers=None):
         return self.rds_store.list_venue_event_profiles(tiers=tiers)
 
+    # ── events.event (plans/260804_instagram-event-extraction.md) ────────────
+    def get_event(self, event_id: str):
+        return self.rds_store.get_event(event_id)
+
+    def get_event_by_source(self, source_handle: str, source_shortcode: str):
+        return self.rds_store.get_event_by_source(source_handle, source_shortcode)
+
+    def insert_event(self, fields: dict) -> dict:
+        return self.rds_store.insert_event(fields)
+
+    def update_event(self, event_id: str, fields: dict):
+        return self.rds_store.update_event(event_id, fields)
+
+    def list_events(self, *, venue_id=None, status=None, since=None, until=None):
+        return self.rds_store.list_events(
+            venue_id=venue_id, status=status, since=since, until=until,
+        )
+
     # ── writes: RDS-only — the projector is the sole Redis writer ────────────────
     # ── core venue ────────────────────────────────────────────────────────────
     def upsert_venue(self, venue) -> None:

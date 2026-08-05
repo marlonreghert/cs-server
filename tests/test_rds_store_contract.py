@@ -13,6 +13,7 @@ SQL (upserts, ON CONFLICT, jsonb cast, composite weekly key) is proven first.
 """
 import os
 import uuid
+from datetime import datetime, timezone
 
 import pytest
 
@@ -447,3 +448,92 @@ def test_outside_circles_count_ignores_enabled_and_fails_open_on_empty(store):
     # Restore the seeded default so later tests see a sane shared scratch DB.
     store.soft_delete_venue(out_vid, "test_cleanup", "contract-test")
     store.set_geo_fence(default_geo_fence(), updated_by="contract-test")
+
+
+# ── events.event (plans/260804_instagram-event-extraction.md) ────────────────
+def _event_fields(vid, shortcode, **overrides):
+    from app.services.pipeline_run_registry import new_run_id
+
+    fields = {
+        "event_id": f"evt_{new_run_id()}",
+        "venue_id": vid,
+        "source_kind": "venue_post",
+        "source_handle": "contract_handle",
+        "source_shortcode": shortcode,
+        "source_permalink": f"https://instagram.com/p/{shortcode}",
+        "starts_at": datetime(2026, 8, 15, 22, 0, tzinfo=timezone.utc),
+        "is_recurring": False,
+        "title": "Festa",
+        "lineup": ["DJ A", "DJ B"],
+        "confidence": 0.9,
+        "status": "pending_review",
+        "raw_extraction": {"title": "Festa"},
+    }
+    fields.update(overrides)
+    return fields
+
+
+def test_event_insert_get_and_source_lookup(store):
+    vid = _vid()
+    store.upsert_venue(_venue(vid))
+    fields = _event_fields(vid, f"abc_{vid}")
+    inserted = store.insert_event(fields)
+    assert inserted["event_id"] == fields["event_id"]
+    assert inserted["title"] == "Festa"
+
+    by_id = store.get_event(fields["event_id"])
+    assert by_id["source_shortcode"] == fields["source_shortcode"]
+
+    by_source = store.get_event_by_source("contract_handle", fields["source_shortcode"])
+    assert by_source["event_id"] == fields["event_id"]
+
+    assert store.get_event_by_source("contract_handle", "no_such_shortcode") is None
+
+
+def test_event_update_is_partial(store):
+    vid = _vid()
+    store.upsert_venue(_venue(vid))
+    fields = _event_fields(vid, f"upd_{vid}")
+    store.insert_event(fields)
+
+    updated = store.update_event(
+        fields["event_id"], {"status": "confirmed", "title": "Corrected"},
+    )
+    assert updated["status"] == "confirmed"
+    assert updated["title"] == "Corrected"
+    # A field NOT in the partial update survives untouched.
+    assert updated["source_permalink"] == fields["source_permalink"]
+
+
+def test_event_update_missing_id_returns_none(store):
+    assert store.update_event("no-such-event-id", {"status": "confirmed"}) is None
+
+
+def test_event_unique_source_constraint_rejects_duplicate(store):
+    """UNIQUE (source_handle, source_shortcode) — the idempotency guarantee is
+    a CONSTRAINT (migration 0023), proven here on both the fake and the real
+    store rather than only in application code."""
+    vid = _vid()
+    store.upsert_venue(_venue(vid))
+    shortcode = f"dup_{vid}"
+    store.insert_event(_event_fields(vid, shortcode))
+    with pytest.raises(Exception):
+        store.insert_event(_event_fields(vid, shortcode, event_id=f"evt_other_{vid}"))
+
+
+def test_list_events_filters_by_venue_and_status(store):
+    vid_a, vid_b = _vid(), _vid()
+    store.upsert_venue(_venue(vid_a))
+    store.upsert_venue(_venue(vid_b))
+    store.insert_event(_event_fields(vid_a, f"la_{vid_a}", status="confirmed"))
+    store.insert_event(_event_fields(vid_a, f"lb_{vid_a}", status="pending_review"))
+    store.insert_event(_event_fields(vid_b, f"lc_{vid_b}", status="confirmed"))
+
+    only_a = {e["source_shortcode"] for e in store.list_events(venue_id=vid_a)}
+    assert only_a == {f"la_{vid_a}", f"lb_{vid_a}"}
+
+    confirmed = {
+        e["source_shortcode"] for e in store.list_events(status="confirmed")
+        if e["venue_id"] in (vid_a, vid_b)
+    }
+    assert confirmed == {f"la_{vid_a}", f"lc_{vid_b}"}

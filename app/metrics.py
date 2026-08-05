@@ -1139,6 +1139,40 @@ EVENT_CANDIDATE_VENUES = Gauge(
 )
 
 # =============================================================================
+# INSTAGRAM EVENT EXTRACTION (plans/260804_instagram-event-extraction.md)
+# =============================================================================
+
+# Every post the job looked at, by what happened to it. `not_event_like` is
+# the cost-gate proof: a post filed here never reached the model. `job_id`
+# stays out of every label here (unbounded cardinality, §7 of
+# docs/venue-retrieval-storage.md) — per-run narrative goes to Loki instead.
+EVENT_EXTRACTION_POSTS_TOTAL = Counter(
+    "event_extraction_posts_total",
+    "Instagram posts examined by event extraction, by outcome",
+    ["outcome"],  # extracted, not_event_like, no_date, low_confidence,
+                  # extraction_failed, skipped_seen
+)
+
+# Cumulative vision-model spend on event extraction, in USD, priced from the
+# token counts the API reports — never a per-post guess (see
+# OPENAI_TOKENS_TOTAL{endpoint="event_extract"} for the raw counts this is
+# derived from). The 9x photo-classification cost-estimate error (§4 of
+# docs/venue-retrieval-storage.md) is why nothing here is asserted as fact
+# until it is actually measured against a live run.
+EVENT_EXTRACTION_COST_USD = Counter(
+    "event_extraction_cost_usd",
+    "Cumulative vision-model spend on event extraction, in USD",
+)
+
+# Snapshot of events.event after the most recent run, by status. Lets an
+# operator see the review queue size (pending_review) without a DB console.
+EVENTS_TOTAL = Gauge(
+    "events_total",
+    "Rows in events.event, by status",
+    ["status"],
+)
+
+# =============================================================================
 # APPLICATION INFO
 # =============================================================================
 

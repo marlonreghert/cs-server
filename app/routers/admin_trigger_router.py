@@ -262,6 +262,25 @@ JOB_REGISTRY = {
         "unavailable_detail": "Event venue targeting not configured",
         "runner": lambda c, cfg: c.event_venue_targeting_service.run(cfg),
     },
+    "event_extraction": {
+        "label": "Instagram Event Extraction",
+        "description": "Turn archived posts of event-candidate venues into "
+        "structured events. A post is sent to the model only when an "
+        "archived image classified 'flyer' or its caption matched an event "
+        "marker — everything else costs nothing. One OpenAI vision call per "
+        "qualifying post.",
+        "default_config": {
+            "eligibility": {"mode": "event_candidates", "venue_ids": ""},
+            "max_venues": 25,
+            "max_posts_per_venue": 20,
+            "lookback_days": 60,
+            "min_confidence": 0.5,
+            "dry_run": False,
+        },
+        "service_attr": "event_extraction_service",
+        "unavailable_detail": "Event extraction not configured (needs OpenAI key + media archive)",
+        "runner": lambda c, cfg: c.event_extraction_service.run(cfg),
+    },
 }
 
 

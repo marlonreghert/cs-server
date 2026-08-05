@@ -615,6 +615,44 @@ class Container:
             flyer_evidence_source=flyer_evidence_source,
         )
         logger.info("[Container] Event venue targeting service initialized")
+
+        # Instagram event extraction (plans/260804_instagram-event-extraction.md):
+        # needs an OpenAI key (the vision call) AND the media archive (the
+        # archived flyer images + manifests it reads). Optional and
+        # dependency-aware like every other AI enrichment path — its absence
+        # never breaks core venue serving.
+        self.openai_event_extraction_client = None
+        self.event_extraction_service = None
+        if settings.openai_api_key and getattr(self, "media_archive_store", None) is not None:
+            from app.api.openai_event_extraction_client import OpenAIEventExtractionClient
+            from app.services.event_extraction_service import (
+                EventExtractionService,
+                EventPostSource,
+            )
+
+            self.openai_event_extraction_client = OpenAIEventExtractionClient(
+                api_key=settings.openai_api_key,
+                model=settings.event_extraction_model,
+                max_completion_tokens=settings.event_extraction_max_tokens,
+            )
+            self.event_extraction_service = EventExtractionService(
+                venue_dao=self.pipeline_repository,
+                post_source=EventPostSource(
+                    media_store=self.media_archive_store,
+                    archive_source=SOURCE_INSTAGRAM_POSTS,
+                ),
+                openai_client=self.openai_event_extraction_client,
+                min_confidence=settings.event_extraction_min_confidence,
+                flyer_confidence_floor=settings.photo_classification_confidence,
+            )
+            logger.info(
+                f"[Container] Event extraction service initialized "
+                f"(model={settings.event_extraction_model})"
+            )
+        else:
+            logger.info(
+                "[Container] Event extraction disabled (needs OpenAI key + media archive)"
+            )
         # The serve handler resolves the live-busyness freshness window through the
         # admin-config mirror; wire it now that the service exists (venue_handler
         # was built above, before admin_config_service).

@@ -1,4 +1,3 @@
-@wip
 Feature: Instagram event extraction
   As the operator of the event pipeline
   I want archived posts of event-candidate venues turned into structured events
@@ -6,7 +5,7 @@ Feature: Instagram event extraction
   date that cannot be determined is never invented
 
   Background:
-    Given a venue with the tier "evidence_confirmed"
+    Given an event-candidate venue with an Instagram handle
     And its Instagram posts are archived with their captions and flyer images
 
   Scenario: Extract an event from a flyer post
@@ -96,7 +95,7 @@ Feature: Instagram event extraction
     Given 10 archived posts of which 4 qualify
     When event extraction runs as a dry run
     Then 4 posts are reported as qualifying
-    And no model call is made
+    And no model call is made during the dry run
     And no event is written
 
   Scenario: Confirm and reject events through the admin API
