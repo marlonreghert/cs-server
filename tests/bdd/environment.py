@@ -138,6 +138,17 @@ def _build_test_app(context) -> None:
         from app.api.google_places_client import GooglePlacesAPIClient
 
         context.google_places_client = GooglePlacesAPIClient(api_key="test")
+        # behave's context does not reset plain attributes between scenarios
+        # (only its fixture layers do); this flag is a per-scenario override
+        # marker (see besttime_add_response_parse_steps._wire_inline_enrichment)
+        # and must not leak a prior scenario's override onto this scenario's
+        # fresh client.
+        context._google_search_place_id_overridden = False
+        # Same leak risk for the geo-fallback transport-error injection (see
+        # besttime_add_response_parse_steps.respond): a scenario that programs
+        # a /venues/filter transport failure must not poison every later
+        # scenario's filter call in the same behave process.
+        context.besttime_filter_http_error = None
         context.add_venue_handler = AddVenueHandler(
             venue_dao=context.venue_dao,
             besttime_api=context.besttime,
@@ -298,6 +309,11 @@ def _build_rds_layer(context) -> None:
     # scenarios exercise the true validate-before-write path (not a MagicMock).
     if getattr(context, "container", None) is not None:
         context.container.admin_config_service = context.admin_config_service
+    # The Google-only add path reads this admin config key at request time;
+    # add_venue_handler was built in _build_test_app, before this service
+    # existed, so wire it now (mirrors the rds_store wiring above).
+    if getattr(context, "add_venue_handler", None) is not None:
+        context.add_venue_handler.admin_config_service = context.admin_config_service
 
     from app.services.eligibility_rules import EligibilityRuleService
 

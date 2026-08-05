@@ -121,6 +121,16 @@ class Settings(BaseSettings):
     closure_detection_enabled: bool = False
     closure_detection_hours: int = 12
 
+    # Kill switch for cataloging a venue from Google metadata alone when
+    # BestTime's geo fallback finds no name match (the terminal-502 case).
+    # Read through AdminConfigService at request time (reversible in seconds,
+    # no redeploy); this Settings attribute is only the fallback for when the
+    # admin read fails or the key is absent — the admin value always wins when
+    # present. OFF by default: creation is automatic on every qualifying
+    # rejection, so a false-off-to-on flip catalogs indiscriminately.
+    # See plans/260804_add-venue-google-only.md.
+    add_venue_google_only_enabled: bool = False
+
     @property
     def rds_sqlalchemy_url(self) -> str:
         """SQLAlchemy URL for the RDS Postgres connection (psycopg v3 driver)."""

@@ -1272,3 +1272,347 @@ async def test_readd_of_otherwise_deprecated_venue_still_short_circuits(
     assert (
         rds_fake_store.get_venue(vid)["deprecated_source"] == "google_places"
     )
+
+
+# ── Google-only catalog path (plans/260804_add-venue-google-only.md) ─────────
+# BDD (tests/bdd/api/add-venue-google-only.feature) covers the end-to-end
+# outcomes; these unit tests pin the branching contract: the flag gate
+# (settings fallback vs admin override vs a config-read failure), the ledger
+# guarantees (no mark_touched, no counter drift), the quality gate (a failed
+# Google resolve/details persists nothing), and the deterministic minted id.
+
+_GOOGLE_ONLY_NAME = "Bar do Joao"
+_GOOGLE_ONLY_ADDRESS = "Rua das Flores 123, Recife - PE"
+
+
+def _minted_id() -> str:
+    return f"vsg_{_address_hash(_GOOGLE_ONLY_NAME, _GOOGLE_ONLY_ADDRESS)[:24]}"
+
+
+def _unforecastable_response():
+    """A BestTime rejection venue_info block WITHOUT a venue_id (nothing was
+    created) but WITH rating/reviews/price_level — BestTime reports these even
+    on a rejection; the plan uses them to fill the minted venue."""
+    return NewVenueResponse.model_validate(
+        {
+            "status": "Error",
+            "message": "Venue found, but could not forecast this venue.",
+            "venue_info": {
+                "venue_name": _GOOGLE_ONLY_NAME,
+                "venue_address": _GOOGLE_ONLY_ADDRESS,
+                "rating": 4.2,
+                "reviews": 50,
+                "price_level": 2,
+            },
+        }
+    )
+
+
+def _no_geo_match():
+    return VenueFilterResponse(status="OK", venues=[], venues_n=0)
+
+
+def _google_client(place_id="places/ChIJgoogleonly", details=None):
+    from app.models.vibe_attributes import GooglePlacesDetailsResponse
+
+    client = AsyncMock()
+    client.search_place_id.return_value = place_id
+    client.get_place_details.return_value = details or GooglePlacesDetailsResponse(
+        place_id=place_id, business_status="OPERATIONAL", primary_type="bar",
+    )
+    return client
+
+
+class _AdminConfigStub:
+    """Minimal AdminConfigService double: a fixed .get() return value, or a
+    raised exception to simulate an RDS/Redis outage."""
+
+    def __init__(self, value=None, raise_exc=None):
+        self.value = value
+        self.raise_exc = raise_exc
+        self.calls: list[str] = []
+
+    def get(self, key: str):
+        self.calls.append(key)
+        if self.raise_exc is not None:
+            raise self.raise_exc
+        return self.value
+
+
+def _google_only_handler(venue_dao, besttime, budget, fake, admin_config=None, google_client=None):
+    return AddVenueHandler(
+        venue_dao=venue_dao,
+        besttime_api=besttime,
+        budget_service=budget,
+        redis_client=fake,
+        google_places_client=google_client,
+        admin_config_service=admin_config,
+    )
+
+
+@pytest.mark.asyncio
+async def test_google_only_disabled_by_default_returns_502_and_persists_nothing(
+    handler, besttime, fake
+):
+    """The default `handler` fixture has no admin_config_service and the
+    settings default is off -> today's exact rejection, unchanged: same body,
+    AND the same pre-existing metric label (no google_only_disabled label —
+    the flag-off deploy must be a genuine no-op, metrics included)."""
+    besttime.add_venue_to_account.return_value = _unforecastable_response()
+    besttime.venue_filter.return_value = _no_geo_match()
+    before = _add_venue_result_metric("besttime_rejected_no_geo_match")
+
+    outcome = await handler.add(_req())
+
+    assert outcome.status_code == 502
+    assert "geo fallback" in outcome.body["detail"].lower()
+    assert _add_venue_result_metric("besttime_rejected_no_geo_match") == before + 1
+    assert handler.venue_dao.get_venue(_minted_id()) is None
+
+
+@pytest.mark.asyncio
+async def test_google_only_enabled_creates_minted_venue(venue_dao, besttime, budget, fake):
+    besttime.add_venue_to_account.return_value = _unforecastable_response()
+    besttime.venue_filter.return_value = _no_geo_match()
+    admin_config = _AdminConfigStub(value={"enabled": True})
+    handler = _google_only_handler(
+        venue_dao, besttime, budget, fake, admin_config, _google_client()
+    )
+    before = _add_venue_result_metric("created_google_only")
+
+    outcome = await handler.add(_req())
+
+    assert outcome.status_code == 201
+    assert outcome.body["status"] == "created_google_only"
+    assert outcome.body["source"] == "google_places"
+    assert outcome.body["venue_id"] == _minted_id()
+    assert _add_venue_result_metric("created_google_only") == before + 1
+
+    persisted = venue_dao.get_venue(_minted_id())
+    assert persisted is not None
+    assert persisted.forecast is False
+    assert persisted.processed is True
+    assert persisted.venue_source == "google_only"
+    assert persisted.venue_name == _GOOGLE_ONLY_NAME
+    assert persisted.venue_address == _GOOGLE_ONLY_ADDRESS
+    # Rating/reviews come from BestTime's rejection block (Google is silent).
+    assert persisted.rating == 4.2
+    assert persisted.reviews == 50
+    # No BestTime venue type — the eligibility view's NULL-guard covers this.
+    assert persisted.venue_type is None
+
+
+@pytest.mark.asyncio
+async def test_google_only_minted_id_is_deterministic_and_not_a_besttime_id(
+    venue_dao, besttime, budget, fake
+):
+    besttime.add_venue_to_account.return_value = _unforecastable_response()
+    besttime.venue_filter.return_value = _no_geo_match()
+    admin_config = _AdminConfigStub(value={"enabled": True})
+    handler = _google_only_handler(
+        venue_dao, besttime, budget, fake, admin_config, _google_client()
+    )
+
+    outcome = await handler.add(_req())
+
+    assert outcome.body["venue_id"] == _minted_id()
+    assert _minted_id().startswith("vsg_")
+    assert not _minted_id().startswith("ven_")
+
+
+@pytest.mark.asyncio
+async def test_google_only_never_marks_touched_and_never_moves_the_counter(
+    venue_dao, besttime, budget, fake
+):
+    besttime.add_venue_to_account.return_value = _unforecastable_response()
+    besttime.venue_filter.return_value = _no_geo_match()
+    admin_config = _AdminConfigStub(value={"enabled": True})
+    handler = _google_only_handler(
+        venue_dao, besttime, budget, fake, admin_config, _google_client()
+    )
+
+    await handler.add(_req())
+
+    # Reserved then released around the (rejected) BestTime create -> net 0.
+    assert int(fake.get("venue_add_counter_v1:2026-05") or 0) == 0
+    assert not fake.sismember("besttime_touched_v1:2026-05", _minted_id())
+    # No second paid create, no extra BestTime endpoint touched.
+    assert besttime.add_venue_to_account.await_count == 1
+    assert besttime.venue_filter.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_google_only_admin_config_read_failure_disables_not_enables(
+    venue_dao, besttime, budget, fake
+):
+    besttime.add_venue_to_account.return_value = _unforecastable_response()
+    besttime.venue_filter.return_value = _no_geo_match()
+    admin_config = _AdminConfigStub(raise_exc=RuntimeError("rds down"))
+    handler = _google_only_handler(
+        venue_dao, besttime, budget, fake, admin_config, _google_client()
+    )
+
+    outcome = await handler.add(_req())
+
+    assert outcome.status_code == 502
+    assert venue_dao.get_venue(_minted_id()) is None
+
+
+@pytest.mark.asyncio
+async def test_google_only_malformed_admin_value_falls_back_to_settings_default(
+    venue_dao, besttime, budget, fake
+):
+    besttime.add_venue_to_account.return_value = _unforecastable_response()
+    besttime.venue_filter.return_value = _no_geo_match()
+    # Present but missing the "enabled" key -> falls to settings (default off).
+    admin_config = _AdminConfigStub(value={"unexpected": True})
+    handler = _google_only_handler(
+        venue_dao, besttime, budget, fake, admin_config, _google_client()
+    )
+
+    outcome = await handler.add(_req())
+
+    assert outcome.status_code == 502
+    assert venue_dao.get_venue(_minted_id()) is None
+
+
+@pytest.mark.asyncio
+async def test_google_only_admin_explicit_false_wins_over_a_true_settings_default(
+    venue_dao, besttime, budget, fake, monkeypatch
+):
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "add_venue_google_only_enabled", True)
+    besttime.add_venue_to_account.return_value = _unforecastable_response()
+    besttime.venue_filter.return_value = _no_geo_match()
+    admin_config = _AdminConfigStub(value={"enabled": False})
+    handler = _google_only_handler(
+        venue_dao, besttime, budget, fake, admin_config, _google_client()
+    )
+
+    outcome = await handler.add(_req())
+
+    assert outcome.status_code == 502  # admin's explicit False wins
+    assert venue_dao.get_venue(_minted_id()) is None
+
+
+@pytest.mark.asyncio
+async def test_google_only_settings_fallback_enables_when_admin_key_absent(
+    venue_dao, besttime, budget, fake, monkeypatch
+):
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "add_venue_google_only_enabled", True)
+    besttime.add_venue_to_account.return_value = _unforecastable_response()
+    besttime.venue_filter.return_value = _no_geo_match()
+    admin_config = _AdminConfigStub(value=None)  # key absent entirely
+    handler = _google_only_handler(
+        venue_dao, besttime, budget, fake, admin_config, _google_client()
+    )
+
+    outcome = await handler.add(_req())
+
+    assert outcome.status_code == 201
+    assert outcome.body["status"] == "created_google_only"
+
+
+@pytest.mark.asyncio
+async def test_google_only_unresolvable_place_persists_nothing(
+    venue_dao, besttime, budget, fake
+):
+    besttime.add_venue_to_account.return_value = _unforecastable_response()
+    besttime.venue_filter.return_value = _no_geo_match()
+    admin_config = _AdminConfigStub(value={"enabled": True})
+    google_client = AsyncMock()
+    google_client.search_place_id.return_value = None
+    handler = _google_only_handler(
+        venue_dao, besttime, budget, fake, admin_config, google_client
+    )
+    before = _add_venue_result_metric("google_only_enrichment_failed")
+
+    outcome = await handler.add(_req())
+
+    assert outcome.status_code == 502
+    assert "geo fallback" in outcome.body["detail"].lower()
+    assert _add_venue_result_metric("google_only_enrichment_failed") == before + 1
+    assert venue_dao.get_venue(_minted_id()) is None
+    google_client.get_place_details.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_google_only_details_failure_persists_nothing(venue_dao, besttime, budget, fake):
+    besttime.add_venue_to_account.return_value = _unforecastable_response()
+    besttime.venue_filter.return_value = _no_geo_match()
+    admin_config = _AdminConfigStub(value={"enabled": True})
+    google_client = AsyncMock()
+    google_client.search_place_id.return_value = "places/ChIJfail"
+    google_client.get_place_details.return_value = None
+    handler = _google_only_handler(
+        venue_dao, besttime, budget, fake, admin_config, google_client
+    )
+    before = _add_venue_result_metric("google_only_enrichment_failed")
+
+    outcome = await handler.add(_req())
+
+    assert outcome.status_code == 502
+    assert _add_venue_result_metric("google_only_enrichment_failed") == before + 1
+    assert venue_dao.get_venue(_minted_id()) is None
+
+
+@pytest.mark.asyncio
+async def test_geo_fallback_match_wins_over_google_only_even_when_flag_enabled(
+    venue_dao, besttime, budget, fake
+):
+    """The new path is reached ONLY from match is None; a real geo-fallback
+    match must never be preempted, even with the flag on."""
+    besttime.add_venue_to_account.return_value = _unforecastable_response()
+    matched = VenueFilterVenue(
+        venue_id="ven_real_match",
+        venue_name=_GOOGLE_ONLY_NAME,
+        venue_address="addr",
+        venue_lat=-8.05,
+        venue_lng=-34.88,
+        venue_type="BAR",
+        day_int=0,
+        day_raw=[0] * 24,
+    )
+    besttime.venue_filter.return_value = VenueFilterResponse(
+        status="OK", venues=[matched], venues_n=1
+    )
+    admin_config = _AdminConfigStub(value={"enabled": True})
+    google_client = _google_client()
+    handler = _google_only_handler(
+        venue_dao, besttime, budget, fake, admin_config, google_client
+    )
+
+    outcome = await handler.add(_req())
+
+    assert outcome.status_code == 200
+    assert outcome.body["status"] == "matched_via_geo_fallback"
+    assert outcome.body["venue_id"] == "ven_real_match"
+    google_client.search_place_id.assert_not_awaited()
+    assert venue_dao.get_venue(_minted_id()) is None
+
+
+@pytest.mark.asyncio
+async def test_google_only_transport_failure_never_reaches_the_new_path(
+    venue_dao, besttime, budget, fake
+):
+    """A /venues/filter transport failure is terminal, exactly as today —
+    it must never fall through to the Google-only path even when the flag
+    is enabled, because a failed filter call is not evidence BestTime lacks
+    the venue."""
+    besttime.add_venue_to_account.return_value = _unforecastable_response()
+    besttime.venue_filter.side_effect = httpx.ConnectError("simulated")
+    admin_config = _AdminConfigStub(value={"enabled": True})
+    google_client = _google_client()
+    handler = _google_only_handler(
+        venue_dao, besttime, budget, fake, admin_config, google_client
+    )
+
+    outcome = await handler.add(_req())
+
+    assert outcome.status_code == 502
+    assert "unavailable" in outcome.body["detail"].lower()
+    google_client.search_place_id.assert_not_awaited()
+    assert venue_dao.get_venue(_minted_id()) is None

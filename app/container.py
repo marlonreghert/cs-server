@@ -621,6 +621,9 @@ class Container:
             # System of record for the geo-link undo path (created_at recency
             # guard + soft-delete; the projector then drops it from serving).
             rds_store=self.rds_store,
+            # Kill switch for the Google-only catalog path (default off, read
+            # fresh on every request; see plans/260804_add-venue-google-only.md).
+            admin_config_service=self.admin_config_service,
         )
 
         # Server-side batch venue-add: runs a curated list through the same

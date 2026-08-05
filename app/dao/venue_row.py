@@ -41,6 +41,7 @@ COLUMN_FIELDS: tuple[str, ...] = (
     "deprecated_reason",
     "deprecated_source",
     "google_business_status",
+    "venue_source",
 )
 
 # Genuinely-nested fields columns cannot hold — the only contents of the residual
@@ -97,6 +98,13 @@ def venue_from_row(row: Mapping) -> Venue:
     legacy blob.
     """
     data = {f: row.get(f) for f in COLUMN_FIELDS}
+    # A legacy row from before migration 0021 (or a hand-built test fixture)
+    # carries no venue_source at all; row.get() above turns that absence into
+    # an explicit None, which the Venue model's `str` field type would reject.
+    # Popping it lets the model's own "besttime" default apply, matching every
+    # pre-migration row's true provenance.
+    if data.get("venue_source") is None:
+        data.pop("venue_source", None)
     extra = row.get("extra") or {}
     for f in RESIDUAL_FIELDS:
         if f in extra:
