@@ -13,6 +13,7 @@ import time
 
 from openai import AsyncOpenAI
 
+from app.api.openai_compat import sampling_kwargs
 from app.metrics import (
     OPENAI_API_CALLS_TOTAL,
     OPENAI_API_CALL_DURATION_SECONDS,
@@ -295,7 +296,7 @@ class OpenAIVibeClient:
             response = await self.client.chat.completions.create(
                 model=model,
                 messages=[{"role": "user", "content": content}],
-                temperature=0.2,
+                **sampling_kwargs(model, 0.2),
                 max_completion_tokens=3072,
                 response_format={"type": "json_object"},
             )
@@ -382,7 +383,7 @@ class OpenAIVibeClient:
             response = await self.client.chat.completions.create(
                 model=model,
                 messages=[{"role": "user", "content": content}],
-                temperature=0.1,
+                **sampling_kwargs(model, 0.1),
                 max_completion_tokens=3072,
                 response_format={"type": "json_object"},
             )

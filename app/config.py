@@ -310,7 +310,7 @@ class Settings(BaseSettings):
     instagram_google_search_actor: str = "apify~google-search-scraper"
     instagram_google_search_results: int = 10
     instagram_google_search_country: str = "br"
-    instagram_judge_model: str = "gpt-5.4-mini"
+    instagram_judge_model: str = "gpt-5.6-luna"
     instagram_judge_max_venue_photos: int = 3
 
     # Pipeline run registry: how many recent runs per pipeline stay selectable
@@ -432,7 +432,7 @@ class Settings(BaseSettings):
     # runs exactly as before, because classification is an enhancement and
     # never a dependency.
     photo_classification_enabled: bool = True
-    photo_classification_model: str = "gpt-5.4-nano"
+    photo_classification_model: str = "gpt-5.6-luna"
     # Below this, a photo is filed as `other` rather than guessed. Matches the
     # menu filter's threshold: a wrong label is worse than an honest unknown,
     # because everything downstream will trust it.
@@ -462,7 +462,7 @@ class Settings(BaseSettings):
     menu_extraction_enabled: bool = False
     menu_extraction_on_startup: bool = False
     menu_extraction_cron: str = "0 6 1 * *"  # Monthly: 1st at 6 AM
-    menu_extraction_model: str = "gpt-5.4-nano"
+    menu_extraction_model: str = "gpt-5.6-luna"
     # Where extraction gets its photos. `archive` reads the newest run of the
     # retrieval pipeline — real Google "Menu" tab shots, already paid for —
     # instead of a second private copy. `redis` restores the original path
@@ -481,8 +481,8 @@ class Settings(BaseSettings):
     vibe_classifier_target_photos: int = 10         # Photos to send to Stage A
     vibe_classifier_escalation_threshold: float = 0.80  # Below this -> Stage B
     vibe_classifier_stage_b_photos: int = 5         # Photos for Stage B (highest relevance)
-    vibe_classifier_stage_a_model: str = "gpt-5.4-nano"
-    vibe_classifier_stage_b_model: str = "gpt-5.4-mini"
+    vibe_classifier_stage_a_model: str = "gpt-5.6-luna"
+    vibe_classifier_stage_b_model: str = "gpt-5.6-luna"
     vibe_classifier_early_stop_enabled: bool = True
     vibe_classifier_early_stop_min_photos: int = 6
     vibe_classifier_early_stop_confidence: float = 0.92

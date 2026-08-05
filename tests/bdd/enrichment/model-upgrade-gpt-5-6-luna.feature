@@ -1,4 +1,3 @@
-@wip
 Feature: Model upgrade to gpt-5.6-luna
   As the operator of the enrichment pipelines
   I want every OpenAI path to run the new model without sending it a parameter
