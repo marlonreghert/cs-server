@@ -568,6 +568,9 @@ class Container:
         from app.services.venue_eligibility import EligibilityConfig
         from app.services.vibe_modes_config import validate_vibe_modes_config
         from app.models.venue_category import validate_category_map_config
+        from app.services.event_venue_targeting import (
+            validate_event_candidate_categories_config,
+        )
 
         def _validate_eligibility_config(value):
             EligibilityConfig.from_dict(value, from_admin_override=True)  # raises on invalid
@@ -581,8 +584,37 @@ class Container:
                 "force_update": validate_force_update_config,
                 "vibe_modes": validate_vibe_modes_config,
                 "venue_category_map": validate_category_map_config,
+                "event_candidate_categories": validate_event_candidate_categories_config,
             },
         )
+
+        # Event venue targeting (plans/260804_event-venue-targeting.md): free
+        # category gate + bounded evidence gate. No optional API key required —
+        # unlike venue_photo_archive_service, this makes zero external calls by
+        # design, so it is always available. The flyer evidence source degrades
+        # to a no-op when the media archive is not configured; the evidence
+        # gate still runs on Instagram captions alone.
+        from app.services.event_venue_targeting import (
+            ArchivedFlyerEvidenceSource,
+            EventVenueTargetingService,
+            NullFlyerEvidenceSource,
+        )
+        from app.services.archive_sources import SOURCE_INSTAGRAM_POSTS
+
+        flyer_evidence_source = (
+            ArchivedFlyerEvidenceSource(
+                media_store=self.media_archive_store,
+                archive_source=SOURCE_INSTAGRAM_POSTS,
+            )
+            if getattr(self, "media_archive_store", None) is not None
+            else NullFlyerEvidenceSource()
+        )
+        self.event_venue_targeting_service = EventVenueTargetingService(
+            venue_dao=self.pipeline_repository,
+            redis_client=self.redis_client.client,
+            flyer_evidence_source=flyer_evidence_source,
+        )
+        logger.info("[Container] Event venue targeting service initialized")
         # The serve handler resolves the live-busyness freshness window through the
         # admin-config mirror; wire it now that the service exists (venue_handler
         # was built above, before admin_config_service).

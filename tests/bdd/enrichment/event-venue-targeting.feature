@@ -1,4 +1,3 @@
-@wip
 Feature: Event venue targeting
   As the operator of the event pipeline
   I want a free category gate followed by a bounded evidence gate

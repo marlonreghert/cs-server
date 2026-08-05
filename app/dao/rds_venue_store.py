@@ -340,6 +340,86 @@ class RdsVenueStore:
                 "v.rating DESC NULLS LAST, v.venue_id ASC LIMIT :limit"
             ), {"limit": limit})]
 
+    def list_event_candidate_ids_by_priority(self, limit: int) -> list[str]:
+        """The top-`limit` servable venues ordered by refresh priority, WITHOUT
+        the `venue_source <> 'google_only'` filter that
+        list_servable_venue_ids_by_priority applies for BestTime refresh.
+
+        A google_only venue is one BestTime could not forecast — in this
+        catalog that skews toward the small independent club and event space,
+        precisely the venue most likely to run events. Reusing the BestTime-
+        scoped selection here would silently drop exactly those venues (a
+        shorter list, not an error), so this is a separate method rather than a
+        flag on the existing one: a boolean someone can pass wrong is a worse
+        guard than two functions that cannot be confused. See
+        plans/260804_event-venue-targeting.md.
+        """
+        if limit <= 0:
+            return []
+        with self.engine.connect() as conn:
+            return [r[0] for r in conn.execute(text(
+                "SELECT ev.venue_id FROM serving.eligible_venue ev "
+                "JOIN venues.venue v ON v.venue_id = ev.venue_id "
+                "ORDER BY v.priority ASC, v.reviews DESC NULLS LAST, "
+                "v.rating DESC NULLS LAST, v.venue_id ASC LIMIT :limit"
+            ), {"limit": limit})]
+
+    # ── events.venue_event_profile (event venue targeting verdict) ───────────
+    def upsert_venue_event_profile(
+        self, venue_id, *, tier, category_pass, category_reason=None,
+        evidence_score=None, evidence_sample=None, evaluated_at=None,
+    ) -> None:
+        with self.engine.begin() as conn:
+            conn.execute(text(
+                "INSERT INTO events.venue_event_profile "
+                "(venue_id, tier, category_pass, category_reason, evidence_score, "
+                " evidence_sample, evaluated_at, updated_at) "
+                "VALUES (:venue_id, :tier, :category_pass, :category_reason, "
+                " :evidence_score, CAST(:evidence_sample AS jsonb), :evaluated_at, now()) "
+                "ON CONFLICT (venue_id) DO UPDATE SET "
+                "tier=excluded.tier, category_pass=excluded.category_pass, "
+                "category_reason=excluded.category_reason, "
+                "evidence_score=excluded.evidence_score, "
+                "evidence_sample=excluded.evidence_sample, "
+                "evaluated_at=excluded.evaluated_at, updated_at=now()"
+            ), {
+                "venue_id": venue_id, "tier": tier, "category_pass": category_pass,
+                "category_reason": category_reason, "evidence_score": evidence_score,
+                "evidence_sample": (
+                    json.dumps(evidence_sample) if evidence_sample is not None else None
+                ),
+                "evaluated_at": evaluated_at,
+            })
+
+    def get_venue_event_profile(self, venue_id) -> Optional[dict]:
+        with self.engine.connect() as conn:
+            row = conn.execute(text(
+                "SELECT venue_id, tier, category_pass, category_reason, "
+                "evidence_score, evidence_sample, evaluated_at, updated_at "
+                "FROM events.venue_event_profile WHERE venue_id=:v"
+            ), {"v": venue_id}).mappings().first()
+            return dict(row) if row else None
+
+    def list_venue_event_profiles(self, tiers: Optional[list[str]] = None) -> list[dict]:
+        """Every venue_event_profile row, joined to venue_source for the
+        tier x venue_source gauge — optionally filtered to a tier subset (the
+        `event_candidates` eligibility mode resolution)."""
+        sql = (
+            "SELECT p.venue_id, p.tier, p.category_pass, p.category_reason, "
+            "p.evidence_score, p.evidence_sample, p.evaluated_at, p.updated_at, "
+            "v.venue_source FROM events.venue_event_profile p "
+            "JOIN venues.venue v ON v.venue_id = p.venue_id"
+        )
+        params: dict = {}
+        if tiers:
+            sql += " WHERE p.tier IN :tiers"
+            stmt = text(sql).bindparams(bindparam("tiers", expanding=True))
+            params["tiers"] = list(tiers)
+        else:
+            stmt = text(sql)
+        with self.engine.connect() as conn:
+            return [dict(r) for r in conn.execute(stmt, params).mappings()]
+
     def list_all_venue_rows(self) -> list[dict]:
         """Every venue row (active + deprecated) with scalar columns + residual
         `extra` + address (from venues.address) — backs the pipeline

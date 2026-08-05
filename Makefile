@@ -83,6 +83,9 @@ test-unit:
 		tests/test_openai_call_shape.py \
 		tests/test_google_search_cannot_self_accept.py \
 		tests/test_container_google_search_wiring.py \
+		tests/test_events_schema_migration.py \
+		tests/test_event_caption_matcher.py \
+		tests/test_event_venue_targeting.py \
 		-v
 
 test-integration:

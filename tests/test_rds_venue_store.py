@@ -87,3 +87,51 @@ class TestServablePriorityExcludesGoogleOnly:
         store.upsert_venue(_venue("g", priority=0, reviews=999, venue_source="google_only"))
         store.soft_delete_venue("g", "test", "test")
         assert store.list_servable_venue_ids_by_priority(10) == ["a"]
+
+
+class TestEventCandidatePriorityIncludesGoogleOnly:
+    """plans/260804_event-venue-targeting.md: the event-targeting priority
+    selection must NOT reuse the BestTime-scoped exclusion above — a
+    google_only venue (BestTime could not forecast it) is exactly the kind of
+    small independent venue most likely to host events, and dropping it here
+    would be silent (a shorter list, not an error). Asserted over one fixture
+    so list_event_candidate_ids_by_priority and list_servable_venue_ids_by_priority
+    can never silently converge.
+    """
+
+    def test_google_only_venue_included_while_servable_selection_excludes_it(self):
+        store = InMemoryRdsVenueStore()
+        store.upsert_venue(_venue("besttime_venue", priority=1, reviews=1))
+        store.upsert_venue(
+            _venue("google_only_venue", priority=0, reviews=9999, venue_source="google_only")
+        )
+        # The BestTime-scoped selection still excludes it...
+        assert store.list_servable_venue_ids_by_priority(10) == ["besttime_venue"]
+        # ...but the event-targeting selection includes it, ordered by the same
+        # priority/reviews/rating/id keys as every other venue.
+        assert store.list_event_candidate_ids_by_priority(10) == [
+            "google_only_venue", "besttime_venue",
+        ]
+
+    def test_google_only_alone_still_selects_it(self):
+        store = InMemoryRdsVenueStore()
+        store.upsert_venue(_venue("only_google", venue_source="google_only"))
+        assert store.list_event_candidate_ids_by_priority(10) == ["only_google"]
+
+    def test_google_only_venue_with_null_priority_orders_deterministically(self):
+        """A genuinely NULL priority (never BestTime-tiered) must not raise or
+        sort arbitrarily — reviews/rating still tie-break it predictably."""
+        store = InMemoryRdsVenueStore()
+        store.upsert_venue(_venue("g_high_reviews", reviews=500, venue_source="google_only"))
+        store.upsert_venue(_venue("g_low_reviews", reviews=10, venue_source="google_only"))
+        store.upsert_venue(_venue("b", priority=1, reviews=1))
+        store.venues["g_high_reviews"]["priority"] = None
+        store.venues["g_low_reviews"]["priority"] = None
+        assert store.list_event_candidate_ids_by_priority(10) == [
+            "b", "g_high_reviews", "g_low_reviews",
+        ]
+
+    def test_non_positive_limit_selects_nothing(self):
+        store = InMemoryRdsVenueStore()
+        store.upsert_venue(_venue("g", venue_source="google_only"))
+        assert store.list_event_candidate_ids_by_priority(0) == []

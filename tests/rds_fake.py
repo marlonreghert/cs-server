@@ -68,6 +68,9 @@ class InMemoryRdsVenueStore:
         # (recife @ 40 km) so the fake mirrors the migration-seeded real tables.
         from app.services.venue_eligibility import default_geo_fence
         self.geo_fence: dict = default_geo_fence()
+        # events.venue_event_profile: venue_id -> profile row (see
+        # plans/260804_event-venue-targeting.md).
+        self.event_profiles: dict[str, dict] = {}
         self._down = False
 
     # ── test controls ────────────────────────────────────────────────────────
@@ -313,6 +316,66 @@ class InMemoryRdsVenueStore:
         ]
         rows.sort(key=_key)
         return [vid for vid, _ in rows[:limit]]
+
+    def list_event_candidate_ids_by_priority(self, limit: int) -> list[str]:
+        """Mirror RdsVenueStore: the top-`limit` servable venues by priority,
+        WITHOUT the venue_source='google_only' exclusion that
+        list_servable_venue_ids_by_priority applies. A google_only venue must
+        be eligible here — see plans/260804_event-venue-targeting.md."""
+        if limit <= 0:
+            return []
+        servable = set(self.list_servable_venue_ids())
+
+        def _key(item):
+            vid, row = item
+            # A google_only venue may genuinely carry a NULL priority (never
+            # BestTime-tiered); mirror Postgres's ASC-default NULLS LAST so it
+            # tie-breaks on reviews/rating instead of raising or sorting
+            # arbitrarily against a real int priority.
+            priority = row.get("priority")
+            priority_key = priority if priority is not None else float("inf")
+            reviews = row.get("reviews")
+            rating = row.get("rating")
+            reviews_key = -(reviews if reviews is not None else float("-inf"))
+            rating_key = -(rating if rating is not None else float("-inf"))
+            return (priority_key, reviews_key, rating_key, vid)
+
+        rows = [(vid, row) for vid, row in self.venues.items() if vid in servable]
+        rows.sort(key=_key)
+        return [vid for vid, _ in rows[:limit]]
+
+    # ── events.venue_event_profile ─────────────────────────────────────────────
+    def upsert_venue_event_profile(
+        self, venue_id, *, tier, category_pass, category_reason=None,
+        evidence_score=None, evidence_sample=None, evaluated_at=None,
+    ) -> None:
+        self._guard()
+        self.event_profiles[venue_id] = {
+            "venue_id": venue_id,
+            "tier": tier,
+            "category_pass": category_pass,
+            "category_reason": category_reason,
+            "evidence_score": evidence_score,
+            "evidence_sample": copy.deepcopy(evidence_sample),
+            "evaluated_at": evaluated_at,
+            "updated_at": _now(),
+        }
+
+    def get_venue_event_profile(self, venue_id) -> Optional[dict]:
+        row = self.event_profiles.get(venue_id)
+        return copy.deepcopy(row) if row else None
+
+    def list_venue_event_profiles(self, tiers: Optional[list[str]] = None) -> list[dict]:
+        tier_set = set(tiers) if tiers else None
+        out = []
+        for row in self.event_profiles.values():
+            if tier_set is not None and row.get("tier") not in tier_set:
+                continue
+            venue_row = self.venues.get(row["venue_id"], {})
+            merged = dict(row)
+            merged["venue_source"] = venue_row.get("venue_source", "besttime")
+            out.append(merged)
+        return out
 
     def list_all_venue_rows(self) -> list[dict]:
         return [self._row_with_address(row) for row in self.venues.values()]

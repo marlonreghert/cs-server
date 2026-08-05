@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 import pytest
 
 from app.services.venue_photo_archive_service import (
+    ELIGIBILITY_EVENT_CANDIDATES,
     ELIGIBILITY_POINT_RADIUS,
     ELIGIBILITY_VENUE_IDS,
     InvalidArchiveConfig,
@@ -121,6 +122,23 @@ class TestParseConfig:
         # Callers that already guard InvalidArchivePath must keep working.
         assert issubclass(InvalidArchiveConfig, InvalidArchivePath)
 
+    def test_event_candidates_mode_is_accepted(self):
+        # plans/260804_event-venue-targeting.md: the shared eligibility mode
+        # every event-aware run inherits.
+        assert cfg(eligibility={"mode": ELIGIBILITY_EVENT_CANDIDATES})["eligibility"] == {
+            "mode": ELIGIBILITY_EVENT_CANDIDATES, "include_category_candidates": False,
+        }
+
+    def test_event_candidates_mode_accepts_include_category_candidates(self):
+        c = cfg(eligibility={
+            "mode": ELIGIBILITY_EVENT_CANDIDATES, "include_category_candidates": True,
+        })
+        assert c["eligibility"]["include_category_candidates"] is True
+
+    def test_still_rejects_unknown_modes(self):
+        with pytest.raises(InvalidArchiveConfig):
+            cfg(eligibility={"mode": "whenever"})
+
 
 # ── run prefixes ─────────────────────────────────────────────────────────────
 class TestRunPrefix:
@@ -188,6 +206,7 @@ class TestRunPrefix:
 class _Dao:
     def __init__(self, venues):
         self._venues = venues  # {id: (lat, lng)}
+        self.event_profiles: list[dict] = []  # [{"venue_id", "tier"}, ...]
 
     def list_active_venue_ids(self):
         return list(self._venues)
@@ -200,6 +219,12 @@ class _Dao:
 
     def get_vibe_attributes(self, venue_id):
         return None
+
+    def list_venue_event_profiles(self, tiers=None):
+        if tiers is None:
+            return list(self.event_profiles)
+        tier_set = set(tiers)
+        return [p for p in self.event_profiles if p["tier"] in tier_set]
 
 
 def _service(venues, **kw):
@@ -243,6 +268,40 @@ class TestSelection:
             "radius_km": 500,
         }))
         assert selected == []
+
+    def test_event_candidates_mode_resolves_to_confirmed_set(self):
+        svc = _service({"a": (-8.05, -34.88), "b": (-8.05, -34.88), "c": (-8.05, -34.88)})
+        svc.venue_dao.event_profiles = [
+            {"venue_id": "a", "tier": "evidence_confirmed"},
+            {"venue_id": "b", "tier": "category_candidate"},
+        ]
+        selected, _, _ = svc.select_venues(
+            cfg(eligibility={"mode": ELIGIBILITY_EVENT_CANDIDATES})
+        )
+        assert selected == ["a"]
+
+    def test_event_candidates_mode_only_selects_venues_still_in_the_catalog(self):
+        """A confirmed venue that has since left the active catalog (soft-
+        deleted) must not be resurrected by a stale tier."""
+        svc = _service({"a": (-8.05, -34.88)})
+        svc.venue_dao.event_profiles = [
+            {"venue_id": "a", "tier": "evidence_confirmed"},
+            {"venue_id": "gone", "tier": "evidence_confirmed"},
+        ]
+        selected, _, _ = svc.select_venues(
+            cfg(eligibility={"mode": ELIGIBILITY_EVENT_CANDIDATES})
+        )
+        assert selected == ["a"]
+
+    def test_max_venues_caps_the_event_candidates_mode(self):
+        svc = _service({f"v{i}": (-8.05, -34.88) for i in range(5)})
+        svc.venue_dao.event_profiles = [
+            {"venue_id": f"v{i}", "tier": "evidence_confirmed"} for i in range(5)
+        ]
+        selected, _, _ = svc.select_venues(cfg(
+            max_venues=2, eligibility={"mode": ELIGIBILITY_EVENT_CANDIDATES},
+        ))
+        assert len(selected) == 2
 
 
 # ── estimate ─────────────────────────────────────────────────────────────────
