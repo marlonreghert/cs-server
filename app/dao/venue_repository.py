@@ -125,6 +125,23 @@ class VenueRepository(RedisVenueDAO):
                 logger.warning(f"[VenueRepository] RDS list_all_venues skip: {e}")
         return out
 
+    def list_event_candidate_ids_by_priority(self, limit):
+        """The event-targeting priority ordering — served venues by priority,
+        WITHOUT the venue_source='google_only' exclusion
+        list_servable_venue_ids_by_priority applies for BestTime refresh. See
+        plans/260804_event-venue-targeting.md."""
+        return self.rds_store.list_event_candidate_ids_by_priority(limit)
+
+    # ── events.venue_event_profile (event venue targeting verdict) ───────────
+    def upsert_venue_event_profile(self, venue_id, **fields) -> None:
+        self.rds_store.upsert_venue_event_profile(venue_id, **fields)
+
+    def get_venue_event_profile(self, venue_id):
+        return self.rds_store.get_venue_event_profile(venue_id)
+
+    def list_venue_event_profiles(self, tiers=None):
+        return self.rds_store.list_venue_event_profiles(tiers=tiers)
+
     # ── writes: RDS-only — the projector is the sole Redis writer ────────────────
     # ── core venue ────────────────────────────────────────────────────────────
     def upsert_venue(self, venue) -> None:

@@ -91,7 +91,15 @@ SKIP_SCOPES = (SKIP_SCOPE_LATEST_RUN, SKIP_SCOPE_THIS_RUN, SKIP_SCOPE_NONE)
 ELIGIBILITY_ALL = "all"
 ELIGIBILITY_VENUE_IDS = "venue_ids"
 ELIGIBILITY_POINT_RADIUS = "point_radius"
-ELIGIBILITY_MODES = (ELIGIBILITY_ALL, ELIGIBILITY_VENUE_IDS, ELIGIBILITY_POINT_RADIUS)
+# Resolves to the event venue targeting confirmed set (plans/260804_event-
+# venue-targeting.md), shared here so every run that takes an eligibility
+# block — this archive job, event extraction, anything later — inherits one
+# definition of "an event venue" instead of each re-deriving it.
+ELIGIBILITY_EVENT_CANDIDATES = "event_candidates"
+ELIGIBILITY_MODES = (
+    ELIGIBILITY_ALL, ELIGIBILITY_VENUE_IDS, ELIGIBILITY_POINT_RADIUS,
+    ELIGIBILITY_EVENT_CANDIDATES,
+)
 
 MAX_RADIUS_KM = 500.0
 
@@ -412,6 +420,14 @@ def parse_config(config: Optional[dict], *, default_max_venues: int,
                 f"got {radius_value}"
             )
         resolved_eligibility["radius_km"] = radius_value
+    elif mode == ELIGIBILITY_EVENT_CANDIDATES:
+        # Optional widening for a first run made before any evidence exists:
+        # include category_candidate tier alongside evidence_confirmed. Every
+        # existing cap (max_venues) still applies on top — this mode narrows
+        # the catalog, it never widens past it.
+        resolved_eligibility["include_category_candidates"] = bool(
+            eligibility.get("include_category_candidates")
+        )
 
     return {
         "source": source,
@@ -684,6 +700,16 @@ class VenuePhotoArchiveService:
                     continue  # no coordinates cannot be inside a radius
                 if haversine_km(lat, lon, coords[0], coords[1]) <= radius:
                     eligible.append(vid)
+        elif mode == ELIGIBILITY_EVENT_CANDIDATES:
+            from app.services.event_venue_targeting import resolve_event_candidate_ids
+
+            candidate_ids = set(resolve_event_candidate_ids(
+                self.venue_dao,
+                include_category_candidates=eligibility.get(
+                    "include_category_candidates", False
+                ),
+            ))
+            eligible = [vid for vid in catalog if vid in candidate_ids]
         else:
             eligible = catalog
 

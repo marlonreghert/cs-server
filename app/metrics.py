@@ -1105,6 +1105,40 @@ ENGAGEMENT_HOT_LIKE_DEDUP_TOTAL = Counter(
 )
 
 # =============================================================================
+# EVENT VENUE TARGETING (plans/260804_event-venue-targeting.md)
+# =============================================================================
+
+# Per-venue verdicts from each stage of the event targeting run. `stage` is
+# "category" (free, whole catalog) or "evidence" (bounded, top N by priority).
+EVENT_TARGETING_VENUES_TOTAL = Counter(
+    "event_targeting_venues_total",
+    "Event venue targeting verdicts per stage",
+    ["stage", "verdict"],
+)
+
+# A malformed admin_config:event_candidate_categories write must never empty
+# the candidate set — this counts every time the loader fell back to the
+# in-code defaults, so a bad write is visible instead of silently shrinking
+# the next event run's target list.
+EVENT_TARGETING_CONFIG_FALLBACK_TOTAL = Counter(
+    "event_targeting_config_fallback_total",
+    "Times the event candidate category config fell back to in-code defaults",
+    ["reason"],
+)
+
+# Snapshot of venue_event_profile after the most recent run, by tier AND
+# venue_source. The second label is only ever "besttime" or "google_only", so
+# it costs nothing, and it answers the question this plan would otherwise leave
+# unanswerable: whether the venues BestTime could not forecast are actually
+# reaching the evidence gate, or are being silently dropped by a filter meant
+# for BestTime refresh (see list_event_candidate_ids_by_priority).
+EVENT_CANDIDATE_VENUES = Gauge(
+    "event_candidate_venues",
+    "Venues in each event-targeting tier, by venue source",
+    ["tier", "venue_source"],
+)
+
+# =============================================================================
 # APPLICATION INFO
 # =============================================================================
 

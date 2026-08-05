@@ -244,6 +244,24 @@ JOB_REGISTRY = {
         "description": "Reconstruct the Redis serving projection (incl. the geo index and live busyness) from RDS. Disaster recovery / Redis warm.",
         "runner": _rebuild_redis_offloop,
     },
+    "event_targeting": {
+        "label": "Event Venue Targeting",
+        "description": "Two-stage targeting for which venues are worth crawling for "
+        "events: a free category gate over the whole catalog, then a bounded "
+        "evidence gate (archived flyer photos + Instagram caption event "
+        "markers) over the top N by priority. Zero model calls, zero external "
+        "API calls.",
+        "default_config": {
+            "max_evidence_venues": 25,
+            "min_evidence_posts": 3,
+            "lookback_days": 60,
+            "recompute": False,
+            "dry_run": False,
+        },
+        "service_attr": "event_venue_targeting_service",
+        "unavailable_detail": "Event venue targeting not configured",
+        "runner": lambda c, cfg: c.event_venue_targeting_service.run(cfg),
+    },
 }
 
 
@@ -1152,3 +1170,42 @@ def venue_type_breakdown():
     except Exception as e:
         logger.error(f"[AdminTrigger] Venue type breakdown failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/events/targeting")
+def event_targeting_summary(
+    tier: Optional[str] = Query(None),
+    limit: int = Query(100, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
+):
+    """Tier counts + a paged listing of event_venue_profile rows.
+
+    The admin-config CRUD route already handles arbitrary keys, so the
+    category allow-list (admin_config:event_candidate_categories) is editable
+    with no dedicated endpoint — this route only reports the targeting
+    verdicts computed by the event_targeting job.
+    """
+    venue_dao = _get_venue_dao_from_container()
+    from app.services.event_venue_targeting import ALL_TIERS
+
+    tiers = [tier] if tier else None
+    try:
+        profiles = venue_dao.list_venue_event_profiles(tiers=tiers)
+    except Exception as e:
+        logger.error(f"[AdminTrigger] Event targeting summary failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+    counts = {t: 0 for t in ALL_TIERS}
+    for p in profiles:
+        counts[p.get("tier")] = counts.get(p.get("tier"), 0) + 1
+
+    profiles.sort(key=lambda p: p.get("venue_id") or "")
+    page = profiles[offset:offset + limit]
+
+    return {
+        "tier_counts": counts,
+        "total": len(profiles),
+        "limit": limit,
+        "offset": offset,
+        "venues": page,
+    }
