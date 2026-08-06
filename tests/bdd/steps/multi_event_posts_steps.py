@@ -229,17 +229,8 @@ def step_then_three_events_exist_for_that_post(context):
 
 @then("each event carries its own title")
 def step_then_each_event_carries_its_own_title(context):
-    # Data-driven (not hardcoded to this scenario's specific titles) so this
-    # generic phrase is reusable by any other scenario that persists several
-    # events for one post — e.g. tests/bdd/enrichment/venue-post-multi-
-    # event.feature's venue-side equivalent. The guarantee itself is
-    # unchanged: every row got the model's OWN title, not a sibling's or a
-    # collapsed default — proven by every row having a distinct, non-empty
-    # title.
-    rows = _rows(context)
-    titles = {r["title"] for r in rows}
-    assert all(titles), rows
-    assert len(titles) == len(rows), rows
+    titles = {r["title"] for r in _rows(context)}
+    assert titles == {"O Homem do Fraque Verde", "Adilson Ramos", "Khrystal"}, titles
 
 
 @then("the three events are linked to three different venues")
@@ -274,28 +265,20 @@ def step_given_a_post_announcing_one_event_today_and_one_later(context):
 
 @then("the two events carry different start dates")
 def step_then_the_two_events_carry_different_start_dates(context):
-    # Data-driven (not hardcoded to this scenario's specific titles/dates) so
-    # this generic phrase is reusable by any other scenario asserting
-    # independent per-event date resolution — e.g. tests/bdd/enrichment/
-    # venue-post-multi-event.feature's venue-side equivalent.
-    rows = sorted(_rows(context), key=lambda r: r["starts_at"])
-    assert len(rows) == 2, rows
-    assert rows[0]["starts_at"] is not None and rows[1]["starts_at"] is not None
-    assert rows[0]["starts_at"] != rows[1]["starts_at"]
+    today_row = _row_by_title(context, "Evento de Hoje")
+    later_row = _row_by_title(context, "Evento Futuro")
+    assert today_row["starts_at"] is not None and later_row["starts_at"] is not None
+    assert today_row["starts_at"] != later_row["starts_at"]
 
 
 @then("both dates are resolved against the post timestamp")
 def step_then_both_dates_resolved_against_post_timestamp(context):
-    # The earlier event is anchored directly to the post's own timestamp
-    # ("today"); the later one forward-fills to its next occurrence on or
-    # after that SAME anchor — never the run clock. Comparing against
-    # `context.mep_now` (the fixture's own source of truth for the post
-    # timestamp) rather than a hardcoded literal date keeps this reusable —
-    # see the sibling assertion above.
-    rows = sorted(_rows(context), key=lambda r: r["starts_at"])
-    post_ts = context.mep_now
-    assert rows[0]["starts_at"].date() == post_ts.date()
-    assert rows[1]["starts_at"].date() > post_ts.date()
+    today_row = _row_by_title(context, "Evento de Hoje")
+    later_row = _row_by_title(context, "Evento Futuro")
+    # The post's own timestamp is 2026-08-05: "hoje" anchors there, "15/08"
+    # forward-fills to the next occurrence at or after it.
+    assert today_row["starts_at"].date().isoformat() == "2026-08-05"
+    assert later_row["starts_at"].date().isoformat() == "2026-08-15"
 
 
 # ── Scenario 4: single-party flyer, unchanged behaviour ──────────────────────
@@ -340,18 +323,9 @@ def step_then_no_duplicate_event_is_created(context):
 
 @given("the operator confirmed one of them with a corrected title")
 def step_given_the_operator_confirmed_one_with_a_corrected_title(context):
-    # Any one of the several existing events — WHICH one is irrelevant to
-    # this scenario's guarantee (a confirmed row's operator-corrected title
-    # survives whichever of them the next extraction reorders). Picking
-    # deterministically (sorted by title) rather than hardcoding a specific
-    # title keeps this reusable by any other scenario with its own fixture
-    # titles — e.g. tests/bdd/enrichment/venue-post-multi-event.feature's
-    # venue-side equivalent — while still selecting "Adilson Ramos" (and
-    # "Adilson Ramos - CORRIGIDO") for THIS scenario's own three titles,
-    # unchanged from before.
-    original_title, event_id = sorted(context.mep_event_ids_by_title.items())[0]
+    event_id = context.mep_event_ids_by_title["Adilson Ramos"]
     context.mep_confirmed_event_id = event_id
-    context.mep_confirmed_title = f"{original_title} - CORRIGIDO"
+    context.mep_confirmed_title = "Adilson Ramos - CORRIGIDO"
     context.mep_dao.update_event(event_id, {
         "status": "confirmed", "title": context.mep_confirmed_title,
     })

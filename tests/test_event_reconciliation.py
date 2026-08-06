@@ -262,6 +262,55 @@ class TestConfirmedPreservationAndDivergence:
         assert after["review_reason"] == REVIEW_REASON_DIVERGES_FROM_CONFIRMED
         assert after["starts_at"].date().isoformat() == "2026-08-10"
 
+    def test_a_confirmed_event_genuinely_replaced_is_inserted_not_absorbed(self):
+        """The exact scenario a review caught: pairing on cardinality ALONE
+        ("exactly one orphaned protected row, exactly one unmatched fresh
+        event") is not enough — a confirmed event genuinely REPLACED by an
+        unrelated one is ALSO "one orphaned, one unmatched". Both the title
+        AND the resolved date must change together for this to be
+        indistinguishable from "the same event moved" vs "a different event
+        arrived" — so when BOTH change, they must NOT be paired: the
+        confirmed row is left alone (untouched, not superseded — it is
+        already exempt) and the new event is inserted as its own row rather
+        than silently absorbed and lost."""
+        dao = _dao()
+        confirmed_event = [_event(
+            "Baile da Metropole", datetime(2026, 8, 7, 22, tzinfo=timezone.utc),
+        )]
+        reconcile_post_events(
+            venue_dao=dao, source_kind="venue_post", source_handle="metropolerecife",
+            source_shortcode="ABC", source_permalink="https://ig/p/ABC",
+            prepared_events=confirmed_event, now=NOW, attribute=_venue_attribute("ven_x"),
+        )
+        row = _rows(dao, "metropolerecife", "ABC")[0]
+        dao.update_event(row["event_id"], {"status": STATUS_CONFIRMED})
+
+        # An unrelated event: different title AND a different date two
+        # weeks later — nothing about it suggests "Baile da Metropole moved".
+        unrelated_event = [_event(
+            "Noite do Forro", datetime(2026, 8, 21, 22, tzinfo=timezone.utc),
+        )]
+        reconcile_post_events(
+            venue_dao=dao, source_kind="venue_post", source_handle="metropolerecife",
+            source_shortcode="ABC", source_permalink="https://ig/p/ABC",
+            prepared_events=unrelated_event, now=NOW, attribute=_venue_attribute("ven_x"),
+        )
+
+        rows = _rows(dao, "metropolerecife", "ABC")
+        assert len(rows) == 2, rows
+        by_title = {r["title"]: r for r in rows}
+
+        confirmed = by_title["Baile da Metropole"]
+        assert confirmed["event_id"] == row["event_id"]
+        assert confirmed["status"] == STATUS_CONFIRMED
+        # NOT flagged: this run's fresh event was never treated as ITS
+        # divergent answer — it is a different event entirely.
+        assert confirmed["review_reason"] is None
+
+        new_row = by_title["Noite do Forro"]
+        assert new_row["status"] == STATUS_PENDING_REVIEW
+        assert new_row["starts_at"].date().isoformat() == "2026-08-21"
+
     def test_attribute_is_never_invoked_for_a_confirmed_row(self):
         dao = _dao()
         events = [_event("Event A", datetime(2026, 8, 10, tzinfo=timezone.utc))]

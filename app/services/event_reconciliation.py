@@ -47,7 +47,7 @@ from datetime import datetime
 from typing import Callable, Optional
 
 from app.metrics import EVENT_EXTRACTION_EVENTS_PER_POST
-from app.services.event_identity import compute_source_event_key
+from app.services.event_identity import compute_source_event_key, normalize_title
 from app.services.event_venue_resolution import RESOLUTION_MANUAL
 from app.services.pipeline_run_registry import new_run_id
 
@@ -82,6 +82,32 @@ def new_event_id() -> str:
     """A ULID: same time-ordered rationale as the archive run id — see
     app/services/pipeline_run_registry.new_run_id."""
     return f"evt_{new_run_id()}"
+
+
+def _plausibly_same_event(existing: dict, prepared: dict) -> bool:
+    """True when EXACTLY ONE of the two `source_event_key` components
+    (normalized title, resolved calendar date) changed between `existing`
+    and `prepared` — the signature of the SAME event drifting (the model
+    re-phrased its title, or the event moved to a new date), never of an
+    unrelated event replacing it.
+
+    Uses `normalize_title` — the SAME normalization `compute_source_event_
+    key` hashes — so this check and the key itself can never disagree about
+    what counts as "the same title". `existing`/`prepared` reaching this
+    function already have DIFFERENT keys (that is why one was orphaned and
+    the other unmatched), so "neither changed" cannot occur here; the only
+    real question is whether exactly one changed (pair) or both did (do
+    not — see the caller for what happens then).
+    """
+    same_title = normalize_title(prepared.get("title")) == normalize_title(existing.get("title"))
+
+    existing_starts_at = existing.get("starts_at")
+    prepared_starts_at = prepared.get("starts_at")
+    existing_date = existing_starts_at.date() if existing_starts_at is not None else None
+    prepared_date = prepared_starts_at.date() if prepared_starts_at is not None else None
+    same_date = existing_date == prepared_date
+
+    return same_title != same_date
 
 
 def reconcile_post_events(
@@ -228,15 +254,29 @@ def reconcile_post_events(
     # no principled way to guess which fresh event corresponds to which
     # orphaned row, so they are left to the normal insert/supersede paths
     # below instead of risking a wrong pairing.
+    #
+    # Cardinality alone is not enough, though: a confirmed event genuinely
+    # REPLACED by an unrelated one is ALSO "exactly one orphaned, exactly one
+    # unmatched" — nothing about the counts distinguishes "the same event
+    # moved" from "a different event arrived while the old one vanished".
+    # `_plausibly_same_event` is the extra check: pair only when EXACTLY ONE
+    # of the two key components changed (same title/different date, or same
+    # date/different title) — the signature of the SAME event drifting.
+    # When BOTH changed, they are treated as two unrelated events: the
+    # protected row is left alone (already exempt from supersession below)
+    # and the fresh event is inserted as its own row instead of being
+    # silently absorbed into the confirmed/manual row and lost.
     orphaned_protected = [
         row for row in existing_events
         if row["event_id"] not in handled_event_ids
         and (row.get("status") == STATUS_CONFIRMED or row.get("location_resolution") == RESOLUTION_MANUAL)
     ]
     if len(orphaned_protected) == 1 and len(unmatched) == 1:
+        candidate = orphaned_protected[0]
         index, prepared, key = unmatched[0]
-        _persist(orphaned_protected[0], prepared, index, key)
-        unmatched = []
+        if _plausibly_same_event(candidate, prepared):
+            _persist(candidate, prepared, index, key)
+            unmatched = []
 
     for index, prepared, key in unmatched:
         _persist(None, prepared, index, key)

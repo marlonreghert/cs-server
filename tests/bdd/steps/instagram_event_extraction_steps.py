@@ -443,8 +443,16 @@ def step_when_event_extraction_runs_again_over_that_post(context):
 
 @when("event extraction runs again over its post")
 def step_when_event_extraction_runs_again_over_its_post(context):
+    # Same date_text as the original extraction ("15/08") — only the title
+    # diverges. The shared reconciliation's confirmed-row match now requires
+    # EXACTLY ONE of (title, resolved date) to change to still recognize
+    # this as the SAME event (plans/260806_venue-post-multi-event.md's
+    # pairing fallback): a fresh answer that changes BOTH is, correctly,
+    # indistinguishable from an unrelated event replacing this one, and is
+    # no longer absorbed into the confirmed row. This scenario is about the
+    # title diverging, so the date is held constant to isolate exactly that.
     context.ee_openai.program(_extraction_json(
-        title="A completely different title", date_text="16/08", time_text="20h",
+        title="A completely different title", date_text="15/08", time_text="20h",
     ))
     _run_extraction(context)
 

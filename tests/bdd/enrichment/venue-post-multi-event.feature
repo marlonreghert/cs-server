@@ -11,8 +11,8 @@ Feature: Venue-post multi-event
   Scenario: Extract every event a venue post announces
     Given a venue post whose flyer announces three events
     When venue event extraction runs
-    Then three events are persisted for that post
-    And each event carries its own title
+    Then three venue events are persisted for that post
+    And each venue event carries its own title
 
   Scenario: Attribute every event in a venue post to the posting venue
     Given a venue post whose flyer announces three events
@@ -22,23 +22,23 @@ Feature: Venue-post multi-event
   Scenario: Resolve each event's date independently
     Given a venue post announcing one event on a date and one on a later date
     When venue event extraction runs
-    Then the two events carry different start dates
-    And both dates are resolved against the post timestamp
+    Then the two venue events carry different start dates
+    And both venue event dates are resolved against the post timestamp
 
   Scenario: Leave a single-event venue post producing exactly one event
     Given a venue post whose flyer announces a single party
     When venue event extraction runs
-    Then exactly one event is persisted for that post
+    Then exactly one venue event is persisted for that post
 
   Scenario: Produce no duplicates when a re-extraction reorders the events
     Given a venue post that already produced three events
     When venue event extraction runs again and returns them in a different order
-    Then three events exist for that post
+    Then three venue events exist for that post
     And no duplicate venue event is created
 
   Scenario: Preserve a confirmed venue event across a reordered re-extraction
     Given a venue post that already produced three events
-    And the operator confirmed one of them with a corrected title
+    And the operator confirmed one of the venue events with a corrected title
     When venue event extraction runs again and returns them in a different order
     Then the confirmed venue event's corrected title is unchanged
 
@@ -85,7 +85,7 @@ Feature: Venue-post multi-event
   Scenario: Skip one malformed event and keep its siblings
     Given a venue post whose extraction returns three events and one is malformed
     When venue event extraction runs
-    Then two events are persisted for that post
+    Then two venue events are persisted for that post
     And the malformed venue event is counted
 
   Scenario: Record how many events a venue post produced

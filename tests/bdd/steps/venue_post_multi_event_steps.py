@@ -17,20 +17,23 @@ via multi_event_posts_steps.py's own fixtures (`_reset_context`, `_seed_post`,
 pattern instagram_post_recency_and_unknown_time_steps.py already establishes
 for a sibling file.
 
-Several assertions in this feature use EXACT SAME wording as scenarios
-already defined in multi_event_posts_steps.py ("three events are persisted
-for that post", "each event carries its own title", "the two events carry
-different start dates", "both dates are resolved against the post
-timestamp", "two events are persisted for that post", and the Given "the
-operator confirmed one of them with a corrected title") — these are
-intentionally REUSED, not redefined (redefining would be an AmbiguousStep
-collision), by pointing that file's data-driven (title/domain-agnostic)
-`context.mep_dao`/`context.mep_handle`/`context.mep_shortcode` at THIS
-file's venue fixture via `_alias_shared_context`. Those four steps were
-generalized (still verified against multi-event-posts.feature's own 14
-scenarios, unedited and passing) from hardcoded promoter-specific titles/
-dates into data-driven assertions precisely so this reuse is possible without
-weakening anything.
+Several of this feature's phrases would otherwise be VERBATIM identical to
+existing Then/Given text in multi_event_posts_steps.py ("three events are
+persisted for that post", "each event carries its own title", "the two
+events carry different start dates", "both dates are resolved against the
+post timestamp", "two events are persisted for that post", and the Given
+"the operator confirmed one of them with a corrected title") — an
+AmbiguousStep collision (same step TYPE, same literal text) if redefined.
+Rather than dodge that by loosening the PROMOTER file's own assertions
+(which protect real captured @recifequecabenobolso evidence and must stay
+exactly as strong as before) or by aliasing this file's fixtures onto that
+one's generic context variables, every such line here is reworded with its
+own "venue event(s)" phrasing — extending the SAME distinguishing-wording
+convention the rest of this feature already uses ("venue event extraction
+runs", "no duplicate venue event", "the confirmed venue event's...") — and
+given its OWN step implementation below, asserting the SAME exact,
+non-generic expectations (specific titles, specific dates) the equivalent
+promoter steps do.
 """
 from __future__ import annotations
 
@@ -71,17 +74,6 @@ def _snapshot_metric(name: str, labels: dict | None = None) -> float:
     return REGISTRY.get_sample_value(name, labels or None) or 0.0
 
 
-def _alias_shared_context(context, shortcode: str) -> None:
-    """Point multi_event_posts_steps.py's generic, data-driven step
-    implementations at THIS scenario's venue fixture, so genuinely identical
-    wording ("three events are persisted for that post", etc.) is reused
-    verbatim rather than re-implemented under a different phrase. See the
-    module docstring."""
-    context.mep_dao = context.ee_dao
-    context.mep_handle = context.ee_handle
-    context.mep_shortcode = shortcode
-
-
 _TS = datetime(2026, 7, 1, 20, 0, tzinfo=timezone.utc)
 THREE_TITLES = ("Noite de Abertura", "Noite Principal", "Noite de Encerramento")
 
@@ -96,7 +88,6 @@ def step_given_its_posts_are_archived(context):
 @given("a venue post whose flyer announces three events")
 def step_given_a_venue_post_whose_flyer_announces_three_events(context):
     _add_post(context, "vpme_three", timestamp=_TS)
-    _alias_shared_context(context, "vpme_three")
     context.vpme_events_per_post_snapshot = _snapshot_metric(
         "event_extraction_events_per_post_sum",
     )
@@ -110,6 +101,17 @@ def step_given_a_venue_post_whose_flyer_announces_three_events(context):
 @when("venue event extraction runs")
 def step_when_venue_event_extraction_runs(context):
     _run_extraction(context)
+
+
+@then("three venue events are persisted for that post")
+def step_then_three_venue_events_are_persisted_for_that_post(context):
+    assert len(_rows(context)) == 3, _rows(context)
+
+
+@then("each venue event carries its own title")
+def step_then_each_venue_event_carries_its_own_title(context):
+    titles = {r["title"] for r in _rows(context)}
+    assert titles == set(THREE_TITLES), titles
 
 
 @then("all three events are attributed to the posting venue")
@@ -130,24 +132,42 @@ def step_then_the_events_per_post_measurement_records_three_for_venue(context):
 @given("a venue post announcing one event on a date and one on a later date")
 def step_given_a_venue_post_announcing_one_event_on_a_date_and_one_later(context):
     _add_post(context, "vpme_two_dates", timestamp=_TS)
-    _alias_shared_context(context, "vpme_two_dates")
-    # The reused "both dates are resolved against the post timestamp" Then
-    # (multi_event_posts_steps.py) reads context.mep_now as its anchor.
-    context.mep_now = _TS
     context.ee_openai.program(_events_json([
         {"title": "Evento de Hoje Venue", "date_text": "hoje"},
         {"title": "Evento Futuro Venue", "date_text": "15/08"},
     ]))
 
 
+@then("the two venue events carry different start dates")
+def step_then_the_two_venue_events_carry_different_start_dates(context):
+    today_row = _row_by_title(context, "Evento de Hoje Venue")
+    later_row = _row_by_title(context, "Evento Futuro Venue")
+    assert today_row["starts_at"] is not None and later_row["starts_at"] is not None
+    assert today_row["starts_at"] != later_row["starts_at"]
+
+
+@then("both venue event dates are resolved against the post timestamp")
+def step_then_both_venue_event_dates_are_resolved_against_the_post_timestamp(context):
+    today_row = _row_by_title(context, "Evento de Hoje Venue")
+    later_row = _row_by_title(context, "Evento Futuro Venue")
+    # The post's own timestamp is 2026-07-01: "hoje" anchors there, "15/08"
+    # forward-fills to the next occurrence at or after it.
+    assert today_row["starts_at"].date().isoformat() == "2026-07-01"
+    assert later_row["starts_at"].date().isoformat() == "2026-08-15"
+
+
 # ── Scenario 4: single-event venue post, unchanged behaviour ────────────────
 @given("a venue post whose flyer announces a single party")
 def step_given_a_venue_post_whose_flyer_announces_a_single_party(context):
     _add_post(context, "vpme_single", timestamp=_TS)
-    _alias_shared_context(context, "vpme_single")
     context.ee_openai.program(_events_json([
         {"title": "Festa Unica Venue", "date_text": "01/07", "time_text": "20h"},
     ]))
+
+
+@then("exactly one venue event is persisted for that post")
+def step_then_exactly_one_venue_event_is_persisted_for_that_post(context):
+    assert len(_rows(context)) == 1, _rows(context)
 
 
 # ── Scenarios 5, 6, 10: a venue post that already produced three events ─────
@@ -158,9 +178,6 @@ def step_given_a_venue_post_that_already_produced_three_events(context):
     rows = _rows(context)
     assert len(rows) == 3, rows
     context.vpme_event_ids_by_title = {r["title"]: r["event_id"] for r in rows}
-    # The reused "the operator confirmed one of them with a corrected title"
-    # Given (multi_event_posts_steps.py) reads context.mep_event_ids_by_title.
-    context.mep_event_ids_by_title = context.vpme_event_ids_by_title
 
 
 @when("venue event extraction runs again and returns them in a different order")
@@ -173,6 +190,11 @@ def step_when_venue_event_extraction_runs_again_reordered(context):
     _run_extraction(context)
 
 
+@then("three venue events exist for that post")
+def step_then_three_venue_events_exist_for_that_post(context):
+    assert len(_rows(context)) == 3, _rows(context)
+
+
 @then("no duplicate venue event is created")
 def step_then_no_duplicate_venue_event_is_created(context):
     current_ids = {r["event_id"] for r in _rows(context)}
@@ -181,11 +203,25 @@ def step_then_no_duplicate_venue_event_is_created(context):
     )
 
 
+@given("the operator confirmed one of the venue events with a corrected title")
+def step_given_the_operator_confirmed_one_of_the_venue_events_with_a_corrected_title(context):
+    # Any one of the three — WHICH one is irrelevant to this scenario's
+    # guarantee (a confirmed row's operator-corrected title survives
+    # whichever of them the next extraction reorders). Picked
+    # deterministically for a stable, repeatable assertion.
+    event_id = context.vpme_event_ids_by_title[THREE_TITLES[1]]
+    context.vpme_confirmed_event_id = event_id
+    context.vpme_confirmed_title = f"{THREE_TITLES[1]} - CORRIGIDO"
+    context.ee_dao.update_event(event_id, {
+        "status": "confirmed", "title": context.vpme_confirmed_title,
+    })
+
+
 @then("the confirmed venue event's corrected title is unchanged")
 def step_then_the_confirmed_venue_events_corrected_title_is_unchanged(context):
-    row = context.ee_dao.get_event(context.mep_confirmed_event_id)
+    row = context.ee_dao.get_event(context.vpme_confirmed_event_id)
     assert row is not None
-    assert row["title"] == context.mep_confirmed_title, row
+    assert row["title"] == context.vpme_confirmed_title, row
 
 
 @when("venue event extraction runs again and returns only two of them")
@@ -369,7 +405,6 @@ def step_then_no_venue_event_is_persisted_for_that_post(context):
 @given("a venue post whose extraction returns three events and one is malformed")
 def step_given_a_venue_post_whose_extraction_returns_three_events_one_malformed(context):
     _add_post(context, "vpme_malformed", timestamp=_TS)
-    _alias_shared_context(context, "vpme_malformed")
     context.vpme_malformed_snapshot = _snapshot_metric("event_extraction_malformed_events_total")
     base = {
         "description": None, "date_text": "01/07", "time_text": "20h",
@@ -383,6 +418,11 @@ def step_given_a_venue_post_whose_extraction_returns_three_events_one_malformed(
         {**base, "title": "Valid Venue Event B"},
     ]})
     context.ee_openai.program(raw)
+
+
+@then("two venue events are persisted for that post")
+def step_then_two_venue_events_are_persisted_for_that_post(context):
+    assert len(_rows(context)) == 2, _rows(context)
 
 
 @then("the malformed venue event is counted")

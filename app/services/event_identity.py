@@ -29,12 +29,19 @@ from datetime import datetime
 from typing import Optional
 
 
-def _normalize_title(title: Optional[str]) -> str:
+def normalize_title(title: Optional[str]) -> str:
     """Case/accent/whitespace-insensitive: "O Homem do Fraque Verde" and a
     later re-extraction reading "o homem do fraque verde " (different case,
     trailing whitespace) must hash identically, or a harmless re-extraction
     quirk would look like a brand-new event and orphan the operator's
-    confirmation of the original row."""
+    confirmation of the original row.
+
+    Public (not a leading-underscore helper) so any code that needs to ask
+    "do these two titles count as the same title" — e.g.
+    app.services.event_reconciliation's same-event pairing fallback — uses
+    the IDENTICAL normalization `compute_source_event_key` hashes, rather
+    than a second, potentially-drifting notion of title equality.
+    """
     text = (title or "").strip().casefold()
     text = unicodedata.normalize("NFKD", text)
     text = "".join(ch for ch in text if not unicodedata.combining(ch))
@@ -54,8 +61,8 @@ def compute_source_event_key(title: Optional[str], starts_at: Optional[datetime]
     event behaviour for an unresolvable date.
     """
     date_part = starts_at.date().isoformat() if starts_at is not None else ""
-    payload = f"{_normalize_title(title)}|{date_part}"
+    payload = f"{normalize_title(title)}|{date_part}"
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:32]
 
 
-__all__ = ["compute_source_event_key"]
+__all__ = ["compute_source_event_key", "normalize_title"]
