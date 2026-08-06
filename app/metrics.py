@@ -1150,7 +1150,7 @@ EVENT_EXTRACTION_POSTS_TOTAL = Counter(
     "event_extraction_posts_total",
     "Instagram posts examined by event extraction, by outcome",
     ["outcome"],  # extracted, not_event_like, no_date, low_confidence,
-                  # extraction_failed, skipped_seen
+                  # extraction_failed, skipped_seen, unread_time
 )
 
 # Cumulative vision-model spend on event extraction, in USD, priced from the

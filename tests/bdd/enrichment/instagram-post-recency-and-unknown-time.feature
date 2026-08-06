@@ -1,4 +1,3 @@
-@wip
 Feature: Instagram post recency and unknown event time
   As the operator of the event pipeline
   I want the image cap to keep the newest posts, and an unread event time to be
@@ -10,8 +9,7 @@ Feature: Instagram post recency and unknown event time
     Given a venue with a confirmed Instagram handle
 
   Scenario: Archive the newest posts when the scraper returns them out of order
-    Given the scraper returns posts dated 2026-08-02, 2026-08-05, 2026-08-04,
-      2026-08-06 and 2026-08-01 in that order
+    Given the scraper returns posts dated "2026-08-02, 2026-08-05, 2026-08-04, 2026-08-06 and 2026-08-01" in that order
     And each post carries one image
     And the run caps images per venue at 2
     When the archive runs for the source "instagram_posts"

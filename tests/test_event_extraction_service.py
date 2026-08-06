@@ -25,10 +25,12 @@ from app.models.venue import Venue
 from app.services.event_extraction_service import (
     ArchivedPost,
     EventExtractionService,
+    EventPostSource,
     OUTCOME_EXTRACTED,
     OUTCOME_EXTRACTION_FAILED,
     OUTCOME_LOW_CONFIDENCE,
     OUTCOME_NOT_EVENT_LIKE,
+    OUTCOME_UNREAD_TIME,
     post_qualifies,
 )
 from tests.rds_fake import InMemoryRdsVenueStore
@@ -317,3 +319,144 @@ class TestDryRunSpendsNothing:
         assert result["qualifying_posts"] == 1
         assert client.calls == 0
         assert dao.list_events() == []
+
+
+class TestUnreadTimeReviewReason:
+    """plans/260806_instagram-post-recency-and-unknown-time.md: the four
+    combinations of (time parsed / not) x (names_time yes / not present).
+    Only "time not parsed AND flyer said yes" is an extraction defect worth
+    queueing; the other three are either fine (time parsed) or a genuinely
+    date-only event (no flyer signal, or the flyer said no)."""
+
+    def _run_one(self, *, flyer_names_time, time_text):
+        dao = _dao()
+        _seed_venue(dao, "v1", "v1_handle")
+        post = _post(
+            "s1", caption="Ingressos abertos!", flyer_photo_key="s1.jpg",
+            flyer_confidence=0.9, flyer_names_time=flyer_names_time,
+            timestamp=datetime(2026, 7, 1, 20, tzinfo=timezone.utc),
+        )
+        posts = {"v1": [post]}
+        cfg = {"eligibility": {"mode": "venue_ids", "venue_ids": "v1"}}
+        client = _FakeOpenAIClient([
+            _extraction_json(date_text="hoje", time_text=time_text),
+        ])
+        service = EventExtractionService(dao, _FakePostSource(posts), client)
+        result = _run(service.run(cfg))
+        stored = dao.get_event_by_source("v1_handle", "s1")
+        return result, stored
+
+    def test_time_unread_and_flyer_names_a_time_is_queued(self):
+        result, stored = self._run_one(flyer_names_time="yes", time_text=None)
+        assert result["outcomes"].get(OUTCOME_UNREAD_TIME) == 1
+        assert "unread_time" in stored["review_reason"]
+        assert stored["raw_extraction"]["time_known"] is False
+
+    def test_time_unread_and_flyer_names_no_time_is_not_queued(self):
+        result, stored = self._run_one(flyer_names_time="no", time_text=None)
+        assert result["outcomes"].get(OUTCOME_UNREAD_TIME, 0) == 0
+        assert not (stored["review_reason"] or "")
+        assert stored["raw_extraction"]["time_known"] is False
+
+    def test_time_unread_and_no_flyer_signal_is_not_queued(self):
+        # An absent signal (no flyer attribute at all) must never be read as
+        # a positive one.
+        result, stored = self._run_one(flyer_names_time=None, time_text=None)
+        assert result["outcomes"].get(OUTCOME_UNREAD_TIME, 0) == 0
+        assert not (stored["review_reason"] or "")
+        assert stored["raw_extraction"]["time_known"] is False
+
+    def test_time_parsed_and_flyer_names_a_time_is_not_queued(self):
+        result, stored = self._run_one(flyer_names_time="yes", time_text="22h")
+        assert result["outcomes"].get(OUTCOME_UNREAD_TIME, 0) == 0
+        assert not (stored["review_reason"] or "")
+        assert stored["raw_extraction"]["time_known"] is True
+
+    def test_time_parsed_and_no_flyer_signal_is_not_queued(self):
+        result, stored = self._run_one(flyer_names_time=None, time_text="22h")
+        assert result["outcomes"].get(OUTCOME_UNREAD_TIME, 0) == 0
+        assert not (stored["review_reason"] or "")
+        assert stored["raw_extraction"]["time_known"] is True
+
+    def test_a_stated_00h_is_known_and_never_queued(self):
+        # THE TRAP pinned at the service level too: "00h" is a real stated
+        # midnight, not a defaulted one.
+        result, stored = self._run_one(flyer_names_time="yes", time_text="00h")
+        assert result["outcomes"].get(OUTCOME_UNREAD_TIME, 0) == 0
+        assert stored["starts_at"].hour == 0
+        assert stored["raw_extraction"]["time_known"] is True
+
+
+class _FakeMediaStoreForPostGrouping:
+    """A media store stand-in that returns manifest dicts verbatim — no S3,
+    no model calls. Proves `EventPostSource.posts_for_venue` reads
+    `names_time` from the SAME classified flyer entry it already reads
+    `flyer_photo_key`/`flyer_confidence` from, with zero extra calls of any
+    kind (there is nothing here to call)."""
+
+    def __init__(self, prefixes, manifest: dict):
+        self._prefixes = prefixes
+        self._manifest = manifest
+
+    async def list_run_prefixes(self, source):
+        return self._prefixes
+
+    async def read_manifest(self, prefix, venue_id):
+        return self._manifest
+
+
+class TestEventPostSourceThreadsFlyerNamesTime:
+    """plans/260806_instagram-post-recency-and-unknown-time.md: `names_time`
+    must reach `ArchivedPost` from the manifest's already-classified flyer
+    attributes — no second model call, because there is no client wired into
+    this path at all."""
+
+    PREFIX = "retrieved/source=instagram_posts/year=2026/month=07/day=01/run_id=r1/"
+
+    def _posts_for(self, manifest_photos):
+        manifest = {"photos": manifest_photos}
+        store = _FakeMediaStoreForPostGrouping([self.PREFIX], manifest)
+        source = EventPostSource(store)
+        since = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        return asyncio.run(source.posts_for_venue("v1", since))
+
+    def test_a_confident_yes_is_threaded_through(self):
+        posts = self._posts_for([{
+            "shortcode": "s1", "permalink": "https://instagram.com/p/s1",
+            "caption": "cap", "uploaded_at": "2026-07-01T12:00:00.000Z",
+            "key": "s1.jpg", "category": "flyer",
+            "classification_confidence": 0.95,
+            "attributes": {"announces_event": "yes", "names_time": "yes"},
+        }])
+        assert len(posts) == 1
+        assert posts[0].flyer_names_time == "yes"
+        assert posts[0].flyer_photo_key == "s1.jpg"
+
+    def test_a_confident_no_is_threaded_through(self):
+        posts = self._posts_for([{
+            "shortcode": "s1", "permalink": "https://instagram.com/p/s1",
+            "caption": "cap", "uploaded_at": "2026-07-01T12:00:00.000Z",
+            "key": "s1.jpg", "category": "flyer",
+            "classification_confidence": 0.95,
+            "attributes": {"announces_event": "yes", "names_time": "no"},
+        }])
+        assert posts[0].flyer_names_time == "no"
+
+    def test_no_flyer_photo_leaves_it_none(self):
+        posts = self._posts_for([{
+            "shortcode": "s1", "permalink": "https://instagram.com/p/s1",
+            "caption": "cap", "uploaded_at": "2026-07-01T12:00:00.000Z",
+            "key": "s1.jpg", "category": "food_drinks",
+            "attributes": {"subject": "food"},
+        }])
+        assert posts[0].flyer_photo_key is None
+        assert posts[0].flyer_names_time is None
+
+    def test_a_flyer_with_no_attributes_block_leaves_it_none(self):
+        posts = self._posts_for([{
+            "shortcode": "s1", "permalink": "https://instagram.com/p/s1",
+            "caption": "cap", "uploaded_at": "2026-07-01T12:00:00.000Z",
+            "key": "s1.jpg", "category": "flyer",
+            "classification_confidence": 0.95,
+        }])
+        assert posts[0].flyer_names_time is None
