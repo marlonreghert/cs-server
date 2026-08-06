@@ -507,6 +507,13 @@ class Settings(BaseSettings):
     # rather than trusted — the operator outranks an unsure model.
     event_extraction_min_confidence: float = 0.5
     event_extraction_max_tokens: int = 4096
+    # Multi-Event Posts (plans/260806_multi-event-posts.md). A sanity bound on
+    # how many events ONE post can yield — also the input the output-token
+    # budget scales from (app.api.openai_event_extraction_client.
+    # compute_multi_event_max_completion_tokens), since the real count is
+    # unknown before the call completes. 20 comfortably covers the largest
+    # observed roundup (17 images) with headroom.
+    event_extraction_max_events_per_post: int = 20
     vibe_classifier_early_stop_confidence: float = 0.92
 
     # Instagram Promoter Events (plans/260804_instagram-promoter-events.md).

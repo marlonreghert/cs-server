@@ -64,6 +64,26 @@ class _FakeOpenAIClient:
             raise item
         return item
 
+    async def extract_events(self, *, caption, image_data_uri=None, max_events):
+        """PromoterCrawlService now calls extract_events (plans/260806_
+        multi-event-posts.md), never extract. Every test in this file still
+        programs a single flat event JSON (via _extraction_json) — wrapping
+        it into the {"events": [...]} shape here means a single-event post
+        behaves exactly as it did before, with zero changes to any existing
+        test's Given/programming code."""
+        import json as _json
+
+        self.calls += 1
+        if not self._responses:
+            raise AssertionError("fake OpenAI client called more times than programmed")
+        item = self._responses.pop(0)
+        if isinstance(item, Exception):
+            raise item
+        if isinstance(item, tuple) and item and item[0] == "__truncated__":
+            return item[1], True
+        wrapped = _json.dumps({"events": [_json.loads(item)]})
+        return wrapped, False
+
 
 def _extraction_json(**overrides) -> str:
     import json

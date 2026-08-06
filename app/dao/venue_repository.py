@@ -149,6 +149,12 @@ class VenueRepository(RedisVenueDAO):
     def get_event_by_source(self, source_handle: str, source_shortcode: str):
         return self.rds_store.get_event_by_source(source_handle, source_shortcode)
 
+    def list_events_by_source(self, source_handle: str, source_shortcode: str):
+        """Every event row sharing one post (plans/260806_multi-event-posts.md)
+        — the multi-event counterpart of get_event_by_source, which returns
+        at most one row and is unsafe to use once a post can hold several."""
+        return self.rds_store.list_events_by_source(source_handle, source_shortcode)
+
     def insert_event(self, fields: dict) -> dict:
         return self.rds_store.insert_event(fields)
 

@@ -70,6 +70,13 @@ class EventOut(BaseModel):
     location_confidence: Optional[float] = None
     linked_by: Optional[str] = None
     linked_at: Optional[datetime] = None
+    # plans/260806_multi-event-posts.md: the content-derived identity that
+    # lets several events share one post, and the display-only ordinal that
+    # never participates in it. NULL for a pre-migration row never
+    # re-extracted since, and for an extraction_failed placeholder (no
+    # content to key by).
+    source_event_key: Optional[str] = None
+    source_event_index: Optional[int] = None
 
 
 def _to_out(row: dict) -> EventOut:

@@ -1189,7 +1189,30 @@ PROMOTER_CRAWL_POSTS_TOTAL = Counter(
     "promoter_crawl_posts_total",
     "Promoter posts examined by the promoter crawl, by outcome",
     ["outcome"],  # archived, not_event_like, extracted, extraction_failed,
-                  # manual_preserved, account_unavailable
+                  # manual_preserved, account_unavailable, truncated
+)
+
+# =============================================================================
+# MULTI-EVENT POSTS (plans/260806_multi-event-posts.md)
+# =============================================================================
+
+# How many events ONE post yielded. A listings account collapsing back to
+# one event per post (the regression this feature exists to prevent) shows
+# up only in the SHAPE of this distribution, never in a single scalar —
+# `promoter_crawl_posts_total{outcome="extracted"}` alone cannot distinguish
+# "17 posts, 1 event each" from "1 post, 17 events".
+EVENT_EXTRACTION_EVENTS_PER_POST = Histogram(
+    "event_extraction_events_per_post",
+    "Number of events extracted from a single post",
+    buckets=(1, 2, 3, 5, 8, 13, 20),
+)
+
+# One malformed entry inside an otherwise-valid multi-event list must be
+# skipped and counted, never fatal to its siblings — this is the counter
+# that proves the skip actually happened rather than silently vanishing.
+EVENT_EXTRACTION_MALFORMED_EVENTS_TOTAL = Counter(
+    "event_extraction_malformed_events_total",
+    "Individual malformed events skipped within an otherwise-valid multi-event extraction",
 )
 
 # `method` is what makes this worth reading: whether links are coming from
