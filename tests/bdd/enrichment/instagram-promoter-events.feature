@@ -1,4 +1,3 @@
-@wip
 Feature: Instagram promoter events
   As the operator of the event pipeline
   I want events from accounts that belong to no venue mapped to known venues
@@ -62,11 +61,10 @@ Feature: Instagram promoter events
     And the link method is "name_match"
 
   Scenario: Queue for review when two candidates score within the margin
-    Given a promoter post whose location text matches two venues with scores
-      0.91 and 0.89
+    Given a promoter post whose location text matches two venues with scores 0.91 and 0.89
     And the auto-link margin is 0.05
     When the promoter crawl runs
-    Then the event has the status "pending_review"
+    Then the event has the review status "pending_review"
     And the event has no venue id
     And both venues are recorded as ranked candidates
 
@@ -117,4 +115,4 @@ Feature: Instagram promoter events
     When the promoter crawl runs as a dry run
     Then the accounts and post counts it would crawl are reported
     And no post is crawled
-    And no event is written
+    And no promoter event is written

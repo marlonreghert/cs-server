@@ -1173,6 +1173,44 @@ EVENTS_TOTAL = Gauge(
 )
 
 # =============================================================================
+# PROMOTER EVENTS (plans/260804_instagram-promoter-events.md)
+# =============================================================================
+
+# Snapshot of events.promoter_account after the most recent registry change,
+# by lifecycle status — the first question this feature has to answer: how
+# many discovered handles are still awaiting an operator's decision.
+PROMOTER_ACCOUNTS_TOTAL = Gauge(
+    "promoter_accounts_total",
+    "Rows in events.promoter_account, by status",
+    ["status"],
+)
+
+PROMOTER_CRAWL_POSTS_TOTAL = Counter(
+    "promoter_crawl_posts_total",
+    "Promoter posts examined by the promoter crawl, by outcome",
+    ["outcome"],  # archived, not_event_like, extracted, extraction_failed,
+                  # manual_preserved, account_unavailable
+)
+
+# `method` is what makes this worth reading: whether links are coming from
+# exact @-mentions/location tags or from fuzzy name matching is the
+# difference between a resolver that is working and one that is guessing
+# successfully so far. `result` is auto, queued, unresolved, or manual.
+EVENT_VENUE_LINK_TOTAL = Counter(
+    "event_venue_link_total",
+    "Promoter event venue resolution outcomes, by method and result",
+    ["method", "result"],
+)
+
+# The operator-load signal, and the number that says whether the auto-link
+# floor/margin are set sensibly: a queue that only grows means the gates are
+# too strict, not that the resolver found nothing.
+EVENT_REVIEW_QUEUE_DEPTH = Gauge(
+    "event_review_queue_depth",
+    "Promoter events awaiting a location decision (location_resolution IS NULL)",
+)
+
+# =============================================================================
 # APPLICATION INFO
 # =============================================================================
 

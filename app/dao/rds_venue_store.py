@@ -435,6 +435,9 @@ class RdsVenueStore:
         "title", "description", "lineup", "ticket_url", "price_text", "location_text",
         "cover_photo_key", "confidence", "status", "review_reason", "raw_extraction",
         "first_seen_at", "last_seen_at",
+        # plans/260804_instagram-promoter-events.md (migration 0024) — how, if
+        # at all, a promoter event's venue was resolved.
+        "location_resolution", "location_confidence", "linked_by", "linked_at",
     )
     _EVENT_JSONB_COLUMNS = ("lineup", "raw_extraction")
     _EVENT_SELECT = (
@@ -442,7 +445,9 @@ class RdsVenueStore:
         "source_permalink, starts_at, ends_at, is_recurring, recurrence_text, "
         "title, description, lineup, ticket_url, price_text, location_text, "
         "cover_photo_key, confidence, status, review_reason, raw_extraction, "
-        "first_seen_at, last_seen_at, updated_at FROM events.event"
+        "first_seen_at, last_seen_at, updated_at, "
+        "location_resolution, location_confidence, linked_by, linked_at "
+        "FROM events.event"
     )
 
     def get_event(self, event_id: str) -> Optional[dict]:
@@ -536,6 +541,131 @@ class RdsVenueStore:
         sql += " ORDER BY starts_at NULLS LAST, event_id"
         with self.engine.connect() as conn:
             return [dict(r) for r in conn.execute(text(sql), params).mappings()]
+
+    def list_events_pending_location(self) -> list[dict]:
+        """Promoter-post events awaiting a location decision — the review
+        queue's whole population. `location_resolution IS NULL` is the
+        distinguishing predicate (migration 0024's docstring): an
+        `unresolved` event was decided (below the floor) and is excluded
+        here, same as an `auto`/`manual` one."""
+        sql = (
+            f"{self._EVENT_SELECT} WHERE source_kind='promoter_post' "
+            "AND location_resolution IS NULL "
+            "ORDER BY first_seen_at, event_id"
+        )
+        with self.engine.connect() as conn:
+            return [dict(r) for r in conn.execute(text(sql)).mappings()]
+
+    # ── instagram.handle reverse index (plans/260804_instagram-promoter-events.md) ─
+    def list_instagram_handles(self) -> dict[str, str]:
+        """venue_id -> instagram_handle, for every venue with a confirmed
+        handle. The resolution ladder's rung 1 reverses this into
+        handle -> venue_id; free, since it reads what the cascade already
+        discovered rather than a new provider call."""
+        with self.engine.connect() as conn:
+            rows = conn.execute(text(
+                "SELECT venue_id, instagram_handle FROM instagram.handle "
+                "WHERE deleted_at IS NULL AND instagram_handle IS NOT NULL"
+            )).mappings()
+            return {r["venue_id"]: r["instagram_handle"] for r in rows}
+
+    # ── events.promoter_account (plans/260804_instagram-promoter-events.md) ──
+    _PROMOTER_COLUMNS = (
+        "handle", "display_name", "status", "discovery_source",
+        "discovered_from_event_id", "mention_count", "notes", "added_by",
+        "last_crawled_at", "posts_crawled", "events_extracted",
+    )
+    _PROMOTER_SELECT = (
+        "SELECT handle, display_name, status, discovery_source, "
+        "discovered_from_event_id, mention_count, notes, added_by, "
+        "last_crawled_at, posts_crawled, events_extracted, "
+        "created_at, updated_at FROM events.promoter_account"
+    )
+
+    def get_promoter_account(self, handle: str) -> Optional[dict]:
+        with self.engine.connect() as conn:
+            row = conn.execute(
+                text(f"{self._PROMOTER_SELECT} WHERE handle=:h"), {"h": handle},
+            ).mappings().first()
+            return dict(row) if row else None
+
+    def list_promoter_accounts(self, status: Optional[str] = None) -> list[dict]:
+        sql = self._PROMOTER_SELECT
+        params: dict = {}
+        if status is not None:
+            sql += " WHERE status=:status"
+            params["status"] = status
+        sql += " ORDER BY handle"
+        with self.engine.connect() as conn:
+            return [dict(r) for r in conn.execute(text(sql), params).mappings()]
+
+    def upsert_promoter_account(self, handle: str, fields: dict) -> dict:
+        """INSERT ... ON CONFLICT (handle) DO UPDATE, so registering an
+        already-known handle (e.g. discovery re-proposing a manually added
+        one) updates it in place rather than raising. Only the keys present
+        in `fields` are set on conflict; the primary key and any column the
+        caller omitted are left untouched — mirrors update_event's partial-
+        update contract."""
+        cols = [c for c in self._PROMOTER_COLUMNS if c in fields and c != "handle"]
+        assign = {c: fields[c] for c in cols}
+        assign["handle"] = handle
+        insert_cols = ["handle"] + cols
+        col_list = ", ".join(insert_cols)
+        val_list = ", ".join(f":{c}" for c in insert_cols)
+        if cols:
+            update_clause = ", ".join(f"{c}=:{c}" for c in cols) + ", updated_at=now()"
+            conflict_sql = f"DO UPDATE SET {update_clause}"
+        else:
+            conflict_sql = "DO NOTHING"
+        with self.engine.begin() as conn:
+            conn.execute(
+                text(
+                    f"INSERT INTO events.promoter_account ({col_list}) "
+                    f"VALUES ({val_list}) "
+                    f"ON CONFLICT (handle) {conflict_sql}"
+                ),
+                assign,
+            )
+        return self.get_promoter_account(handle)
+
+    # ── events.event_venue_link_candidate (plans/260804_instagram-promoter-events.md) ─
+    def replace_event_venue_link_candidates(self, event_id: str, candidates: list[dict]) -> None:
+        """Replace the whole ranked candidate list for one event — a later
+        crawl of the same post recomputes the ladder from scratch, so the
+        old ranking must not linger alongside a new one. DELETE-then-INSERT
+        in one transaction, matching the fake's replace-whole-list contract."""
+        with self.engine.begin() as conn:
+            conn.execute(
+                text("DELETE FROM events.event_venue_link_candidate WHERE event_id=:e"),
+                {"e": event_id},
+            )
+            for c in candidates:
+                conn.execute(
+                    text(
+                        "INSERT INTO events.event_venue_link_candidate "
+                        "(event_id, venue_id, rank, score, method, evidence) "
+                        "VALUES (:event_id, :venue_id, :rank, :score, :method, "
+                        "CAST(:evidence AS jsonb))"
+                    ),
+                    {
+                        "event_id": event_id, "venue_id": c["venue_id"],
+                        "rank": c["rank"], "score": c.get("score"),
+                        "method": c["method"],
+                        "evidence": json.dumps(c.get("evidence") or {}),
+                    },
+                )
+
+    def list_event_venue_link_candidates(self, event_id: str) -> list[dict]:
+        with self.engine.connect() as conn:
+            rows = conn.execute(
+                text(
+                    "SELECT event_id, venue_id, rank, score, method, evidence, created_at "
+                    "FROM events.event_venue_link_candidate "
+                    "WHERE event_id=:e ORDER BY rank"
+                ),
+                {"e": event_id},
+            ).mappings()
+            return [dict(r) for r in rows]
 
     # ── bulk per-table readers (projector rebuild, P1) ─────────────────────────
     # Replace the projector's former per-venue read loop (~18 SQL queries per

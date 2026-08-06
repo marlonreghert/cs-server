@@ -509,6 +509,22 @@ class Settings(BaseSettings):
     event_extraction_max_tokens: int = 4096
     vibe_classifier_early_stop_confidence: float = 0.92
 
+    # Instagram Promoter Events (plans/260804_instagram-promoter-events.md).
+    # Two independent gates decide an auto-link (app/services/
+    # event_venue_resolution.py): an absolute floor, AND a margin over the
+    # runner-up. The margin is the one that matters — a top score of 0.91
+    # against a runner-up of 0.89 is a coin toss wearing a high score.
+    # Calibrated by the first hand-audited crawl (see the plan's Open
+    # Questions), not asserted correct here.
+    promoter_link_confidence_floor: float = 0.55
+    promoter_link_margin: float = 0.08
+    # A promoter posts far more than a venue does, so this bound is NOT
+    # optional and defaults small — unlike event extraction's per-venue cap.
+    promoter_max_posts_per_account: int = 15
+    # How many distinct already-extracted event posts must mention a handle
+    # before discovery proposes it as a candidate account.
+    promoter_mention_threshold: int = 3
+
     # Dev Mode - overrides default locations for venue discovery
     dev_mode: bool = False
     dev_lat: float = -8.07834       # Default: Recife ZS/ZN
