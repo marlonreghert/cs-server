@@ -1,7 +1,10 @@
 """Crawl active promoter accounts, extract their events with the existing
 extractor, and resolve each event's venue through the resolution ladder. See
-plans/260804_instagram-promoter-events.md §C-D and
-plans/260806_multi-event-posts.md (one post can announce SEVERAL events).
+plans/260804_instagram-promoter-events.md §C-D,
+plans/260806_multi-event-posts.md (one post can announce SEVERAL events), and
+plans/260806_venue-post-multi-event.md (the per-post reconciliation itself is
+now SHARED with EventExtractionService — see app/services/
+event_reconciliation.py — rather than duplicated here).
 
 Reuses, unchanged, every piece `260804_instagram-event-extraction.md` already
 built: `resolve_event_datetime` (dates are never trusted to the model),
@@ -19,25 +22,28 @@ never crawled, until an operator flips it.
 
 A manual link (`location_resolution == 'manual'`) is never overwritten by a
 later crawl of the same post: the operator outranks the model, the same
-principle `EventExtractionService` applies to a `confirmed` event. With
-several events per post, both protections now apply PER EVENT (matched by
-its content-derived `source_event_key`, app.services.event_identity), not
-per post — a confirmed or manually-linked sibling must never be affected by
-what happens to the other events the same post announces.
+principle applies to a `confirmed` event — now enforced by the shared
+`reconcile_post_events`, not a local copy. With several events per post, both
+protections apply PER EVENT (matched by its content-derived
+`source_event_key`, app.services.event_identity), not per post — a confirmed
+or manually-linked sibling must never be affected by what happens to the
+other events the same post announces. A `confirmed` promoter event now also
+gets its divergence FLAGGED when the model's fresh title/date no longer
+matches — a behaviour this path gained by moving onto the shared module,
+mirroring what the venue path already did.
 """
 from __future__ import annotations
 
 import base64
 import logging
 from datetime import datetime, timedelta, timezone
-from typing import Optional
+from typing import Callable, Optional
 
 from app.api.openai_event_extraction_client import (
     EventExtractionParseError,
     parse_multi_event_extraction_response,
 )
 from app.metrics import (
-    EVENT_EXTRACTION_EVENTS_PER_POST,
     EVENT_EXTRACTION_MALFORMED_EVENTS_TOTAL,
     EVENT_REVIEW_QUEUE_DEPTH,
     EVENT_VENUE_LINK_TOTAL,
@@ -46,13 +52,16 @@ from app.metrics import (
 from app.services.archive_sources import SOURCE_INSTAGRAM_POSTS
 from app.services.event_caption_matcher import matches_event_marker
 from app.services.event_date_resolver import REASON_MISSING_DATE, resolve_event_datetime
-from app.services.event_extraction_service import new_event_id
-from app.services.event_identity import compute_source_event_key
+from app.services.event_reconciliation import (
+    STATUS_CONFIRMED,
+    STATUS_SUPERSEDED,
+    new_event_id,
+    reconcile_post_events,
+)
 from app.services.event_venue_resolution import (
     DEFAULT_CONFIDENCE_FLOOR,
     DEFAULT_MARGIN,
     RESOLUTION_AUTO,
-    RESOLUTION_MANUAL,
     RESOLUTION_QUEUED,
     RESOLUTION_UNRESOLVED,
     build_handle_index,
@@ -68,14 +77,7 @@ logger = logging.getLogger(__name__)
 
 SOURCE_KIND_PROMOTER_POST = "promoter_post"
 
-STATUS_PENDING_REVIEW = "pending_review"
 STATUS_EXTRACTION_FAILED = "extraction_failed"
-STATUS_CONFIRMED = "confirmed"
-# Already defined (and unused) by 0023_event_table's status vocabulary —
-# plans/260806_multi-event-posts.md is the first thing that writes it: an
-# event a later extraction no longer finds is superseded, never
-# hard-deleted, and never touched at all once confirmed or manually linked.
-STATUS_SUPERSEDED = "superseded"
 REVIEW_REASON_LOW_CONFIDENCE = "low_confidence"
 REVIEW_REASON_EXTRACTION_FAILED = "extraction_failed"
 
@@ -421,71 +423,22 @@ class PromoterCrawlService:
             EVENT_EXTRACTION_MALFORMED_EVENTS_TOTAL.inc(malformed_count)
 
         post_ts = _parse_timestamp(post.get("timestamp")) or now
-        existing_by_key = {
-            row["source_event_key"]: row for row in existing_events
-            if row.get("source_event_key") is not None
-        }
-        seen_keys: set[str] = set()
-        persisted = 0
 
-        for index, parsed in enumerate(events_data, start=1):
+        prepared_events: list[dict] = []
+        for parsed in events_data:
             # Each event resolves its OWN date, independently, against the
             # post's timestamp — never a sibling's.
             resolved_date = resolve_event_datetime(
                 date_text=parsed["date_text"], time_text=parsed["time_text"],
                 post_timestamp=post_ts,
             )
-            source_event_key = compute_source_event_key(parsed["title"], resolved_date.starts_at)
-            seen_keys.add(source_event_key)
-            existing = existing_by_key.get(source_event_key)
-
-            # A `confirmed` event is the operator's word: only raw_extraction
-            # and last_seen_at move, mirroring
-            # EventExtractionService._preserve_confirmed. This now applies
-            # PER EVENT — a confirmed sibling in the same post must not gate
-            # or alter what happens to the others.
-            if existing is not None and existing.get("status") == STATUS_CONFIRMED:
-                self.venue_dao.update_event(existing["event_id"], {
-                    "raw_extraction": parsed, "last_seen_at": now,
-                })
-                persisted += 1
-                continue
-
-            # A manual link outranks the model: a later crawl of the same
-            # post must never move venue_id/location_resolution/confidence/
-            # linked_* once an operator has set them for THIS event.
-            preserve_manual_link = (
-                existing is not None and existing.get("location_resolution") == RESOLUTION_MANUAL
-            )
-            # An event with no location_text resolves as unresolved and must
-            # NEVER inherit a sibling's venue — "the other event in this
-            # post was at the Cinema" is not evidence about this one. Passing
-            # each event's OWN location_text (never a sibling's, never a
-            # merged one) into the SAME unchanged ladder is what guarantees
-            # this: resolve_event_venue already returns RESOLUTION_UNRESOLVED
-            # when location_text is absent (no name-match candidates), and
-            # rungs 1-2 read the shared caption/tag, which no per-event data
-            # can leak between siblings.
-            resolution = None
-            if not preserve_manual_link:
-                resolution = resolve_event_venue(
-                    caption=caption, location_text=parsed["location_text"],
-                    location_tag=post.get("location_tag"), promoter_handle=handle,
-                    venues=venues, handle_index=handle_index,
-                    confidence_floor=self.confidence_floor, margin=self.margin,
-                )
-
             review_reason = None
             if resolved_date.needs_review:
                 review_reason = REASON_MISSING_DATE
             elif parsed["confidence"] < self.min_confidence:
                 review_reason = REVIEW_REASON_LOW_CONFIDENCE
 
-            fields = {
-                "source_kind": SOURCE_KIND_PROMOTER_POST,
-                "source_handle": handle, "source_shortcode": shortcode,
-                "source_permalink": post.get("permalink"),
-                "source_event_key": source_event_key, "source_event_index": index,
+            prepared_events.append({
                 "starts_at": resolved_date.starts_at, "ends_at": resolved_date.ends_at,
                 "is_recurring": resolved_date.is_recurring or bool(parsed["is_recurring"]),
                 "recurrence_text": resolved_date.recurrence_text or parsed["recurrence_text"],
@@ -493,89 +446,82 @@ class PromoterCrawlService:
                 "lineup": parsed["lineup"], "ticket_url": parsed["ticket_url"],
                 "price_text": parsed["price_text"], "location_text": parsed["location_text"],
                 "confidence": parsed["confidence"],
-                "status": STATUS_PENDING_REVIEW,
                 "review_reason": review_reason,
                 "raw_extraction": parsed,
-                "last_seen_at": now,
-            }
+            })
 
-            if resolution is not None:
-                if resolution.resolution == RESOLUTION_AUTO:
-                    fields.update({
-                        "venue_id": resolution.venue_id,
-                        "location_resolution": RESOLUTION_AUTO,
-                        "location_confidence": resolution.confidence,
-                        "linked_by": resolution.method,
-                        "linked_at": now,
-                    })
-                elif resolution.resolution == RESOLUTION_UNRESOLVED:
-                    fields.update({
-                        "venue_id": None,
-                        "location_resolution": RESOLUTION_UNRESOLVED,
-                        "location_confidence": None,
-                        "linked_by": None,
-                        "linked_at": None,
-                    })
-                # RESOLUTION_QUEUED: the four link columns are left out of
-                # `fields` entirely — update_event's partial-update contract
-                # means they stay NULL, the "awaiting review" state.
+        # The ONE thing parameterised (plans/260806_venue-post-multi-event.md
+        # §B): each event runs the resolution ladder on its OWN
+        # location_text — never a sibling's, never merged. An event with no
+        # location_text resolves as unresolved and must NEVER inherit a
+        # sibling's venue: resolve_event_venue already guarantees this (it
+        # returns RESOLUTION_UNRESOLVED when location_text is absent, and
+        # rungs 1-2 read only the shared caption/tag, which carries no
+        # per-event data to leak between siblings). Never invoked by the
+        # shared reconciler for a confirmed or manually-linked existing row.
+        #
+        # Returns (fields, on_persisted): `replace_event_venue_link_
+        # candidates` writes a row with a real, non-deferrable FK to
+        # events.event (migration 0024_promoter_accounts) — it MUST NOT run
+        # until the event row itself is committed, so it is deferred into
+        # `on_persisted` rather than called here directly. The reconciler
+        # calls it after insert_event/update_event.
+        def _attribute(fields: dict, event_id: str) -> tuple[dict, Optional[Callable[[], None]]]:
+            resolution = resolve_event_venue(
+                caption=caption, location_text=fields["location_text"],
+                location_tag=post.get("location_tag"), promoter_handle=handle,
+                venues=venues, handle_index=handle_index,
+                confidence_floor=self.confidence_floor, margin=self.margin,
+            )
 
-            if existing is None:
-                fields["event_id"] = new_event_id()
-                fields["first_seen_at"] = now
-                # A fresh row has no prior value for the four link columns to
-                # fall back on — unlike an update, where omitting them from
-                # `fields` correctly leaves whatever was already stored (NULL,
-                # from that same row's own first insert) untouched. Without this,
-                # a brand-new RESOLUTION_QUEUED event would insert with venue_id
-                # simply ABSENT rather than explicitly NULL — the real store's
-                # column default covers that, but the in-memory fake does not.
-                fields.setdefault("venue_id", None)
-                fields.setdefault("location_resolution", None)
-                fields.setdefault("location_confidence", None)
-                fields.setdefault("linked_by", None)
-                fields.setdefault("linked_at", None)
-                self.venue_dao.insert_event(fields)
-                event_id = fields["event_id"]
-            else:
-                self.venue_dao.update_event(existing["event_id"], fields)
-                event_id = existing["event_id"]
-
-            if resolution is not None and resolution.candidates:
-                self.venue_dao.replace_event_venue_link_candidates(event_id, [
-                    {
-                        "venue_id": c.venue_id, "rank": rank, "score": c.score,
-                        "method": c.method, "evidence": c.evidence,
-                    }
-                    for rank, c in enumerate(resolution.candidates, start=1)
-                ])
-
-            if resolution is not None:
+            def _on_persisted() -> None:
+                if resolution.candidates:
+                    self.venue_dao.replace_event_venue_link_candidates(event_id, [
+                        {
+                            "venue_id": c.venue_id, "rank": rank, "score": c.score,
+                            "method": c.method, "evidence": c.evidence,
+                        }
+                        for rank, c in enumerate(resolution.candidates, start=1)
+                    ])
                 EVENT_VENUE_LINK_TOTAL.labels(
                     method=resolution.method or "none",
                     result=_RESULT_LABEL[resolution.resolution],
                 ).inc()
 
-            persisted += 1
+            if resolution.resolution == RESOLUTION_AUTO:
+                result_fields = {
+                    "venue_id": resolution.venue_id,
+                    "location_resolution": RESOLUTION_AUTO,
+                    "location_confidence": resolution.confidence,
+                    "linked_by": resolution.method,
+                    "linked_at": now,
+                }
+            elif resolution.resolution == RESOLUTION_UNRESOLVED:
+                result_fields = {
+                    "venue_id": None,
+                    "location_resolution": RESOLUTION_UNRESOLVED,
+                    "location_confidence": None,
+                    "linked_by": None,
+                    "linked_at": None,
+                }
+            else:
+                # RESOLUTION_QUEUED: leave the four link columns out of the
+                # returned dict entirely — the reconciler's partial-update
+                # path means they stay NULL, the "awaiting review" state.
+                result_fields = {}
+            return result_fields, _on_persisted
 
-        # An event previously extracted from this post and absent from THIS
-        # run is superseded — never hard-deleted, and never touched at all
-        # once confirmed or manually linked (the operator outranks the
-        # model, exactly as the confirmed branch above already behaves).
-        for row in existing_events:
-            key = row.get("source_event_key")
-            if key is None or key in seen_keys:
-                continue
-            if row.get("status") == STATUS_CONFIRMED:
-                continue
-            if row.get("location_resolution") == RESOLUTION_MANUAL:
-                continue
-            self.venue_dao.update_event(row["event_id"], {"status": STATUS_SUPERSEDED})
+        persisted = reconcile_post_events(
+            venue_dao=self.venue_dao,
+            source_kind=SOURCE_KIND_PROMOTER_POST,
+            source_handle=handle,
+            source_shortcode=shortcode,
+            source_permalink=post.get("permalink"),
+            prepared_events=prepared_events,
+            now=now,
+            attribute=_attribute,
+        )
 
-        # A listings account collapsing back to one event per post is
-        # exactly the regression this feature exists to prevent — visible
-        # only in this distribution, never in a single scalar.
-        EVENT_EXTRACTION_EVENTS_PER_POST.observe(len(events_data))
         PROMOTER_CRAWL_POSTS_TOTAL.labels(outcome=OUTCOME_EXTRACTED).inc()
         return persisted
 

@@ -147,7 +147,18 @@ class _FakePostSource:
 class _FakeOpenAIClient:
     """Programmed with one response (a JSON string) or exception per call, in
     order. `.calls` proves the cost-gate assertion: it must stay 0 for a
-    non-qualifying post."""
+    non-qualifying post.
+
+    `EventExtractionService` now calls `extract_events` (plans/260806_venue-
+    post-multi-event.md), never the singular `extract`. Every test in this
+    file still programs a single flat event JSON (via `_extraction_json`) or
+    an intentionally-invalid string — wrapping a flat dict into the
+    `{"events": [...]}` shape here (mirroring
+    tests/test_promoter_crawl_service.py's identical fake) means a
+    single-event post behaves exactly as it did before, with zero changes to
+    any existing test's programming code. An already-truncated tuple or a
+    string that is not valid JSON at all is returned VERBATIM so the real
+    parser (not this fake) is what raises on it."""
 
     def __init__(self, responses: list):
         self._responses = list(responses)
@@ -161,6 +172,23 @@ class _FakeOpenAIClient:
         if isinstance(item, Exception):
             raise item
         return item
+
+    async def extract_events(self, *, caption, image_data_uri=None, max_events):
+        self.calls += 1
+        if not self._responses:
+            raise AssertionError("fake OpenAI client called more times than programmed")
+        item = self._responses.pop(0)
+        if isinstance(item, Exception):
+            raise item
+        if isinstance(item, tuple) and item and item[0] == "__truncated__":
+            return item[1], True
+        try:
+            flat = json.loads(item)
+        except (json.JSONDecodeError, TypeError):
+            return item, False
+        if isinstance(flat, dict) and "events" not in flat:
+            return json.dumps({"events": [flat]}), False
+        return item, False
 
 
 def _dao() -> VenueRepository:
@@ -199,7 +227,43 @@ class TestZeroModelCallsForNonQualifying:
 
 
 class TestIdempotentReExtraction:
-    def test_two_runs_over_the_same_post_leave_one_row(self):
+    def test_two_runs_with_the_same_answer_leave_one_row(self):
+        """A stable re-extraction (same title, same content) must not
+        duplicate the row — the content-derived key matches directly."""
+        dao = _dao()
+        _seed_venue(dao, "v1", "v1_handle")
+        post = _post(
+            "s1", caption="Ingressos abertos!", flyer_photo_key="s1.jpg",
+            flyer_confidence=0.9, timestamp=datetime(2026, 7, 1, 20, tzinfo=timezone.utc),
+        )
+        posts = {"v1": [post]}
+        cfg = {"eligibility": {"mode": "venue_ids", "venue_ids": "v1"}}
+
+        client = _FakeOpenAIClient([_extraction_json(), _extraction_json()])
+        service = EventExtractionService(dao, _FakePostSource(posts), client)
+
+        r1 = _run(service.run(cfg))
+        r2 = _run(service.run(cfg))
+
+        assert r1["outcomes"].get(OUTCOME_EXTRACTED) == 1
+        assert r2["outcomes"].get(OUTCOME_EXTRACTED) == 1
+        matches = [
+            e for e in dao.list_events(venue_id="v1")
+            if e["source_shortcode"] == "s1"
+        ]
+        assert len(matches) == 1, matches
+        assert matches[0]["title"] == "Festa"
+        assert client.calls == 2
+
+    def test_a_changed_title_supersedes_the_old_row_instead_of_updating_it(self):
+        """plans/260806_venue-post-multi-event.md §E: identity is now
+        content-derived (source_event_key = hash(title, date)), not
+        positional or post-based. A title phrased differently on
+        re-extraction is indistinguishable from "a different event" to that
+        key, so — for a row that is neither confirmed nor manually linked —
+        the OLD row is superseded and a NEW one is inserted. Nothing is
+        deleted, and this is the explicitly documented, intentional
+        consequence of content-derived identity, not a regression to fix."""
         dao = _dao()
         _seed_venue(dao, "v1", "v1_handle")
         post = _post(
@@ -221,9 +285,10 @@ class TestIdempotentReExtraction:
             e for e in dao.list_events(venue_id="v1")
             if e["source_shortcode"] == "s1"
         ]
-        assert len(matches) == 1, matches
-        # The second run's answer (updated title) is what is now stored.
-        assert matches[0]["title"] == "Festa 2"
+        assert len(matches) == 2, matches
+        by_title = {m["title"]: m for m in matches}
+        assert by_title["Festa"]["status"] == "superseded"
+        assert by_title["Festa 2"]["status"] == "pending_review"
         assert client.calls == 2
 
 
@@ -255,6 +320,114 @@ class TestConfirmedIsNeverReverted:
         assert after["title"] == "Corrected by operator"
         assert after["review_reason"] == "model_diverges_from_confirmed_record"
         assert after["raw_extraction"]["title"] == "A completely different title"
+
+
+class TestSingleEventVenuePostIsByteIdenticalToTheOldPath:
+    """plans/260806_venue-post-multi-event.md: this is the regression that
+    matters most. Every existing venue event in the database was written by
+    the OLD single-event `_extract_one` (calling `openai_client.extract()`
+    and `parse_extraction_response`, one row per post, no
+    source_event_key/source_event_index). The refactor moves the venue path
+    onto the same multi-event extraction + shared reconciliation the
+    promoter path uses, but a post that still only announces ONE event must
+    persist EXACTLY the fields the old path would have written — field for
+    field, not just "a row exists". The two genuinely NEW columns
+    (source_event_key, source_event_index) are asserted separately: their
+    existence is the intended, migration-0025-backed addition, not a
+    regression.
+    """
+
+    def test_every_field_matches_the_pre_refactor_shape_exactly(self):
+        dao = _dao()
+        _seed_venue(dao, "v1", "v1_handle")
+        post = _post(
+            "s1", caption="Ingressos abertos!", flyer_photo_key="s1.jpg",
+            flyer_confidence=0.9, timestamp=datetime(2026, 7, 1, 20, tzinfo=timezone.utc),
+            permalink="https://instagram.com/p/s1",
+        )
+        posts = {"v1": [post]}
+        cfg = {"eligibility": {"mode": "venue_ids", "venue_ids": "v1"}}
+
+        client = _FakeOpenAIClient([_extraction_json(
+            title="Festa da Casa", description="Uma noite especial",
+            date_text="15/08", time_text="22h", is_recurring=False,
+            recurrence_text=None, lineup=["DJ A", "DJ B"],
+            ticket_url="https://tickets.example/x", price_text="R$30",
+            location_text="Rua das Flores, 123", confidence=0.87,
+        )])
+        service = EventExtractionService(dao, _FakePostSource(posts), client)
+        result = _run(service.run(cfg))
+
+        assert result["outcomes"].get(OUTCOME_EXTRACTED) == 1
+        stored = dao.get_event_by_source("v1_handle", "s1")
+        assert stored is not None
+
+        # Every field the OLD path would have written, computed exactly the
+        # same way: venue_id is the posting venue (never the ladder);
+        # starts_at/ends_at/is_recurring/recurrence_text come from the SAME
+        # resolve_event_datetime call; every other content field is copied
+        # verbatim from the model's parsed answer; cover_photo_key is the
+        # post's own flyer image; status is pending_review (no confirmed/
+        # manual row exists yet); review_reason is None (a full date, high
+        # confidence); raw_extraction is the parsed dict PLUS time_known.
+        assert stored["venue_id"] == "v1"
+        assert stored["source_kind"] == "venue_post"
+        assert stored["source_handle"] == "v1_handle"
+        assert stored["source_shortcode"] == "s1"
+        assert stored["source_permalink"] == "https://instagram.com/p/s1"
+        assert stored["starts_at"].date().isoformat() == "2026-08-15"
+        assert stored["starts_at"].hour == 22
+        assert stored["ends_at"] is None
+        assert stored["is_recurring"] is False
+        assert stored["recurrence_text"] is None
+        assert stored["title"] == "Festa da Casa"
+        assert stored["description"] == "Uma noite especial"
+        assert stored["lineup"] == ["DJ A", "DJ B"]
+        assert stored["ticket_url"] == "https://tickets.example/x"
+        assert stored["price_text"] == "R$30"
+        assert stored["location_text"] == "Rua das Flores, 123"
+        assert stored["cover_photo_key"] == "s1.jpg"
+        assert stored["confidence"] == 0.87
+        assert stored["status"] == "pending_review"
+        assert stored["review_reason"] is None
+        assert stored["raw_extraction"] == {
+            "title": "Festa da Casa", "description": "Uma noite especial",
+            "date_text": "15/08", "time_text": "22h", "is_recurring": False,
+            "recurrence_text": None, "lineup": ["DJ A", "DJ B"],
+            "ticket_url": "https://tickets.example/x", "price_text": "R$30",
+            "location_text": "Rua das Flores, 123", "confidence": 0.87,
+            "time_known": True,
+        }
+        assert stored["first_seen_at"] is not None
+        assert stored["last_seen_at"] is not None
+        assert stored["event_id"].startswith("evt_")
+
+        # The two genuinely NEW columns — expected additions, not drift.
+        assert stored["source_event_key"] is not None
+        assert stored["source_event_index"] == 1
+
+        # The promoter-only ladder columns: a venue event never runs the
+        # ladder (attribution is a constant venue_id), so these stay NULL —
+        # "location_resolution unchanged" per the plan, meaning still NULL,
+        # not that the column is ever absent from a real Postgres row.
+        assert stored["location_resolution"] is None
+        assert stored["location_confidence"] is None
+        assert stored["linked_by"] is None
+        assert stored["linked_at"] is None
+
+        # No unexpected columns crept in beyond the old shape, the two new
+        # identity columns, and the always-NULL ladder columns above.
+        expected_keys = {
+            "venue_id", "source_kind", "source_handle", "source_shortcode",
+            "source_permalink", "starts_at", "ends_at", "is_recurring",
+            "recurrence_text", "title", "description", "lineup", "ticket_url",
+            "price_text", "location_text", "cover_photo_key", "confidence",
+            "status", "review_reason", "raw_extraction", "last_seen_at",
+            "event_id", "first_seen_at", "source_event_key", "source_event_index",
+            "location_resolution", "location_confidence", "linked_by", "linked_at",
+            "updated_at",
+        }
+        assert set(stored.keys()) == expected_keys, set(stored.keys())
 
 
 class TestExtractionFailureRecordsAndContinues:
