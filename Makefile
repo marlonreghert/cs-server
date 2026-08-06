@@ -96,6 +96,7 @@ test-unit:
 		tests/test_event_identity.py \
 		tests/test_multi_event_extraction.py \
 		tests/test_multi_event_posts_migration.py \
+		tests/test_event_cover_presign.py \
 		-v
 
 test-integration:

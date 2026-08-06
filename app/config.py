@@ -532,6 +532,21 @@ class Settings(BaseSettings):
     # before discovery proposes it as a candidate account.
     promoter_mention_threshold: int = 3
 
+    # Event Cover Presign (plans/260806_event-cover-presign.md). Short-lived
+    # on purpose: the url is handed to a browser and IS the grant to that one
+    # archived object for its lifetime (see MediaArchiveStore.presign).
+    event_cover_presign_expires_seconds: int = 900
+    # Opt-in shared-secret gate, checked against the `X-Admin-Api-Key` header.
+    # Empty (the default) makes the check a no-op — matching every existing
+    # admin/internal route in this repo, which rely solely on the network-layer
+    # gating documented in app/routers/internal_router.py (Caddy does not
+    # expose /admin publicly; no admin_token/internal_api_key exists there by
+    # design). This route is the first to accept an optional app-level gate
+    # because, unlike its siblings, its response IS a bearer credential that
+    # keeps working after it leaves cs-server's network perimeter — setting
+    # this adds defense-in-depth for that one property, without requiring it.
+    admin_api_key: str = ""
+
     # Dev Mode - overrides default locations for venue discovery
     dev_mode: bool = False
     dev_lat: float = -8.07834       # Default: Recife ZS/ZN

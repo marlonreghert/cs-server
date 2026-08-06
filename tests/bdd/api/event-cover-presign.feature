@@ -1,4 +1,3 @@
-@wip
 Feature: Event cover presign
   As the operator reviewing extracted events
   I want a short-lived viewable url for an event's archived flyer
