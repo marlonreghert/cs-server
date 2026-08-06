@@ -644,6 +644,7 @@ class Container:
                 openai_client=self.openai_event_extraction_client,
                 min_confidence=settings.event_extraction_min_confidence,
                 flyer_confidence_floor=settings.photo_classification_confidence,
+                max_events_per_post=settings.event_extraction_max_events_per_post,
             )
             logger.info(
                 f"[Container] Event extraction service initialized "

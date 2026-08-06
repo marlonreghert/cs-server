@@ -18,6 +18,7 @@ tests/bdd/steps/prev_day_weekly_forecast_steps.py does.
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import datetime, timedelta, timezone
 
 import fakeredis
@@ -69,7 +70,18 @@ class _FakePostSource:
 class _FakeOpenAIClient:
     """Programmed with one response (a raw JSON string, or an Exception) per
     call, in order. `.calls` is the cost-gate proof: it must stay 0 for a
-    non-qualifying post."""
+    non-qualifying post.
+
+    `EventExtractionService` now calls `extract_events` (plans/260806_venue-
+    post-multi-event.md), never the singular `extract`. Every scenario in
+    this file still programs a single flat event JSON (via `_extraction_json`)
+    or an intentionally-invalid string — `extract_events` wraps a flat dict
+    into the `{"events": [...]}` shape automatically (mirroring
+    tests/bdd/steps/multi_event_posts_steps.py's fake), so a single-event
+    post behaves exactly as it did before with zero changes to any existing
+    Given step. An intentionally-truncated tuple (`program_truncated`) or a
+    string that is not valid JSON at all is returned VERBATIM, so the real
+    parser — not this fake — is what raises on it or reports it truncated."""
 
     def __init__(self):
         self._responses: list = []
@@ -77,6 +89,9 @@ class _FakeOpenAIClient:
 
     def program(self, response) -> None:
         self._responses.append(response)
+
+    def program_truncated(self, raw_text: str) -> None:
+        self._responses.append(("__truncated__", raw_text))
 
     async def extract(self, *, caption, image_data_uri=None):
         self.calls += 1
@@ -86,6 +101,23 @@ class _FakeOpenAIClient:
         if isinstance(item, Exception):
             raise item
         return item
+
+    async def extract_events(self, *, caption, image_data_uri=None, max_events):
+        self.calls += 1
+        if not self._responses:
+            raise AssertionError("fake OpenAI client called more times than programmed")
+        item = self._responses.pop(0)
+        if isinstance(item, Exception):
+            raise item
+        if isinstance(item, tuple) and item and item[0] == "__truncated__":
+            return item[1], True
+        try:
+            flat = json.loads(item)
+        except (json.JSONDecodeError, TypeError):
+            return item, False
+        if isinstance(flat, dict) and "events" not in flat:
+            return json.dumps({"events": [flat]}), False
+        return item, False
 
 
 def _extraction_json(**overrides) -> str:

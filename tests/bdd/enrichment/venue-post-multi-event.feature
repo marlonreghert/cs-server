@@ -1,4 +1,3 @@
-@wip
 Feature: Venue-post multi-event
   As the operator of the event pipeline
   I want a venue's own post to be able to announce several events
