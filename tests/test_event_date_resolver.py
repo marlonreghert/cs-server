@@ -189,3 +189,64 @@ class TestNeverInventADate:
         )
         assert resolved.review_reason is not None
         assert "date" in resolved.review_reason.lower()
+
+
+# ── time_known: a stated midnight is not the same fact as a defaulted one ────
+class TestTimeKnown:
+    """plans/260806_instagram-post-recency-and-unknown-time.md: an event whose
+    time could not be read must not be indistinguishable from one that
+    genuinely never stated a time. `time_known` is the signal; the trap is
+    that a stated "00h" and a defaulted midnight land on the exact same
+    `starts_at` instant, so only checking the PARSE RESULT (not the hour
+    value, which is falsy at midnight regardless) tells them apart.
+    """
+
+    def test_a_parsed_time_is_known(self):
+        post_ts = _post_at(2026, 7, 1)
+        resolved = resolve_event_datetime(
+            date_text="hoje", time_text="22h", post_timestamp=post_ts,
+        )
+        assert resolved.time_known is True
+
+    def test_an_absent_time_defaults_to_midnight_and_is_not_known(self):
+        post_ts = _post_at(2026, 7, 1)
+        resolved = resolve_event_datetime(
+            date_text="hoje", time_text=None, post_timestamp=post_ts,
+        )
+        assert resolved.starts_at.hour == 0
+        assert resolved.starts_at.minute == 0
+        assert resolved.time_known is False
+
+    def test_a_stated_00h_is_known_even_though_it_is_also_midnight(self):
+        # THE TRAP: "00h" is a real stated midnight. It must report
+        # time_known=True even though it resolves to the identical instant a
+        # defaulted midnight would.
+        post_ts = _post_at(2026, 7, 1)
+        resolved = resolve_event_datetime(
+            date_text="hoje", time_text="00h", post_timestamp=post_ts,
+        )
+        assert resolved.starts_at.hour == 0
+        assert resolved.starts_at.minute == 0
+        assert resolved.time_known is True
+
+    def test_a_stated_00h_and_a_defaulted_midnight_are_the_same_instant_but_different_facts(self):
+        post_ts = _post_at(2026, 7, 1)
+        stated = resolve_event_datetime(
+            date_text="hoje", time_text="00h", post_timestamp=post_ts,
+        )
+        defaulted = resolve_event_datetime(
+            date_text="hoje", time_text=None, post_timestamp=post_ts,
+        )
+        assert stated.starts_at == defaulted.starts_at
+        assert stated.time_known is True
+        assert defaulted.time_known is False
+
+    def test_a_missing_date_reports_time_unknown(self):
+        # No date resolved at all -> starts_at is None; time_known must not
+        # be left uninitialized/true by accident.
+        post_ts = _post_at(2026, 7, 1)
+        resolved = resolve_event_datetime(
+            date_text=None, time_text="22h", post_timestamp=post_ts,
+        )
+        assert resolved.starts_at is None
+        assert resolved.time_known is False

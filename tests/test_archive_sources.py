@@ -797,3 +797,123 @@ class TestInstagramSource:
     def test_missing_settings_falls_back_to_a_documented_default(self):
         source = get_source(SOURCE_INSTAGRAM_POSTS)
         assert source.unit_cost_usd(None, {}) > 0
+
+
+class TestInstagramPostOrdering:
+    """plans/260806_instagram-post-recency-and-unknown-time.md: the actor
+    makes no ordering promise, so the cap must be fed newest-first rather
+    than array order. `_sort_posts_newest_first` is tested directly for the
+    ordering rules, plus one end-to-end pin through `.fetch()` on the exact
+    out-of-order sequence observed live against @recifequecabenobolso."""
+
+    def _fetch(self, client, cfg=None, handle="somehandle"):
+        source = get_source(SOURCE_INSTAGRAM_POSTS)
+        return asyncio.run(source.fetch(
+            client, {"instagram_handle": handle},
+            {"max_photos_per_venue": 10, "source_config": {}, **(cfg or {})},
+        ))
+
+    def test_the_real_observed_out_of_order_sequence_keeps_the_newest_post(self):
+        # The exact sequence observed live: 08-02, 08-05, 08-04, 08-06, 08-01,
+        # in that array order. A cap of 2 must keep 08-06 and 08-05 — the two
+        # newest — never the two that happened to lead the array.
+        posts = [
+            _ig_post("d0802", ["https://x/d0802.jpg"], timestamp="2026-08-02T20:00:00.000Z"),
+            _ig_post("d0805", ["https://x/d0805.jpg"], timestamp="2026-08-05T20:00:00.000Z"),
+            _ig_post("d0804", ["https://x/d0804.jpg"], timestamp="2026-08-04T20:00:00.000Z"),
+            _ig_post("d0806", ["https://x/d0806.jpg"], timestamp="2026-08-06T20:00:00.000Z"),
+            _ig_post("d0801", ["https://x/d0801.jpg"], timestamp="2026-08-01T20:00:00.000Z"),
+        ]
+        client = _FakeIgSourceClient(posts)
+        result = self._fetch(client, cfg={"max_photos_per_venue": 2})
+        ids = {p["instagram_photo_id"] for p in result["photos"]}
+        assert ids == {"d0806", "d0805"}, ids
+
+    def test_a_missing_timestamp_never_displaces_a_dated_post(self):
+        posts = [
+            _ig_post("undated", ["https://x/undated.jpg"], timestamp=None),
+            _ig_post("dated", ["https://x/dated.jpg"], timestamp="2026-08-06T20:00:00.000Z"),
+        ]
+        client = _FakeIgSourceClient(posts)
+        result = self._fetch(client, cfg={"max_photos_per_venue": 1})
+        assert [p["instagram_photo_id"] for p in result["photos"]] == ["dated"]
+
+    def test_an_undated_post_is_still_archived_when_capacity_remains(self):
+        posts = [
+            _ig_post("undated", ["https://x/undated.jpg"], timestamp=None),
+            _ig_post("dated", ["https://x/dated.jpg"], timestamp="2026-08-06T20:00:00.000Z"),
+        ]
+        client = _FakeIgSourceClient(posts)
+        result = self._fetch(client, cfg={"max_photos_per_venue": 2})
+        ids = {p["instagram_photo_id"] for p in result["photos"]}
+        assert ids == {"undated", "dated"}
+
+    def test_cap_still_bounds_images_not_posts_after_sorting(self):
+        # Oldest listed first: a cap that trusted array order would spend
+        # itself on the two oldest carousels and never reach the newest.
+        posts = [
+            _ig_post(
+                "old", [f"https://x/old_{j}.jpg" for j in range(5)],
+                timestamp="2026-08-01T20:00:00.000Z",
+            ),
+            _ig_post(
+                "mid", [f"https://x/mid_{j}.jpg" for j in range(5)],
+                timestamp="2026-08-03T20:00:00.000Z",
+            ),
+            _ig_post(
+                "new", [f"https://x/new_{j}.jpg" for j in range(5)],
+                timestamp="2026-08-05T20:00:00.000Z",
+            ),
+        ]
+        client = _FakeIgSourceClient(posts)
+        result = self._fetch(client, cfg={"max_photos_per_venue": 6})
+        assert len(result["photos"]) == 6
+        shortcodes = {p["shortcode"] for p in result["photos"]}
+        assert shortcodes == {"new", "mid"}, shortcodes
+
+
+class TestSortPostsNewestFirstUnit:
+    """Direct unit coverage of the sort helper, independent of the source's
+    fetch/cap plumbing above."""
+
+    def _sort(self, posts):
+        from app.services.archive_sources import _sort_posts_newest_first
+        return _sort_posts_newest_first(posts)
+
+    def test_descending_by_timestamp(self):
+        posts = [
+            _ig_post("a", [], timestamp="2026-08-02T00:00:00.000Z"),
+            _ig_post("b", [], timestamp="2026-08-06T00:00:00.000Z"),
+            _ig_post("c", [], timestamp="2026-08-04T00:00:00.000Z"),
+        ]
+        result = self._sort(posts)
+        assert [p["shortcode"] for p in result] == ["b", "c", "a"]
+
+    def test_missing_timestamp_sorts_last(self):
+        posts = [
+            _ig_post("undated", [], timestamp=None),
+            _ig_post("dated", [], timestamp="2026-08-01T00:00:00.000Z"),
+        ]
+        result = self._sort(posts)
+        assert [p["shortcode"] for p in result] == ["dated", "undated"]
+
+    def test_unparseable_timestamp_sorts_last_and_does_not_raise(self):
+        posts = [
+            _ig_post("garbage", [], timestamp="not-a-timestamp"),
+            _ig_post("dated", [], timestamp="2026-08-01T00:00:00.000Z"),
+        ]
+        result = self._sort(posts)  # must not raise
+        assert [p["shortcode"] for p in result] == ["dated", "garbage"]
+
+    def test_stable_for_equal_timestamps(self):
+        same_ts = "2026-08-01T00:00:00.000Z"
+        posts = [
+            _ig_post("first", [], timestamp=same_ts),
+            _ig_post("second", [], timestamp=same_ts),
+            _ig_post("third", [], timestamp=same_ts),
+        ]
+        result = self._sort(posts)
+        assert [p["shortcode"] for p in result] == ["first", "second", "third"]
+
+    def test_empty_list(self):
+        assert self._sort([]) == []

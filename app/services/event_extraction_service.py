@@ -62,6 +62,12 @@ STATUS_EXTRACTION_FAILED = "extraction_failed"
 REVIEW_REASON_LOW_CONFIDENCE = "low_confidence"
 REVIEW_REASON_EXTRACTION_FAILED = "extraction_failed"
 REVIEW_REASON_DIVERGES_FROM_CONFIRMED = "model_diverges_from_confirmed_record"
+# The flyer named a time and the extractor produced none — an extraction
+# defect, not a date-only event. Kept distinct from a genuinely time-less
+# event (stored, marked unknown, never queued) so the review queue is not
+# flooded with non-problems. See
+# plans/260806_instagram-post-recency-and-unknown-time.md.
+REVIEW_REASON_UNREAD_TIME = "unread_time"
 
 OUTCOME_EXTRACTED = "extracted"
 OUTCOME_NOT_EVENT_LIKE = "not_event_like"
@@ -69,6 +75,7 @@ OUTCOME_NO_DATE = "no_date"
 OUTCOME_LOW_CONFIDENCE = "low_confidence"
 OUTCOME_EXTRACTION_FAILED = "extraction_failed"
 OUTCOME_SKIPPED_SEEN = "skipped_seen"
+OUTCOME_UNREAD_TIME = "unread_time"
 ALL_STATUSES = (
     "pending_review", "confirmed", "rejected", "superseded", "extraction_failed",
 )
@@ -95,6 +102,12 @@ class ArchivedPost:
     flyer_photo_key: Optional[str]
     flyer_confidence: Optional[float]
     any_photo_key: Optional[str]
+    # Whether the flyer photo's own classification said a time was printed on
+    # it ("yes"/"no"), or None when no flyer photo was classified at all — see
+    # plans/260806_instagram-post-recency-and-unknown-time.md. Read from the
+    # SAME classified flyer already loaded for `flyer_photo_key`, so checking
+    # it costs no extra model call.
+    flyer_names_time: Optional[str] = None
 
 
 class EventPostSource:
@@ -140,6 +153,7 @@ class EventPostSource:
                     "timestamp": entry.get("uploaded_at"),
                     "flyer_photo_key": None,
                     "flyer_confidence": None,
+                    "flyer_names_time": None,
                     "any_photo_key": None,
                 })
                 if bucket["any_photo_key"] is None:
@@ -150,6 +164,11 @@ class EventPostSource:
                     if bucket["flyer_photo_key"] is None or (confidence or 0.0) > best_so_far:
                         bucket["flyer_photo_key"] = entry.get("key")
                         bucket["flyer_confidence"] = confidence
+                        # Same classified flyer already loaded above — reading
+                        # this costs no extra model call.
+                        bucket["flyer_names_time"] = (entry.get("attributes") or {}).get(
+                            "names_time"
+                        )
 
         posts = []
         for bucket in grouped.values():
@@ -160,6 +179,7 @@ class EventPostSource:
                 timestamp=_parse_timestamp(bucket["timestamp"]),
                 flyer_photo_key=bucket["flyer_photo_key"],
                 flyer_confidence=bucket["flyer_confidence"],
+                flyer_names_time=bucket["flyer_names_time"],
                 any_photo_key=bucket["any_photo_key"],
             ))
         return posts
@@ -350,13 +370,37 @@ class EventExtractionService:
             post_timestamp=post_timestamp,
         )
 
+        # A time is an extraction MISS (worth an operator's eye) only when the
+        # flyer itself said one was there and none was read; a flyer that
+        # names no time, or a caption-only post with no flyer attribute at
+        # all, is a genuinely date-only event and must NOT be queued —
+        # queueing every date-only event would flood the review queue with
+        # non-problems. `flyer_names_time` is None both when no flyer was
+        # classified and when the attribute did not clear the classifier's
+        # own confidence floor; either way that is an absent signal, never
+        # read as a positive one.
+        unread_time = (
+            not resolved.needs_review
+            and not resolved.time_known
+            and post.flyer_names_time == "yes"
+        )
+
         reasons: list[str] = []
         if resolved.needs_review:
             reasons.append(resolved.review_reason)
+        if unread_time:
+            reasons.append(REVIEW_REASON_UNREAD_TIME)
         low_confidence = parsed["confidence"] < cfg["min_confidence"]
         if low_confidence:
             reasons.append(REVIEW_REASON_LOW_CONFIDENCE)
         review_reason = "; ".join(reasons) if reasons else None
+
+        # `time_known` rides in the existing raw_extraction JSONB blob rather
+        # than a new column (no migration for this plan) — a copy, not the
+        # model's own dict, so `_preserve_confirmed`'s divergence check below
+        # still compares the model's actual, unmodified answer.
+        raw_extraction = dict(parsed)
+        raw_extraction["time_known"] = resolved.time_known
 
         now = self._now()
         fields = {
@@ -379,7 +423,7 @@ class EventExtractionService:
             "confidence": parsed["confidence"],
             "status": STATUS_PENDING_REVIEW,
             "review_reason": review_reason,
-            "raw_extraction": parsed,
+            "raw_extraction": raw_extraction,
             "last_seen_at": now,
         }
 
@@ -394,6 +438,8 @@ class EventExtractionService:
 
         if resolved.needs_review:
             return OUTCOME_NO_DATE
+        if unread_time:
+            return OUTCOME_UNREAD_TIME
         if low_confidence:
             return OUTCOME_LOW_CONFIDENCE
         return OUTCOME_EXTRACTED
@@ -406,7 +452,9 @@ class EventExtractionService:
         moving status away from confirmed.
         """
         update_fields = {
-            "raw_extraction": parsed,
+            # `fields["raw_extraction"]` (not the bare `parsed`), so a
+            # confirmed event's re-extraction keeps carrying `time_known` too.
+            "raw_extraction": fields["raw_extraction"],
             "last_seen_at": fields["last_seen_at"],
         }
         title_diverges = (parsed.get("title") or None) != (existing.get("title") or None)
@@ -463,4 +511,5 @@ __all__ = [
     "post_qualifies", "new_event_id",
     "OUTCOME_EXTRACTED", "OUTCOME_NOT_EVENT_LIKE", "OUTCOME_NO_DATE",
     "OUTCOME_LOW_CONFIDENCE", "OUTCOME_EXTRACTION_FAILED", "OUTCOME_SKIPPED_SEEN",
+    "OUTCOME_UNREAD_TIME", "REVIEW_REASON_UNREAD_TIME",
 ]

@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any, Callable, Optional
 
 from app.api.apify_gmaps_extractor_client import ApifyPollTimeoutError
@@ -254,6 +255,52 @@ def _searchapi_unit_cost(settings, cfg) -> float:
 
 
 # ── instagram_posts ──────────────────────────────────────────────────────────
+def _parse_post_timestamp(value: Any) -> Optional[datetime]:
+    """A post's `timestamp` field as an aware datetime, or None when absent or
+    unparseable. Used only to ORDER posts (never to gate them), so a bad value
+    must sort last, never raise."""
+    if not value:
+        return None
+    try:
+        text = value.replace("Z", "+00:00") if isinstance(value, str) else value
+        dt = datetime.fromisoformat(text)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
+    except (TypeError, ValueError):
+        return None
+
+
+def _sort_posts_newest_first(posts: list[dict]) -> list[dict]:
+    """Newest first, so a per-venue image cap always spends on the most recent
+    posts. The actor's own array order is not a contract — plans/
+    260806_instagram-post-recency-and-unknown-time.md observed two accounts
+    scraped by the same client return their posts in a different relative
+    order on the same day.
+
+    A post with a missing or unparseable timestamp sorts LAST, stable among
+    ties, so a single payload oddity can never displace a dated post out of a
+    size-bounded cap — and it never raises, just falls to the back.
+    """
+    dated: list[tuple[datetime, dict]] = []
+    undated: list[dict] = []
+    for post in posts:
+        ts = _parse_post_timestamp(post.get("timestamp"))
+        if ts is None:
+            logger.debug(
+                "instagram_posts: post %s has no usable timestamp; sorted last",
+                post.get("shortcode"),
+            )
+            undated.append(post)
+        else:
+            dated.append((ts, post))
+    # list.sort is stable, and Python's docs guarantee reverse=True preserves
+    # that stability (ties keep their original relative order) rather than
+    # literally reversing the list.
+    dated.sort(key=lambda pair: pair[0], reverse=True)
+    return [post for _, post in dated] + undated
+
+
 def _instagram_photo(
     post: dict, url: str, shortcode: Optional[str], child_index: Optional[int]
 ) -> dict:
@@ -327,9 +374,14 @@ async def _fetch_instagram(client, venue, cfg):
         # an exhausted balance for every venue that remains.
         raise ArchiveCreditExhausted(str(e)) from e
 
+    # The actor makes no ordering promise (see the module-level docstring
+    # above `_sort_posts_newest_first`), so the cap below must not be left to
+    # spend on whichever posts happened to lead the array.
+    posts = _sort_posts_newest_first(posts or [])
+
     photos: list[dict] = []
     skipped_cap = 0
-    for post in posts or []:
+    for post in posts:
         if len(photos) >= cap:
             break
         shortcode = post.get("shortcode")

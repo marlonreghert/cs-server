@@ -187,6 +187,15 @@ class ResolvedDate:
     recurrence_text: Optional[str]
     needs_review: bool
     review_reason: Optional[str]
+    # Whether a clock time was actually PARSED out of `time_text`, as opposed
+    # to defaulted to midnight because none was stated. A stated "00h" and a
+    # defaulted midnight land on the exact same `starts_at` instant, so this
+    # is the only way the caller can tell them apart — checking `start_time`
+    # (the parse result) rather than the hour value itself matters: (0, 0) is
+    # a truthy tuple, so a naive `if not start_time_of_day` check would treat
+    # a real stated midnight as unknown, the same class of bug already fixed
+    # once in this repo for a temperature of 0.
+    time_known: bool
 
 
 def _as_recife(post_timestamp: datetime) -> datetime:
@@ -223,13 +232,16 @@ def resolve_event_datetime(
         return ResolvedDate(
             starts_at=None, ends_at=None, is_recurring=is_recurring,
             recurrence_text=recurrence_text, needs_review=True,
-            review_reason=REASON_MISSING_DATE,
+            review_reason=REASON_MISSING_DATE, time_known=False,
         )
 
     start_time, end_time = _parse_time_text(time_text)
     # A date with an unstated clock time defaults to midnight: the date itself
     # was resolved deterministically (never guessed), and only the ABSENT
-    # time-of-day is defaulted here, not the date.
+    # time-of-day is defaulted here, not the date. `time_known` records
+    # whether `start_time` itself is None — never whether the hour is
+    # truthy, which a stated midnight would fail.
+    time_known = start_time is not None
     start_hour, start_minute = start_time or (0, 0)
     starts_at = datetime(
         resolved_date.year, resolved_date.month, resolved_date.day,
@@ -251,6 +263,7 @@ def resolve_event_datetime(
     return ResolvedDate(
         starts_at=starts_at, ends_at=ends_at, is_recurring=is_recurring,
         recurrence_text=recurrence_text, needs_review=False, review_reason=None,
+        time_known=time_known,
     )
 
 
