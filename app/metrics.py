@@ -1233,6 +1233,17 @@ EVENT_REVIEW_QUEUE_DEPTH = Gauge(
     "Promoter events awaiting a location decision (location_resolution IS NULL)",
 )
 
+# plans/260806_event-cover-presign.md — `result` distinguishes a working sign
+# (signed) from the three ways it doesn't: no archived cover on the event
+# (no_key), no such event (not_found), and MediaArchiveStore.presign()
+# returning None (failed). Kept separate from EVENT_VENUE_LINK_TOTAL, whose
+# `result` values mean something unrelated (auto/queued/unresolved/manual).
+EVENT_COVER_PRESIGN_TOTAL = Counter(
+    "event_cover_presign_total",
+    "Event cover-photo presign outcomes",
+    ["result"],
+)
+
 # =============================================================================
 # APPLICATION INFO
 # =============================================================================

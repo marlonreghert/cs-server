@@ -9,13 +9,15 @@ plan's non-goal: "No serving impact").
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
+import secrets
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from pydantic import BaseModel, Field
 
-from app.metrics import EVENT_VENUE_LINK_TOTAL
+from app.config import settings
+from app.metrics import EVENT_COVER_PRESIGN_TOTAL, EVENT_VENUE_LINK_TOTAL
 from app.services.promoter_registry_service import InvalidPromoterAccount, PromoterRegistryService
 
 router = APIRouter(prefix="/admin/events", tags=["admin", "events"])
@@ -37,6 +39,38 @@ def _dao():
     if dao is None:
         raise HTTPException(status_code=503, detail="Venue repository not configured")
     return dao
+
+
+def _media_store():
+    if _container is None:
+        raise HTTPException(status_code=503, detail="Container not initialized")
+    store = getattr(_container, "media_archive_store", None)
+    if store is None:
+        raise HTTPException(status_code=503, detail="Media archive store not configured")
+    return store
+
+
+def _require_admin(
+    x_admin_api_key: Optional[str] = Header(default=None, alias="X-Admin-Api-Key"),
+) -> None:
+    """Opt-in shared-secret gate for admin routes (plans/260806_event-cover-
+    presign.md, item 5: "Require admin auth, like every other admin route").
+
+    `settings.admin_api_key` defaults to empty, which makes this a no-op —
+    identical to every other route in this router, which rely solely on the
+    network-layer gating documented in app/routers/internal_router.py (Caddy
+    never exposes /admin publicly; no admin_token/internal_api_key exists in
+    this repo by design). This route is the first to accept an OPTIONAL
+    app-level gate on top of that, because unlike its siblings its response
+    IS a bearer credential: once issued, it keeps working after it leaves
+    cs-server's network perimeter, so an operator who wants defense-in-depth
+    here can set admin_api_key without changing behavior anywhere else.
+    """
+    expected = settings.admin_api_key
+    if not expected:
+        return
+    if not x_admin_api_key or not secrets.compare_digest(x_admin_api_key, expected):
+        raise HTTPException(status_code=401, detail="Admin authentication required")
 
 
 class EventOut(BaseModel):
@@ -233,6 +267,57 @@ def review_queue():
     return out
 
 
+class EventCoverOut(BaseModel):
+    url: str
+    expires_at: datetime
+    expires_in: int
+
+
+# ── event cover presign (plans/260806_event-cover-presign.md) — also
+# registered before "/{event_id}" for the same reason as /promoters and
+# /review above. Not actually reachable by "/{event_id}" today (that pattern
+# is one path segment; "/{event_id}/cover" is two, so the default converter
+# never matches it regardless of order), but the ordering is pinned by BDD so
+# a future switch to a greedy "{event_id:path}" converter fails loudly
+# instead of silently swallowing this route the way the router's history
+# warns about. ────────────────────────────────────────────────────────────
+@router.get("/{event_id}/cover", response_model=EventCoverOut)
+async def get_event_cover(event_id: str, _admin: None = Depends(_require_admin)):
+    """A short-lived, viewable url for an event's archived cover photo.
+
+    The object is resolved from the event's OWN row, never from anything in
+    the request — the single non-negotiable security decision in the plan:
+    a route that presigns a client-supplied key is an arbitrary-object-read
+    primitive against the whole data lake. The signed url is a bearer
+    credential for that object until it expires; it is returned to the
+    caller here and must never be logged.
+    """
+    dao = _dao()
+    row = dao.get_event(event_id)
+    if row is None:
+        EVENT_COVER_PRESIGN_TOTAL.labels(result="not_found").inc()
+        raise HTTPException(status_code=404, detail="Event not found")
+
+    key = row.get("cover_photo_key")
+    if not key:
+        EVENT_COVER_PRESIGN_TOTAL.labels(result="no_key").inc()
+        raise HTTPException(status_code=404, detail="Event has no archived cover photo")
+
+    store = _media_store()
+    expires_in = settings.event_cover_presign_expires_seconds
+    url = await store.presign(key, expires_in=expires_in)
+    if not url:
+        # MediaArchiveStore.presign() returns None rather than raising on
+        # failure — that must map to a server error here, never a 200
+        # carrying a null/empty url.
+        EVENT_COVER_PRESIGN_TOTAL.labels(result="failed").inc()
+        raise HTTPException(status_code=502, detail="Failed to sign cover photo url")
+
+    EVENT_COVER_PRESIGN_TOTAL.labels(result="signed").inc()
+    expires_at = datetime.now(timezone.utc) + timedelta(seconds=expires_in)
+    return EventCoverOut(url=url, expires_at=expires_at, expires_in=expires_in)
+
+
 @router.get("/{event_id}", response_model=EventOut)
 def get_event(event_id: str):
     dao = _dao()
@@ -327,5 +412,5 @@ def unlink_event(event_id: str):
 __all__ = [
     "router", "set_container", "EventOut", "EventPatch",
     "PromoterAccountOut", "PromoterAccountCreate", "PromoterAccountPatch",
-    "LinkCandidateOut", "ReviewQueueItemOut", "LinkRequest",
+    "LinkCandidateOut", "ReviewQueueItemOut", "LinkRequest", "EventCoverOut",
 ]
