@@ -389,6 +389,59 @@ class MediaArchiveStore:
         )
         return key
 
+    # ── promoter posts (plans/260804_instagram-promoter-events.md) ───────────
+    # A promoter account belongs to no venue, so its posts cannot key off
+    # `venue_id=` — inventing one would poison every consumer that joins on
+    # it (the plan's own words). `promoter=<handle>` is a sibling segment at
+    # the SAME level under the run prefix, not a new partition column, so no
+    # terraform/IAM change is needed: the writer role's grant is already
+    # scoped to `retrieved/*`, not to `venue_id=*` specifically.
+    async def put_promoter_image(
+        self,
+        *,
+        prefix: str,
+        handle: str,
+        photo_id: str,
+        data: bytes,
+        content_type: str,
+        category: Optional[str] = None,
+    ) -> str:
+        folder = f"{MEDIA_DIR}/{_safe_category(category)}" if category else MEDIA_DIR
+        key = (
+            f"{prefix}promoter={handle}/{folder}/"
+            f"{photo_id}.{extension_for(content_type)}"
+        )
+        await asyncio.to_thread(
+            self._s3.put_object,
+            Bucket=self.bucket,
+            Key=key,
+            Body=data,
+            ContentType=content_type or "application/octet-stream",
+        )
+        return key
+
+    async def put_promoter_manifest(self, *, prefix: str, handle: str, manifest: dict) -> str:
+        key = f"{prefix}promoter={handle}/{INFO_DIR}/{MANIFEST_NAME}"
+        await asyncio.to_thread(
+            self._s3.put_object,
+            Bucket=self.bucket,
+            Key=key,
+            Body=json.dumps(manifest, ensure_ascii=False).encode("utf-8"),
+            ContentType="application/json",
+        )
+        return key
+
+    async def read_promoter_manifest(self, prefix: str, handle: str) -> Optional[dict]:
+        key = f"{prefix}promoter={handle}/{INFO_DIR}/{MANIFEST_NAME}"
+        try:
+            response = await asyncio.to_thread(
+                self._s3.get_object, Bucket=self.bucket, Key=key
+            )
+            return json.loads(response["Body"].read())
+        except Exception as e:
+            logger.warning(f"[MediaArchiveStore] promoter manifest read failed for {key}: {e}")
+            return None
+
     # ── reads (GetObject, scoped to retrieved/ by IAM) ───────────────────────
     async def get_info(self, *, source: str, venue_id: str) -> Optional[dict]:
         """The most recent archived place payload for a venue, or None.

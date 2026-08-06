@@ -281,6 +281,36 @@ JOB_REGISTRY = {
         "unavailable_detail": "Event extraction not configured (needs OpenAI key + media archive)",
         "runner": lambda c, cfg: c.event_extraction_service.run(cfg),
     },
+    "promoter_discovery": {
+        "label": "Promoter Account Discovery",
+        "description": "Propose promoter accounts from @-mentions already observed "
+        "in captions of already-extracted venue posts. Costs nothing — the "
+        "captions were already scraped and the events already extracted. "
+        "Never crawls a proposed account; an operator must activate it first.",
+        "default_config": {"mention_threshold": 3},
+        "service_attr": "promoter_registry_service",
+        "unavailable_detail": "Promoter registry not configured",
+        "runner": lambda c, cfg: c.promoter_registry_service.run_discovery(cfg),
+    },
+    "promoter_event_crawl": {
+        "label": "Promoter Event Crawl",
+        "description": "Crawl active promoter accounts (or a given handle list), "
+        "extract events with the existing extractor, and resolve each event's "
+        "venue through the resolution ladder — an exact handle mention or "
+        "location tag first, then a name match gated by a confidence floor "
+        "AND a margin over the runner-up. Anything short of both is queued "
+        "for review; nothing is ever guessed onto the wrong venue.",
+        "default_config": {
+            "handles": "",
+            "max_accounts": 10,
+            "max_posts_per_account": 15,
+            "lookback_days": 60,
+            "dry_run": False,
+        },
+        "service_attr": "promoter_crawl_service",
+        "unavailable_detail": "Promoter crawl not configured (needs Apify API token)",
+        "runner": lambda c, cfg: c.promoter_crawl_service.run(cfg),
+    },
 }
 
 

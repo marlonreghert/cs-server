@@ -76,6 +76,11 @@ class InMemoryRdsVenueStore:
         # UNIQUE (source_handle, source_shortcode) constraint via `_events_guard`
         # rather than a second index, since the fake's volume never needs one.
         self.events: dict[str, dict] = {}
+        # events.promoter_account: handle -> row (see
+        # plans/260804_instagram-promoter-events.md).
+        self.promoter_accounts: dict[str, dict] = {}
+        # events.event_venue_link_candidate: event_id -> ranked candidate rows.
+        self.event_link_candidates: dict[str, list[dict]] = {}
         self._down = False
 
     # ── test controls ────────────────────────────────────────────────────────
@@ -450,6 +455,82 @@ class InMemoryRdsVenueStore:
             out.append(copy.deepcopy(row))
         out.sort(key=lambda r: (r.get("starts_at") is None, r.get("starts_at"), r["event_id"]))
         return out
+
+    def list_events_pending_location(self) -> list[dict]:
+        """Promoter-post events awaiting a location decision — mirrors the
+        real store's `location_resolution IS NULL` predicate. An `unresolved`
+        event was decided (below the floor) and is excluded here, same as an
+        `auto`/`manual` one — this is what makes it distinguishable from a
+        queued one."""
+        out = [
+            copy.deepcopy(row) for row in self.events.values()
+            if row.get("source_kind") == "promoter_post"
+            and row.get("location_resolution") is None
+        ]
+        out.sort(key=lambda r: (r.get("first_seen_at"), r["event_id"]))
+        return out
+
+    # ── instagram.handle reverse index (plans/260804_instagram-promoter-events.md) ─
+    def list_instagram_handles(self) -> dict[str, str]:
+        """venue_id -> instagram_handle for every venue with a confirmed
+        handle. Mirrors the real store's read of instagram.handle."""
+        out = {}
+        for vid, row in self.enrichment.get("instagram.handle", {}).items():
+            if row.get("deleted_at") is not None:
+                continue
+            handle = row.get("instagram_handle")
+            if handle:
+                out[vid] = handle
+        return out
+
+    # ── events.promoter_account (plans/260804_instagram-promoter-events.md) ──
+    def get_promoter_account(self, handle: str) -> Optional[dict]:
+        row = self.promoter_accounts.get(handle)
+        return copy.deepcopy(row) if row else None
+
+    def list_promoter_accounts(self, status: Optional[str] = None) -> list[dict]:
+        rows = [
+            copy.deepcopy(r) for r in self.promoter_accounts.values()
+            if status is None or r.get("status") == status
+        ]
+        rows.sort(key=lambda r: r["handle"])
+        return rows
+
+    def upsert_promoter_account(self, handle: str, fields: dict) -> dict:
+        """INSERT-or-update by handle: only the keys present in `fields`
+        change on an existing row (mirrors update_event's partial-update
+        contract); a fresh row gets house defaults for anything omitted, the
+        same shape the real store's column defaults provide."""
+        self._guard()
+        existing = self.promoter_accounts.get(handle)
+        now = _now()
+        if existing is None:
+            row = {
+                "handle": handle, "display_name": None, "status": "candidate",
+                "discovery_source": "manual", "discovered_from_event_id": None,
+                "mention_count": 0, "notes": None, "added_by": None,
+                "last_crawled_at": None, "posts_crawled": 0, "events_extracted": 0,
+                "created_at": now, "updated_at": now,
+            }
+            row.update(fields)
+        else:
+            row = dict(existing)
+            row.update(fields)
+            row["updated_at"] = now
+        self.promoter_accounts[handle] = row
+        return copy.deepcopy(row)
+
+    # ── events.event_venue_link_candidate (plans/260804_instagram-promoter-events.md) ─
+    def replace_event_venue_link_candidates(self, event_id: str, candidates: list[dict]) -> None:
+        """Replace the whole ranked list for one event — a later crawl of the
+        same post recomputes the ladder from scratch, so the old ranking must
+        not linger alongside a new one."""
+        self._guard()
+        self.event_link_candidates[event_id] = [dict(c) for c in candidates]
+
+    def list_event_venue_link_candidates(self, event_id: str) -> list[dict]:
+        rows = self.event_link_candidates.get(event_id, [])
+        return [copy.deepcopy(r) for r in sorted(rows, key=lambda r: r["rank"])]
 
     def list_all_venue_rows(self) -> list[dict]:
         return [self._row_with_address(row) for row in self.venues.values()]

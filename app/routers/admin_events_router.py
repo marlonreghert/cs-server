@@ -9,11 +9,14 @@ plan's non-goal: "No serving impact").
 """
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
+
+from app.metrics import EVENT_VENUE_LINK_TOTAL
+from app.services.promoter_registry_service import InvalidPromoterAccount, PromoterRegistryService
 
 router = APIRouter(prefix="/admin/events", tags=["admin", "events"])
 
@@ -60,6 +63,13 @@ class EventOut(BaseModel):
     first_seen_at: Optional[datetime] = None
     last_seen_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
+    # plans/260804_instagram-promoter-events.md: how, if at all, a promoter
+    # event's venue was resolved. NULL for a venue-owned post's event, which
+    # never touches the resolution ladder at all.
+    location_resolution: Optional[str] = None
+    location_confidence: Optional[float] = None
+    linked_by: Optional[str] = None
+    linked_at: Optional[datetime] = None
 
 
 def _to_out(row: dict) -> EventOut:
@@ -94,6 +104,126 @@ def list_events(
     dao = _dao()
     rows = dao.list_events(venue_id=venue_id, status=status, since=since, until=until)
     return [_to_out(r) for r in rows]
+
+
+# ── promoter registry (plans/260804_instagram-promoter-events.md) ───────────
+# Registered BEFORE the "/{event_id}" routes below: FastAPI/Starlette matches
+# routes in REGISTRATION ORDER, and "/{event_id}" is a single path segment —
+# exactly the shape of "/promoters" and "/review" too. Registered after it,
+# a request for GET /admin/events/review would be swallowed by
+# get_event(event_id="review") and returned as a 404 "Event not found"
+# instead of ever reaching this code (caught by BDD, not by inspection).
+def _registry() -> PromoterRegistryService:
+    return PromoterRegistryService(_dao())
+
+
+class PromoterAccountOut(BaseModel):
+    handle: str
+    display_name: Optional[str] = None
+    status: str
+    discovery_source: str = "manual"
+    discovered_from_event_id: Optional[str] = None
+    mention_count: int = 0
+    notes: Optional[str] = None
+    added_by: Optional[str] = None
+    last_crawled_at: Optional[datetime] = None
+    posts_crawled: int = 0
+    events_extracted: int = 0
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+
+
+class PromoterAccountCreate(BaseModel):
+    """Registering a handle defaults it to `candidate` — even a deliberate
+    manual add still has to be flipped `active` (PATCH) before anything
+    crawls it, the same one-way gate a discovered candidate goes through."""
+    handle: str
+    display_name: Optional[str] = None
+    status: str = "candidate"
+    notes: Optional[str] = None
+    added_by: Optional[str] = None
+
+
+class PromoterAccountPatch(BaseModel):
+    display_name: Optional[str] = None
+    status: Optional[str] = None
+    notes: Optional[str] = None
+    added_by: Optional[str] = None
+
+
+@router.get("/promoters", response_model=list[PromoterAccountOut])
+def list_promoters(status: Optional[str] = Query(None)):
+    return _registry().list(status=status)
+
+
+@router.post("/promoters", response_model=PromoterAccountOut)
+def create_promoter(body: PromoterAccountCreate):
+    try:
+        return _registry().register(
+            body.handle, display_name=body.display_name, status=body.status,
+            notes=body.notes, added_by=body.added_by,
+        )
+    except InvalidPromoterAccount as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.patch("/promoters/{handle}", response_model=PromoterAccountOut)
+def patch_promoter(handle: str, patch: PromoterAccountPatch):
+    fields = patch.model_dump(exclude_unset=True)
+    try:
+        row = _registry().update(handle, fields)
+    except InvalidPromoterAccount as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    if row is None:
+        raise HTTPException(status_code=404, detail="Promoter account not found")
+    return row
+
+
+@router.delete("/promoters/{handle}", response_model=PromoterAccountOut)
+def delete_promoter(handle: str):
+    """A soft transition to `rejected`, never a hard delete — the same
+    "keep the audit trail" posture every other enrichment table in this
+    codebase takes (CLAUDE.md)."""
+    row = _registry().reject(handle)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Promoter account not found")
+    return row
+
+
+# ── review queue (also registered before "/{event_id}") ─────────────────────
+class LinkCandidateOut(BaseModel):
+    venue_id: str
+    rank: int
+    score: Optional[float] = None
+    method: str
+    evidence: dict = Field(default_factory=dict)
+
+
+class ReviewQueueItemOut(EventOut):
+    candidates: list[LinkCandidateOut] = Field(default_factory=list)
+
+
+class LinkRequest(BaseModel):
+    """Choose a candidate by rank, or name a venue directly — exactly one
+    must resolve to a venue_id."""
+    venue_id: Optional[str] = None
+    candidate_rank: Optional[int] = None
+    linked_by: str
+
+
+@router.get("/review", response_model=list[ReviewQueueItemOut])
+def review_queue():
+    """Pending promoter events with their ranked candidates — the queue's
+    whole value: an operator chooses between named venues with scores and
+    reasons instead of being handed a location string and a search box."""
+    dao = _dao()
+    out = []
+    for row in dao.list_events_pending_location():
+        candidates = dao.list_event_venue_link_candidates(row["event_id"])
+        out.append(ReviewQueueItemOut(
+            **{**row, "lineup": row.get("lineup") or []}, candidates=candidates,
+        ))
+    return out
 
 
 @router.get("/{event_id}", response_model=EventOut)
@@ -140,4 +270,55 @@ def reject_event(event_id: str):
     return _to_out(updated)
 
 
-__all__ = ["router", "set_container", "EventOut", "EventPatch"]
+# ── manual link / unlink (promoter registry + review queue are registered
+# above, before "/{event_id}" — see the comment there) ──────────────────────
+@router.post("/{event_id}/link", response_model=EventOut)
+def link_event(event_id: str, body: LinkRequest):
+    """A manual link is never overwritten by a later crawl (see
+    PromoterCrawlService) — the operator's answer outranks the model, the
+    same principle a confirmed event's protection is built on."""
+    dao = _dao()
+    existing = dao.get_event(event_id)
+    if existing is None:
+        raise HTTPException(status_code=404, detail="Event not found")
+
+    venue_id = body.venue_id
+    confidence = None
+    if body.candidate_rank is not None:
+        candidates = dao.list_event_venue_link_candidates(event_id)
+        match = next((c for c in candidates if c["rank"] == body.candidate_rank), None)
+        if match is None:
+            raise HTTPException(status_code=400, detail="Unknown candidate rank")
+        venue_id = match["venue_id"]
+        confidence = match.get("score")
+    if not venue_id:
+        raise HTTPException(status_code=400, detail="venue_id or candidate_rank is required")
+
+    updated = dao.update_event(event_id, {
+        "venue_id": venue_id, "location_resolution": "manual",
+        "location_confidence": confidence, "linked_by": body.linked_by,
+        "linked_at": datetime.now(timezone.utc),
+    })
+    EVENT_VENUE_LINK_TOTAL.labels(method="manual", result="manual").inc()
+    return _to_out(updated)
+
+
+@router.post("/{event_id}/unlink", response_model=EventOut)
+def unlink_event(event_id: str):
+    dao = _dao()
+    existing = dao.get_event(event_id)
+    if existing is None:
+        raise HTTPException(status_code=404, detail="Event not found")
+    updated = dao.update_event(event_id, {
+        "venue_id": None, "location_resolution": "unresolved",
+        "location_confidence": None, "linked_by": None, "linked_at": None,
+    })
+    EVENT_VENUE_LINK_TOTAL.labels(method="operator_unlink", result="unresolved").inc()
+    return _to_out(updated)
+
+
+__all__ = [
+    "router", "set_container", "EventOut", "EventPatch",
+    "PromoterAccountOut", "PromoterAccountCreate", "PromoterAccountPatch",
+    "LinkCandidateOut", "ReviewQueueItemOut", "LinkRequest",
+]

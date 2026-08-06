@@ -653,6 +653,59 @@ class Container:
             logger.info(
                 "[Container] Event extraction disabled (needs OpenAI key + media archive)"
             )
+
+        # Instagram promoter events (plans/260804_instagram-promoter-events.md).
+        # The registry is pure RDS CRUD and always available; discovery
+        # additionally reads archived venue-post captions through the SAME
+        # EventPostSource event extraction uses, reused unchanged, and
+        # degrades to "nothing considered" (never an error) without the
+        # media archive. The crawl needs the Apify Instagram client;
+        # extraction and archiving inside it degrade gracefully (skipped,
+        # not failed) when OpenAI or the media archive are not configured —
+        # the same dependency-aware posture every other optional enrichment
+        # path in this container takes.
+        from app.services.promoter_registry_service import PromoterRegistryService
+
+        promoter_post_source = None
+        if getattr(self, "media_archive_store", None) is not None:
+            from app.services.event_extraction_service import (
+                EventPostSource as _PromoterDiscoveryPostSource,
+            )
+
+            promoter_post_source = _PromoterDiscoveryPostSource(
+                media_store=self.media_archive_store,
+                archive_source=SOURCE_INSTAGRAM_POSTS,
+            )
+        self.promoter_registry_service = PromoterRegistryService(
+            venue_dao=self.pipeline_repository,
+            post_source=promoter_post_source,
+        )
+        logger.info("[Container] Promoter registry service initialized")
+
+        self.promoter_crawl_service = None
+        if self.apify_instagram_client is not None:
+            from app.services.promoter_crawl_service import (
+                ApifyPromoterPostsClient,
+                PromoterCrawlService,
+            )
+            from app.services.venue_photo_archive_service import HttpPhotoDownloader
+
+            self.promoter_crawl_service = PromoterCrawlService(
+                venue_dao=self.pipeline_repository,
+                posts_client=ApifyPromoterPostsClient(self.apify_instagram_client),
+                media_store=getattr(self, "media_archive_store", None),
+                downloader=HttpPhotoDownloader(),
+                openai_client=self.openai_event_extraction_client,
+                archive_source=SOURCE_INSTAGRAM_POSTS,
+                max_posts_per_account_default=settings.promoter_max_posts_per_account,
+                confidence_floor=settings.promoter_link_confidence_floor,
+                margin=settings.promoter_link_margin,
+                min_confidence=settings.event_extraction_min_confidence,
+            )
+            logger.info("[Container] Promoter crawl service initialized")
+        else:
+            logger.info("[Container] Promoter crawl disabled (needs Apify API token)")
+
         # The serve handler resolves the live-busyness freshness window through the
         # admin-config mirror; wire it now that the service exists (venue_handler
         # was built above, before admin_config_service).

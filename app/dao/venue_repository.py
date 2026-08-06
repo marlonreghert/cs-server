@@ -160,6 +160,30 @@ class VenueRepository(RedisVenueDAO):
             venue_id=venue_id, status=status, since=since, until=until,
         )
 
+    def list_events_pending_location(self):
+        return self.rds_store.list_events_pending_location()
+
+    # ── instagram.handle reverse index (plans/260804_instagram-promoter-events.md) ─
+    def list_instagram_handles(self):
+        return self.rds_store.list_instagram_handles()
+
+    # ── events.promoter_account (plans/260804_instagram-promoter-events.md) ──
+    def get_promoter_account(self, handle: str):
+        return self.rds_store.get_promoter_account(handle)
+
+    def list_promoter_accounts(self, status=None):
+        return self.rds_store.list_promoter_accounts(status=status)
+
+    def upsert_promoter_account(self, handle: str, fields: dict):
+        return self.rds_store.upsert_promoter_account(handle, fields)
+
+    # ── events.event_venue_link_candidate (plans/260804_instagram-promoter-events.md) ─
+    def replace_event_venue_link_candidates(self, event_id: str, candidates: list):
+        return self.rds_store.replace_event_venue_link_candidates(event_id, candidates)
+
+    def list_event_venue_link_candidates(self, event_id: str):
+        return self.rds_store.list_event_venue_link_candidates(event_id)
+
     # ── writes: RDS-only — the projector is the sole Redis writer ────────────────
     # ── core venue ────────────────────────────────────────────────────────────
     def upsert_venue(self, venue) -> None:
