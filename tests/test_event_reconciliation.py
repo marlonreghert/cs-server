@@ -17,6 +17,7 @@ from datetime import datetime, timezone
 
 from app.dao.venue_repository import VenueRepository
 from app.services.event_reconciliation import (
+    REVIEW_REASON_ABSENT_FROM_LATEST_EXTRACTION,
     REVIEW_REASON_DIVERGES_FROM_CONFIRMED,
     STATUS_CONFIRMED,
     STATUS_PENDING_REVIEW,
@@ -45,8 +46,11 @@ def _event(title: str, starts_at, **overrides) -> dict:
 
 
 def _venue_attribute(venue_id: str):
-    def attribute(fields: dict, event_id: str) -> dict:
-        return {"venue_id": venue_id}
+    # attribute() returns (fields_to_merge, on_persisted) — see
+    # app.services.event_reconciliation.AttributeFn. The venue strategy has
+    # no side effect to defer, so on_persisted is always None.
+    def attribute(fields: dict, event_id: str) -> tuple[dict, None]:
+        return {"venue_id": venue_id}, None
     return attribute
 
 
@@ -303,9 +307,11 @@ class TestConfirmedPreservationAndDivergence:
         confirmed = by_title["Baile da Metropole"]
         assert confirmed["event_id"] == row["event_id"]
         assert confirmed["status"] == STATUS_CONFIRMED
-        # NOT flagged: this run's fresh event was never treated as ITS
-        # divergent answer — it is a different event entirely.
-        assert confirmed["review_reason"] is None
+        # NOT flagged as diverging: this run's fresh event was never treated
+        # as ITS divergent answer — it is a different event entirely. It IS
+        # marked absent-from-this-run so an operator can see the post no
+        # longer yields their confirmed event, rather than silence.
+        assert confirmed["review_reason"] == REVIEW_REASON_ABSENT_FROM_LATEST_EXTRACTION
 
         new_row = by_title["Noite do Forro"]
         assert new_row["status"] == STATUS_PENDING_REVIEW
@@ -318,7 +324,7 @@ class TestConfirmedPreservationAndDivergence:
 
         def tracking_attribute(fields, event_id):
             calls.append(fields["title"])
-            return {"venue_id": "v1"}
+            return {"venue_id": "v1"}, None
 
         reconcile_post_events(
             venue_dao=dao, source_kind="venue_post", source_handle="h1",
@@ -377,7 +383,10 @@ class TestConfirmedPreservationAndDivergence:
         for row in rows:
             if row["event_id"] in confirmed_ids:
                 assert row["title"] in ("Event A", "Event B")
-                assert row["review_reason"] is None
+                # Orphaned (ambiguous cardinality, correctly not guessed at)
+                # — marked absent-from-this-run, same as the unambiguous
+                # "genuinely replaced" case; not a fabricated divergence.
+                assert row["review_reason"] == REVIEW_REASON_ABSENT_FROM_LATEST_EXTRACTION
             else:
                 assert row["status"] == STATUS_PENDING_REVIEW
                 assert row["title"] in ("Event A Renamed", "Event B Renamed")
@@ -389,7 +398,7 @@ class TestManualLinkPreservation:
         events = [_event("Event A", datetime(2026, 8, 10, tzinfo=timezone.utc))]
 
         def promoter_attribute(fields, event_id):
-            return {"venue_id": "v_auto", "location_resolution": "auto"}
+            return {"venue_id": "v_auto", "location_resolution": "auto"}, None
 
         reconcile_post_events(
             venue_dao=dao, source_kind="promoter_post", source_handle="h1",
@@ -423,7 +432,7 @@ class TestManualLinkPreservation:
 
         def tracking_attribute(fields, event_id):
             calls.append(fields["title"])
-            return {"venue_id": "v_auto", "location_resolution": "auto"}
+            return {"venue_id": "v_auto", "location_resolution": "auto"}, None
 
         reconcile_post_events(
             venue_dao=dao, source_kind="promoter_post", source_handle="h1",
@@ -442,6 +451,49 @@ class TestManualLinkPreservation:
             prepared_events=events, now=NOW, attribute=tracking_attribute,
         )
         assert calls == []
+
+    def test_a_manually_linked_row_genuinely_replaced_is_marked_absent_not_silently_stale(self):
+        """The same guarantee TestConfirmedPreservationAndDivergence proves
+        for a confirmed row, for a manually-linked one: orphaned (both title
+        and date changed) and correctly not paired, it must not go entirely
+        untouched. review_reason/last_seen_at refresh; venue_id/
+        location_resolution/linked_by (operator-owned) do not move."""
+        dao = _dao()
+        events = [_event("Event A", datetime(2026, 8, 10, tzinfo=timezone.utc))]
+
+        def promoter_attribute(fields, event_id):
+            return {"venue_id": "v_auto", "location_resolution": "auto"}, None
+
+        reconcile_post_events(
+            venue_dao=dao, source_kind="promoter_post", source_handle="h1",
+            source_shortcode="s1", source_permalink=None,
+            prepared_events=events, now=NOW, attribute=promoter_attribute,
+        )
+        row = _rows(dao, "h1", "s1")[0]
+        dao.update_event(row["event_id"], {
+            "venue_id": "v_manual", "location_resolution": "manual",
+            "linked_by": "operator_x", "linked_at": NOW,
+            "last_seen_at": datetime(2026, 8, 1, tzinfo=timezone.utc),
+        })
+
+        unrelated = [_event("Something Else Entirely", datetime(2026, 9, 1, tzinfo=timezone.utc))]
+        later = datetime(2026, 8, 12, tzinfo=timezone.utc)
+        reconcile_post_events(
+            venue_dao=dao, source_kind="promoter_post", source_handle="h1",
+            source_shortcode="s1", source_permalink=None,
+            prepared_events=unrelated, now=later, attribute=promoter_attribute,
+        )
+
+        after = dao.get_event(row["event_id"])
+        assert after["venue_id"] == "v_manual"
+        assert after["location_resolution"] == "manual"
+        assert after["linked_by"] == "operator_x"
+        assert after["review_reason"] == REVIEW_REASON_ABSENT_FROM_LATEST_EXTRACTION
+        assert after["last_seen_at"] == later
+
+        rows = _rows(dao, "h1", "s1")
+        assert len(rows) == 2, rows
+        assert any(r["title"] == "Something Else Entirely" for r in rows)
 
 
 class TestAttributionStrategies:
@@ -474,7 +526,7 @@ class TestAttributionStrategies:
         def ladder_attribute(fields, event_id):
             seen_location_texts.append(fields["location_text"])
             venue_id = {"Venue One": "v1", "Venue Two": "v2"}[fields["location_text"]]
-            return {"venue_id": venue_id, "location_resolution": "auto"}
+            return {"venue_id": venue_id, "location_resolution": "auto"}, None
 
         reconcile_post_events(
             venue_dao=dao, source_kind="promoter_post", source_handle="h1",
@@ -511,3 +563,115 @@ class TestEventsPerPostHistogram:
         )
         after = _sum()
         assert after - before == 3.0
+
+
+class TestDatelessEventsNeverPairOnDateAlone:
+    """An unresolved date is not evidence of a MATCHING date: `None == None`
+    must never count as "same date" when deciding whether an orphaned
+    confirmed/manual row is plausibly the SAME event as an unmatched fresh
+    one. Two genuinely different, both-dateless events differ only by
+    title, which the exactly-one-changed rule would otherwise read as
+    "date matched, title changed" — a false pair."""
+
+    def test_two_dateless_events_with_different_titles_do_not_pair(self):
+        dao = _dao()
+        events = [_event("Event A", None)]
+        reconcile_post_events(
+            venue_dao=dao, source_kind="venue_post", source_handle="h1",
+            source_shortcode="s1", source_permalink=None,
+            prepared_events=events, now=NOW, attribute=_venue_attribute("v1"),
+        )
+        row = _rows(dao, "h1", "s1")[0]
+        dao.update_event(row["event_id"], {"status": STATUS_CONFIRMED})
+
+        unrelated = [_event("Event Z", None)]
+        reconcile_post_events(
+            venue_dao=dao, source_kind="venue_post", source_handle="h1",
+            source_shortcode="s1", source_permalink=None,
+            prepared_events=unrelated, now=NOW, attribute=_venue_attribute("v1"),
+        )
+
+        rows = _rows(dao, "h1", "s1")
+        assert len(rows) == 2, rows
+        confirmed = dao.get_event(row["event_id"])
+        # NOT absorbed as "Event A"'s divergent answer: title unchanged,
+        # marked absent rather than diverging (there is no substantiated
+        # divergence — "Event Z" was never treated as Event A's own answer).
+        assert confirmed["title"] == "Event A"
+        assert confirmed["review_reason"] == REVIEW_REASON_ABSENT_FROM_LATEST_EXTRACTION
+        by_title = {r["title"]: r for r in rows}
+        assert by_title["Event Z"]["status"] == STATUS_PENDING_REVIEW
+
+
+class TestDuplicateKeyWithinOneRun:
+    """compute_source_event_key's own docstring already names this: two
+    events in one post with the same normalized title and the same
+    resolved date collapse onto ONE key. Persisting both would violate the
+    real (source_handle, source_shortcode, source_event_key) UNIQUE
+    constraint — the second must be skipped, never inserted alongside the
+    first."""
+
+    def test_two_identical_title_and_date_events_do_not_both_get_inserted(self):
+        dao = _dao()
+        same_date = datetime(2026, 8, 10, tzinfo=timezone.utc)
+        events = [
+            _event("Duplicate Event", same_date, description="First copy"),
+            _event("Duplicate Event", same_date, description="Second copy"),
+        ]
+        persisted = reconcile_post_events(
+            venue_dao=dao, source_kind="venue_post", source_handle="h1",
+            source_shortcode="s1", source_permalink=None,
+            prepared_events=events, now=NOW, attribute=_venue_attribute("v1"),
+        )
+        rows = _rows(dao, "h1", "s1")
+        assert len(rows) == 1, rows
+        assert persisted == 1
+
+    def test_a_duplicate_key_does_not_crash_the_whole_post(self):
+        """Before the fix this raised (the fake enforces the real UNIQUE
+        constraint on insert_event) instead of degrading gracefully."""
+        dao = _dao()
+        same_date = datetime(2026, 8, 10, tzinfo=timezone.utc)
+        events = [
+            _event("Duplicate Event", same_date),
+            _event("Duplicate Event", same_date),
+            _event("Distinct Event", datetime(2026, 8, 11, tzinfo=timezone.utc)),
+        ]
+        reconcile_post_events(
+            venue_dao=dao, source_kind="venue_post", source_handle="h1",
+            source_shortcode="s1", source_permalink=None,
+            prepared_events=events, now=NOW, attribute=_venue_attribute("v1"),
+        )
+        rows = _rows(dao, "h1", "s1")
+        assert {r["title"] for r in rows} == {"Duplicate Event", "Distinct Event"}
+        assert len(rows) == 2
+
+
+class TestExtractionFailurePlaceholderNeverSuperseded:
+    """A row with NO source_event_key at all is an extraction_failed
+    placeholder (EventExtractionService._record_failure /
+    PromoterCrawlService._record_failure) that predates content identity
+    entirely — the original PromoterCrawlService explicitly skipped it in
+    the supersede loop (`if key is None or key in seen_keys: continue`).
+    It must never be flipped to superseded just because this run's events
+    don't happen to share its (nonexistent) key."""
+
+    def test_a_null_key_placeholder_is_never_superseded(self):
+        dao = _dao()
+        placeholder_id = "evt_placeholder"
+        dao.insert_event({
+            "event_id": placeholder_id, "source_kind": "venue_post",
+            "source_handle": "h1", "source_shortcode": "s1",
+            "status": "extraction_failed", "source_event_key": None,
+            "raw_extraction": {"error": "boom"},
+        })
+
+        events = [_event("Event A", datetime(2026, 8, 10, tzinfo=timezone.utc))]
+        reconcile_post_events(
+            venue_dao=dao, source_kind="venue_post", source_handle="h1",
+            source_shortcode="s1", source_permalink=None,
+            prepared_events=events, now=NOW, attribute=_venue_attribute("v1"),
+        )
+
+        placeholder = dao.get_event(placeholder_id)
+        assert placeholder["status"] == "extraction_failed"

@@ -27,7 +27,15 @@ Owns everything that must never differ between the two callers:
     attribution column is left untouched (content still refreshes);
   - otherwise: a full upsert;
   - every existing key this run did not return: superseded, never deleted,
-    and never touched at all once confirmed or manually linked;
+    never touched once confirmed or manually linked, and never touched (nor
+    treated as a candidate for anything) when it has no `source_event_key`
+    at all — an `extraction_failed` placeholder row, which predates content
+    identity entirely;
+  - a confirmed/manually-linked row that is orphaned (its stored key matched
+    no fresh event) and could not be unambiguously paired with one either:
+    left with its operator-owned fields untouched, but its own review_reason/
+    last_seen_at ARE refreshed so an operator can see the post no longer
+    yields it, rather than a silently stale row;
   - observing `EVENT_EXTRACTION_EVENTS_PER_POST`.
 
 The ONE thing that genuinely differs between the two callers is per-event
@@ -39,6 +47,16 @@ see the plan's §B for why a second knob (e.g. "should confirmed events be
 preserved?") would re-create the exact drift this refactor removes.
 `attribute` is never invoked for a confirmed or manually-linked existing
 row — attribution must never touch either.
+
+`attribute` returns `(fields, on_persisted)`, not a bare dict: `fields` is
+merged before the row is written, but any SIDE EFFECT that references the
+event by id (the promoter path's `replace_event_venue_link_candidates`) must
+run AFTER `insert_event`/`update_event`, never before — migration
+0024_promoter_accounts declares `event_venue_link_candidate.event_id` as a
+real, non-deferrable FK to `events.event`, so writing a candidate row for an
+event that is not committed yet raises ForeignKeyViolation on real Postgres
+for every first-time QUEUED or auto-linked event (the normal case). See
+plans/260806_venue-post-multi-event.md's review.
 """
 from __future__ import annotations
 
@@ -68,14 +86,26 @@ STATUS_SUPERSEDED = "superseded"
 # path gains it by moving onto this shared module.
 REVIEW_REASON_DIVERGES_FROM_CONFIRMED = "model_diverges_from_confirmed_record"
 
-# attribute(fields, event_id) -> a dict of attribution fields to merge into
-# `fields` (may be empty). `fields` already carries every column this module
-# and the caller have built for this event so far (identity/bookkeeping +
-# the caller's prepared content), so the ladder can read e.g.
-# `fields["location_text"]`. `event_id` is stable by the time this is
-# called — the existing row's id, or a freshly minted one — so a callback
-# that needs it (persisting resolution candidates) never has to guess it.
-AttributeFn = Callable[[dict, str], dict]
+# Flagged on a confirmed/manually-linked row that is orphaned (no fresh event
+# this run shares its key) and could not be unambiguously paired with one
+# either (see `_plausibly_same_event`). NOT a divergence — there is no
+# specific fresh answer to compare against, so nothing about the operator's
+# record is contradicted — but silence is worse: an operator must be able to
+# tell "this run's extraction no longer yields your confirmed/linked event"
+# apart from "everything is still fine".
+REVIEW_REASON_ABSENT_FROM_LATEST_EXTRACTION = "confirmed_event_absent_from_latest_extraction"
+
+# attribute(fields, event_id) -> (fields_to_merge, on_persisted). `fields`
+# already carries every column this module and the caller have built for
+# this event so far (identity/bookkeeping + the caller's prepared content),
+# so the ladder can read e.g. `fields["location_text"]`. `event_id` is
+# stable by the time this is called — the existing row's id, or a freshly
+# minted one — so a callback that needs it never has to guess it.
+# `fields_to_merge` is applied BEFORE the row is written. `on_persisted` (or
+# None) is called with NO arguments AFTER the row is written — this is
+# where a side effect that references the event by id belongs (the FK note
+# above is why this is split at all).
+AttributeFn = Callable[[dict, str], tuple[dict, Optional[Callable[[], None]]]]
 
 
 def new_event_id() -> str:
@@ -105,7 +135,11 @@ def _plausibly_same_event(existing: dict, prepared: dict) -> bool:
     prepared_starts_at = prepared.get("starts_at")
     existing_date = existing_starts_at.date() if existing_starts_at is not None else None
     prepared_date = prepared_starts_at.date() if prepared_starts_at is not None else None
-    same_date = existing_date == prepared_date
+    # An unresolved date is not evidence of a MATCHING date — "unknown" must
+    # never compare equal to "unknown". Two genuinely different dateless
+    # events would otherwise look like "same date" and pair on title alone
+    # differing, when really neither date says anything at all.
+    same_date = existing_date is not None and prepared_date is not None and existing_date == prepared_date
 
     return same_title != same_date
 
@@ -214,8 +248,20 @@ def reconcile_post_events(
             event_id = existing["event_id"]
             handled_event_ids.add(event_id)
 
+        # `attribute` returns (fields_to_merge, on_persisted): the fields
+        # are merged NOW (needed for the insert/update below), but
+        # `on_persisted` — the promoter path's candidate-row write — must
+        # not run until AFTER the event row itself is committed.
+        # event_venue_link_candidate.event_id is a real, non-deferrable FK
+        # to events.event (migration 0024_promoter_accounts); calling it
+        # before insert_event raises ForeignKeyViolation on real Postgres
+        # for every first-time QUEUED or auto-linked event — the normal
+        # case, not an edge case. See plans/260806_venue-post-multi-
+        # event.md's review.
+        on_persisted: Optional[Callable[[], None]] = None
         if not preserve_manual_link:
-            fields.update(attribute(fields, event_id))
+            attribution_fields, on_persisted = attribute(fields, event_id)
+            fields.update(attribution_fields)
 
         if existing is None:
             # A fresh row has no prior value for the four link columns to
@@ -233,11 +279,31 @@ def reconcile_post_events(
         else:
             venue_dao.update_event(event_id, fields)
 
+        if on_persisted is not None:
+            on_persisted()
+
         persisted += 1
 
     unmatched: list[tuple[int, dict, str]] = []
+    seen_keys_this_run: set[str] = set()
     for index, prepared in enumerate(prepared_events, start=1):
         key = compute_source_event_key(prepared.get("title"), prepared.get("starts_at"))
+        if key in seen_keys_this_run:
+            # compute_source_event_key's own docstring already names this:
+            # two events in the SAME post with the same normalized title and
+            # the same resolved date collapse onto one key — there is no
+            # stronger identity signal available. Persisting a second row
+            # for it would violate the real (source_handle, source_shortcode,
+            # source_event_key) UNIQUE constraint (uq_event_source_key), so
+            # the duplicate is skipped rather than crashing the whole post;
+            # the first occurrence already represents this key for this run.
+            logger.warning(
+                f"[EventReconciliation] duplicate source_event_key within "
+                f"one post ({source_handle}/{source_shortcode}); skipping a "
+                f"second row for title={prepared.get('title')!r}"
+            )
+            continue
+        seen_keys_this_run.add(key)
         existing = existing_by_key.get(key)
         if existing is None:
             unmatched.append((index, prepared, key))
@@ -284,13 +350,33 @@ def reconcile_post_events(
     # An event previously extracted from this post and absent from THIS run
     # is superseded — never hard-deleted, and never touched at all once
     # confirmed or manually linked (the operator outranks the model, exactly
-    # as the confirmed branch above already behaves).
+    # as the confirmed branch above already behaves). A row with NO
+    # source_event_key at all is an extraction_failed placeholder that
+    # predates content identity entirely (see
+    # EventExtractionService._record_failure / PromoterCrawlService.
+    # _record_failure) — it was never a candidate for THIS run's events and
+    # must never be flipped to superseded by their mere presence.
     for row in existing_events:
         if row["event_id"] in handled_event_ids:
             continue
-        if row.get("status") == STATUS_CONFIRMED:
+        if row.get("source_event_key") is None:
             continue
-        if row.get("location_resolution") == RESOLUTION_MANUAL:
+        is_protected = (
+            row.get("status") == STATUS_CONFIRMED
+            or row.get("location_resolution") == RESOLUTION_MANUAL
+        )
+        if is_protected:
+            # Orphaned AND not unambiguously pairable with a fresh event
+            # (see above) — never claim a divergence from a specific answer
+            # that does not exist, and never move status or any
+            # operator-owned field. But silence would mean the operator
+            # never learns "the post no longer yields your confirmed/linked
+            # event" — so review_reason and last_seen_at are refreshed to
+            # say exactly that, and nothing else.
+            venue_dao.update_event(row["event_id"], {
+                "review_reason": REVIEW_REASON_ABSENT_FROM_LATEST_EXTRACTION,
+                "last_seen_at": now,
+            })
             continue
         venue_dao.update_event(row["event_id"], {"status": STATUS_SUPERSEDED})
 
@@ -305,5 +391,5 @@ def reconcile_post_events(
 __all__ = [
     "reconcile_post_events", "new_event_id",
     "STATUS_PENDING_REVIEW", "STATUS_CONFIRMED", "STATUS_SUPERSEDED",
-    "REVIEW_REASON_DIVERGES_FROM_CONFIRMED",
+    "REVIEW_REASON_DIVERGES_FROM_CONFIRMED", "REVIEW_REASON_ABSENT_FROM_LATEST_EXTRACTION",
 ]

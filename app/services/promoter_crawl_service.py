@@ -37,7 +37,7 @@ from __future__ import annotations
 import base64
 import logging
 from datetime import datetime, timedelta, timezone
-from typing import Optional
+from typing import Callable, Optional
 
 from app.api.openai_event_extraction_client import (
     EventExtractionParseError,
@@ -459,46 +459,57 @@ class PromoterCrawlService:
         # rungs 1-2 read only the shared caption/tag, which carries no
         # per-event data to leak between siblings). Never invoked by the
         # shared reconciler for a confirmed or manually-linked existing row.
-        def _attribute(fields: dict, event_id: str) -> dict:
+        #
+        # Returns (fields, on_persisted): `replace_event_venue_link_
+        # candidates` writes a row with a real, non-deferrable FK to
+        # events.event (migration 0024_promoter_accounts) — it MUST NOT run
+        # until the event row itself is committed, so it is deferred into
+        # `on_persisted` rather than called here directly. The reconciler
+        # calls it after insert_event/update_event.
+        def _attribute(fields: dict, event_id: str) -> tuple[dict, Optional[Callable[[], None]]]:
             resolution = resolve_event_venue(
                 caption=caption, location_text=fields["location_text"],
                 location_tag=post.get("location_tag"), promoter_handle=handle,
                 venues=venues, handle_index=handle_index,
                 confidence_floor=self.confidence_floor, margin=self.margin,
             )
-            if resolution.candidates:
-                self.venue_dao.replace_event_venue_link_candidates(event_id, [
-                    {
-                        "venue_id": c.venue_id, "rank": rank, "score": c.score,
-                        "method": c.method, "evidence": c.evidence,
-                    }
-                    for rank, c in enumerate(resolution.candidates, start=1)
-                ])
-            EVENT_VENUE_LINK_TOTAL.labels(
-                method=resolution.method or "none",
-                result=_RESULT_LABEL[resolution.resolution],
-            ).inc()
+
+            def _on_persisted() -> None:
+                if resolution.candidates:
+                    self.venue_dao.replace_event_venue_link_candidates(event_id, [
+                        {
+                            "venue_id": c.venue_id, "rank": rank, "score": c.score,
+                            "method": c.method, "evidence": c.evidence,
+                        }
+                        for rank, c in enumerate(resolution.candidates, start=1)
+                    ])
+                EVENT_VENUE_LINK_TOTAL.labels(
+                    method=resolution.method or "none",
+                    result=_RESULT_LABEL[resolution.resolution],
+                ).inc()
 
             if resolution.resolution == RESOLUTION_AUTO:
-                return {
+                result_fields = {
                     "venue_id": resolution.venue_id,
                     "location_resolution": RESOLUTION_AUTO,
                     "location_confidence": resolution.confidence,
                     "linked_by": resolution.method,
                     "linked_at": now,
                 }
-            if resolution.resolution == RESOLUTION_UNRESOLVED:
-                return {
+            elif resolution.resolution == RESOLUTION_UNRESOLVED:
+                result_fields = {
                     "venue_id": None,
                     "location_resolution": RESOLUTION_UNRESOLVED,
                     "location_confidence": None,
                     "linked_by": None,
                     "linked_at": None,
                 }
-            # RESOLUTION_QUEUED: leave the four link columns out of the
-            # returned dict entirely — the reconciler's partial-update path
-            # means they stay NULL, the "awaiting review" state.
-            return {}
+            else:
+                # RESOLUTION_QUEUED: leave the four link columns out of the
+                # returned dict entirely — the reconciler's partial-update
+                # path means they stay NULL, the "awaiting review" state.
+                result_fields = {}
+            return result_fields, _on_persisted
 
         persisted = reconcile_post_events(
             venue_dao=self.venue_dao,

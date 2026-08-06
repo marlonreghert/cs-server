@@ -553,8 +553,22 @@ class InMemoryRdsVenueStore:
     def replace_event_venue_link_candidates(self, event_id: str, candidates: list[dict]) -> None:
         """Replace the whole ranked list for one event — a later crawl of the
         same post recomputes the ladder from scratch, so the old ranking must
-        not linger alongside a new one."""
+        not linger alongside a new one.
+
+        Enforces the REAL, non-deferrable FK migration 0024_promoter_accounts
+        declares (`event_id text NOT NULL REFERENCES events.event(event_id)`):
+        raises if `event_id` is not already a row in `self.events`. Without
+        this the fake had zero referential integrity and could not catch a
+        caller writing candidates before the event row it references is
+        committed — exactly the bug plans/260806_venue-post-multi-event.md's
+        review caught (a real Postgres ForeignKeyViolation on every
+        first-time QUEUED/auto-linked event)."""
         self._guard()
+        if event_id not in self.events:
+            raise ValueError(
+                f"event_venue_link_candidate FK violation: event_id {event_id!r} "
+                f"does not exist in events.event yet"
+            )
         self.event_link_candidates[event_id] = [dict(c) for c in candidates]
 
     def list_event_venue_link_candidates(self, event_id: str) -> list[dict]:

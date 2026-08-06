@@ -47,7 +47,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Optional
+from typing import Callable, Optional
 
 from app.api.openai_event_extraction_client import (
     EventExtractionParseError,
@@ -500,9 +500,10 @@ class EventExtractionService:
         # The ONE thing parameterised: a venue post's events are always
         # attributed to the POSTING venue — never the resolution ladder, and
         # a named `location_text` is recorded but never re-attributes the
-        # event elsewhere (plans/260806_venue-post-multi-event.md §D).
-        def _attribute(fields: dict, event_id: str) -> dict:
-            return {"venue_id": venue_id}
+        # event elsewhere (plans/260806_venue-post-multi-event.md §D). No
+        # side effect to defer, unlike the promoter ladder — always None.
+        def _attribute(fields: dict, event_id: str) -> tuple[dict, Optional[Callable[[], None]]]:
+            return {"venue_id": venue_id}, None
 
         reconcile_post_events(
             venue_dao=self.venue_dao,

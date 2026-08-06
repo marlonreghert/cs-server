@@ -299,7 +299,15 @@ def step_given_a_confirmed_promoter_event(context):
     _reset_mep_context(context)
     context.mep_dao.upsert_promoter_account(context.mep_handle, {"status": "active"})
     _mep_seed_post(context, caption=GENERIC_EVENT_CAPTION)
-    context.mep_openai.program(_events_json([{"title": "Festa Confirmada Promoter"}]))
+    # A real, resolvable date, held constant across both extractions — this
+    # scenario is about the TITLE diverging while the model still agrees on
+    # WHEN (same normalized title XOR same date is what lets the shared
+    # reconciliation still recognize this as the same event; two dateless
+    # answers would never count as "the same date" — see
+    # app.services.event_reconciliation._plausibly_same_event).
+    context.mep_openai.program(_events_json([
+        {"title": "Festa Confirmada Promoter", "date_text": "10/08"},
+    ]))
     _run_mep_crawl(context)
     row = _mep_row_by_title(context, "Festa Confirmada Promoter")
     context.vpme_promoter_confirmed_event_id = row["event_id"]
@@ -311,7 +319,9 @@ def step_given_a_confirmed_promoter_event(context):
 
 @when("the multi-event extraction runs again and returns a different title")
 def step_when_the_multi_event_extraction_runs_again_different_title(context):
-    context.mep_openai.program(_events_json([{"title": "Festa Totalmente Diferente Promoter"}]))
+    context.mep_openai.program(_events_json([
+        {"title": "Festa Totalmente Diferente Promoter", "date_text": "10/08"},
+    ]))
     _run_mep_crawl(context)
 
 
