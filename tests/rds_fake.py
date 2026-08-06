@@ -401,20 +401,49 @@ class InMemoryRdsVenueStore:
                 return copy.deepcopy(row)
         return None
 
+    def list_events_by_source(self, source_handle: str, source_shortcode: str) -> list[dict]:
+        """Every event row sharing one post (plans/260806_multi-event-posts.md)
+        — get_event_by_source returns at most one row and is unsafe once a
+        post can hold several."""
+        out = [
+            copy.deepcopy(row) for row in self.events.values()
+            if row.get("source_handle") == source_handle
+            and row.get("source_shortcode") == source_shortcode
+        ]
+        out.sort(key=lambda r: (
+            r.get("source_event_index") if r.get("source_event_index") is not None else 0,
+            r["event_id"],
+        ))
+        return out
+
     def insert_event(self, fields: dict) -> dict:
-        """Mirrors the real UNIQUE (source_handle, source_shortcode) constraint:
-        raises rather than silently inserting a second row for a post already
-        extracted. The service is expected to check get_event_by_source first
-        (the same pattern as every ON-CONFLICT-free write elsewhere in this
-        fake) — this is the last-resort guard, not the primary mechanism."""
+        """Mirrors the real UNIQUE (source_handle, source_shortcode,
+        source_event_key) constraint (migration 0025, replacing 0023's
+        two-column constraint): raises rather than silently inserting a
+        duplicate for a post/event already extracted. A NULL
+        `source_event_key` never collides with another NULL — the same
+        semantics the real Postgres UNIQUE constraint gives NULLs — which is
+        what lets several events share one post AND lets an
+        extraction_failed placeholder (no content to key by) coexist with a
+        confirmed event's row. The service is expected to check
+        list_events_by_source/get_event_by_source first (the same pattern as
+        every ON-CONFLICT-free write elsewhere in this fake) — this is the
+        last-resort guard, not the primary mechanism."""
         self._guard()
         event_id = fields["event_id"]
-        existing = self.get_event_by_source(fields["source_handle"], fields["source_shortcode"])
-        if existing is not None:
-            raise ValueError(
-                f"duplicate (source_handle, source_shortcode): "
-                f"{fields['source_handle']!r}, {fields['source_shortcode']!r}"
-            )
+        key = fields.get("source_event_key")
+        if key is not None:
+            for row in self.events.values():
+                if (
+                    row.get("source_handle") == fields.get("source_handle")
+                    and row.get("source_shortcode") == fields.get("source_shortcode")
+                    and row.get("source_event_key") == key
+                ):
+                    raise ValueError(
+                        f"duplicate (source_handle, source_shortcode, source_event_key): "
+                        f"{fields.get('source_handle')!r}, {fields.get('source_shortcode')!r}, "
+                        f"{key!r}"
+                    )
         now = _now()
         row = dict(fields)
         row.setdefault("first_seen_at", now)

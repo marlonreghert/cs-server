@@ -93,6 +93,9 @@ test-unit:
 		tests/test_event_venue_resolution.py \
 		tests/test_promoter_registry_service.py \
 		tests/test_promoter_crawl_service.py \
+		tests/test_event_identity.py \
+		tests/test_multi_event_extraction.py \
+		tests/test_multi_event_posts_migration.py \
 		-v
 
 test-integration:

@@ -438,6 +438,10 @@ class RdsVenueStore:
         # plans/260804_instagram-promoter-events.md (migration 0024) — how, if
         # at all, a promoter event's venue was resolved.
         "location_resolution", "location_confidence", "linked_by", "linked_at",
+        # plans/260806_multi-event-posts.md (migration 0025) — the content-
+        # derived identity that lets several events share one post, and the
+        # display-only ordinal that never participates in that identity.
+        "source_event_key", "source_event_index",
     )
     _EVENT_JSONB_COLUMNS = ("lineup", "raw_extraction")
     _EVENT_SELECT = (
@@ -446,7 +450,8 @@ class RdsVenueStore:
         "title, description, lineup, ticket_url, price_text, location_text, "
         "cover_photo_key, confidence, status, review_reason, raw_extraction, "
         "first_seen_at, last_seen_at, updated_at, "
-        "location_resolution, location_confidence, linked_by, linked_at "
+        "location_resolution, location_confidence, linked_by, linked_at, "
+        "source_event_key, source_event_index "
         "FROM events.event"
     )
 
@@ -467,10 +472,25 @@ class RdsVenueStore:
             ).mappings().first()
             return dict(row) if row else None
 
+    def list_events_by_source(self, source_handle: str, source_shortcode: str) -> list[dict]:
+        """Every event row sharing one post, ordered for display
+        (plans/260806_multi-event-posts.md) — `get_event_by_source` returns
+        at most one row and is unsafe once a post can hold several."""
+        with self.engine.connect() as conn:
+            rows = conn.execute(
+                text(
+                    f"{self._EVENT_SELECT} WHERE source_handle=:h AND source_shortcode=:s "
+                    "ORDER BY source_event_index NULLS LAST, event_id"
+                ),
+                {"h": source_handle, "s": source_shortcode},
+            ).mappings()
+            return [dict(r) for r in rows]
+
     def insert_event(self, fields: dict) -> dict:
-        """INSERT relying on the UNIQUE (source_handle, source_shortcode)
-        constraint (migration 0023) to reject a duplicate — the service is
-        expected to check get_event_by_source first; this is the backstop,
+        """INSERT relying on the UNIQUE (source_handle, source_shortcode,
+        source_event_key) constraint (migration 0025, replacing 0023's
+        two-column constraint) to reject a duplicate — the service is
+        expected to check list_events_by_source first; this is the backstop,
         not the primary idempotency mechanism (a constraint, not a code path)."""
         cols = [c for c in self._EVENT_COLUMNS if c in fields]
         assign = {c: fields[c] for c in cols}

@@ -510,15 +510,38 @@ def test_event_update_missing_id_returns_none(store):
 
 
 def test_event_unique_source_constraint_rejects_duplicate(store):
-    """UNIQUE (source_handle, source_shortcode) — the idempotency guarantee is
-    a CONSTRAINT (migration 0023), proven here on both the fake and the real
-    store rather than only in application code."""
+    """UNIQUE (source_handle, source_shortcode, source_event_key) —
+    replacing 0023's two-column constraint (migration 0025,
+    plans/260806_multi-event-posts.md): a post can now hold several events,
+    so idempotency is keyed by CONTENT, not just the post. A duplicate SAME
+    key for the same post is still rejected, proven here on both the fake
+    and the real store rather than only in application code. See
+    test_event_different_source_event_key_is_not_a_duplicate below for the
+    other half of the contract this migration changed on purpose."""
     vid = _vid()
     store.upsert_venue(_venue(vid))
     shortcode = f"dup_{vid}"
-    store.insert_event(_event_fields(vid, shortcode))
+    store.insert_event(_event_fields(vid, shortcode, source_event_key="k1"))
     with pytest.raises(Exception):
-        store.insert_event(_event_fields(vid, shortcode, event_id=f"evt_other_{vid}"))
+        store.insert_event(
+            _event_fields(vid, shortcode, event_id=f"evt_other_{vid}", source_event_key="k1")
+        )
+
+
+def test_event_different_source_event_key_is_not_a_duplicate(store):
+    """The whole point of migration 0025: several events CAN share one post
+    as long as their content-derived keys differ — a roundup post at three
+    venues must persist three rows, not collide on the first insert."""
+    vid = _vid()
+    store.upsert_venue(_venue(vid))
+    shortcode = f"multi_{vid}"
+    store.insert_event(_event_fields(vid, shortcode, source_event_key="k1"))
+    store.insert_event(
+        _event_fields(vid, shortcode, event_id=f"evt_other_{vid}", source_event_key="k2")
+    )
+    rows = store.list_events_by_source("contract_handle", shortcode)
+    assert len(rows) == 2
+    assert {r["source_event_key"] for r in rows} == {"k1", "k2"}
 
 
 def test_list_events_filters_by_venue_and_status(store):

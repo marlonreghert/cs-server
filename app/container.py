@@ -701,6 +701,7 @@ class Container:
                 confidence_floor=settings.promoter_link_confidence_floor,
                 margin=settings.promoter_link_margin,
                 min_confidence=settings.event_extraction_min_confidence,
+                max_events_per_post=settings.event_extraction_max_events_per_post,
             )
             logger.info("[Container] Promoter crawl service initialized")
         else:
