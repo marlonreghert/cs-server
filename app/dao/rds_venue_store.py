@@ -595,11 +595,25 @@ class RdsVenueStore:
         it (or a later crawl superseded it) would otherwise resurrect here
         forever — exactly the "finished with" case the plan requires this
         queue to keep excluding.
+
+        A third clause, `status = 'extraction_failed'`, is explicit for BOTH
+        source kinds (plans/260807_date-resolution-correctness.md, defect 3):
+        a VENUE-post event in that status matches neither of the two clauses
+        above (its `location_resolution` is never set at all — venue posts
+        carry constant attribution) and used to never reach the queue at
+        all. A PROMOTER-post event in that status happened to surface only
+        incidentally, via clause 2, whenever `location_resolution` was still
+        NULL — true as long as nobody had linked it yet, but an accident of
+        that column's state, not a deliberate design. A total extraction
+        failure is lost signal on a post already paid for (archived,
+        classified); it deserves an operator's attention at least as much as
+        a clean unconfirmed event, never less.
         """
         sql = (
             f"{self._EVENT_SELECT} WHERE e.status = 'pending_review' "
             "OR (e.source_kind = 'promoter_post' AND e.location_resolution IS NULL "
             "AND e.status NOT IN ('rejected', 'superseded')) "
+            "OR e.status = 'extraction_failed' "
             "ORDER BY e.first_seen_at, e.event_id"
         )
         with self.engine.connect() as conn:

@@ -51,7 +51,7 @@ from app.metrics import (
 )
 from app.services.archive_sources import SOURCE_INSTAGRAM_POSTS
 from app.services.event_caption_matcher import matches_event_marker
-from app.services.event_date_resolver import REASON_MISSING_DATE, resolve_event_datetime
+from app.services.event_date_resolver import resolve_event_datetime
 from app.services.event_reconciliation import (
     STATUS_CONFIRMED,
     STATUS_SUPERSEDED,
@@ -447,7 +447,13 @@ class PromoterCrawlService:
             )
             review_reason = None
             if resolved_date.needs_review:
-                review_reason = REASON_MISSING_DATE
+                # Use the resolver's OWN reason rather than assuming
+                # REASON_MISSING_DATE: plans/260807_date-resolution-
+                # correctness.md's weekday_mismatch also sets needs_review
+                # True while still resolving a real starts_at — hardcoding
+                # "missing_date" here would mislabel a resolved-but-flagged
+                # date as a blank one.
+                review_reason = resolved_date.review_reason
             elif parsed["confidence"] < self.min_confidence:
                 review_reason = REVIEW_REASON_LOW_CONFIDENCE
 

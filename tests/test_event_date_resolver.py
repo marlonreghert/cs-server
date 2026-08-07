@@ -16,6 +16,7 @@ import pytest
 
 from app.services.event_date_resolver import (
     REASON_MISSING_DATE,
+    REASON_WEEKDAY_MISMATCH,
     RECIFE_TZ,
     resolve_event_datetime,
 )
@@ -250,3 +251,179 @@ class TestTimeKnown:
         )
         assert resolved.starts_at is None
         assert resolved.time_known is False
+
+
+# ── plans/260807_date-resolution-correctness.md ──────────────────────────────
+# Defect 1: pt-BR month abbreviations, verbatim from the plan's Evidence
+# section — a future edit that "simplifies" _MONTHS/_TEXTUAL_DATE_RE has to
+# argue with a specific row, not just a diff.
+class TestMonthAbbreviationsResolveVerbatim:
+    _ANCHOR = _post_at(2026, 8, 3)  # a Monday; "5 SET"/etc all roll to 5 Sep
+
+    @pytest.mark.parametrize(
+        "date_text",
+        ["05/SET", "05/set", "5 SET", "SET 05"],
+        ids=["05_SET", "05_set_lower", "5_space_SET", "SET_space_05"],
+    )
+    def test_day_and_abbreviated_month_resolve_to_5_september(self, date_text):
+        resolved = resolve_event_datetime(
+            date_text=date_text, time_text=None, post_timestamp=self._ANCHOR,
+        )
+        assert resolved.starts_at is not None, resolved
+        assert resolved.starts_at.date().isoformat() == "2026-09-05", resolved.starts_at
+
+    def test_08_ago_resolves_to_8_august(self):
+        # Distinct row from the table above: a different day AND a different
+        # month abbreviation, so this cannot pass by coincidentally reusing
+        # the same hardcoded expectation.
+        resolved = resolve_event_datetime(
+            date_text="08/Ago", time_text=None, post_timestamp=self._ANCHOR,
+        )
+        assert resolved.starts_at is not None, resolved
+        assert resolved.starts_at.date().isoformat() == "2026-08-08", resolved.starts_at
+
+    @pytest.mark.parametrize("date_text", ["05/09", "05.09", "05-09", "05/09/26"])
+    def test_pre_existing_numeric_forms_are_unaffected(self, date_text):
+        resolved = resolve_event_datetime(
+            date_text=date_text, time_text=None, post_timestamp=self._ANCHOR,
+        )
+        assert resolved.starts_at is not None, resolved
+        assert resolved.starts_at.date().isoformat() == "2026-09-05", resolved.starts_at
+
+    def test_full_month_name_form_is_unaffected(self):
+        resolved = resolve_event_datetime(
+            date_text="5 de setembro", time_text=None, post_timestamp=self._ANCHOR,
+        )
+        assert resolved.starts_at is not None, resolved
+        assert resolved.starts_at.date().isoformat() == "2026-09-05", resolved.starts_at
+
+    @pytest.mark.parametrize("date_text", ["HOJE", "AMANHÃ", "toda quinta"])
+    def test_relative_and_recurring_forms_are_unaffected(self, date_text):
+        resolved = resolve_event_datetime(
+            date_text=date_text, time_text=None, post_timestamp=self._ANCHOR,
+        )
+        assert resolved.starts_at is not None, resolved
+
+
+class TestMonthAbbreviationNeverMatchesInsideProse:
+    """The trap named in the plan: 'set', 'mai' and 'out' are ordinary
+    Portuguese words. A bare 3-letter match with no adjacent day numeral must
+    never invent a date out of sentence prose."""
+
+    @pytest.mark.parametrize(
+        "date_text",
+        [
+            "Em breve soltamos os detalhes completos, aguardem set chegar por aqui",
+            "Não vou dar mai detalhes agora, aguardem a confirmação completa",
+            "Isso já tava meio out, mano, mas o line-up completo ainda sai",
+        ],
+        ids=["set_in_prose", "mai_in_prose", "out_in_prose"],
+    )
+    def test_bare_abbreviation_word_in_prose_resolves_to_no_date(self, date_text):
+        post_ts = _post_at(2026, 8, 1)
+        resolved = resolve_event_datetime(
+            date_text=date_text, time_text=None, post_timestamp=post_ts,
+        )
+        assert resolved.starts_at is None, resolved
+        assert resolved.needs_review is True, resolved
+
+
+# Defect 2 (the load-bearing one): a weekday corroborates an explicit date,
+# it never replaces one.
+class TestWeekdayCorroboratesNeverReplaces:
+    def test_explicit_date_and_agreeing_weekday_resolve_silently(self):
+        # The operator's real case: 5 September 2026 IS a Saturday, so this
+        # must resolve WITHOUT any flag — the weekday corroborates, it is
+        # not merely tolerated.
+        post_ts = _post_at(2026, 8, 3)  # Monday
+        resolved = resolve_event_datetime(
+            date_text="Sábado • 05/SET", time_text=None, post_timestamp=post_ts,
+        )
+        assert resolved.starts_at is not None, resolved
+        assert resolved.starts_at.date().isoformat() == "2026-09-05", resolved.starts_at
+        assert resolved.needs_review is False, resolved
+        assert resolved.review_reason is None, resolved
+
+    def test_weekday_with_a_competing_numeral_never_wins(self):
+        # THE dangerous case fixed here: pre-fix, this silently returned the
+        # next Friday and dropped the "15" with no flag at all.
+        post_ts = _post_at(2026, 8, 1)
+        resolved = resolve_event_datetime(
+            date_text="sexta 15", time_text=None, post_timestamp=post_ts,
+        )
+        assert resolved.starts_at is None, resolved
+        assert resolved.needs_review is True, resolved
+        assert resolved.review_reason == REASON_MISSING_DATE, resolved
+
+    def test_the_339_day_case_resolves_to_no_date_and_flagged(self):
+        """The worst observed instance (plan's Evidence section): an anchor
+        in January, a flyer stating a December date the resolver cannot read
+        (the month text is unparseable) beside a weekday. Pre-fix, the
+        weekday fallback silently returned the next Sunday from the January
+        anchor — 6 days out, not 339 — with no flag at all. Post-fix this
+        must resolve to no date, not a plausible-looking nearby Sunday: the
+        visible blank is the safe failure, not the confident wrong answer."""
+        post_ts = _post_at(2026, 1, 5)
+        resolved = resolve_event_datetime(
+            date_text="Domingo • 20/DEZEMBRÃO", time_text=None, post_timestamp=post_ts,
+        )
+        assert resolved.starts_at is None, resolved
+        assert resolved.needs_review is True, resolved
+        assert resolved.review_reason == REASON_MISSING_DATE, resolved
+
+    def test_guard_does_not_fire_for_a_bare_weekday_with_no_numeral(self):
+        # Trap A: the guard is "numeral present AND unresolved", never
+        # merely "weekday present" — a bare/qualified weekday with nothing
+        # competing must keep resolving exactly as before this fix.
+        post_ts = _post_at(2026, 8, 3)  # Monday
+        resolved = resolve_event_datetime(
+            date_text="este sábado", time_text=None, post_timestamp=post_ts,
+        )
+        assert resolved.starts_at is not None, resolved
+        assert resolved.starts_at.date().weekday() == 5, resolved.starts_at
+        assert resolved.needs_review is False, resolved
+
+    def test_recurrence_is_unaffected_even_with_a_competing_numeral(self):
+        # Trap B: the recurrence branch runs BEFORE the new guard and must
+        # never be dragged into it, even when a bare numeral sits right next
+        # to the recurring weekday — adversarial input chosen specifically
+        # to prove the guard cannot leak into this path.
+        post_ts = _post_at(2026, 7, 13)  # Monday
+        resolved = resolve_event_datetime(
+            date_text="toda quinta dia 15", time_text=None, post_timestamp=post_ts,
+        )
+        assert resolved.is_recurring is True, resolved
+        assert resolved.starts_at is not None, resolved
+        assert resolved.starts_at.date().isoformat() == "2026-07-16", resolved.starts_at
+        assert resolved.needs_review is False, resolved
+
+
+# Defect 2b: disagreement is a third outcome — never silently trusted either
+# way.
+class TestWeekdayMismatchIsFlaggedNotTrusted:
+    def test_disagreeing_weekday_is_flagged_and_explicit_date_wins(self):
+        # 5 September 2026 is a Saturday, not a Sunday: a genuine flyer typo.
+        post_ts = _post_at(2026, 8, 3)
+        resolved = resolve_event_datetime(
+            date_text="Domingo • 05/SET", time_text=None, post_timestamp=post_ts,
+        )
+        assert resolved.starts_at is not None, resolved
+        assert resolved.starts_at.date().isoformat() == "2026-09-05", resolved.starts_at
+        assert resolved.needs_review is True, resolved
+        assert resolved.review_reason == REASON_WEEKDAY_MISMATCH, resolved
+
+    def test_defect_1_fix_also_closes_the_original_339_day_evidence(self):
+        """Once "dez" is a parseable abbreviation, the plan's original
+        measured bug case ("Domingo • 20/DEZ" from a 2026-01-05 anchor) is no
+        longer a blank OR a mismatch: 20 December 2026 genuinely IS a Sunday,
+        so the explicit date and the stated weekday agree and this resolves
+        silently, correctly, to the true date — the 339-day miss it used to
+        produce is simply gone."""
+        post_ts = _post_at(2026, 1, 5)
+        resolved = resolve_event_datetime(
+            date_text="Domingo • 20/DEZ", time_text=None, post_timestamp=post_ts,
+        )
+        assert resolved.starts_at is not None, resolved
+        assert resolved.starts_at.date().isoformat() == "2026-12-20", resolved.starts_at
+        assert resolved.needs_review is False, resolved
+        assert resolved.review_reason is None, resolved

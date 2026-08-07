@@ -1152,8 +1152,13 @@ EVENT_EXTRACTION_POSTS_TOTAL = Counter(
     ["outcome"],  # extracted, not_event_like, no_date, low_confidence,
                   # extraction_failed, skipped_seen, unread_time, truncated
                   # (a venue post's multi-event response cut off mid-list —
-                  # plans/260806_venue-post-multi-event.md; a stale outcome
-                  # list here is how the next reader misreads a dashboard)
+                  # plans/260806_venue-post-multi-event.md), weekday_mismatch
+                  # (the explicit date resolved but disagreed with a stated
+                  # weekday — plans/260807_date-resolution-correctness.md).
+                  # A rise in "no_date" after that same change is the date
+                  # resolver correctly refusing a guess it used to silently
+                  # make, not a regression — a stale outcome list here is how
+                  # the next reader misreads a dashboard.
 )
 
 # Cumulative vision-model spend on event extraction, in USD, priced from the
