@@ -1228,12 +1228,19 @@ EVENT_VENUE_LINK_TOTAL = Counter(
     ["method", "result"],
 )
 
-# The operator-load signal, and the number that says whether the auto-link
-# floor/margin are set sensibly: a queue that only grows means the gates are
-# too strict, not that the resolver found nothing.
+# The operator-load signal. Widened by plans/260807_review-queue-
+# completeness-and-venue-names.md: this NO LONGER means "ambiguous promoter
+# links" — it is every event awaiting a human decision (anything
+# `pending_review`, which every persisted event starts as, plus any promoter
+# event still lacking a location decision even once its data is confirmed;
+# see VenueRepository.list_events_awaiting_decision). A dashboard built
+# against the old, narrower meaning will silently start reading "unconfirmed
+# events" instead of "ambiguous promoter links" — re-baseline any alert
+# threshold rather than assume the old scale still applies.
 EVENT_REVIEW_QUEUE_DEPTH = Gauge(
     "event_review_queue_depth",
-    "Promoter events awaiting a location decision (location_resolution IS NULL)",
+    "Events awaiting an operator decision (pending_review, or a promoter "
+    "event with no location decision yet)",
 )
 
 # plans/260806_event-cover-presign.md — `result` distinguishes a working sign

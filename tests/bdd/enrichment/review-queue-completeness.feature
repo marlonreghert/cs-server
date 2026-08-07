@@ -1,4 +1,3 @@
-@wip
 Feature: Review queue completeness and venue names
   As the operator of the event pipeline
   I want the review queue to hold every event awaiting my decision, each showing

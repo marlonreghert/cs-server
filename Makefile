@@ -101,6 +101,7 @@ test-unit:
 		tests/test_photo_classification.py \
 		tests/test_classification_batch_retry.py \
 		tests/test_photo_classifier_error_handling.py \
+		tests/test_review_queue_completeness.py \
 		-v
 
 test-integration:

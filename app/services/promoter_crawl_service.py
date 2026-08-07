@@ -591,7 +591,11 @@ class PromoterCrawlService:
                 })
 
     def _update_review_queue_gauge(self) -> None:
-        EVENT_REVIEW_QUEUE_DEPTH.set(len(self.venue_dao.list_events_pending_location() or []))
+        # Widened alongside list_events_awaiting_decision (plans/260807_
+        # review-queue-completeness-and-venue-names.md) — see that DAO
+        # method's docstring, and the metric's own definition in
+        # app/metrics.py, for what "review queue depth" means now.
+        EVENT_REVIEW_QUEUE_DEPTH.set(len(self.venue_dao.list_events_awaiting_decision() or []))
 
 
 __all__ = [

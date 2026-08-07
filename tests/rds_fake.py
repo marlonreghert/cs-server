@@ -388,9 +388,24 @@ class InMemoryRdsVenueStore:
         return out
 
     # ── events.event (plans/260804_instagram-event-extraction.md) ────────────
+    def _with_venue_name(self, row: dict) -> dict:
+        """Mirror RdsVenueStore._EVENT_SELECT's `LEFT JOIN venues.venue` —
+        every event-returning method routes through this so `venue_name` is
+        never something a caller has to remember to attach separately.
+        LEFT, not INNER: a NULL venue_id (never attributed) and a venue_id
+        with no matching row (dangling reference) both resolve to
+        `venue_name: None` here, exactly like a real LEFT JOIN, and the event
+        itself is still returned either way (plans/260807_review-queue-
+        completeness-and-venue-names.md)."""
+        out = copy.deepcopy(row)
+        venue_id = out.get("venue_id")
+        venue = self.venues.get(venue_id) if venue_id else None
+        out["venue_name"] = venue.get("venue_name") if venue else None
+        return out
+
     def get_event(self, event_id: str) -> Optional[dict]:
         row = self.events.get(event_id)
-        return copy.deepcopy(row) if row else None
+        return self._with_venue_name(row) if row else None
 
     def get_event_by_source(self, source_handle: str, source_shortcode: str) -> Optional[dict]:
         for row in self.events.values():
@@ -398,7 +413,7 @@ class InMemoryRdsVenueStore:
                 row.get("source_handle") == source_handle
                 and row.get("source_shortcode") == source_shortcode
             ):
-                return copy.deepcopy(row)
+                return self._with_venue_name(row)
         return None
 
     def list_events_by_source(self, source_handle: str, source_shortcode: str) -> list[dict]:
@@ -406,7 +421,7 @@ class InMemoryRdsVenueStore:
         — get_event_by_source returns at most one row and is unsafe once a
         post can hold several."""
         out = [
-            copy.deepcopy(row) for row in self.events.values()
+            self._with_venue_name(row) for row in self.events.values()
             if row.get("source_handle") == source_handle
             and row.get("source_shortcode") == source_shortcode
         ]
@@ -450,7 +465,7 @@ class InMemoryRdsVenueStore:
         row.setdefault("last_seen_at", now)
         row["updated_at"] = now
         self.events[event_id] = row
-        return copy.deepcopy(row)
+        return self._with_venue_name(row)
 
     def update_event(self, event_id: str, fields: dict) -> Optional[dict]:
         """Partial update: only the keys in `fields` change. Returns None
@@ -464,7 +479,7 @@ class InMemoryRdsVenueStore:
         row.update(fields)
         row["updated_at"] = _now()
         self.events[event_id] = row
-        return copy.deepcopy(row)
+        return self._with_venue_name(row)
 
     def list_events(
         self, *, venue_id: Optional[str] = None, status: Optional[str] = None,
@@ -481,21 +496,38 @@ class InMemoryRdsVenueStore:
                 continue
             if until is not None and (starts_at is None or starts_at > until):
                 continue
-            out.append(copy.deepcopy(row))
+            out.append(self._with_venue_name(row))
         out.sort(key=lambda r: (r.get("starts_at") is None, r.get("starts_at"), r["event_id"]))
         return out
 
-    def list_events_pending_location(self) -> list[dict]:
-        """Promoter-post events awaiting a location decision — mirrors the
-        real store's `location_resolution IS NULL` predicate. An `unresolved`
-        event was decided (below the floor) and is excluded here, same as an
-        `auto`/`manual` one — this is what makes it distinguishable from a
-        queued one."""
-        out = [
-            copy.deepcopy(row) for row in self.events.values()
-            if row.get("source_kind") == "promoter_post"
-            and row.get("location_resolution") is None
-        ]
+    def list_events_awaiting_decision(self) -> list[dict]:
+        """Every event still awaiting a human decision — mirrors
+        RdsVenueStore.list_events_awaiting_decision (plans/260807_review-
+        queue-completeness-and-venue-names.md), replacing the old, narrower
+        `list_events_pending_location` predicate that excluded every
+        venue-post event by construction.
+
+        Union of:
+          - `status == "pending_review"` (nobody has confirmed the data), or
+          - `source_kind == "promoter_post" and location_resolution is None
+            and status not in ("rejected", "superseded")` (nobody has decided
+            where it happens, and this isn't an event an operator already
+            finished with — see the real DAO's docstring for why that guard
+            is needed: /reject and the supersede path both leave
+            location_resolution untouched).
+        """
+        out = []
+        for row in self.events.values():
+            status = row.get("status")
+            if status == "pending_review":
+                out.append(self._with_venue_name(row))
+                continue
+            if (
+                row.get("source_kind") == "promoter_post"
+                and row.get("location_resolution") is None
+                and status not in ("rejected", "superseded")
+            ):
+                out.append(self._with_venue_name(row))
         out.sort(key=lambda r: (r.get("first_seen_at"), r["event_id"]))
         return out
 
