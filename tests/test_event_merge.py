@@ -278,3 +278,111 @@ class TestConfirmedCanonicalIsFrozen:
         duplicate = _event("evt_b", title="Noite da Patroa")
         _changed, reason = merge_event_fields(canonical, duplicate)
         assert reason is None
+
+    def test_a_missing_operator_edited_fields_key_behaves_like_null(self):
+        """Migration 0026's raw-SQL-built dicts never carry this key at all
+        (it postdates 0026 — migration 0027) — `.get(...)` must read that
+        exactly like an explicit `None`, so the migration's replay always
+        lands in the legacy whole-row-freeze branch, unchanged from what it
+        shipped with."""
+        canonical = _event("evt_a", status="confirmed", price_text="R$30")
+        assert "operator_edited_fields" not in canonical
+        duplicate = _event("evt_b", price_text="R$99")
+        changed, reason = merge_event_fields(canonical, duplicate)
+        assert changed == {}
+        assert reason == REVIEW_REASON_DIVERGES_FROM_CONFIRMED
+
+
+class TestFieldLevelProtectionOnTheMergePath:
+    """plans/260807_auto-accept-and-field-level-protection.md's coordination
+    note: a CONFIRMED canonical whose `operator_edited_fields` is a real
+    list applies the SAME per-field table a same-post re-extraction does
+    (app.services.event_reconciliation.apply_operator_field_protection) —
+    proven here at the same level TestConfirmedCanonicalIsFrozen already
+    uses (a direct `merge_event_fields` call), since two events reaching
+    this function are, by construction, already identity-matched (see
+    compute_event_identity) and title specifically can therefore never
+    genuinely disagree here post-normalization — exactly why these tests
+    exercise a non-title edited field (`price_text`) for the "edited field
+    genuinely differs" case, while a separate test still proves an edited
+    TITLE's exact casing is never silently re-cased by an unedited fold."""
+
+    def test_a_null_new_value_never_overwrites_a_known_one(self):
+        canonical = _event(
+            "evt_a", status="confirmed", operator_edited_fields=["title"],
+            price_text="R$30",
+        )
+        duplicate = _event("evt_b", price_text=None)
+        changed, _reason = merge_event_fields(canonical, duplicate)
+        assert "price_text" not in changed
+
+    def test_an_unedited_field_folds_in_from_the_more_recently_seen_source(self):
+        canonical = _event(
+            "evt_a", status="confirmed", operator_edited_fields=["title"],
+            description="Old info", last_seen_at=_D1,
+        )
+        duplicate = _event("evt_b", description="New info", last_seen_at=_D2)
+        changed, reason = merge_event_fields(canonical, duplicate)
+        assert changed["description"] == "New info"
+        assert reason is None  # unedited fold-in never flags
+
+    def test_a_less_recently_seen_duplicates_unedited_field_never_overwrites(self):
+        canonical = _event(
+            "evt_a", status="confirmed", operator_edited_fields=["title"],
+            description="Current info", last_seen_at=_D2,
+        )
+        duplicate = _event("evt_b", description="Stale info", last_seen_at=_D1)
+        changed, _reason = merge_event_fields(canonical, duplicate)
+        assert "description" not in changed
+
+    def test_an_edited_field_that_genuinely_differs_is_kept_and_flagged(self):
+        """The exact shape the coordination note asks for: an
+        OPERATOR-EDITED field (here `price_text`, standing in for `title`,
+        which can never genuinely disagree at this point — see the class
+        docstring) survives a contradicting duplicate and the divergence is
+        flagged, while an unedited field in the SAME call is absorbed."""
+        canonical = _event(
+            "evt_a", status="confirmed", operator_edited_fields=["price_text"],
+            price_text="R$30 corrigido", description="Old info", last_seen_at=_D1,
+        )
+        duplicate = _event(
+            "evt_b", price_text="R$99", description="New info", last_seen_at=_D2,
+        )
+        changed, reason = merge_event_fields(canonical, duplicate)
+        assert "price_text" not in changed  # kept — never silently overwritten
+        assert changed["description"] == "New info"  # absorbed — unedited
+        assert reason == REVIEW_REASON_DIVERGES_FROM_CONFIRMED  # flagged
+
+    def test_an_edited_titles_exact_casing_survives_an_unedited_fold(self):
+        """Title can never genuinely DISAGREE post-normalization once two
+        events reach this function (compute_event_identity groups on it) —
+        but that must not be confused with "title is free to be re-cased".
+        An operator who edited title keeps their EXACT casing even when a
+        duplicate states the model's own (differently-cased) form."""
+        canonical = _event(
+            "evt_a", status="confirmed", operator_edited_fields=["title"],
+            title="Noite da Patroa - Edição Especial",
+        )
+        duplicate = _event("evt_b", title="NOITE DA PATROA - EDIÇÃO ESPECIAL")
+        changed, _reason = merge_event_fields(canonical, duplicate)
+        assert "title" not in changed
+        assert canonical["title"] == "Noite da Patroa - Edição Especial"
+
+    def test_lineup_unions_even_when_the_canonical_is_confirmed_and_edited(self):
+        canonical = _event(
+            "evt_a", status="confirmed", operator_edited_fields=["title"],
+            lineup=["DJ A"],
+        )
+        duplicate = _event("evt_b", lineup=["DJ B"])
+        changed, _reason = merge_event_fields(canonical, duplicate)
+        assert changed["lineup"] == ["DJ A", "DJ B"]
+
+    def test_a_legacy_null_operator_edited_fields_keeps_whole_row_protection(self):
+        canonical = _event(
+            "evt_a", status="confirmed", operator_edited_fields=None,
+            price_text="R$30", description="Original",
+        )
+        duplicate = _event("evt_b", price_text="R$999", description="Something else")
+        changed, reason = merge_event_fields(canonical, duplicate)
+        assert changed == {}
+        assert reason == REVIEW_REASON_DIVERGES_FROM_CONFIRMED

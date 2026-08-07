@@ -76,10 +76,23 @@ a scalar: it is UNIONED, preserving first-seen order and dropping duplicates
 — a teaser naming two DJs and a later flyer naming five yields five, never a
 contested choice.
 
-A CONFIRMED canonical's fields are never recomputed by a merge: `duplicate`
-never overwrites them. A difference is still flagged (divergence, not
-disagreement — the operator's confirmed record is the one specific answer
-being diverged FROM, not one of several equally-uncertain answers).
+A CONFIRMED canonical with NO record of which fields an operator edited
+(`operator_edited_fields IS NULL` — a row confirmed before that column
+existed, or confirmed without ever being PATCHed) is frozen exactly as
+before: `duplicate` never overwrites any field, and a difference is still
+flagged (divergence, not disagreement — the operator's confirmed record is
+the one specific answer being diverged FROM, not one of several equally-
+uncertain answers). See plans/260807_auto-accept-and-field-level-
+protection.md's coordination note: this whole-row rule is now the LEGACY
+fallback, not the only behaviour — a CONFIRMED canonical whose operator_
+edited_fields IS a real list instead applies the SAME field-level table
+`app.services.event_reconciliation` applies for a same-post re-extraction
+(`apply_operator_field_protection`, imported from there rather than
+reimplemented — the two runtime paths that can touch a confirmed event's
+fields must never drift apart on this again): a field the operator never
+edited still folds in `duplicate`'s answer (picking whichever source was
+more recently seen, same as an unprotected canonical already does below);
+an EDITED field holds and gets flagged only when it genuinely disagrees.
 """
 from __future__ import annotations
 
@@ -88,7 +101,13 @@ from typing import Optional
 
 from app.metrics import EVENT_MERGE_TOTAL, EVENT_SOURCES_PER_EVENT
 from app.services.event_identity import normalize_title
-from app.services.event_reconciliation import REVIEW_REASON_DIVERGES_FROM_CONFIRMED
+from app.services.event_reconciliation import (
+    PROTECTABLE_EVENT_FIELDS as _SCALAR_MERGE_FIELDS,
+    REVIEW_REASON_DIVERGES_FROM_CONFIRMED,
+    apply_operator_field_protection,
+    event_field_is_absent as _is_empty,
+    union_lineup as _union_lineup,
+)
 
 # Flagged on a (non-confirmed) canonical event when the fold hit a genuine,
 # unresolvable scalar disagreement between two sources — never silently
@@ -98,16 +117,16 @@ REVIEW_REASON_SOURCES_DISAGREE = "sources_disagree"
 STATUS_CONFIRMED = "confirmed"
 RESOLUTION_MANUAL = "manual"
 
-# Scalars merged by §C. Identity columns (event_id, venue_id, starts_at —
-# starts_at is part of identity, so two events reaching a merge already
-# AGREE on the date; only the full timestamp can still differ, which is why
-# it participates in scalar merge too), attribution (location_resolution/
-# location_confidence/linked_by/linked_at), status, and review_reason are
-# never touched by this loop — they are handled explicitly by the caller.
-_SCALAR_MERGE_FIELDS = (
-    "starts_at", "ends_at", "is_recurring", "recurrence_text", "title",
-    "description", "ticket_url", "price_text", "location_text", "confidence",
-)
+# `_SCALAR_MERGE_FIELDS` (imported above as `PROTECTABLE_EVENT_FIELDS`) is
+# the SAME set app.services.event_reconciliation protects for a same-post
+# re-extraction — the two must never drift apart again (see the module
+# docstring's coordination note). Identity columns (event_id, venue_id,
+# starts_at — starts_at is part of identity, so two events reaching a merge
+# already AGREE on the date; only the full timestamp can still differ,
+# which is why it participates in scalar merge too), attribution
+# (location_resolution/location_confidence/linked_by/linked_at), status,
+# and review_reason are never touched by this loop — they are handled
+# explicitly by the caller.
 
 _EPOCH = datetime.min.replace(tzinfo=timezone.utc)
 
@@ -148,17 +167,6 @@ def choose_canonical(events: list[dict]) -> Optional[dict]:
     return min(events, key=lambda e: e["event_id"])
 
 
-def _union_lineup(*lineups) -> list:
-    seen: set = set()
-    out: list = []
-    for lineup in lineups:
-        for item in (lineup or []):
-            if item not in seen:
-                seen.add(item)
-                out.append(item)
-    return out
-
-
 def _values_agree(field: str, a, b) -> bool:
     """Plain equality, EXCEPT `title`: two events reaching a merge already
     agree on `normalize_title(title)` by construction (that IS the identity
@@ -166,38 +174,14 @@ def _values_agree(field: str, a, b) -> bool:
     PATROA" vs "Noite da Patroa" as a disagreement over casing/accents that
     was never really information in conflict, defeating the exact merge
     §B's "titles differing only in case and accents" scenario exists to
-    prove clean."""
+    prove clean. This is why `values_equal` is pluggable in
+    `event_reconciliation.apply_operator_field_protection`: a same-post
+    re-extraction (that module's OWN `_values_equal`) compares title RAW —
+    see its docstring for why cosmetic re-casing is still worth a look
+    there, unlike here."""
     if field == "title":
         return normalize_title(a) == normalize_title(b)
     return a == b
-
-
-def _time_known(event: dict) -> bool:
-    """Whether `event`'s `starts_at` carries a REAL stated clock time, or a
-    defaulted midnight standing in for "no time was stated"
-    (app.services.event_date_resolver.resolve_event_datetime: "a stated
-    '00h' and a defaulted midnight land on the exact same starts_at
-    instant"). Read from the SOURCE's own `raw_extraction["time_known"]`
-    (folded in by both extraction paths) — the only place this distinction
-    still exists once `starts_at` itself is a plain datetime. Defaults True
-    (never suppress a value this function cannot prove is a default) when
-    the flag is absent, e.g. an extraction_failed placeholder."""
-    raw = event.get("raw_extraction")
-    if not isinstance(raw, dict) or "time_known" not in raw:
-        return True
-    return bool(raw["time_known"])
-
-
-def _is_empty(field: str, value, event: dict) -> bool:
-    """A teaser naming only a date resolves `starts_at` to that date at a
-    DEFAULTED midnight (never `None`) — treated as EMPTY for merge purposes
-    so a later post's real time fills it in cleanly instead of being read as
-    a contradiction (§C's "complement, don't overwrite"). Every other field
-    (including `starts_at` when a real time WAS stated) uses plain
-    None/empty-string emptiness."""
-    if field == "starts_at" and value is not None:
-        return not _time_known(event)
-    return value in (None, "")
 
 
 def merge_event_fields(canonical: dict, duplicate: dict) -> tuple[dict, Optional[str]]:
@@ -209,21 +193,63 @@ def merge_event_fields(canonical: dict, duplicate: dict) -> tuple[dict, Optional
       - `review_reason` is the value the canonical row's `review_reason`
         should become (which may be unchanged from what it already was).
 
-    A confirmed canonical is frozen: `changed_fields` is always empty, and
-    `review_reason` becomes `REVIEW_REASON_DIVERGES_FROM_CONFIRMED` the
-    moment `duplicate` states a non-empty value for any scalar that differs
-    from the canonical's own — never silently absorbed, never overwritten.
+    A confirmed canonical with `operator_edited_fields IS NULL` (a legacy
+    row — confirmed before that column existed, or confirmed without ever
+    being PATCHed) is frozen exactly as this shipped originally:
+    `changed_fields` is always empty, and `review_reason` becomes
+    `REVIEW_REASON_DIVERGES_FROM_CONFIRMED` the moment `duplicate` states a
+    non-empty value for any scalar that differs from the canonical's own.
+    Pinned deliberately: migration 0026's one-time historical collapse
+    calls this SAME function directly against rows its own raw SQL built —
+    rows that NEVER carry an `operator_edited_fields` key at all, since
+    that column (migration 0027) postdates 0026 — so `canonical.get(
+    "operator_edited_fields")` is always `None` there and this branch is
+    the ONLY one 0026's replay can ever reach, unchanged from what it
+    shipped with, with no special-casing required.
+
+    A confirmed canonical whose `operator_edited_fields` IS a real list
+    (plans/260807_auto-accept-and-field-level-protection.md's coordination
+    note) instead applies the SAME per-field table a same-post
+    re-extraction does — `app.services.event_reconciliation.
+    apply_operator_field_protection`, imported rather than reimplemented:
+    a field the operator never touched still folds in `duplicate`'s answer
+    (recency-broken, exactly like an unprotected canonical below); an
+    EDITED field holds and is flagged only when it genuinely disagrees.
     """
     if canonical.get("status") == STATUS_CONFIRMED:
-        diverges = any(
-            not _is_empty(field, duplicate.get(field), duplicate)
-            and not _values_agree(field, duplicate.get(field), canonical.get(field))
-            for field in _SCALAR_MERGE_FIELDS
+        edited_fields = canonical.get("operator_edited_fields")
+        if edited_fields is None:
+            diverges = any(
+                not _is_empty(field, duplicate.get(field), duplicate)
+                and not _values_agree(field, duplicate.get(field), canonical.get(field))
+                for field in _SCALAR_MERGE_FIELDS
+            )
+            review_reason = (
+                REVIEW_REASON_DIVERGES_FROM_CONFIRMED if diverges else canonical.get("review_reason")
+            )
+            return {}, review_reason
+
+        # Recency decided ONCE per call (not per field) — the same "more
+        # recently seen source wins a disagreement" rule the unprotected
+        # branch below already applies, just expressed as a fixed pick
+        # between the two whole rows rather than a per-field comparison.
+        prefer_duplicate = _recency(duplicate) > _recency(canonical)
+
+        def _resolve_unedited_conflict(field: str, existing_value, new_value):
+            del field
+            return new_value if prefer_duplicate else existing_value
+
+        changed, diverges = apply_operator_field_protection(
+            existing=canonical, new=duplicate, fields=_SCALAR_MERGE_FIELDS,
+            values_equal=_values_agree, resolve_conflict=_resolve_unedited_conflict,
         )
+        merged_lineup = _union_lineup(canonical.get("lineup"), duplicate.get("lineup"))
+        if merged_lineup != (canonical.get("lineup") or []):
+            changed["lineup"] = merged_lineup
         review_reason = (
             REVIEW_REASON_DIVERGES_FROM_CONFIRMED if diverges else canonical.get("review_reason")
         )
-        return {}, review_reason
+        return changed, review_reason
 
     changed: dict = {}
     disagreed = False

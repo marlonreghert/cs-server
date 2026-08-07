@@ -158,71 +158,67 @@ def is_clean_extraction(
     )
 
 
-# ── field-level protection for a confirmed row's re-extraction (§B) ─────────
-# Content fields eligible for the per-field decision table below — the SAME
-# set app.services.event_merge._SCALAR_MERGE_FIELDS folds for a CROSS-post
-# merge, duplicated here (not imported) because event_merge imports
-# REVIEW_REASON_DIVERGES_FROM_CONFIRMED FROM this module already; importing
-# back would cycle. `lineup` is handled separately, just below — it UNIONS
-# unconditionally, never contested, even for an operator-edited event.
-_PROTECTABLE_FIELDS = (
+# ── field-level protection for a confirmed/canonical row (§B) ───────────────
+# SHARED between this module's own confirmed-branch (a same-post re-
+# extraction, below) and app.services.event_merge's confirmed-canonical
+# branch (a CROSS-post merge) — coordination note on plans/260807_auto-
+# accept-and-field-level-protection.md: the two used to implement the same
+# table twice (once here, once drifting in event_merge.py's blunt "always
+# freeze" rule) and that inconsistency is worse than either rule alone, since
+# an operator cannot predict which of the two runtime paths will touch their
+# edit next. event_merge.py imports these names FROM here (never the other
+# way — it already imports REVIEW_REASON_DIVERGES_FROM_CONFIRMED from this
+# module, and this module must never import back, or the two would cycle).
+#
+# `PROTECTABLE_EVENT_FIELDS` is the SAME set app.services.event_merge used to
+# call `_SCALAR_MERGE_FIELDS`; `event_field_is_absent` is the same rule it
+# used to call `_is_empty`. Both callers agree on these EXACTLY — only the
+# equality check and the conflict resolution for an unedited, differing
+# field are caller-specific (see `apply_operator_field_protection`).
+PROTECTABLE_EVENT_FIELDS = (
     "starts_at", "ends_at", "is_recurring", "recurrence_text", "title",
     "description", "ticket_url", "price_text", "location_text", "confidence",
 )
 
-# Fields whose "empty" value is the empty string as well as None — comparing
-# a fresh "" against a stored real value must never register as a
-# meaningful equality miss, but must still count as "absent" for the
-# never-degrade rule.
-_TEXT_FIELDS = (
-    "title", "description", "recurrence_text", "ticket_url", "price_text",
-    "location_text",
-)
 
-
-def _time_known(event: dict) -> bool:
+def event_time_known(event: dict) -> bool:
     """Whether `event`'s `starts_at` carries a REAL stated clock time, or a
-    defaulted midnight standing in for "no time was stated" — same
-    distinction app.services.event_merge._time_known reads, from the same
-    `raw_extraction["time_known"]` flag both extraction paths fold in.
-    Defaults True (never suppress a value this function cannot prove is a
-    default) when the flag is absent."""
+    defaulted midnight standing in for "no time was stated"
+    (app.services.event_date_resolver.resolve_event_datetime: "a stated
+    '00h' and a defaulted midnight land on the exact same starts_at
+    instant"). Read from the SOURCE's own `raw_extraction["time_known"]`
+    (folded in by both extraction paths) — the only place this distinction
+    still exists once `starts_at` itself is a plain datetime. Defaults True
+    (never suppress a value this function cannot prove is a default) when
+    the flag is absent, e.g. an extraction_failed placeholder."""
     raw = event.get("raw_extraction")
     if not isinstance(raw, dict) or "time_known" not in raw:
         return True
     return bool(raw["time_known"])
 
 
-def _is_absent(field: str, value, event: dict) -> bool:
+def event_field_is_absent(field: str, value, event: dict) -> bool:
     """`value` counts as null/absent for the per-field table's FIRST rule
     ("new value null/absent -> keep existing — never degrade"). A teaser
     naming only a date resolves `starts_at` to a DEFAULTED midnight (never
-    None) — treated as absent here too, mirroring event_merge's identical
-    `_is_empty` rule, so a later post's real time can still fill it in
-    without being read as a contradiction."""
+    `None`) — treated as absent here too, so a later post's real time can
+    still fill it in without being read as a contradiction. Every other
+    field uses plain None/empty-string emptiness — `value in (None, "")`
+    never matches a real value (0.0, False, ...) for a non-text field, so
+    this is safe to apply uniformly across every field in
+    `PROTECTABLE_EVENT_FIELDS` without a separate text/non-text split."""
     if field == "starts_at" and value is not None:
-        return not _time_known(event)
-    if field in _TEXT_FIELDS:
-        return value in (None, "")
-    return value is None
+        return not event_time_known(event)
+    return value in (None, "")
 
 
-def _values_equal(field: str, a, b) -> bool:
-    """"new value equals existing -> nothing" — plain equality, except the
-    text fields, where an empty string and None both mean "nothing stated"
-    and must never register as a change."""
-    if field in _TEXT_FIELDS:
-        return (a or None) == (b or None)
-    return a == b
-
-
-def _union_lineup(*lineups) -> list:
-    """Same rule app.services.event_merge._union_lineup already applies for
-    a cross-post merge: preserve first-seen order, drop duplicates. A later
-    post naming more performers is additive, never a contradiction — true
-    even when the event's title has been operator-edited, since the
-    operator never touched the lineup by construction of this call (lineup
-    is not itself frozen by the per-field table below)."""
+def union_lineup(*lineups) -> list:
+    """Preserve first-seen order, drop duplicates. A later post naming more
+    performers is additive, never a contradiction — true even when the
+    event's title has been operator-edited, since neither caller ever
+    treats `lineup` as a field a PATCH can protect (it is not a member of
+    `PROTECTABLE_EVENT_FIELDS`; both callers union it unconditionally,
+    outside the per-field table below)."""
     seen: set = set()
     out: list = []
     for lineup in lineups:
@@ -233,26 +229,104 @@ def _union_lineup(*lineups) -> list:
     return out
 
 
+def apply_operator_field_protection(
+    *,
+    existing: dict,
+    new: dict,
+    fields: tuple,
+    values_equal: Callable[[str, object, object], bool],
+    resolve_conflict: Callable[[str, object, object], object],
+) -> tuple[dict, bool]:
+    """The per-field decision table (§B), shared by BOTH callers for a row
+    whose `operator_edited_fields` is a REAL list (never call this for a
+    NULL one — see each caller's own legacy branch, which the coordination
+    note requires stay exactly what it already does today, since the two
+    callers' legacy/whole-row rules pre-date this table and genuinely
+    differ from each other by design):
+      - `new`'s value for a field is null/absent -> keep `existing`'s
+        (never degrade a known value with one a later source lacks);
+      - equal (per `values_equal`) -> no-op;
+      - the field is NOT in `existing["operator_edited_fields"]` and the
+        two differ -> resolve via `resolve_conflict` (caller-specific: a
+        same-post re-extraction always prefers the fresh answer; a cross-
+        post merge prefers whichever source was more recently seen —
+        exactly what a non-confirmed canonical already does);
+      - the field IS operator-edited and the two differ -> keep `existing`'s
+        value, and this call reports a divergence for the caller to flag.
+
+    `values_equal` and `resolve_conflict` are pluggable because the two
+    callers genuinely disagree on ONE thing: title equality. A same-post
+    re-extraction compares it RAW (a cosmetic re-casing between two runs of
+    the identical post is still worth an operator's eye); a cross-post
+    merge compares it NORMALIZED (two posts about the same night already
+    agree post-normalization BY CONSTRUCTION of the identity they were
+    grouped on — see event_merge.compute_event_identity — so a raw-string
+    difference there is never real information). `lineup` is deliberately
+    NOT one of `fields` here — both callers union it themselves, outside
+    this table, unconditionally.
+
+    Returns `(changed_fields, diverges)`. `changed_fields` never includes
+    `lineup` or any identity/bookkeeping column — the caller's concern.
+    """
+    edited_set = set(existing["operator_edited_fields"])
+    changed: dict = {}
+    diverges = False
+    for field in fields:
+        new_value = new.get(field)
+        if event_field_is_absent(field, new_value, new):
+            continue  # never degrade a known value with a null/absent one
+        existing_value = existing.get(field)
+        if values_equal(field, new_value, existing_value):
+            continue  # nothing to do
+        if field in edited_set:
+            diverges = True  # keep the operator's value, flag the divergence
+            continue
+        resolved = resolve_conflict(field, existing_value, new_value)
+        if not values_equal(field, resolved, existing_value):
+            changed[field] = resolved
+    return changed, diverges
+
+
+# Fields whose "empty" value is the empty string as well as None, for
+# `_values_equal` below — comparing a fresh "" against a stored real value
+# must never register as a meaningful equality miss.
+_TEXT_FIELDS = (
+    "title", "description", "recurrence_text", "ticket_url", "price_text",
+    "location_text",
+)
+
+
+def _values_equal(field: str, a, b) -> bool:
+    """This module's OWN `values_equal` for `apply_operator_field_protection`
+    — plain equality, folding None and "" together for text fields (a
+    same-post re-extraction's title is compared RAW, never normalized; see
+    that function's docstring for why this differs from event_merge's own
+    version, which normalizes title specifically)."""
+    if field in _TEXT_FIELDS:
+        return (a or None) == (b or None)
+    return a == b
+
+
 def _confirmed_update_fields(existing: dict, prepared: dict) -> tuple[dict, bool]:
     """The confirmed-row re-extraction rule (§B/§3): `existing.
     operator_edited_fields` is NULL for a legacy row (migrated before this
     column existed, or confirmed without ever being PATCHed) — for those,
     keep TODAY'S whole-row protection unchanged (only title/starts_at are
     compared, matching the exact legacy divergence check; no content field
-    ever updates). Once it is a real list, apply the finer per-field table:
-    a null/absent fresh value never degrades a known one; an unedited field
-    differing from the fresh answer updates; an EDITED field differing from
-    the fresh answer keeps the operator's value and flags the divergence.
-    `lineup` unions regardless, in both branches — it is additive, never a
-    contradiction to protect against (see plans/260807_auto-accept-and-
-    field-level-protection.md).
+    ever updates). Once it is a real list, apply the SHARED per-field table
+    (`apply_operator_field_protection`) — a null/absent fresh value never
+    degrades a known one; an unedited field differing from the fresh
+    answer updates; an EDITED field differing from the fresh answer keeps
+    the operator's value and flags the divergence. `lineup` unions
+    regardless, in both branches — it is additive, never a contradiction to
+    protect against (see plans/260807_auto-accept-and-field-level-
+    protection.md).
 
     Returns `(changed_fields, diverges)`: `changed_fields` never includes
     identity/bookkeeping columns (the caller adds those), and `diverges`
     tells the caller whether to set `REVIEW_REASON_DIVERGES_FROM_CONFIRMED`.
     """
     edited_fields = existing.get("operator_edited_fields")
-    changed: dict = {}
 
     if edited_fields is None:
         # Legacy/never-edited row: which fields, if any, an operator
@@ -262,23 +336,17 @@ def _confirmed_update_fields(existing: dict, prepared: dict) -> tuple[dict, bool
         # title/starts_at are compared, nothing content-level ever updates.
         title_diverges = (prepared.get("title") or None) != (existing.get("title") or None)
         date_diverges = prepared.get("starts_at") != existing.get("starts_at")
-        return changed, (title_diverges or date_diverges)
+        return {}, (title_diverges or date_diverges)
 
-    edited_set = set(edited_fields)
-    diverges = False
-    for field in _PROTECTABLE_FIELDS:
-        new_value = prepared.get(field)
-        if _is_absent(field, new_value, prepared):
-            continue  # never degrade a known value with a null/absent one
-        existing_value = existing.get(field)
-        if _values_equal(field, new_value, existing_value):
-            continue  # nothing to do
-        if field in edited_set:
-            diverges = True  # keep the operator's value, flag the divergence
-            continue
-        changed[field] = new_value  # not operator-edited — take the fresh answer
+    changed, diverges = apply_operator_field_protection(
+        existing=existing, new=prepared, fields=PROTECTABLE_EVENT_FIELDS,
+        values_equal=_values_equal,
+        # A same-post re-extraction IS the newer answer, by construction —
+        # never a source whose recency needs comparing against the row's own.
+        resolve_conflict=lambda field, existing_value, new_value: new_value,
+    )
 
-    merged_lineup = _union_lineup(existing.get("lineup"), prepared.get("lineup"))
+    merged_lineup = union_lineup(existing.get("lineup"), prepared.get("lineup"))
     if merged_lineup != (existing.get("lineup") or []):
         changed["lineup"] = merged_lineup
 
@@ -628,4 +696,8 @@ __all__ = [
     "reconcile_post_events", "new_event_id", "is_clean_extraction",
     "STATUS_PENDING_REVIEW", "STATUS_CONFIRMED", "STATUS_SUPERSEDED", "STATUS_ACCEPTED",
     "REVIEW_REASON_DIVERGES_FROM_CONFIRMED", "REVIEW_REASON_ABSENT_FROM_LATEST_EXTRACTION",
+    # Shared with app.services.event_merge's confirmed-canonical branch — see
+    # the coordination note beside PROTECTABLE_EVENT_FIELDS above.
+    "PROTECTABLE_EVENT_FIELDS", "event_field_is_absent", "event_time_known",
+    "union_lineup", "apply_operator_field_protection",
 ]
