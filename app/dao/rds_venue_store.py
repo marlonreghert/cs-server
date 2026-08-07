@@ -19,6 +19,7 @@ from typing import Optional
 from sqlalchemy import bindparam, create_engine, text
 
 from app.dao.venue_row import split_venue_for_storage
+from app.services.pipeline_run_registry import new_run_id
 
 logger = logging.getLogger(__name__)
 
@@ -600,7 +601,12 @@ class RdsVenueStore:
             if c in source_assign and source_assign[c] is not None:
                 source_assign[c] = json.dumps(source_assign[c])
         source_assign["event_id"] = fields["event_id"]
-        source_insert_cols = ["event_id"] + source_cols
+        # events.event_source.id is a NOT NULL primary key with no column
+        # default (app-generated, like events.event.event_id itself —
+        # app.services.event_reconciliation.new_event_id) — never left for
+        # Postgres to fill in.
+        source_assign["id"] = f"evsrc_{new_run_id()}"
+        source_insert_cols = ["id", "event_id"] + source_cols
         source_val_list = ", ".join(
             f"CAST(:{c} AS jsonb)" if c in self._EVENT_SOURCE_JSONB_COLUMNS else f":{c}"
             for c in source_insert_cols
