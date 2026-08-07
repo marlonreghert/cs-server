@@ -52,6 +52,7 @@ from app.metrics import (
 from app.services.archive_sources import SOURCE_INSTAGRAM_POSTS
 from app.services.event_caption_matcher import matches_event_marker
 from app.services.event_date_resolver import resolve_event_datetime
+from app.services.event_merge import merge_touched_events
 from app.services.event_reconciliation import (
     STATUS_CONFIRMED,
     STATUS_SUPERSEDED,
@@ -531,6 +532,7 @@ class PromoterCrawlService:
                 result_fields = {}
             return result_fields, _on_persisted
 
+        touched_event_ids: list[str] = []
         persisted = reconcile_post_events(
             venue_dao=self.venue_dao,
             source_kind=SOURCE_KIND_PROMOTER_POST,
@@ -540,7 +542,15 @@ class PromoterCrawlService:
             prepared_events=prepared_events,
             now=now,
             attribute=_attribute,
+            touched_event_ids=touched_event_ids,
         )
+        # A promoter post can resolve to the SAME venue+date+title a venue's
+        # own post (or another promoter post) already announced — recognise
+        # that the moment this post's events are persisted, rather than
+        # leaving it to a later migration. See
+        # plans/260807_one-event-many-posts.md.
+        if touched_event_ids:
+            merge_touched_events(self.venue_dao, touched_event_ids, now)
 
         PROMOTER_CRAWL_POSTS_TOTAL.labels(outcome=OUTCOME_EXTRACTED).inc()
         return persisted
@@ -588,12 +598,17 @@ class PromoterCrawlService:
             if row.get("status") == STATUS_CONFIRMED:
                 self.venue_dao.update_event(row["event_id"], {
                     "raw_extraction": raw_extraction, "last_seen_at": now,
+                    # Identifies which of this (possibly multi-source,
+                    # post-merge) event's sources owns this refresh — see
+                    # plans/260807_one-event-many-posts.md.
+                    "source_handle": handle, "source_shortcode": shortcode,
                 })
             else:
                 self.venue_dao.update_event(row["event_id"], {
                     "status": STATUS_EXTRACTION_FAILED,
                     "review_reason": REVIEW_REASON_EXTRACTION_FAILED,
                     "raw_extraction": raw_extraction, "last_seen_at": now,
+                    "source_handle": handle, "source_shortcode": shortcode,
                 })
 
     def _update_review_queue_gauge(self) -> None:

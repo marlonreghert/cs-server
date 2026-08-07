@@ -154,6 +154,7 @@ def reconcile_post_events(
     prepared_events: list[dict],
     now: datetime,
     attribute: AttributeFn,
+    touched_event_ids: Optional[list] = None,
 ) -> int:
     """Reconcile one post's freshly-extracted events against the rows already
     persisted for `(source_handle, source_shortcode)`. Returns the number of
@@ -180,6 +181,15 @@ def reconcile_post_events(
     NOT done here: both callers already call it identically, and several of
     its outputs (review_reason nuances, raw_extraction shape) legitimately
     stay caller-specific — see plans/260806_venue-post-multi-event.md.
+
+    `touched_event_ids`, when given a list, gets every event id this call
+    persisted (inserted or updated) appended to it — nothing is inserted
+    into the list itself, so a caller passing its own list can read it back
+    after this returns. This is how a caller feeds
+    `app.services.event_merge.merge_touched_events` without this module
+    importing that one (which would import back into this one for
+    `REVIEW_REASON_DIVERGES_FROM_CONFIRMED`, a cycle) — see
+    plans/260807_one-event-many-posts.md.
     """
     existing_events = venue_dao.list_events_by_source(source_handle, source_shortcode)
     existing_by_key = {
@@ -207,6 +217,13 @@ def reconcile_post_events(
                 "raw_extraction": prepared.get("raw_extraction"),
                 "last_seen_at": now,
                 "source_event_key": key,
+                # Identifies WHICH of this (possibly multi-source, post-merge)
+                # event's sources is being refreshed — without these, an
+                # event carrying more than one source (plans/260807_one-
+                # event-many-posts.md) has no unambiguous target for
+                # raw_extraction/last_seen_at/source_event_key.
+                "source_handle": source_handle,
+                "source_shortcode": source_shortcode,
             }
             title_diverges = (prepared.get("title") or None) != (existing.get("title") or None)
             date_diverges = prepared.get("starts_at") != existing.get("starts_at")
@@ -215,6 +232,8 @@ def reconcile_post_events(
             venue_dao.update_event(existing["event_id"], update_fields)
             handled_event_ids.add(existing["event_id"])
             persisted += 1
+            if touched_event_ids is not None:
+                touched_event_ids.append(existing["event_id"])
             return
 
         # A manual link outranks the model too: a later run of the same post
@@ -283,6 +302,8 @@ def reconcile_post_events(
             on_persisted()
 
         persisted += 1
+        if touched_event_ids is not None:
+            touched_event_ids.append(event_id)
 
     unmatched: list[tuple[int, dict, str]] = []
     seen_keys_this_run: set[str] = set()
@@ -376,6 +397,11 @@ def reconcile_post_events(
             venue_dao.update_event(row["event_id"], {
                 "review_reason": REVIEW_REASON_ABSENT_FROM_LATEST_EXTRACTION,
                 "last_seen_at": now,
+                # Same reason as the confirmed branch above: identifies which
+                # of this (possibly multi-source) event's sources owns the
+                # refreshed last_seen_at.
+                "source_handle": row.get("source_handle"),
+                "source_shortcode": row.get("source_shortcode"),
             })
             continue
         venue_dao.update_event(row["event_id"], {"status": STATUS_SUPERSEDED})

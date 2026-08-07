@@ -71,11 +71,27 @@ class InMemoryRdsVenueStore:
         # events.venue_event_profile: venue_id -> profile row (see
         # plans/260804_event-venue-targeting.md).
         self.event_profiles: dict[str, dict] = {}
-        # events.event: event_id -> row (see
-        # plans/260804_instagram-event-extraction.md). Mirrors the real table's
-        # UNIQUE (source_handle, source_shortcode) constraint via `_events_guard`
-        # rather than a second index, since the fake's volume never needs one.
+        # events.event: event_id -> row of MERGED fields only (see
+        # plans/260804_instagram-event-extraction.md, restructured by
+        # plans/260807_one-event-many-posts.md). Per-post provenance
+        # (source_kind/handle/shortcode/permalink/source_event_key/
+        # source_event_index/cover_photo_key/raw_extraction/first_seen_at/
+        # last_seen_at) lives in `self.event_sources` — see that attribute's
+        # comment for why the split matters.
         self.events: dict[str, dict] = {}
+        # events.event_source: id -> row (event_id, source_kind,
+        # source_handle, source_shortcode, source_permalink,
+        # source_event_key, source_event_index, cover_photo_key,
+        # raw_extraction, first_seen_at, last_seen_at). One row per POST that
+        # announced an event; several can share one event_id once a
+        # cross-post merge recognises them as the same real-world night
+        # (plans/260807_one-event-many-posts.md). The UNIQUE (source_handle,
+        # source_shortcode, source_event_key) idempotency guarantee (moved
+        # here from events.event by migration 0026, replacing 0025's
+        # two-table-away version) is enforced in `insert_event`, mirroring
+        # the real constraint rather than adding a second index.
+        self.event_sources: dict[str, dict] = {}
+        self._event_source_seq = 0
         # events.promoter_account: handle -> row (see
         # plans/260804_instagram-promoter-events.md).
         self.promoter_accounts: dict[str, dict] = {}
@@ -387,99 +403,284 @@ class InMemoryRdsVenueStore:
             out.append(merged)
         return out
 
-    # ── events.event (plans/260804_instagram-event-extraction.md) ────────────
-    def _with_venue_name(self, row: dict) -> dict:
-        """Mirror RdsVenueStore._EVENT_SELECT's `LEFT JOIN venues.venue` —
-        every event-returning method routes through this so `venue_name` is
-        never something a caller has to remember to attach separately.
-        LEFT, not INNER: a NULL venue_id (never attributed) and a venue_id
-        with no matching row (dangling reference) both resolve to
-        `venue_name: None` here, exactly like a real LEFT JOIN, and the event
-        itself is still returned either way (plans/260807_review-queue-
-        completeness-and-venue-names.md)."""
+    # ── events.event / events.event_source (plans/260804_instagram-event-
+    # extraction.md, restructured by plans/260807_one-event-many-posts.md) ──
+    # `self.events` holds MERGED fields only; `self.event_sources` holds one
+    # row per announcing post. Every event-returning method below joins the
+    # two back into the SAME flat shape callers relied on before the split —
+    # `source_kind`/`source_handle`/`source_shortcode`/`source_permalink`/
+    # `cover_photo_key`/`first_seen_at`/`last_seen_at` are DERIVED, never
+    # stored on `self.events` directly, so a caller cannot silently drift
+    # from the real schema by writing to a column that no longer exists
+    # there.
+    _EVENT_SOURCE_FIELDS = (
+        "source_kind", "source_handle", "source_shortcode", "source_permalink",
+        "source_event_key", "source_event_index", "cover_photo_key",
+        "raw_extraction", "first_seen_at", "last_seen_at",
+    )
+
+    # A source's first/last_seen_at can be an ISO string (the fake's own
+    # `_now()` default, or a caller-supplied fixture like tests/
+    # test_review_queue_completeness.py's) OR a real datetime (every real
+    # reconciliation call) — DIFFERENT sources on the SAME event can now mix
+    # the two once several posts share one event (plans/260807_one-event-
+    # many-posts.md), which a plain `<`/`min`/`max` cannot compare. Coerce
+    # through `_coerce_dt` (already used elsewhere in this file for the
+    # identical reason) before ever comparing two of these.
+    _EPOCH = datetime.min.replace(tzinfo=timezone.utc)
+
+    def _sort_dt(self, value):
+        return _coerce_dt(value) or self._EPOCH
+
+    def _sources_for(self, event_id: str) -> list[dict]:
+        return [s for s in self.event_sources.values() if s["event_id"] == event_id]
+
+    def _primary_source(self, event_id: str) -> Optional[dict]:
+        """The source EventOut's four legacy scalars (source_permalink,
+        source_handle, source_shortcode, cover_photo_key) are derived from —
+        the MOST RECENTLY SEEN source, so the deployed console's flyer
+        viewer keeps working unchanged across a merge
+        (plans/260807_one-event-many-posts.md's compatibility guarantee)."""
+        sources = self._sources_for(event_id)
+        if not sources:
+            return None
+        return max(sources, key=lambda s: (self._sort_dt(s.get("last_seen_at")), s["id"]))
+
+    def _seen_bounds(self, event_id: str) -> tuple:
+        sources = self._sources_for(event_id)
+        firsts = [self._sort_dt(s.get("first_seen_at")) for s in sources if s.get("first_seen_at") is not None]
+        lasts = [self._sort_dt(s.get("last_seen_at")) for s in sources if s.get("last_seen_at") is not None]
+        return (min(firsts) if firsts else None, max(lasts) if lasts else None)
+
+    def _merged_view(self, row: dict) -> dict:
+        """`events.event` row -> the full backward-compatible flat dict:
+        + venue_name (LEFT JOIN), + the legacy per-source scalars derived
+        from the PRIMARY (most recently seen) source — source_permalink,
+        source_handle, source_shortcode and cover_photo_key are the four the
+        API compatibility guarantee names explicitly
+        (plans/260807_one-event-many-posts.md); source_kind/
+        source_event_key/source_event_index/raw_extraction ride along for
+        the same reason (existing single-source callers read them off
+        get_event/list_events, and "the primary source's own value" is the
+        only non-arbitrary answer once several sources exist) — +
+        first_seen_at/last_seen_at aggregated across EVERY source (earliest
+        first-seen, latest last-seen). The columns leave events.event, the
+        response shape does not."""
         out = copy.deepcopy(row)
         venue_id = out.get("venue_id")
         venue = self.venues.get(venue_id) if venue_id else None
         out["venue_name"] = venue.get("venue_name") if venue else None
+        primary = self._primary_source(row["event_id"])
+        for field in self._EVENT_SOURCE_FIELDS:
+            if field in ("first_seen_at", "last_seen_at"):
+                continue
+            out[field] = primary.get(field) if primary else None
+        first_seen, last_seen = self._seen_bounds(row["event_id"])
+        out["first_seen_at"] = first_seen
+        out["last_seen_at"] = last_seen
+        return out
+
+    def _view_for_source(self, source_row: dict) -> Optional[dict]:
+        """`events.event` row + event_source row -> the flat dict for THIS
+        SPECIFIC post — used by list_events_by_source, where reconciliation
+        needs the post's OWN source_event_key/raw_extraction/timestamps, not
+        the merged event's primary/aggregate values (those could belong to a
+        DIFFERENT source once several posts share one event)."""
+        event = self.events.get(source_row["event_id"])
+        if event is None:
+            return None
+        out = copy.deepcopy(event)
+        venue_id = out.get("venue_id")
+        venue = self.venues.get(venue_id) if venue_id else None
+        out["venue_name"] = venue.get("venue_name") if venue else None
+        for field in self._EVENT_SOURCE_FIELDS:
+            out[field] = source_row.get(field)
         return out
 
     def get_event(self, event_id: str) -> Optional[dict]:
         row = self.events.get(event_id)
-        return self._with_venue_name(row) if row else None
+        return self._merged_view(row) if row else None
 
     def get_event_by_source(self, source_handle: str, source_shortcode: str) -> Optional[dict]:
-        for row in self.events.values():
-            if (
-                row.get("source_handle") == source_handle
-                and row.get("source_shortcode") == source_shortcode
-            ):
-                return self._with_venue_name(row)
-        return None
+        rows = self.list_events_by_source(source_handle, source_shortcode)
+        return rows[0] if rows else None
 
     def list_events_by_source(self, source_handle: str, source_shortcode: str) -> list[dict]:
         """Every event row sharing one post (plans/260806_multi-event-posts.md)
         — get_event_by_source returns at most one row and is unsafe once a
-        post can hold several."""
-        out = [
-            self._with_venue_name(row) for row in self.events.values()
-            if row.get("source_handle") == source_handle
-            and row.get("source_shortcode") == source_shortcode
+        post can hold several. Post-merge, each returned row's event_id may
+        be shared with OTHER sources too (plans/260807_one-event-many-
+        posts.md) — that is exactly the point: the same merged event, seen
+        through this one post's own provenance."""
+        matches = [
+            s for s in self.event_sources.values()
+            if s.get("source_handle") == source_handle
+            and s.get("source_shortcode") == source_shortcode
         ]
+        out = [v for v in (self._view_for_source(s) for s in matches) if v is not None]
         out.sort(key=lambda r: (
             r.get("source_event_index") if r.get("source_event_index") is not None else 0,
             r["event_id"],
         ))
         return out
 
+    def list_event_sources(self, event_id: str) -> list[dict]:
+        """Every source (announcing post) attached to one event, oldest
+        first-seen first — the admin API's `sources[]`
+        (plans/260807_one-event-many-posts.md)."""
+        rows = [copy.deepcopy(s) for s in self._sources_for(event_id)]
+        rows.sort(key=lambda s: (self._sort_dt(s.get("first_seen_at")), s["id"]))
+        return rows
+
+    def reattach_event_sources(self, from_event_id: str, to_event_id: str) -> None:
+        """Re-point every source currently on `from_event_id` at
+        `to_event_id` — step 3 of the merge (plans/260807_one-event-many-
+        posts.md): provenance must survive the collapse even though the
+        duplicate event row does not."""
+        self._guard()
+        if to_event_id not in self.events:
+            raise ValueError(
+                f"reattach_event_sources: target event {to_event_id!r} does not exist"
+            )
+        for s in self.event_sources.values():
+            if s["event_id"] == from_event_id:
+                s["event_id"] = to_event_id
+
+    def delete_event(self, event_id: str) -> None:
+        """Hard delete — ONLY ever correct for a now-SOURCELESS duplicate
+        collapsed into a canonical event (reattach_event_sources must run
+        first). Mirrors the real FK from event_source to event: raises if
+        any source still references this event, exactly as a real DELETE
+        would fail instead of silently orphaning provenance."""
+        self._guard()
+        if event_id not in self.events:
+            return
+        remaining = self._sources_for(event_id)
+        if remaining:
+            raise ValueError(
+                f"delete_event: {event_id!r} still has {len(remaining)} "
+                f"event_source row(s) — reattach them before deleting"
+            )
+        del self.events[event_id]
+        self.event_link_candidates.pop(event_id, None)
+
     def insert_event(self, fields: dict) -> dict:
-        """Mirrors the real UNIQUE (source_handle, source_shortcode,
-        source_event_key) constraint (migration 0025, replacing 0023's
-        two-column constraint): raises rather than silently inserting a
-        duplicate for a post/event already extracted. A NULL
-        `source_event_key` never collides with another NULL — the same
-        semantics the real Postgres UNIQUE constraint gives NULLs — which is
-        what lets several events share one post AND lets an
-        extraction_failed placeholder (no content to key by) coexist with a
-        confirmed event's row. The service is expected to check
-        list_events_by_source/get_event_by_source first (the same pattern as
-        every ON-CONFLICT-free write elsewhere in this fake) — this is the
-        last-resort guard, not the primary mechanism."""
+        """Splits `fields` into the events.event row and its FIRST
+        events.event_source row. Mirrors the real UNIQUE (source_handle,
+        source_shortcode, source_event_key) constraint (migration 0026,
+        moved here from events.event by migration 0025's two-column
+        predecessor): raises rather than silently inserting a duplicate for
+        a post/event already extracted. A NULL `source_event_key` never
+        collides with another NULL — the same semantics the real Postgres
+        UNIQUE constraint gives NULLs — which is what lets several events
+        share one post AND lets an extraction_failed placeholder (no content
+        to key by) coexist with a confirmed event's row. The service is
+        expected to check list_events_by_source/get_event_by_source first
+        (the same pattern as every ON-CONFLICT-free write elsewhere in this
+        fake) — this is the last-resort guard, not the primary mechanism."""
         self._guard()
         event_id = fields["event_id"]
+        source_handle = fields.get("source_handle")
+        source_shortcode = fields.get("source_shortcode")
         key = fields.get("source_event_key")
         if key is not None:
-            for row in self.events.values():
+            for s in self.event_sources.values():
                 if (
-                    row.get("source_handle") == fields.get("source_handle")
-                    and row.get("source_shortcode") == fields.get("source_shortcode")
-                    and row.get("source_event_key") == key
+                    s.get("source_handle") == source_handle
+                    and s.get("source_shortcode") == source_shortcode
+                    and s.get("source_event_key") == key
                 ):
                     raise ValueError(
                         f"duplicate (source_handle, source_shortcode, source_event_key): "
-                        f"{fields.get('source_handle')!r}, {fields.get('source_shortcode')!r}, "
-                        f"{key!r}"
+                        f"{source_handle!r}, {source_shortcode!r}, {key!r}"
                     )
         now = _now()
-        row = dict(fields)
-        row.setdefault("first_seen_at", now)
-        row.setdefault("last_seen_at", now)
-        row["updated_at"] = now
-        self.events[event_id] = row
-        return self._with_venue_name(row)
+        event_row = {k: v for k, v in fields.items() if k not in self._EVENT_SOURCE_FIELDS}
+        event_row["updated_at"] = now
+        self.events[event_id] = event_row
+
+        source_fields = {k: v for k, v in fields.items() if k in self._EVENT_SOURCE_FIELDS}
+        self._event_source_seq += 1
+        source_row = {
+            "id": f"evsrc_{self._event_source_seq}",
+            "event_id": event_id,
+            "source_kind": source_fields.get("source_kind", "venue_post"),
+            "source_handle": source_handle,
+            "source_shortcode": source_shortcode,
+            "source_permalink": source_fields.get("source_permalink"),
+            "source_event_key": key,
+            "source_event_index": source_fields.get("source_event_index"),
+            "cover_photo_key": source_fields.get("cover_photo_key"),
+            "raw_extraction": source_fields.get("raw_extraction"),
+            "first_seen_at": source_fields.get("first_seen_at", now),
+            "last_seen_at": source_fields.get("last_seen_at", now),
+        }
+        self.event_sources[source_row["id"]] = source_row
+        return self.get_event(event_id)
+
+    def _resolve_source_for_update(self, event_id: str, fields: dict, source_fields: dict) -> dict:
+        """Which event_source row a partial update's source-level keys
+        apply to. Explicit `source_handle`+`source_shortcode` in `fields`
+        (every reconciliation write supplies them) resolves unambiguously
+        even once an event carries several sources
+        (plans/260807_one-event-many-posts.md). Absent both, falls back to
+        "the only source" for every PRE-merge call site (every existing
+        direct `update_event({"last_seen_at": ...})` poke in this repo's
+        tests and routers) — and RAISES rather than guessing when that is
+        ambiguous, per this repo's fakes-must-raise convention."""
+        handle = fields.get("source_handle")
+        shortcode = fields.get("source_shortcode")
+        candidates = self._sources_for(event_id)
+        if handle is not None and shortcode is not None:
+            matches = [
+                s for s in candidates
+                if s.get("source_handle") == handle and s.get("source_shortcode") == shortcode
+            ]
+            if not matches:
+                raise ValueError(
+                    f"update_event: no event_source row for event_id={event_id!r} "
+                    f"source_handle={handle!r} source_shortcode={shortcode!r}"
+                )
+            if len(matches) > 1:
+                raise ValueError(
+                    f"update_event: ambiguous event_source rows for event_id={event_id!r} "
+                    f"source_handle={handle!r} source_shortcode={shortcode!r}"
+                )
+            return matches[0]
+        if len(candidates) == 1:
+            return candidates[0]
+        raise ValueError(
+            f"update_event: cannot route source-level fields {sorted(source_fields)} "
+            f"for event_id={event_id!r} without source_handle/source_shortcode — "
+            f"{len(candidates)} source(s) exist"
+        )
 
     def update_event(self, event_id: str, fields: dict) -> Optional[dict]:
         """Partial update: only the keys in `fields` change. Returns None
         (rather than raising) when the event does not exist, so a caller
         racing a delete degrades the same way the real UPDATE...WHERE would
-        (zero rows affected)."""
+        (zero rows affected). Source-level keys (see _EVENT_SOURCE_FIELDS)
+        route to the specific event_source row identified by
+        `_resolve_source_for_update`; everything else updates the merged
+        events.event row directly. Always bumps `updated_at`, matching the
+        real store's unconditional `updated_at=now()`."""
         self._guard()
         row = self.events.get(event_id)
         if row is None:
             return None
-        row.update(fields)
+        event_fields = {k: v for k, v in fields.items() if k not in self._EVENT_SOURCE_FIELDS}
+        source_fields = {k: v for k, v in fields.items() if k in self._EVENT_SOURCE_FIELDS}
+
+        if event_fields:
+            row.update(event_fields)
         row["updated_at"] = _now()
         self.events[event_id] = row
-        return self._with_venue_name(row)
+
+        if source_fields:
+            target = self._resolve_source_for_update(event_id, fields, source_fields)
+            target.update(source_fields)
+
+        return self.get_event(event_id)
 
     def list_events(
         self, *, venue_id: Optional[str] = None, status: Optional[str] = None,
@@ -496,7 +697,7 @@ class InMemoryRdsVenueStore:
                 continue
             if until is not None and (starts_at is None or starts_at > until):
                 continue
-            out.append(self._with_venue_name(row))
+            out.append(self._merged_view(row))
         out.sort(key=lambda r: (r.get("starts_at") is None, r.get("starts_at"), r["event_id"]))
         return out
 
@@ -522,22 +723,27 @@ class InMemoryRdsVenueStore:
             the queue entirely; a promoter-post one surfaced only by
             accident, via the second clause, whenever nobody had linked it
             yet. See the real DAO's docstring for the full rationale.
+
+        `source_kind` is read off the MERGED view (the primary source's
+        kind, plans/260807_one-event-many-posts.md) rather than the raw
+        event row, which no longer stores it at all.
         """
         out = []
         for row in self.events.values():
-            status = row.get("status")
+            view = self._merged_view(row)
+            status = view.get("status")
             if status == "pending_review":
-                out.append(self._with_venue_name(row))
+                out.append(view)
                 continue
             if status == "extraction_failed":
-                out.append(self._with_venue_name(row))
+                out.append(view)
                 continue
             if (
-                row.get("source_kind") == "promoter_post"
-                and row.get("location_resolution") is None
+                view.get("source_kind") == "promoter_post"
+                and view.get("location_resolution") is None
                 and status not in ("rejected", "superseded")
             ):
-                out.append(self._with_venue_name(row))
+                out.append(view)
         out.sort(key=lambda r: (r.get("first_seen_at"), r["event_id"]))
         return out
 

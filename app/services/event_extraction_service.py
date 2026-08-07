@@ -61,6 +61,7 @@ from app.metrics import (
 from app.models.photo_taxonomy import CATEGORY_FLYER
 from app.services.event_caption_matcher import matches_event_marker
 from app.services.event_date_resolver import REASON_WEEKDAY_MISMATCH, resolve_event_datetime
+from app.services.event_merge import merge_touched_events
 from app.services.event_reconciliation import (
     STATUS_CONFIRMED,
     new_event_id,
@@ -518,6 +519,7 @@ class EventExtractionService:
         def _attribute(fields: dict, event_id: str) -> tuple[dict, Optional[Callable[[], None]]]:
             return {"venue_id": venue_id}, None
 
+        touched_event_ids: list[str] = []
         reconcile_post_events(
             venue_dao=self.venue_dao,
             source_kind=SOURCE_KIND_VENUE_POST,
@@ -527,7 +529,14 @@ class EventExtractionService:
             prepared_events=prepared_events,
             now=now,
             attribute=_attribute,
+            touched_event_ids=touched_event_ids,
         )
+        # Recognise a countdown campaign — several posts announcing the SAME
+        # night — the moment this post's own events are persisted, so a
+        # later post never re-fragments an identity this or an earlier post
+        # already established. See plans/260807_one-event-many-posts.md.
+        if touched_event_ids:
+            merge_touched_events(self.venue_dao, touched_event_ids, now)
 
         return single_event_outcome if single_event_outcome is not None else OUTCOME_EXTRACTED
 
@@ -568,12 +577,17 @@ class EventExtractionService:
                 # Not even a failed re-extraction reverts a confirmed record.
                 self.venue_dao.update_event(row["event_id"], {
                     "raw_extraction": raw_extraction, "last_seen_at": now,
+                    # Identifies which of this (possibly multi-source, post-
+                    # merge) event's sources owns this refresh — see
+                    # plans/260807_one-event-many-posts.md.
+                    "source_handle": handle, "source_shortcode": post.shortcode,
                 })
             else:
                 self.venue_dao.update_event(row["event_id"], {
                     "status": STATUS_EXTRACTION_FAILED,
                     "review_reason": REVIEW_REASON_EXTRACTION_FAILED,
                     "raw_extraction": raw_extraction, "last_seen_at": now,
+                    "source_handle": handle, "source_shortcode": post.shortcode,
                 })
 
     def _update_events_gauge(self) -> None:

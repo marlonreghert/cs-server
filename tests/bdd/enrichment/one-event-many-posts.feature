@@ -1,4 +1,3 @@
-@wip
 Feature: One event, many posts
   As the operator of the event pipeline
   I want a countdown campaign to be one event carrying all of its posts
@@ -32,13 +31,13 @@ Feature: One event, many posts
     Given two posts for the same event stating different times
     When the events are extracted
     Then the event keeps the time from the most recent post
-    And the event is flagged with the reason "sources_disagree"
+    And the merged event is flagged with the reason "sources_disagree"
 
   Scenario: Never recompute a confirmed event when a new source arrives
     Given a confirmed event with an operator's corrected title
     And a later post announcing the same event
     When the events are extracted
-    Then the corrected title is unchanged
+    Then the confirmed event's corrected title survives the merge
     And the new source is attached to that event
     And the divergence is flagged
 

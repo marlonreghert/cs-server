@@ -428,38 +428,86 @@ class RdsVenueStore:
         with self.engine.connect() as conn:
             return [dict(r) for r in conn.execute(text(_VENUE_SELECT)).mappings()]
 
-    # ── events.event (plans/260804_instagram-event-extraction.md) ────────────
+    # ── events.event / events.event_source (plans/260804_instagram-event-
+    # extraction.md, restructured by plans/260807_one-event-many-posts.md) ──
+    # `events.event` holds MERGED fields only; per-post provenance
+    # (source_kind/handle/shortcode/permalink/source_event_key/
+    # source_event_index/cover_photo_key/raw_extraction/first_seen_at/
+    # last_seen_at) lives in `events.event_source`, one row per announcing
+    # post, several of which can now share one `event_id` (migration 0026).
     _EVENT_COLUMNS = (
-        "event_id", "venue_id", "source_kind", "source_handle", "source_shortcode",
-        "source_permalink", "starts_at", "ends_at", "is_recurring", "recurrence_text",
-        "title", "description", "lineup", "ticket_url", "price_text", "location_text",
-        "cover_photo_key", "confidence", "status", "review_reason", "raw_extraction",
-        "first_seen_at", "last_seen_at",
+        "event_id", "venue_id", "starts_at", "ends_at", "is_recurring",
+        "recurrence_text", "title", "description", "lineup", "ticket_url",
+        "price_text", "location_text", "confidence", "status", "review_reason",
         # plans/260804_instagram-promoter-events.md (migration 0024) — how, if
         # at all, a promoter event's venue was resolved.
         "location_resolution", "location_confidence", "linked_by", "linked_at",
-        # plans/260806_multi-event-posts.md (migration 0025) — the content-
-        # derived identity that lets several events share one post, and the
-        # display-only ordinal that never participates in that identity.
-        "source_event_key", "source_event_index",
     )
-    _EVENT_JSONB_COLUMNS = ("lineup", "raw_extraction")
+    _EVENT_JSONB_COLUMNS = ("lineup",)
+    # The per-source columns `insert_event`/`update_event` route to
+    # events.event_source instead of events.event — see the module-level
+    # split in tests.rds_fake.InMemoryRdsVenueStore, which this mirrors.
+    _EVENT_SOURCE_FIELDS = (
+        "source_kind", "source_handle", "source_shortcode", "source_permalink",
+        "source_event_key", "source_event_index", "cover_photo_key",
+        "raw_extraction", "first_seen_at", "last_seen_at",
+    )
+    _EVENT_SOURCE_JSONB_COLUMNS = ("raw_extraction",)
+
     # plans/260807_review-queue-completeness-and-venue-names.md: LEFT JOIN,
     # never INNER — an unresolved promoter event has `venue_id IS NULL` (or a
     # venue_id with no matching row) and must still be selected; an INNER
     # join would silently drop exactly the rows the review queue exists for.
     # Every `events.event` column is qualified `e.` because the join makes
-    # `venue_id` ambiguous otherwise (both tables have a column by that
-    # name); `v.venue_name` is the only column pulled from venues.venue.
+    # `venue_id` ambiguous otherwise; `v.venue_name` is the only column
+    # pulled from venues.venue. `ps` (primary source) is a LATERAL picking
+    # the MOST RECENTLY SEEN source per event — the four legacy scalars
+    # (source_kind/handle/shortcode/permalink/cover_photo_key... the first
+    # four of which the admin console reads today) are derived from it, so
+    # the console keeps working unchanged across a merge
+    # (plans/260807_one-event-many-posts.md's compatibility guarantee). `agg`
+    # aggregates first_seen_at/last_seen_at across EVERY source (earliest
+    # first-seen, latest last-seen) — the columns leave events.event, the
+    # response shape does not.
     _EVENT_SELECT = (
-        "SELECT e.event_id, e.venue_id, e.source_kind, e.source_handle, e.source_shortcode, "
-        "e.source_permalink, e.starts_at, e.ends_at, e.is_recurring, e.recurrence_text, "
-        "e.title, e.description, e.lineup, e.ticket_url, e.price_text, e.location_text, "
-        "e.cover_photo_key, e.confidence, e.status, e.review_reason, e.raw_extraction, "
-        "e.first_seen_at, e.last_seen_at, e.updated_at, "
+        "SELECT e.event_id, e.venue_id, e.starts_at, e.ends_at, e.is_recurring, "
+        "e.recurrence_text, e.title, e.description, e.lineup, e.ticket_url, "
+        "e.price_text, e.location_text, e.confidence, e.status, e.review_reason, "
         "e.location_resolution, e.location_confidence, e.linked_by, e.linked_at, "
-        "e.source_event_key, e.source_event_index, v.venue_name "
-        "FROM events.event e LEFT JOIN venues.venue v ON v.venue_id = e.venue_id"
+        "e.updated_at, v.venue_name, "
+        "ps.source_kind, ps.source_handle, ps.source_shortcode, ps.source_permalink, "
+        "ps.source_event_key, ps.source_event_index, ps.cover_photo_key, ps.raw_extraction, "
+        "agg.first_seen_at, agg.last_seen_at "
+        "FROM events.event e "
+        "LEFT JOIN venues.venue v ON v.venue_id = e.venue_id "
+        "LEFT JOIN LATERAL ("
+        "  SELECT source_kind, source_handle, source_shortcode, source_permalink, "
+        "         source_event_key, source_event_index, cover_photo_key, raw_extraction "
+        "  FROM events.event_source es WHERE es.event_id = e.event_id "
+        "  ORDER BY es.last_seen_at DESC, es.id DESC LIMIT 1"
+        ") ps ON true "
+        "LEFT JOIN LATERAL ("
+        "  SELECT min(first_seen_at) AS first_seen_at, max(last_seen_at) AS last_seen_at "
+        "  FROM events.event_source es2 WHERE es2.event_id = e.event_id"
+        ") agg ON true"
+    )
+
+    # Per-SOURCE projection for list_events_by_source: reconciliation needs
+    # THIS post's own source_event_key/raw_extraction/timestamps, never the
+    # merged event's primary/aggregate values (which could belong to a
+    # DIFFERENT source once several posts share one event).
+    _EVENT_SOURCE_SELECT = (
+        "SELECT e.event_id, e.venue_id, e.starts_at, e.ends_at, e.is_recurring, "
+        "e.recurrence_text, e.title, e.description, e.lineup, e.ticket_url, "
+        "e.price_text, e.location_text, e.confidence, e.status, e.review_reason, "
+        "e.location_resolution, e.location_confidence, e.linked_by, e.linked_at, "
+        "e.updated_at, v.venue_name, "
+        "es.source_kind, es.source_handle, es.source_shortcode, es.source_permalink, "
+        "es.source_event_key, es.source_event_index, es.cover_photo_key, "
+        "es.raw_extraction, es.first_seen_at, es.last_seen_at "
+        "FROM events.event_source es "
+        "JOIN events.event e ON e.event_id = es.event_id "
+        "LEFT JOIN venues.venue v ON v.venue_id = e.venue_id"
     )
 
     def get_event(self, event_id: str) -> Optional[dict]:
@@ -470,78 +518,192 @@ class RdsVenueStore:
             return dict(row) if row else None
 
     def get_event_by_source(self, source_handle: str, source_shortcode: str) -> Optional[dict]:
-        with self.engine.connect() as conn:
-            row = conn.execute(
-                text(
-                    f"{self._EVENT_SELECT} WHERE e.source_handle=:h AND e.source_shortcode=:s"
-                ),
-                {"h": source_handle, "s": source_shortcode},
-            ).mappings().first()
-            return dict(row) if row else None
+        rows = self.list_events_by_source(source_handle, source_shortcode)
+        return rows[0] if rows else None
 
     def list_events_by_source(self, source_handle: str, source_shortcode: str) -> list[dict]:
         """Every event row sharing one post, ordered for display
         (plans/260806_multi-event-posts.md) — `get_event_by_source` returns
-        at most one row and is unsafe once a post can hold several."""
+        at most one row and is unsafe once a post can hold several. Post-
+        merge (plans/260807_one-event-many-posts.md), several returned rows
+        can share one `event_id` too — the same merged event, seen through
+        each of its own sources' provenance."""
         with self.engine.connect() as conn:
             rows = conn.execute(
                 text(
-                    f"{self._EVENT_SELECT} WHERE e.source_handle=:h AND e.source_shortcode=:s "
-                    "ORDER BY e.source_event_index NULLS LAST, e.event_id"
+                    f"{self._EVENT_SOURCE_SELECT} "
+                    "WHERE es.source_handle=:h AND es.source_shortcode=:s "
+                    "ORDER BY es.source_event_index NULLS LAST, e.event_id"
                 ),
                 {"h": source_handle, "s": source_shortcode},
             ).mappings()
             return [dict(r) for r in rows]
 
-    def insert_event(self, fields: dict) -> dict:
-        """INSERT relying on the UNIQUE (source_handle, source_shortcode,
-        source_event_key) constraint (migration 0025, replacing 0023's
-        two-column constraint) to reject a duplicate — the service is
-        expected to check list_events_by_source first; this is the backstop,
-        not the primary idempotency mechanism (a constraint, not a code path)."""
-        cols = [c for c in self._EVENT_COLUMNS if c in fields]
-        assign = {c: fields[c] for c in cols}
-        for c in self._EVENT_JSONB_COLUMNS:
-            if c in assign and assign[c] is not None:
-                assign[c] = json.dumps(assign[c])
-        col_list = ", ".join(cols)
-        val_list = ", ".join(
-            f"CAST(:{c} AS jsonb)" if c in self._EVENT_JSONB_COLUMNS else f":{c}"
-            for c in cols
-        )
+    def list_event_sources(self, event_id: str) -> list[dict]:
+        """Every source (announcing post) attached to one event, oldest
+        first-seen first — the admin API's `sources[]`."""
+        with self.engine.connect() as conn:
+            rows = conn.execute(
+                text(
+                    "SELECT id, event_id, source_kind, source_handle, source_shortcode, "
+                    "source_permalink, source_event_key, source_event_index, cover_photo_key, "
+                    "raw_extraction, first_seen_at, last_seen_at "
+                    "FROM events.event_source WHERE event_id=:e ORDER BY first_seen_at, id"
+                ),
+                {"e": event_id},
+            ).mappings()
+            return [dict(r) for r in rows]
+
+    def reattach_event_sources(self, from_event_id: str, to_event_id: str) -> None:
+        """Re-point every source currently on `from_event_id` at
+        `to_event_id` — step 3 of a cross-post merge
+        (plans/260807_one-event-many-posts.md): provenance must survive the
+        collapse even though the duplicate event row does not."""
         with self.engine.begin() as conn:
             conn.execute(
-                text(f"INSERT INTO events.event ({col_list}) VALUES ({val_list})"),
-                assign,
+                text(
+                    "UPDATE events.event_source SET event_id=:to_id WHERE event_id=:from_id"
+                ),
+                {"to_id": to_event_id, "from_id": from_event_id},
+            )
+
+    def delete_event(self, event_id: str) -> None:
+        """Hard delete — only ever correct for a now-sourceless duplicate a
+        merge has already reattached every source away from.
+        `event_source.event_id` is a real, non-deferrable FK, so this raises
+        (rather than silently orphaning provenance) if any source still
+        references it."""
+        with self.engine.begin() as conn:
+            conn.execute(text("DELETE FROM events.event WHERE event_id=:e"), {"e": event_id})
+
+    def insert_event(self, fields: dict) -> dict:
+        """INSERTs the merged events.event row and its first
+        events.event_source row in one transaction. Relies on the UNIQUE
+        (source_handle, source_shortcode, source_event_key) constraint
+        (migration 0026, moved from events.event by 0025) to reject a
+        duplicate — the service is expected to check list_events_by_source
+        first; this is the backstop, not the primary idempotency mechanism."""
+        event_cols = [c for c in self._EVENT_COLUMNS if c in fields]
+        event_assign = {c: fields[c] for c in event_cols}
+        for c in self._EVENT_JSONB_COLUMNS:
+            if c in event_assign and event_assign[c] is not None:
+                event_assign[c] = json.dumps(event_assign[c])
+        event_col_list = ", ".join(event_cols)
+        event_val_list = ", ".join(
+            f"CAST(:{c} AS jsonb)" if c in self._EVENT_JSONB_COLUMNS else f":{c}"
+            for c in event_cols
+        )
+
+        source_cols = [c for c in self._EVENT_SOURCE_FIELDS if c in fields]
+        source_assign = {c: fields[c] for c in source_cols}
+        for c in self._EVENT_SOURCE_JSONB_COLUMNS:
+            if c in source_assign and source_assign[c] is not None:
+                source_assign[c] = json.dumps(source_assign[c])
+        source_assign["event_id"] = fields["event_id"]
+        source_insert_cols = ["event_id"] + source_cols
+        source_val_list = ", ".join(
+            f"CAST(:{c} AS jsonb)" if c in self._EVENT_SOURCE_JSONB_COLUMNS else f":{c}"
+            for c in source_insert_cols
+        )
+
+        with self.engine.begin() as conn:
+            conn.execute(
+                text(f"INSERT INTO events.event ({event_col_list}) VALUES ({event_val_list})"),
+                event_assign,
+            )
+            conn.execute(
+                text(
+                    f"INSERT INTO events.event_source ({', '.join(source_insert_cols)}) "
+                    f"VALUES ({source_val_list})"
+                ),
+                source_assign,
             )
         return self.get_event(fields["event_id"])
 
     def update_event(self, event_id: str, fields: dict) -> Optional[dict]:
-        """Partial update: only the keys present in `fields` change. Always
-        bumps `updated_at`, matching the fake's contract."""
+        """Partial update: only the keys present in `fields` change. Event-
+        level keys update `events.event`; source-level keys (see
+        `_EVENT_SOURCE_FIELDS`) update the ONE `events.event_source` row
+        identified by `source_handle`+`source_shortcode` when both are
+        given, or the event's single source when it has exactly one —
+        raising when that is ambiguous, never guessing. Always bumps
+        `events.event.updated_at`, matching the fake's contract."""
         if not fields:
             fields = {}
-        cols = [c for c in self._EVENT_COLUMNS if c in fields and c != "event_id"]
-        assign = {c: fields[c] for c in cols}
-        for c in self._EVENT_JSONB_COLUMNS:
-            if c in assign and assign[c] is not None:
-                assign[c] = json.dumps(assign[c])
-        set_clauses = [
-            f"{c}=CAST(:{c} AS jsonb)" if c in self._EVENT_JSONB_COLUMNS else f"{c}=:{c}"
-            for c in cols
-        ]
-        set_clauses.append("updated_at=now()")
-        assign["event_id"] = event_id
+        event_cols = [c for c in self._EVENT_COLUMNS if c in fields and c != "event_id"]
+        source_cols = [c for c in self._EVENT_SOURCE_FIELDS if c in fields]
+
         with self.engine.begin() as conn:
-            result = conn.execute(
-                text(
-                    f"UPDATE events.event SET {', '.join(set_clauses)} "
-                    "WHERE event_id=:event_id"
-                ),
-                assign,
-            )
+            if event_cols:
+                event_assign = {c: fields[c] for c in event_cols}
+                for c in self._EVENT_JSONB_COLUMNS:
+                    if c in event_assign and event_assign[c] is not None:
+                        event_assign[c] = json.dumps(event_assign[c])
+                set_clauses = [
+                    f"{c}=CAST(:{c} AS jsonb)" if c in self._EVENT_JSONB_COLUMNS else f"{c}=:{c}"
+                    for c in event_cols
+                ]
+                set_clauses.append("updated_at=now()")
+                event_assign["event_id"] = event_id
+                result = conn.execute(
+                    text(
+                        f"UPDATE events.event SET {', '.join(set_clauses)} "
+                        "WHERE event_id=:event_id"
+                    ),
+                    event_assign,
+                )
+            else:
+                result = conn.execute(
+                    text("UPDATE events.event SET updated_at=now() WHERE event_id=:event_id"),
+                    {"event_id": event_id},
+                )
             if result.rowcount == 0:
                 return None
+
+            if source_cols:
+                handle = fields.get("source_handle")
+                shortcode = fields.get("source_shortcode")
+                if handle is not None and shortcode is not None:
+                    target = conn.execute(
+                        text(
+                            "SELECT id FROM events.event_source "
+                            "WHERE event_id=:e AND source_handle=:h AND source_shortcode=:s"
+                        ),
+                        {"e": event_id, "h": handle, "s": shortcode},
+                    ).mappings().first()
+                    if target is None:
+                        raise ValueError(
+                            f"update_event: no event_source row for event_id={event_id!r} "
+                            f"source_handle={handle!r} source_shortcode={shortcode!r}"
+                        )
+                else:
+                    candidates = conn.execute(
+                        text("SELECT id FROM events.event_source WHERE event_id=:e"),
+                        {"e": event_id},
+                    ).mappings().all()
+                    if len(candidates) != 1:
+                        raise ValueError(
+                            f"update_event: cannot route source-level fields "
+                            f"{sorted(source_cols)} for event_id={event_id!r} without "
+                            f"source_handle/source_shortcode — {len(candidates)} source(s) exist"
+                        )
+                    target = candidates[0]
+
+                source_assign = {c: fields[c] for c in source_cols}
+                for c in self._EVENT_SOURCE_JSONB_COLUMNS:
+                    if c in source_assign and source_assign[c] is not None:
+                        source_assign[c] = json.dumps(source_assign[c])
+                set_clauses = [
+                    f"{c}=CAST(:{c} AS jsonb)" if c in self._EVENT_SOURCE_JSONB_COLUMNS else f"{c}=:{c}"
+                    for c in source_cols
+                ]
+                source_assign["id"] = target["id"]
+                conn.execute(
+                    text(
+                        f"UPDATE events.event_source SET {', '.join(set_clauses)} WHERE id=:id"
+                    ),
+                    source_assign,
+                )
         return self.get_event(event_id)
 
     def list_events(
@@ -581,12 +743,16 @@ class RdsVenueStore:
             data yet. `event_reconciliation.py` sets this on EVERY persisted
             event, so this is the queue's main, wide population — an inbox,
             not an error flag.
-          - `source_kind = 'promoter_post' AND location_resolution IS NULL`:
-            nobody has decided where it happens. NOT redundant with the first
-            clause — an operator can `/confirm` a promoter event's fields
-            while its venue is still unresolved, which moves status off
-            `pending_review` but leaves `location_resolution` NULL; that
-            event still needs a decision and must not silently drop out.
+          - `ps.source_kind = 'promoter_post' AND location_resolution IS
+            NULL`: nobody has decided where it happens. `ps.source_kind` —
+            the PRIMARY (most recently seen) source's kind
+            (plans/260807_one-event-many-posts.md) — replaces the old
+            `e.source_kind` column, which no longer exists on events.event.
+            NOT redundant with the first clause — an operator can `/confirm`
+            a promoter event's fields while its venue is still unresolved,
+            which moves status off `pending_review` but leaves
+            `location_resolution` NULL; that event still needs a decision
+            and must not silently drop out.
 
         The second clause is guarded with `status NOT IN ('rejected',
         'superseded')`: `/reject` and the reconciliation supersede path both
@@ -611,10 +777,10 @@ class RdsVenueStore:
         """
         sql = (
             f"{self._EVENT_SELECT} WHERE e.status = 'pending_review' "
-            "OR (e.source_kind = 'promoter_post' AND e.location_resolution IS NULL "
+            "OR (ps.source_kind = 'promoter_post' AND e.location_resolution IS NULL "
             "AND e.status NOT IN ('rejected', 'superseded')) "
             "OR e.status = 'extraction_failed' "
-            "ORDER BY e.first_seen_at, e.event_id"
+            "ORDER BY agg.first_seen_at, e.event_id"
         )
         with self.engine.connect() as conn:
             return [dict(r) for r in conn.execute(text(sql)).mappings()]

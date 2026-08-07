@@ -1260,6 +1260,35 @@ EVENT_COVER_PRESIGN_TOTAL = Counter(
 )
 
 # =============================================================================
+# ONE EVENT, MANY POSTS (plans/260807_one-event-many-posts.md)
+# =============================================================================
+
+# How many SOURCES (announcing posts) one merged event carries. A campaign
+# collapsing back to one source per event — three countdown posts silently
+# staying three separate events — is exactly the regression this feature
+# exists to prevent, and only the SHAPE of this distribution shows it; a
+# single scalar (e.g. "events created today") cannot distinguish "3 posts, 3
+# events" from "3 posts, 1 event, 3 sources". Observed once per successful
+# merge, with the CANONICAL event's post-merge source count.
+EVENT_SOURCES_PER_EVENT = Histogram(
+    "event_sources_per_event",
+    "Number of sources (announcing posts) attached to one event after a merge",
+    buckets=(1, 2, 3, 5, 8, 13, 20),
+)
+
+# Every cross-post merge attempt, by outcome — the runtime half of
+# 0026_event_sources's one-time historical collapse. `no_identity` covers both
+# a missing venue and a missing date (never merged, by design — see
+# app.services.event_merge.compute_event_identity); `two_confirmed` is the
+# guard that leaves an ambiguous group alone for an operator to resolve
+# instead of guessing which of two confirmed rows is "the" event.
+EVENT_MERGE_TOTAL = Counter(
+    "event_merge_total",
+    "Cross-post event identity merge attempts, by outcome",
+    ["outcome"],  # merged, no_identity, no_match, two_confirmed
+)
+
+# =============================================================================
 # APPLICATION INFO
 # =============================================================================
 
