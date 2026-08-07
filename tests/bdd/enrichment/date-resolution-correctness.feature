@@ -1,4 +1,3 @@
-@wip
 Feature: Date resolution correctness
   As the operator of the event pipeline
   I want a weekday to corroborate an explicit date, never to replace one
@@ -8,22 +7,22 @@ Feature: Date resolution correctness
   Scenario: Resolve a day with an abbreviated month
     Given a flyer date of "05/SET" on a post from August 2026
     When the event date is resolved
-    Then the event starts on 5 September 2026
+    Then the resolved event date is 5 September 2026
 
   Scenario: Resolve an abbreviated month written before the day
     Given a flyer date of "SET 05" on a post from August 2026
     When the event date is resolved
-    Then the event starts on 5 September 2026
+    Then the resolved event date is 5 September 2026
 
   Scenario: Resolve an abbreviated month regardless of case and accents
     Given a flyer date of "05/set" on a post from August 2026
     When the event date is resolved
-    Then the event starts on 5 September 2026
+    Then the resolved event date is 5 September 2026
 
   Scenario: Read an explicit date rather than the weekday beside it
     Given a flyer date of "Sábado • 05/SET" on a post from August 2026
     When the event date is resolved
-    Then the event starts on 5 September 2026
+    Then the resolved event date is 5 September 2026
     And the event is not dated from the weekday alone
 
   Scenario: Refuse to guess a date from a weekday when a day number is present
@@ -46,7 +45,7 @@ Feature: Date resolution correctness
   Scenario: Keep resolving a recurring weekday announcement
     Given a flyer date of "toda quinta" on a post from August 2026
     When the event date is resolved
-    Then the event is marked recurring
+    Then the resolved event is marked recurring
     And the event starts on the Thursday after the post
 
   Scenario: Flag a weekday that disagrees with the explicit date

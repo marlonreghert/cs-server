@@ -514,12 +514,22 @@ class InMemoryRdsVenueStore:
             where it happens, and this isn't an event an operator already
             finished with — see the real DAO's docstring for why that guard
             is needed: /reject and the supersede path both leave
-            location_resolution untouched).
+            location_resolution untouched), or
+          - `status == "extraction_failed"` (plans/260807_date-resolution-
+            correctness.md, defect 3) — explicit for BOTH source kinds. A
+            venue-post event in this status matched neither clause above (it
+            never sets `location_resolution` at all) and used to vanish from
+            the queue entirely; a promoter-post one surfaced only by
+            accident, via the second clause, whenever nobody had linked it
+            yet. See the real DAO's docstring for the full rationale.
         """
         out = []
         for row in self.events.values():
             status = row.get("status")
             if status == "pending_review":
+                out.append(self._with_venue_name(row))
+                continue
+            if status == "extraction_failed":
                 out.append(self._with_venue_name(row))
                 continue
             if (

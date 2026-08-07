@@ -60,7 +60,7 @@ from app.metrics import (
 )
 from app.models.photo_taxonomy import CATEGORY_FLYER
 from app.services.event_caption_matcher import matches_event_marker
-from app.services.event_date_resolver import resolve_event_datetime
+from app.services.event_date_resolver import REASON_WEEKDAY_MISMATCH, resolve_event_datetime
 from app.services.event_reconciliation import (
     STATUS_CONFIRMED,
     new_event_id,
@@ -93,6 +93,11 @@ OUTCOME_LOW_CONFIDENCE = "low_confidence"
 OUTCOME_EXTRACTION_FAILED = "extraction_failed"
 OUTCOME_SKIPPED_SEEN = "skipped_seen"
 OUTCOME_UNREAD_TIME = "unread_time"
+# The date resolved, but a stated weekday disagreed with the explicit date
+# beside it (plans/260807_date-resolution-correctness.md, defect 2b) — a
+# distinct outcome from OUTCOME_NO_DATE: `starts_at` is set (from the
+# explicit date, the more precise claim), only the disagreement is flagged.
+OUTCOME_WEEKDAY_MISMATCH = "weekday_mismatch"
 # A multi-event response cut off mid-list (finish_reason == "length"):
 # persists nothing partial, distinct from extraction_failed (a truncated
 # response means the output budget was too small, not a bad model answer).
@@ -488,7 +493,15 @@ class EventExtractionService:
             })
 
             if len(events_data) == 1:
-                if resolved.needs_review:
+                # Checked before the general `needs_review` branch: a weekday
+                # mismatch also sets `needs_review=True`, but it is NOT a
+                # missing date (starts_at is set, from the explicit date) and
+                # must not be filed under the same outcome as a genuine blank
+                # — that would erase the distinction the metric exists to
+                # surface (plans/260807_date-resolution-correctness.md).
+                if resolved.review_reason == REASON_WEEKDAY_MISMATCH:
+                    single_event_outcome = OUTCOME_WEEKDAY_MISMATCH
+                elif resolved.needs_review:
                     single_event_outcome = OUTCOME_NO_DATE
                 elif unread_time:
                     single_event_outcome = OUTCOME_UNREAD_TIME
@@ -578,6 +591,6 @@ __all__ = [
     "post_qualifies", "new_event_id",
     "OUTCOME_EXTRACTED", "OUTCOME_NOT_EVENT_LIKE", "OUTCOME_NO_DATE",
     "OUTCOME_LOW_CONFIDENCE", "OUTCOME_EXTRACTION_FAILED", "OUTCOME_SKIPPED_SEEN",
-    "OUTCOME_UNREAD_TIME", "OUTCOME_TRUNCATED", "REVIEW_REASON_UNREAD_TIME",
-    "DEFAULT_MAX_EVENTS_PER_POST",
+    "OUTCOME_UNREAD_TIME", "OUTCOME_TRUNCATED", "OUTCOME_WEEKDAY_MISMATCH",
+    "REVIEW_REASON_UNREAD_TIME", "DEFAULT_MAX_EVENTS_PER_POST",
 ]

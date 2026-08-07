@@ -20,6 +20,8 @@ own docstring; there is no local Postgres in CI/dev, see tests/README.md).
 """
 from __future__ import annotations
 
+import inspect
+
 import pytest
 
 from app.dao.rds_venue_store import RdsVenueStore
@@ -71,6 +73,19 @@ MATRIX = [
     ("promoter_post", "rejected", "auto", False, "operator rejected it"),
     ("promoter_post", "superseded", None, False, "reconciliation superseded it even though it was never linked"),
     ("promoter_post", "superseded", "manual", False, "reconciliation superseded it"),
+    # plans/260807_date-resolution-correctness.md, defect 3: a totally failed
+    # extraction is explicit, third-clause membership for BOTH source kinds —
+    # never a status a future edit can drop by "simplifying" the first two
+    # clauses. A venue-post row matches NEITHER of the first two clauses on
+    # its own (it never touches location_resolution at all) and used to
+    # vanish from the queue entirely.
+    ("venue_post", "extraction_failed", None, True, "a totally failed extraction is lost signal, not a non-event"),
+    ("promoter_post", "extraction_failed", None, True, "extraction_failed is explicit, not incidental clause-2 membership"),
+    # The sharpest proof this is a DELIBERATE clause and not just clause 2
+    # riding along: a non-NULL location_resolution makes clause 2 (which
+    # requires IS NULL) fail outright, so only the explicit third clause can
+    # keep this row in the queue.
+    ("promoter_post", "extraction_failed", "auto", True, "extraction_failed surfaces even when clause 2 cannot apply"),
 ]
 
 
@@ -98,6 +113,22 @@ class TestReviewQueuePredicateMatrix:
         included = [row for row in MATRIX if row[3]]
         excluded = [row for row in MATRIX if not row[3]]
         assert included and excluded
+
+    def test_real_sql_has_an_explicit_extraction_failed_clause(self):
+        """The fake's predicate is hand-mirrored (see this module's
+        docstring) and would not, by itself, catch a mistake in the real SQL
+        RdsVenueStore actually sends — there is no local Postgres in CI/dev
+        to execute it against (tests/README.md), so read the query text
+        directly instead. `inspect.getsource` rather than a class constant:
+        unlike `_EVENT_SELECT`, the predicate is built inline in the method,
+        and this fix is surgical (plans/260807_date-resolution-
+        correctness.md), not a refactor into a new testable constant."""
+        source = inspect.getsource(RdsVenueStore.list_events_awaiting_decision)
+        assert "status = 'extraction_failed'" in source, source
+        # Must be an OR'd top-level clause, not nested inside the
+        # promoter-only clause 2 (which would re-narrow it to one source
+        # kind again).
+        assert "OR e.status = 'extraction_failed'" in source, source
 
     def test_oldest_first_ordering_spans_both_source_kinds(self):
         dao = _dao()
