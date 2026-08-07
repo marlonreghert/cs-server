@@ -444,21 +444,28 @@ class RdsVenueStore:
         "source_event_key", "source_event_index",
     )
     _EVENT_JSONB_COLUMNS = ("lineup", "raw_extraction")
+    # plans/260807_review-queue-completeness-and-venue-names.md: LEFT JOIN,
+    # never INNER — an unresolved promoter event has `venue_id IS NULL` (or a
+    # venue_id with no matching row) and must still be selected; an INNER
+    # join would silently drop exactly the rows the review queue exists for.
+    # Every `events.event` column is qualified `e.` because the join makes
+    # `venue_id` ambiguous otherwise (both tables have a column by that
+    # name); `v.venue_name` is the only column pulled from venues.venue.
     _EVENT_SELECT = (
-        "SELECT event_id, venue_id, source_kind, source_handle, source_shortcode, "
-        "source_permalink, starts_at, ends_at, is_recurring, recurrence_text, "
-        "title, description, lineup, ticket_url, price_text, location_text, "
-        "cover_photo_key, confidence, status, review_reason, raw_extraction, "
-        "first_seen_at, last_seen_at, updated_at, "
-        "location_resolution, location_confidence, linked_by, linked_at, "
-        "source_event_key, source_event_index "
-        "FROM events.event"
+        "SELECT e.event_id, e.venue_id, e.source_kind, e.source_handle, e.source_shortcode, "
+        "e.source_permalink, e.starts_at, e.ends_at, e.is_recurring, e.recurrence_text, "
+        "e.title, e.description, e.lineup, e.ticket_url, e.price_text, e.location_text, "
+        "e.cover_photo_key, e.confidence, e.status, e.review_reason, e.raw_extraction, "
+        "e.first_seen_at, e.last_seen_at, e.updated_at, "
+        "e.location_resolution, e.location_confidence, e.linked_by, e.linked_at, "
+        "e.source_event_key, e.source_event_index, v.venue_name "
+        "FROM events.event e LEFT JOIN venues.venue v ON v.venue_id = e.venue_id"
     )
 
     def get_event(self, event_id: str) -> Optional[dict]:
         with self.engine.connect() as conn:
             row = conn.execute(
-                text(f"{self._EVENT_SELECT} WHERE event_id=:id"), {"id": event_id},
+                text(f"{self._EVENT_SELECT} WHERE e.event_id=:id"), {"id": event_id},
             ).mappings().first()
             return dict(row) if row else None
 
@@ -466,7 +473,7 @@ class RdsVenueStore:
         with self.engine.connect() as conn:
             row = conn.execute(
                 text(
-                    f"{self._EVENT_SELECT} WHERE source_handle=:h AND source_shortcode=:s"
+                    f"{self._EVENT_SELECT} WHERE e.source_handle=:h AND e.source_shortcode=:s"
                 ),
                 {"h": source_handle, "s": source_shortcode},
             ).mappings().first()
@@ -479,8 +486,8 @@ class RdsVenueStore:
         with self.engine.connect() as conn:
             rows = conn.execute(
                 text(
-                    f"{self._EVENT_SELECT} WHERE source_handle=:h AND source_shortcode=:s "
-                    "ORDER BY source_event_index NULLS LAST, event_id"
+                    f"{self._EVENT_SELECT} WHERE e.source_handle=:h AND e.source_shortcode=:s "
+                    "ORDER BY e.source_event_index NULLS LAST, e.event_id"
                 ),
                 {"h": source_handle, "s": source_shortcode},
             ).mappings()
@@ -545,33 +552,55 @@ class RdsVenueStore:
         clauses = []
         params: dict = {}
         if venue_id is not None:
-            clauses.append("venue_id=:venue_id")
+            clauses.append("e.venue_id=:venue_id")
             params["venue_id"] = venue_id
         if status is not None:
-            clauses.append("status=:status")
+            clauses.append("e.status=:status")
             params["status"] = status
         if since is not None:
-            clauses.append("starts_at >= :since")
+            clauses.append("e.starts_at >= :since")
             params["since"] = since
         if until is not None:
-            clauses.append("starts_at <= :until")
+            clauses.append("e.starts_at <= :until")
             params["until"] = until
         if clauses:
             sql += " WHERE " + " AND ".join(clauses)
-        sql += " ORDER BY starts_at NULLS LAST, event_id"
+        sql += " ORDER BY e.starts_at NULLS LAST, e.event_id"
         with self.engine.connect() as conn:
             return [dict(r) for r in conn.execute(text(sql), params).mappings()]
 
-    def list_events_pending_location(self) -> list[dict]:
-        """Promoter-post events awaiting a location decision — the review
-        queue's whole population. `location_resolution IS NULL` is the
-        distinguishing predicate (migration 0024's docstring): an
-        `unresolved` event was decided (below the floor) and is excluded
-        here, same as an `auto`/`manual` one."""
+    def list_events_awaiting_decision(self) -> list[dict]:
+        """Every event still awaiting a human decision — the review queue's
+        whole population (plans/260807_review-queue-completeness-and-venue-
+        names.md, replacing the old, narrower `list_events_pending_location`,
+        which excluded every venue-post event BY CONSTRUCTION regardless of
+        status).
+
+        The union of the two genuine decision states:
+          - `status = 'pending_review'`: nobody has confirmed this event's
+            data yet. `event_reconciliation.py` sets this on EVERY persisted
+            event, so this is the queue's main, wide population — an inbox,
+            not an error flag.
+          - `source_kind = 'promoter_post' AND location_resolution IS NULL`:
+            nobody has decided where it happens. NOT redundant with the first
+            clause — an operator can `/confirm` a promoter event's fields
+            while its venue is still unresolved, which moves status off
+            `pending_review` but leaves `location_resolution` NULL; that
+            event still needs a decision and must not silently drop out.
+
+        The second clause is guarded with `status NOT IN ('rejected',
+        'superseded')`: `/reject` and the reconciliation supersede path both
+        leave `location_resolution` untouched, so an event that was queued
+        for a venue decision and never got one before an operator rejected
+        it (or a later crawl superseded it) would otherwise resurrect here
+        forever — exactly the "finished with" case the plan requires this
+        queue to keep excluding.
+        """
         sql = (
-            f"{self._EVENT_SELECT} WHERE source_kind='promoter_post' "
-            "AND location_resolution IS NULL "
-            "ORDER BY first_seen_at, event_id"
+            f"{self._EVENT_SELECT} WHERE e.status = 'pending_review' "
+            "OR (e.source_kind = 'promoter_post' AND e.location_resolution IS NULL "
+            "AND e.status NOT IN ('rejected', 'superseded')) "
+            "ORDER BY e.first_seen_at, e.event_id"
         )
         with self.engine.connect() as conn:
             return [dict(r) for r in conn.execute(text(sql)).mappings()]

@@ -416,7 +416,11 @@ class TestSingleEventVenuePostIsByteIdenticalToTheOldPath:
         assert stored["linked_at"] is None
 
         # No unexpected columns crept in beyond the old shape, the two new
-        # identity columns, and the always-NULL ladder columns above.
+        # identity columns, the always-NULL ladder columns above, and
+        # `venue_name` (plans/260807_review-queue-completeness-and-venue-
+        # names.md: every event-returning DAO method now LEFT JOINs
+        # venues.venue and carries the linked venue's name, NULL here since
+        # this venue was never upserted).
         expected_keys = {
             "venue_id", "source_kind", "source_handle", "source_shortcode",
             "source_permalink", "starts_at", "ends_at", "is_recurring",
@@ -425,7 +429,7 @@ class TestSingleEventVenuePostIsByteIdenticalToTheOldPath:
             "status", "review_reason", "raw_extraction", "last_seen_at",
             "event_id", "first_seen_at", "source_event_key", "source_event_index",
             "location_resolution", "location_confidence", "linked_by", "linked_at",
-            "updated_at",
+            "updated_at", "venue_name",
         }
         assert set(stored.keys()) == expected_keys, set(stored.keys())
 

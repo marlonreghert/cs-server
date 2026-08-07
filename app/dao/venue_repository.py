@@ -166,8 +166,8 @@ class VenueRepository(RedisVenueDAO):
             venue_id=venue_id, status=status, since=since, until=until,
         )
 
-    def list_events_pending_location(self):
-        return self.rds_store.list_events_pending_location()
+    def list_events_awaiting_decision(self):
+        return self.rds_store.list_events_awaiting_decision()
 
     # ── instagram.handle reverse index (plans/260804_instagram-promoter-events.md) ─
     def list_instagram_handles(self):

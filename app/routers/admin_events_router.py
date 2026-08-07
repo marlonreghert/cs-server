@@ -76,6 +76,13 @@ def _require_admin(
 class EventOut(BaseModel):
     event_id: str
     venue_id: Optional[str] = None
+    # plans/260807_review-queue-completeness-and-venue-names.md: the linked
+    # venue's name, resolved in SQL via a LEFT JOIN (app/dao/rds_venue_store.py
+    # _EVENT_SELECT) so the console never has to decode an opaque venue_id.
+    # NULL whenever venue_id is NULL, and also when venue_id points at a
+    # venue row that no longer exists (a dangling reference must not fail
+    # the listing).
+    venue_name: Optional[str] = None
     source_kind: str = "venue_post"
     source_handle: str
     source_shortcode: str
@@ -254,12 +261,15 @@ class LinkRequest(BaseModel):
 
 @router.get("/review", response_model=list[ReviewQueueItemOut])
 def review_queue():
-    """Pending promoter events with their ranked candidates — the queue's
-    whole value: an operator chooses between named venues with scores and
-    reasons instead of being handed a location string and a search box."""
+    """Every event awaiting a human decision, with ranked venue candidates
+    where they exist — the queue's whole value: an operator chooses between
+    named venues with scores and reasons instead of being handed a location
+    string and a search box. See VenueRepository.list_events_awaiting_decision
+    for the population (wider than "promoter events awaiting a venue" — see
+    plans/260807_review-queue-completeness-and-venue-names.md)."""
     dao = _dao()
     out = []
-    for row in dao.list_events_pending_location():
+    for row in dao.list_events_awaiting_decision():
         candidates = dao.list_event_venue_link_candidates(row["event_id"])
         out.append(ReviewQueueItemOut(
             **{**row, "lineup": row.get("lineup") or []}, candidates=candidates,
