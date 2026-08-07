@@ -1226,6 +1226,41 @@ class VenuePhotoArchiveService:
             return False
         return not get_source(source).provides_categories
 
+    async def _attach_download_bytes(
+        self, photos: list[dict], summary: dict, venue_id: str
+    ) -> None:
+        """Download each photo's bytes BEFORE it is classified.
+
+        OpenAI cannot fetch a provider's signed CDN url server-side —
+        Instagram's fbcdn links 400 with `invalid_image_url` — and this step
+        is shared across every source, so it must never lean on Google's
+        urls happening to be openly fetchable. `_store_photo` reuses these
+        same bytes rather than downloading a second time.
+
+        A photo whose download fails here is simply left without bytes:
+        `annotate(..., require_bytes=True)` excludes it from the model call
+        entirely (no verdict, source category kept) rather than falling back
+        to a url that would just 400 again. `_store_photo` still gets its own
+        attempt afterwards, exactly as it always has — a classify-time
+        download failure must not cost the photo its archive.
+        """
+        for photo in photos:
+            url = photo.get("url")
+            if not url:
+                continue
+            try:
+                data, content_type = await self.downloader.download(
+                    url, timeout=self.photo_timeout_seconds, max_bytes=self.max_photo_bytes,
+                )
+            except Exception as e:  # noqa: BLE001 — _store_photo retries and reports
+                logger.debug(
+                    f"[VenuePhotoArchive] pre-classify download failed for "
+                    f"{venue_id} (will retry at store time): {e}"
+                )
+                continue
+            photo["_bytes"] = data
+            photo["_content_type"] = content_type
+
     async def _classify_photos(
         self, venue_id: str, source: str, photos: list[dict], cfg: dict, summary: dict
     ) -> None:
@@ -1237,6 +1272,7 @@ class VenuePhotoArchiveService:
         """
         if not photos or not self._should_classify(source, cfg):
             return
+        await self._attach_download_bytes(photos, summary, venue_id)
         try:
             stats = await self.photo_classifier.annotate(
                 photos,
@@ -1246,6 +1282,11 @@ class VenuePhotoArchiveService:
                 derive_attributes=bool(cfg.get("derive_photo_attributes", True))
                 and getattr(self._settings, "photo_attributes_enabled", True),
                 venue_id=venue_id,
+                # The live path: never fall back to a provider url — see
+                # PhotoClassificationService._image_reference. `rederive_
+                # attributes` is the only caller that omits this, since it
+                # has no bytes in memory to begin with.
+                require_bytes=True,
             )
         except Exception as e:  # noqa: BLE001 — never lose a fetched photo
             logger.error(
@@ -1396,34 +1437,42 @@ class VenuePhotoArchiveService:
         if not url:
             return None
         photo_id = photo_id_for(photo)
-        try:
-            data, content_type = await self.downloader.download(
-                url,
-                timeout=self.photo_timeout_seconds,
-                max_bytes=self.max_photo_bytes,
-            )
-        except PhotoTooLarge as e:
-            summary["photo_failures"] += 1
-            MEDIA_ARCHIVE_PHOTO_FAILURES_TOTAL.labels(
-                source=source, reason="too_large"
-            ).inc()
-            if source == SOURCE_INSTAGRAM_POSTS:
-                INSTAGRAM_ARCHIVE_IMAGES_TOTAL.labels(result="failed").inc()
-            logger.warning(f"[VenuePhotoArchive] job={summary['job_id']} {venue_id} photo too large: {e}")
-            return None
-        except Exception as e:
-            summary["photo_failures"] += 1
-            MEDIA_ARCHIVE_PHOTO_FAILURES_TOTAL.labels(
-                source=source, reason="download_error"
-            ).inc()
-            if source == SOURCE_INSTAGRAM_POSTS:
-                # Split out from the generic reason so an EXPIRY WAVE (the
-                # scrape-then-download gap widening) is visible as itself
-                # rather than reading as an ordinary download error.
-                result = "expired" if _is_expired_signed_url(e) else "failed"
-                INSTAGRAM_ARCHIVE_IMAGES_TOTAL.labels(result=result).inc()
-            logger.warning(f"[VenuePhotoArchive] job={summary['job_id']} {venue_id} photo download failed: {e}")
-            return None
+        cached_bytes = photo.get("_bytes")
+        if cached_bytes is not None:
+            # Already downloaded for classification (_attach_download_bytes)
+            # — reuse it rather than fetching the SAME url a second time,
+            # which for an Instagram signed link also risks the signature
+            # expiring in the gap between the two calls.
+            data, content_type = cached_bytes, photo.get("_content_type") or "application/octet-stream"
+        else:
+            try:
+                data, content_type = await self.downloader.download(
+                    url,
+                    timeout=self.photo_timeout_seconds,
+                    max_bytes=self.max_photo_bytes,
+                )
+            except PhotoTooLarge as e:
+                summary["photo_failures"] += 1
+                MEDIA_ARCHIVE_PHOTO_FAILURES_TOTAL.labels(
+                    source=source, reason="too_large"
+                ).inc()
+                if source == SOURCE_INSTAGRAM_POSTS:
+                    INSTAGRAM_ARCHIVE_IMAGES_TOTAL.labels(result="failed").inc()
+                logger.warning(f"[VenuePhotoArchive] job={summary['job_id']} {venue_id} photo too large: {e}")
+                return None
+            except Exception as e:
+                summary["photo_failures"] += 1
+                MEDIA_ARCHIVE_PHOTO_FAILURES_TOTAL.labels(
+                    source=source, reason="download_error"
+                ).inc()
+                if source == SOURCE_INSTAGRAM_POSTS:
+                    # Split out from the generic reason so an EXPIRY WAVE (the
+                    # scrape-then-download gap widening) is visible as itself
+                    # rather than reading as an ordinary download error.
+                    result = "expired" if _is_expired_signed_url(e) else "failed"
+                    INSTAGRAM_ARCHIVE_IMAGES_TOTAL.labels(result=result).inc()
+                logger.warning(f"[VenuePhotoArchive] job={summary['job_id']} {venue_id} photo download failed: {e}")
+                return None
 
         try:
             key = await self.media_store.put_image(

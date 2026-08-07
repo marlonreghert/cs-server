@@ -11,10 +11,13 @@ be certain a room is a bar and unsure whether it has screens, and those two
 facts must not share a fate. The service drops anything under the bar to
 `not_classified`.
 
-Takes a plain list of image urls and does not care where they came from —
-provider CDN links during a live run, presigned S3 urls when an archived run is
-re-classified after the schema changes. That is what lets the schema grow
-without paying a provider again.
+Takes a plain list of image REFERENCES — each one a url or a `data:` URI — and
+does not care which: a `data:` URI during a live run (the caller's own
+downloaded bytes; OpenAI cannot fetch a provider's signed CDN url server-side,
+so a live run must never hand one over — see
+PhotoClassificationService._image_reference), a data URI read back from S3
+when an archived run is re-classified after the schema changes. That is what
+lets the schema grow without paying a provider again.
 
 Modelled on `OpenAIMenuClient.classify_menu_photos`: same batching, same
 `detail: "low"` thumbnails, same json_object response format.
@@ -27,6 +30,7 @@ import logging
 import re
 import time
 from typing import Any, Optional
+from urllib.parse import urlparse
 
 from openai import AsyncOpenAI, BadRequestError
 
@@ -128,6 +132,35 @@ def _prompt(with_attributes: bool = True) -> str:
     )
 
 
+# A signed url (provider CDN or presigned S3) is a bearer credential for that
+# object — the query string, not just the path, is the secret. Only the host
+# is ever safe to log.
+_URL_IN_TEXT = re.compile(r"https?://[^\s'\"]+")
+
+# The one error code this client is built to expect from an image the model
+# could not download: OpenAI cannot fetch a provider's signed CDN link
+# server-side (Instagram's fbcdn urls 400 this way), which is exactly why the
+# live archive path hands the model bytes instead — see
+# PhotoClassificationService._image_reference.
+BAD_REQUEST_CODE_INVALID_IMAGE_URL = "invalid_image_url"
+
+
+class _ImageFetchFailure(Exception):
+    """Internal control-flow signal: this batch's images could not be
+    downloaded by the model (`invalid_image_url`). Never crosses the class
+    boundary — `classify_photos` catches it to skip the retry ladder for
+    THIS batch only, without aborting the rest of the run."""
+
+
+def _host_only(message: str) -> str:
+    """The HOST of the first url found in an error message, never the full
+    url — logging the query string would leak a signing token."""
+    match = _URL_IN_TEXT.search(message or "")
+    if not match:
+        return "unknown-host"
+    return urlparse(match.group(0)).netloc or "unknown-host"
+
+
 def _strip_fences(raw_text: str) -> str:
     cleaned = (raw_text or "").strip()
     cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
@@ -210,8 +243,21 @@ class OpenAIPhotoClassifierClient:
             # whole blocks of `batch_size` photos silently kept their source
             # category, and nothing above this line could tell that from success.
             results: list[dict] = []
+            skip_retry = False
             for attempt in range(1, BATCH_MAX_ATTEMPTS + 1):
-                results = await self._one_batch(batch, prompt, model)
+                try:
+                    results = await self._one_batch(batch, prompt, model)
+                except _ImageFetchFailure:
+                    # Already logged and counted, under its own reason, at
+                    # the point it happened. Per-IMAGE, not a call-site bug:
+                    # retrying would ask the model to download the SAME
+                    # unfetchable url again, so this batch's photos simply
+                    # keep their source category — one bad url must not cost
+                    # this venue's OTHER batches a wasted retry ladder, let
+                    # alone the rest of the run.
+                    results = []
+                    skip_retry = True
+                    break
                 if results:
                     if attempt > 1:
                         logger.info(
@@ -220,7 +266,7 @@ class OpenAIPhotoClassifierClient:
                     break
                 if attempt < BATCH_MAX_ATTEMPTS:
                     await asyncio.sleep(BATCH_RETRY_BASE_SECONDS * attempt)
-            if not results:
+            if not results and not skip_retry:
                 # Now countable: an exhausted batch is a distinct outcome from a
                 # model that answered and simply had nothing to say.
                 PHOTO_CLASSIFICATION_FALLBACKS_TOTAL.labels(
@@ -262,19 +308,50 @@ class OpenAIPhotoClassifierClient:
             self._record_usage(response, endpoint)
             return self._parse(response.choices[0].message.content or "")
         except BadRequestError as e:
-            # A rejected parameter is a call-site bug, not a transient blip: a
-            # rate limit or timeout is worth retrying, but every retry of this
-            # would 400 again identically. Surface it loudly and immediately
-            # instead of burning the retry ladder and reporting a silent
-            # "batch_exhausted" fallback that hides the real cause.
             OPENAI_API_CALL_DURATION_SECONDS.labels(endpoint=endpoint).observe(
                 time.perf_counter() - started
             )
             OPENAI_API_CALLS_TOTAL.labels(endpoint=endpoint, status="error").inc()
-            logger.error(
-                f"[PhotoClassifier] request rejected parameter "
-                f"'{e.param or '?'}' for model {resolved_model}: {e}"
-            )
+
+            if e.code == BAD_REQUEST_CODE_INVALID_IMAGE_URL:
+                # Per-IMAGE, not a call-site bug: one photo's url being
+                # unfetchable says nothing about the next batch's photos, so
+                # unlike a genuine parameter rejection this must not abort
+                # the rest of the venue's classification. `invalid_image_url`
+                # always carries param=None, which is exactly why branching
+                # on `e.param` alone (the old behaviour) mis-filed this as a
+                # parameter rejection — a diagnostic that sends an operator
+                # to the wrong subsystem is worse than none.
+                host = _host_only(getattr(e, "message", None) or str(e))
+                logger.error(
+                    f"[PhotoClassifier] image fetch failed for host "
+                    f"'{host}': the model could not download this image "
+                    f"(code={BAD_REQUEST_CODE_INVALID_IMAGE_URL})"
+                )
+                PHOTO_CLASSIFICATION_FALLBACKS_TOTAL.labels(
+                    reason="image_fetch_failed"
+                ).inc(len(urls))
+                raise _ImageFetchFailure() from e
+
+            if e.param:
+                # A rejected parameter is a call-site bug, not a transient
+                # blip: a rate limit or timeout is worth retrying, but every
+                # retry of this would 400 again identically, for every batch
+                # in the run. Surface it loudly and immediately instead of
+                # burning the retry ladder and reporting a silent
+                # "batch_exhausted" fallback that hides the real cause.
+                logger.error(
+                    f"[PhotoClassifier] request rejected parameter "
+                    f"'{e.param}' for model {resolved_model}: {e}"
+                )
+            else:
+                # Neither a known image-fetch failure nor a parameter
+                # rejection — an unknown 400. Keep a generic branch rather
+                # than guessing at a cause the code does not actually name.
+                logger.error(
+                    f"[PhotoClassifier] request rejected (unrecognized 400) "
+                    f"for model {resolved_model}: {e}"
+                )
             raise
         except Exception as e:  # noqa: BLE001 — the caller degrades, never fails
             OPENAI_API_CALL_DURATION_SECONDS.labels(endpoint=endpoint).observe(

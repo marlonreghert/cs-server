@@ -614,5 +614,87 @@ class TestPromptStaysInSyncWithTheSchema(unittest.TestCase):
         self.assertNotIn("space_type", cheap)     # but asks for nothing else
 
 
+class TestBytesOverUrl(unittest.TestCase):
+    """The live archive path hands the model bytes it already downloaded,
+    never a provider url — OpenAI cannot fetch Instagram's signed CDN links
+    server-side (400 invalid_image_url), and Google's own urls being openly
+    fetchable is not something the shared classify step may rely on, since
+    it runs identically for every source.
+
+    `require_bytes=True` is how the live caller (VenuePhotoArchiveService)
+    opts into this. The re-derive path (no bytes in memory) never passes it,
+    so it keeps working exactly as before — see TestReDerivingAnArchivedRun.
+    """
+
+    def test_a_photo_with_bytes_is_sent_as_a_data_uri_not_its_url(self):
+        client = FakeClient(verdicts=[{"category": "interior", "confidence": 0.9}])
+        photos = _photos(1)
+        photos[0]["url"] = "https://instagram.fper12-1.fna.fbcdn.net/secret.jpg"
+        photos[0]["_bytes"] = b"\xff\xd8\xff-jpeg-bytes"
+        photos[0]["_content_type"] = "image/jpeg"
+
+        _run(_service(client).annotate(photos, require_bytes=True))
+
+        assert len(client.batches) == 1
+        sent = client.batches[0]
+        assert len(sent) == 1
+        assert sent[0].startswith("data:image/jpeg;base64,")
+        assert "instagram.fper12-1.fna.fbcdn.net" not in sent[0]
+        assert "http" not in sent[0]
+
+    def test_the_content_type_travels_with_the_bytes(self):
+        client = FakeClient(verdicts=[{"category": "menu", "confidence": 0.9}])
+        photos = _photos(1)
+        photos[0]["_bytes"] = b"\x89PNG-bytes"
+        photos[0]["_content_type"] = "image/png"
+
+        _run(_service(client).annotate(photos, require_bytes=True))
+
+        assert client.batches[0][0].startswith("data:image/png;base64,")
+
+    def test_a_photo_with_no_bytes_is_never_sent_when_bytes_are_required(self):
+        """A download that failed before classification must not fall back
+        to the url that would just 400 again — it gets no verdict and keeps
+        its source category, exactly like any other classification miss."""
+        client = FakeClient(verdicts=[{"category": "interior", "confidence": 0.9}])
+        photos = _photos(1)
+        photos[0]["url"] = "https://instagram.fper12-1.fna.fbcdn.net/secret.jpg"
+        photos[0]["source_category"] = "uncategorised"
+
+        stats = _run(_service(client).annotate(photos, require_bytes=True))
+
+        assert client.batches == [] or all(not b for b in client.batches), (
+            "no reference to send -> the client must never be called with a url"
+        )
+        assert stats["classified"] == 0
+        assert photos[0].get("category") is None or photos[0]["category"] == "uncategorised"
+
+    def test_a_mixed_batch_only_sends_the_photos_that_have_bytes(self):
+        client = FakeClient(verdicts=[{"category": "interior", "confidence": 0.9}])
+        photos = _photos(2)
+        photos[0]["_bytes"] = b"has-bytes"
+        photos[0]["_content_type"] = "image/jpeg"
+        # photos[1] has a url only — no bytes attached (its download failed).
+
+        _run(_service(client).annotate(photos, require_bytes=True))
+
+        assert len(client.batches) == 1
+        assert len(client.batches[0]) == 1, "only the photo with bytes should reach the model"
+        assert photos[0]["category"] == "interior"
+        assert photos[1].get("category") is None
+
+    def test_without_require_bytes_a_url_is_still_sent_unaffected(self):
+        """The re-derive path's contract: no bytes in memory, so the
+        existing `photo['url']` (already a data URI read back from S3 —
+        see VenuePhotoArchiveService._rederive_venue) is what travels."""
+        client = FakeClient(verdicts=[{"category": "interior", "confidence": 0.9}])
+        photos = _photos(1)
+        photos[0]["url"] = "data:image/jpeg;base64,QUJD"
+
+        _run(_service(client).annotate(photos))
+
+        assert client.batches == [["data:image/jpeg;base64,QUJD"]]
+
+
 if __name__ == "__main__":
     unittest.main()

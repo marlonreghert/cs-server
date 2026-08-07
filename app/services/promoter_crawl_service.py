@@ -298,13 +298,13 @@ class PromoterCrawlService:
             extracted = 0
             for post in posts:
                 PROMOTER_CRAWL_POSTS_TOTAL.labels(outcome=OUTCOME_ARCHIVED).inc()
+                archived_images: list[dict] = []
                 if prefix is not None:
-                    manifest_entries.extend(
-                        await self._archive_post_images(prefix, handle, post)
-                    )
+                    archived_images = await self._archive_post_images(prefix, handle, post)
+                    manifest_entries.extend(archived_images)
                 extracted += await self._process_post(
                     handle=handle, post=post, venues=venues, handle_index=handle_index,
-                    now=now,
+                    now=now, archived_images=archived_images,
                 )
 
             if prefix is not None and manifest_entries:
@@ -356,10 +356,23 @@ class PromoterCrawlService:
     # ── extraction + resolution for one post (may yield several events) ─────
     async def _process_post(
         self, *, handle: str, post: dict, venues: list, handle_index: dict, now: datetime,
+        archived_images: list[dict] = (),
     ) -> int:
         """Returns the number of events persisted (0 on any early exit) —
         the caller sums this into `events_extracted`, which is now an
-        accurate per-event tally rather than a per-post flag."""
+        accurate per-event tally rather than a per-post flag.
+
+        `archived_images` is this SAME post's already-archived objects (see
+        `_archive_post_images`, called just before this in `run()`). One
+        post can announce several events (plans/260806_multi-event-posts.md)
+        and slide-to-event alignment is out of scope
+        (plans/260806_multi-event-posts.md), so every event this post
+        produces gets the post's FIRST archived image as its cover — better
+        than a perishable permalink alone, and honest about what it is. A
+        post that stored no image (or whose only image failed to archive)
+        leaves every one of its events with `cover_photo_key = None`.
+        """
+        cover_photo_key = archived_images[0]["key"] if archived_images else None
         shortcode = post.get("shortcode")
         caption = post.get("caption")
         if not shortcode:
@@ -445,6 +458,7 @@ class PromoterCrawlService:
                 "title": parsed["title"], "description": parsed["description"],
                 "lineup": parsed["lineup"], "ticket_url": parsed["ticket_url"],
                 "price_text": parsed["price_text"], "location_text": parsed["location_text"],
+                "cover_photo_key": cover_photo_key,
                 "confidence": parsed["confidence"],
                 "review_reason": review_reason,
                 "raw_extraction": parsed,

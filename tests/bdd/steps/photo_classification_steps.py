@@ -22,6 +22,7 @@ money if they regress:
 """
 from __future__ import annotations
 
+import base64
 import json
 
 from behave import given, then, when  # type: ignore[import-untyped]
@@ -56,6 +57,38 @@ def _wrap(block):
     }
 
 
+# The venue_photo_archive_steps._FakeDownloader convention: bytes are always
+# b"\xff\xd8\xff" + url.encode(). Deterministic, so a data URI built from
+# those bytes is invertible — see _registered_verdict below.
+_FAKE_JPEG_MAGIC = b"\xff\xd8\xff"
+
+
+def _decoded_url(ref: str):
+    """Recover the ORIGINAL photo url from a data URI built by the fake
+    downloader's bytes, or None if `ref` is not one of those (e.g. it is
+    already a plain url, or a data URI registered directly by
+    `_register_for_stored_copies` for a re-derive scenario).
+
+    The live archive path now sends the classifier bytes, not a url (see
+    PhotoClassificationService._image_reference / VenuePhotoArchiveService.
+    _attach_download_bytes) — Instagram's signed CDN links 400 when OpenAI
+    tries to fetch them itself. This fake's `verdicts` dict stayed keyed by
+    URL for readability across ~40 scenarios, so this is what lets a live
+    scenario's registration still be found under the new encoding, without
+    touching any of those scenarios or weakening what they assert.
+    """
+    if not ref.startswith("data:"):
+        return None
+    _, _, b64 = ref.partition(",")
+    try:
+        raw = base64.b64decode(b64)
+    except Exception:
+        return None
+    if not raw.startswith(_FAKE_JPEG_MAGIC):
+        return None
+    return raw[len(_FAKE_JPEG_MAGIC):].decode("utf-8", errors="replace")
+
+
 # ── the fake vision client ───────────────────────────────────────────────────
 class _FakeClassifierClient:
     """Programmable stand-in for OpenAIPhotoClassifierClient.
@@ -71,6 +104,19 @@ class _FakeClassifierClient:
         self.fail_classify = False
         self.default_verdict = {"category": "interior", "confidence": 0.9}
 
+    def _registered_verdict(self, ref: str) -> dict:
+        # Exact match first — covers `_register_for_stored_copies`, which
+        # registers directly against the full data URI a re-derive pass
+        # sends. Falls back to the decoded url — covers every OTHER
+        # scenario, which registers by the provider url and now receives a
+        # data URI built from bytes on the live path.
+        found = self.verdicts.get(ref)
+        if found is None:
+            decoded = _decoded_url(ref)
+            if decoded is not None:
+                found = self.verdicts.get(decoded)
+        return found or {}
+
     async def classify_photos(self, photo_urls, *, model=None, batch_size=10,
                               with_attributes=True):
         self.classify_calls.append(list(photo_urls))
@@ -78,9 +124,9 @@ class _FakeClassifierClient:
         if self.fail_classify:
             raise RuntimeError("vision model unavailable")
         out = []
-        for i, url in enumerate(photo_urls):
+        for i, ref in enumerate(photo_urls):
             verdict = dict(self.default_verdict)
-            verdict.update(self.verdicts.get(url) or {})
+            verdict.update(self._registered_verdict(ref))
             if not with_attributes:
                 # The real client does not ask for them, so the model does not
                 # answer with them.

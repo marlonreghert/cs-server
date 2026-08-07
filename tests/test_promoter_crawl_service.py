@@ -243,3 +243,196 @@ class TestFakeOpenAIClientExhaustion:
         _run(client.extract(caption="x"))
         with pytest.raises(AssertionError):
             _run(client.extract(caption="y"))
+
+
+class _FakeMediaStore:
+    """Records every promoter-keyed write, mirroring
+    tests/bdd/steps/instagram_promoter_events_steps.py's fake so a scenario
+    can assert on the S3 key shape without touching real S3."""
+
+    def __init__(self):
+        self.images: list[str] = []
+        self.manifests: list[tuple] = []
+
+    async def put_promoter_image(self, *, prefix, handle, photo_id, data, content_type, category=None):
+        key = f"{prefix}promoter={handle}/media/{photo_id}.jpg"
+        self.images.append(key)
+        return key
+
+    async def put_promoter_manifest(self, *, prefix, handle, manifest):
+        self.manifests.append((prefix, handle, manifest))
+        return f"{prefix}promoter={handle}/info/_manifest.json"
+
+
+class _FakeDownloader:
+    """No real HTTP call — every url resolves to the same trivial bytes,
+    unless the url is in `fail_urls`."""
+
+    def __init__(self):
+        self.calls = 0
+        self.fail_urls: set[str] = set()
+
+    async def download(self, url, timeout=15.0, max_bytes=None):
+        self.calls += 1
+        if url in self.fail_urls:
+            raise RuntimeError("download failed")
+        return b"FAKE_IMAGE_BYTES", "image/jpeg"
+
+
+class TestPromoterEventCoverPhoto:
+    """Defect 3 (2026-08-07 RCA): `cover_photo_key` is written for a venue
+    post's events (event_extraction_service.py:484) but never for a
+    promoter post's, even though `_archive_post_images` already archives the
+    post's images to S3. A promoter event therefore carries only
+    `source_permalink` — a perishable Instagram link whose CDN url behind it
+    expires within the hour. Every event a promoter post produces must carry
+    the post's archived cover key alongside its permalink."""
+
+    def _service(self, dao, *, posts_client=None, openai_client=None,
+                 media_store=None, downloader=None):
+        return PromoterCrawlService(
+            venue_dao=dao,
+            posts_client=posts_client or _FakePostsClient(),
+            openai_client=openai_client,
+            media_store=media_store,
+            downloader=downloader,
+        )
+
+    def test_the_event_records_the_archived_cover_key(self, dao):
+        dao.upsert_promoter_account("promo", {"status": "active"})
+        post = {
+            "shortcode": "p1", "caption": "Ingressos abertos! Vem pro role.",
+            "permalink": "https://instagram.com/p/p1",
+            "timestamp": datetime(2026, 8, 1, tzinfo=timezone.utc).isoformat(),
+            "image_urls": ["https://instagram.cdn.example/p1.jpg"],
+        }
+        posts_client = _FakePostsClient()
+        posts_client.posts_by_handle["promo"] = [post]
+        openai_client = _FakeOpenAIClient()
+        openai_client.program(_extraction_json())
+        media_store = _FakeMediaStore()
+
+        service = self._service(
+            dao, posts_client=posts_client, openai_client=openai_client,
+            media_store=media_store, downloader=_FakeDownloader(),
+        )
+        _run(service.run({}))
+
+        row = dao.get_event_by_source("promo", "p1")
+        assert row["cover_photo_key"], "the event has no cover_photo_key"
+        assert row["cover_photo_key"] == media_store.images[0]
+
+    def test_the_permalink_survives_alongside_the_cover_key(self, dao):
+        dao.upsert_promoter_account("promo", {"status": "active"})
+        post = {
+            "shortcode": "p1", "caption": "Ingressos abertos! Vem pro role.",
+            "permalink": "https://instagram.com/p/p1",
+            "timestamp": datetime(2026, 8, 1, tzinfo=timezone.utc).isoformat(),
+            "image_urls": ["https://instagram.cdn.example/p1.jpg"],
+        }
+        posts_client = _FakePostsClient()
+        posts_client.posts_by_handle["promo"] = [post]
+        openai_client = _FakeOpenAIClient()
+        openai_client.program(_extraction_json())
+
+        service = self._service(
+            dao, posts_client=posts_client, openai_client=openai_client,
+            media_store=_FakeMediaStore(), downloader=_FakeDownloader(),
+        )
+        _run(service.run({}))
+
+        row = dao.get_event_by_source("promo", "p1")
+        assert row["cover_photo_key"]
+        assert row["source_permalink"] == "https://instagram.com/p/p1"
+
+    def test_every_event_from_a_multi_event_post_gets_the_same_cover(self, dao):
+        """One post, several events, one cover each (slide-to-event
+        alignment is out of scope — 260806_multi-event-posts.md)."""
+        dao.upsert_promoter_account("promo", {"status": "active"})
+        post = {
+            "shortcode": "roundup", "caption": "Ingressos abertos! 3 eventos essa semana.",
+            "permalink": "https://instagram.com/p/roundup",
+            "timestamp": datetime(2026, 8, 1, tzinfo=timezone.utc).isoformat(),
+            "image_urls": ["https://instagram.cdn.example/roundup.jpg"],
+        }
+        posts_client = _FakePostsClient()
+        posts_client.posts_by_handle["promo"] = [post]
+
+        class _MultiEventClient(_FakeOpenAIClient):
+            """Returns a raw multi-event payload as-is, unlike the base
+            fake (which wraps a single flat event dict for every other test
+            in this file)."""
+
+            async def extract_events(self, *, caption, image_data_uri=None, max_events):
+                self.calls += 1
+                item = self._responses.pop(0)
+                return item, False
+
+        import json
+
+        client = _MultiEventClient()
+        client.program(json.dumps({"events": [
+            json.loads(_extraction_json(title="Festa A")),
+            json.loads(_extraction_json(title="Festa B")),
+            json.loads(_extraction_json(title="Festa C")),
+        ]}))
+        media_store = _FakeMediaStore()
+
+        service = self._service(
+            dao, posts_client=posts_client, openai_client=client,
+            media_store=media_store, downloader=_FakeDownloader(),
+        )
+        _run(service.run({}))
+
+        rows = dao.list_events_by_source("promo", "roundup")
+        assert len(rows) == 3
+        cover = media_store.images[0]
+        assert all(r["cover_photo_key"] == cover for r in rows)
+
+    def test_no_image_leaves_the_cover_key_null_but_the_event_persists(self, dao):
+        dao.upsert_promoter_account("promo", {"status": "active"})
+        post = {
+            "shortcode": "p1", "caption": "Ingressos abertos! Vem pro role.",
+            "permalink": "https://instagram.com/p/p1",
+            "timestamp": datetime(2026, 8, 1, tzinfo=timezone.utc).isoformat(),
+            "image_urls": [],  # the post stored no image
+        }
+        posts_client = _FakePostsClient()
+        posts_client.posts_by_handle["promo"] = [post]
+        openai_client = _FakeOpenAIClient()
+        openai_client.program(_extraction_json())
+
+        service = self._service(
+            dao, posts_client=posts_client, openai_client=openai_client,
+            media_store=_FakeMediaStore(), downloader=_FakeDownloader(),
+        )
+        report = _run(service.run({}))
+
+        row = dao.get_event_by_source("promo", "p1")
+        assert row is not None, "the event must still be persisted"
+        assert row["cover_photo_key"] is None
+
+    def test_an_archive_failure_for_this_posts_image_also_leaves_the_key_null(self, dao):
+        dao.upsert_promoter_account("promo", {"status": "active"})
+        post = {
+            "shortcode": "p1", "caption": "Ingressos abertos! Vem pro role.",
+            "permalink": "https://instagram.com/p/p1",
+            "timestamp": datetime(2026, 8, 1, tzinfo=timezone.utc).isoformat(),
+            "image_urls": ["https://instagram.cdn.example/p1.jpg"],
+        }
+        posts_client = _FakePostsClient()
+        posts_client.posts_by_handle["promo"] = [post]
+        openai_client = _FakeOpenAIClient()
+        openai_client.program(_extraction_json())
+        downloader = _FakeDownloader()
+        downloader.fail_urls.add("https://instagram.cdn.example/p1.jpg")
+
+        service = self._service(
+            dao, posts_client=posts_client, openai_client=openai_client,
+            media_store=_FakeMediaStore(), downloader=downloader,
+        )
+        _run(service.run({}))
+
+        row = dao.get_event_by_source("promo", "p1")
+        assert row is not None
+        assert row["cover_photo_key"] is None

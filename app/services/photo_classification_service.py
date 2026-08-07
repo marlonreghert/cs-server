@@ -22,6 +22,7 @@ Four rules carry the behaviour and must not be relaxed:
 """
 from __future__ import annotations
 
+import base64
 import logging
 from typing import Any, Optional
 
@@ -62,6 +63,40 @@ DEFAULT_COST_PER_1K_OUTPUT_USD = 0.0006
 UNKNOWN_AUTHORSHIP = ("", "unknown", None)
 
 
+def _image_reference(photo: dict, *, require_bytes: bool) -> Optional[str]:
+    """What to hand the model for this photo: bytes already in hand, encoded
+    as a data URI, or — only when the caller allows it — whatever is in
+    `photo["url"]`.
+
+    The live archive path attaches `_bytes`/`_content_type` to a photo BEFORE
+    calling `annotate(..., require_bytes=True)`, specifically so this never
+    asks a provider's CDN to serve OpenAI: Instagram's signed fbcdn links
+    return `400 invalid_image_url` when the model tries to fetch them
+    server-side, and the classify step is shared across every source, so it
+    cannot rely on Google's urls happening to be openly fetchable.
+
+    `require_bytes=True` with no bytes attached returns None rather than
+    falling back to the url — a download that already failed would just 400
+    again, so that photo gets no verdict instead (source category kept),
+    exactly like any other classification miss.
+
+    The one caller that never sets `require_bytes` is `derive_for_archived`
+    (re-deriving attributes over an archived run): it has no bytes in
+    memory, only `photo["url"]`, which by then is already a data URI read
+    back from S3 (`read_image_data_uri` — a presigned url is ~1,900 chars
+    and OpenAI refuses it outright, so it was never actually "a url" in the
+    fetchable sense either).
+    """
+    data = photo.get("_bytes")
+    if data:
+        content_type = photo.get("_content_type") or "image/jpeg"
+        encoded = base64.b64encode(data).decode("ascii")
+        return f"data:{content_type};base64,{encoded}"
+    if require_bytes:
+        return None
+    return photo.get("url")
+
+
 class PhotoClassificationService:
     """Annotates fetched photo dicts in place with category and attributes."""
 
@@ -93,12 +128,17 @@ class PhotoClassificationService:
     # ── the live path ────────────────────────────────────────────────────────
     async def annotate(
         self, photos: list[dict], *, derive_attributes: bool = True,
-        recategorize: bool = True, venue_id: str = "",
+        recategorize: bool = True, venue_id: str = "", require_bytes: bool = False,
     ) -> dict:
         """Classify a venue's photos in one call and attach what came back.
 
         Photos are annotated IN PLACE — the archive pipeline then files each one
         under `photo["category"]`. Returns the counts and the estimated cost.
+
+        `require_bytes=True` (the live archive path) sends only photos that
+        carry already-downloaded bytes — see `_image_reference`. A photo with
+        no bytes is excluded from the model call entirely rather than falling
+        back to a url, and gets no verdict (source category kept).
         """
         stats = {"classified": 0, "attributed": 0, "cost_usd": 0.0,
                  "input_tokens": 0, "output_tokens": 0}
@@ -111,8 +151,21 @@ class PhotoClassificationService:
         for photo in photos:
             photo.setdefault("source_category", photo.get("category"))
 
-        urls = [p.get("url") for p in photos]
-        verdicts = await self._classify(urls, venue_id, derive_attributes)
+        refs: list[str] = []
+        ref_indexes: list[int] = []
+        for i, photo in enumerate(photos):
+            ref = _image_reference(photo, require_bytes=require_bytes)
+            if ref is not None:
+                refs.append(ref)
+                ref_indexes.append(i)
+
+        dense_verdicts = (
+            await self._classify(refs, venue_id, derive_attributes) if refs else []
+        )
+        verdicts: list[dict] = [{}] * len(photos)
+        for idx, verdict in zip(ref_indexes, dense_verdicts):
+            verdicts[idx] = verdict
+
         for photo, verdict in zip(photos, verdicts):
             classified, attributed = self._apply_verdict(
                 photo, verdict, derive_attributes, recategorize
@@ -259,9 +312,11 @@ class PhotoClassificationService:
     ) -> int:
         """Re-classify already-archived photos from their stored copies.
 
-        Same single call, reading presigned S3 urls instead of provider links —
-        which is what lets the schema grow without re-fetching, and without a
-        provider bill.
+        Same single call, reading each photo's bytes back from S3 as a data
+        URI (`urls` here are already `read_image_data_uri` results, not
+        provider links — a presigned url is ~1,900 chars and OpenAI refuses
+        it outright) — which is what lets the schema grow without
+        re-fetching, and without a provider bill.
 
         The call returns a category too, and it is **deliberately discarded**:
         the category is in the S3 key of an object that already exists, so
