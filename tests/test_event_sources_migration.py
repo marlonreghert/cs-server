@@ -17,6 +17,7 @@ Three things get their own tests beyond that established shape:
   - downgrade() must REFUSE when any event carries more than one source.
 """
 import importlib.util
+import json
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -155,10 +156,29 @@ def test_creates_the_child_table_with_the_composite_unique_constraint():
     m = _load()
     assert "CREATE TABLE IF NOT EXISTS events.event_source" in m._CREATE_EVENT_SOURCE
     assert (
-        "UNIQUE (source_handle, source_shortcode, source_event_key)"
+        "CONSTRAINT uq_event_source_post UNIQUE (source_handle, source_shortcode, source_event_key)"
         in m._CREATE_EVENT_SOURCE
     )
     assert "REFERENCES events.event(event_id)" in m._CREATE_EVENT_SOURCE
+
+
+def test_the_new_constraint_never_collides_with_events_events_own_name():
+    """Regression guard for a real CI failure (psycopg.errors.DuplicateTable:
+    relation "uq_event_source_key" already exists): a UNIQUE constraint's
+    backing index is named per-SCHEMA in Postgres, not per-table, and
+    events.event and events.event_source share the `events` schema.
+    `events.event`'s OWN uq_event_source_key (added by 0025) is still live
+    when step 1 runs — only step 4 drops it — so the child table's copy MUST
+    use a different identifier. This asserts the two names are literally
+    different strings, not just that each individually looks right."""
+    m = _load()
+    # The CONSTRAINT clause itself, not just a comment mentioning the old
+    # name for context (this migration's own docstring/comments legitimately
+    # reference "uq_event_source_key" when explaining the rename).
+    assert "CONSTRAINT uq_event_source_post UNIQUE" in m._CREATE_EVENT_SOURCE
+    assert "CONSTRAINT uq_event_source_key" not in m._CREATE_EVENT_SOURCE
+    assert "uq_event_source_key" in m._DROP_OLD_CONSTRAINT
+    assert "uq_event_source_key" in m._ADD_OLD_CONSTRAINT
 
 
 def test_drops_the_old_constraint_and_every_single_source_column():
@@ -225,7 +245,11 @@ def test_upgrade_backfills_a_source_row_from_each_events_own_columns():
     assert backfilled["event_id"] == "evt_1"
     assert backfilled["source_permalink"] == "https://ig/p/abc"
     assert backfilled["cover_photo_key"] == "k1.jpg"
-    assert backfilled["raw_extraction"] == {"title": "Noite da Patroa"}
+    # Bound as a JSON STRING, not a bare dict: psycopg has no adapter for a
+    # raw Python dict against a `CAST(:param AS jsonb)` placeholder — a real
+    # Postgres run caught this (`cannot adapt type 'dict'`) where the fake
+    # bind alone could not, since it never actually executes SQL.
+    assert json.loads(backfilled["raw_extraction"]) == {"title": "Noite da Patroa"}
 
 
 def test_upgrade_is_a_noop_collapse_when_no_rows_exist():
@@ -265,11 +289,13 @@ class TestCollapse:
         assert ("evt_c", "evt_a") in fake_op.bind.reattachments
         assert set(fake_op.bind.cleared_candidates) == {"evt_b", "evt_c"}
 
-        # The lineup unions across all three (canonical started empty).
+        # The lineup unions across all three (canonical started empty). Bound
+        # as a JSON STRING (see test_upgrade_backfills_a_source_row_from_
+        # each_events_own_columns's comment on why).
         merged_lineup = None
         for update in fake_op.bind.canonical_updates:
             if "lineup" in update:
-                merged_lineup = update["lineup"]
+                merged_lineup = json.loads(update["lineup"])
         assert merged_lineup is not None, fake_op.bind.canonical_updates
         assert set(merged_lineup) == {"DJ X", "DJ Y"}
 

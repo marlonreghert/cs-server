@@ -42,6 +42,21 @@ that several posts describe one real-world night.
    `events.event`. Only now, because step 2 needed them to exist and step 3
    needed the sources they were copied into to already be attached.
 
+## The new constraint needs its OWN name
+
+The idempotency guarantee moves to `events.event_source`, but its Postgres
+constraint name cannot reuse `uq_event_source_key`: that identifier is
+`events.event`'s CURRENT constraint (added by 0025) until step 4 drops it,
+and a UNIQUE constraint's backing index is named per-SCHEMA, not per-table —
+both tables live in `events`. Creating the child table's constraint under the
+same name before step 4 runs would collide with the still-live original
+(`DuplicateTable` on the index Postgres creates for it), so the child table's
+copy is named `uq_event_source_post` instead. Renaming, not reordering: the
+alternative (dropping 0025's constraint in step 1, before the columns it
+covers are backfilled into the child table) would leave `events.event`
+unprotected mid-migration for no benefit — see step 2's own ordering
+requirement above.
+
 ## Downgrade refuses to run once a real merge happened
 
 The downgrade counts events carrying MORE than one source BEFORE touching
@@ -57,6 +72,8 @@ step 3 is exactly what produces the first multi-source events, the same way
 Revision ID: 0026_event_sources
 Revises: 0025_multi_event_posts
 """
+import json
+
 from alembic import op
 import sqlalchemy as sa
 
@@ -83,11 +100,15 @@ CREATE TABLE IF NOT EXISTS events.event_source (
   raw_extraction      jsonb,
   first_seen_at       timestamptz NOT NULL DEFAULT now(),
   last_seen_at        timestamptz NOT NULL DEFAULT now(),
-  -- The idempotency guarantee, moved here from events.event (0025's
-  -- uq_event_source_key): re-extracting the same post must update its
+  -- The idempotency guarantee, moved here from events.event's
+  -- uq_event_source_key (0025): re-extracting the same post must update its
   -- SOURCE row in place, never insert a duplicate — now scoped to the
-  -- attaching post, independent of which event it attaches to.
-  CONSTRAINT uq_event_source_key UNIQUE (source_handle, source_shortcode, source_event_key)
+  -- attaching post, independent of which event it attaches to. Named
+  -- uq_event_source_post, NOT uq_event_source_key: that name is still
+  -- events.event's own live constraint until step 4 drops it, and a schema
+  -- cannot hold two same-named constraints even on different tables (see
+  -- "The new constraint needs its OWN name" above).
+  CONSTRAINT uq_event_source_post UNIQUE (source_handle, source_shortcode, source_event_key)
 );
 
 CREATE INDEX IF NOT EXISTS ix_event_source_event_id ON events.event_source (event_id);
@@ -162,7 +183,7 @@ SELECT count(*) FROM (
 
 _ADD_BACK_COLUMNS = r"""
 ALTER TABLE events.event
-  ADD COLUMN IF NOT EXISTS source_kind text,
+  ADD COLUMN IF NOT EXISTS source_kind text NOT NULL DEFAULT 'venue_post',
   ADD COLUMN IF NOT EXISTS source_handle text,
   ADD COLUMN IF NOT EXISTS source_shortcode text,
   ADD COLUMN IF NOT EXISTS source_permalink text,
@@ -199,6 +220,9 @@ ALTER TABLE events.event
   ALTER COLUMN last_seen_at SET NOT NULL;
 """
 
+# Restores 0025's ORIGINAL name on events.event — the child table's own
+# uq_event_source_post (still live at this point; DROP_EVENT_SOURCE_TABLE
+# runs after this) is a different identifier, so the two never collide.
 _ADD_OLD_CONSTRAINT = r"""
 ALTER TABLE events.event
   ADD CONSTRAINT uq_event_source_key UNIQUE (source_handle, source_shortcode, source_event_key);
@@ -220,6 +244,19 @@ def _new_source_id() -> str:
     return f"evsrc_{new_run_id()}"
 
 
+def _jsonb(value):
+    """psycopg (v3) has no default adapter for a bare Python dict/list bound
+    against a `CAST(:param AS jsonb)` placeholder — SELECTing a jsonb column
+    back through `.mappings()` decodes it INTO a dict/list automatically, but
+    writing it back out requires re-serializing first (the same thing
+    app.dao.rds_venue_store.RdsVenueStore's insert_event/update_event already
+    do for every jsonb column, for the identical reason). Every jsonb value
+    this migration writes — the backfilled `raw_extraction`, the collapse's
+    merged `lineup`, the downgrade's restored `raw_extraction` — routes
+    through this."""
+    return json.dumps(value) if value is not None else None
+
+
 def upgrade() -> None:
     # 1. The child table, empty, constraint and all.
     op.execute(_CREATE_EVENT_SOURCE)
@@ -239,7 +276,7 @@ def upgrade() -> None:
             "source_event_key": row["source_event_key"],
             "source_event_index": row["source_event_index"],
             "cover_photo_key": row["cover_photo_key"],
-            "raw_extraction": row["raw_extraction"],
+            "raw_extraction": _jsonb(row["raw_extraction"]),
             "first_seen_at": row["first_seen_at"], "last_seen_at": row["last_seen_at"],
         })
 
@@ -275,6 +312,7 @@ def upgrade() -> None:
                 for field, value in update_fields.items():
                     if field == "lineup":
                         set_clauses.append("lineup=CAST(:lineup AS jsonb)")
+                        value = _jsonb(value)
                     else:
                         set_clauses.append(f"{field}=:{field}")
                     params[field] = value
@@ -311,7 +349,9 @@ def downgrade() -> None:
     bind = op.get_bind()
     rows = bind.execute(sa.text(_SELECT_SOURCES_FOR_DOWNGRADE)).mappings().all()
     for row in rows:
-        bind.execute(sa.text(_RESTORE_ONE_EVENT), dict(row))
+        params = dict(row)
+        params["raw_extraction"] = _jsonb(params["raw_extraction"])
+        bind.execute(sa.text(_RESTORE_ONE_EVENT), params)
     op.execute(_RESTORE_NOT_NULL)
     op.execute(_ADD_OLD_CONSTRAINT)
     op.execute(_DROP_EVENT_SOURCE_TABLE)
