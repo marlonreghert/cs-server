@@ -126,6 +126,15 @@ class EventOut(BaseModel):
     # keeps working unchanged across a merge. `sources` is the new,
     # optional-to-adopt way to see every announcing post at once.
     sources: list["EventSourceOut"] = Field(default_factory=list)
+    # plans/260807_auto-accept-and-field-level-protection.md: the union of
+    # every field name an operator has PATCHed on this event (written by
+    # `patch_event`, below). NULL/None is a MEANINGFUL, distinct value from
+    # an empty list: it means "unknown which fields, if any, were edited" —
+    # every row that predates this column, or that was confirmed without
+    # ever being PATCHed — and `reconcile_post_events`'s confirmed branch
+    # reads exactly that distinction to keep today's whole-row protection
+    # for those rows rather than guessing. Additive.
+    operator_edited_fields: Optional[list[str]] = None
 
 
 class EventSourceOut(BaseModel):
@@ -367,6 +376,15 @@ def patch_event(event_id: str, patch: EventPatch):
     if existing is None:
         raise HTTPException(status_code=404, detail="Event not found")
     fields = patch.model_dump(exclude_unset=True)
+    if fields:
+        # `exclude_unset` yields exactly the keys the console sent as a
+        # genuine change (vibes_bot #169's partial-patch fix) — the ONLY
+        # signal that lets `reconcile_post_events` protect what an operator
+        # actually touched instead of the whole row. Accumulates across
+        # successive patches; never records a field this request did not
+        # send. Sorted for a deterministic, order-independent value.
+        already_edited = set(existing.get("operator_edited_fields") or [])
+        fields["operator_edited_fields"] = sorted(already_edited | set(fields.keys()))
     updated = dao.update_event(event_id, fields) if fields else existing
     return _to_out(dao, updated)
 

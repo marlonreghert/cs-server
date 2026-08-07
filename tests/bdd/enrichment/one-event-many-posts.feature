@@ -41,6 +41,14 @@ Feature: One event, many posts
     And the new source is attached to that event
     And the divergence is flagged
 
+  Scenario: Field-level protection extends to the merge path, not just re-extraction
+    Given a confirmed event whose price an operator corrected
+    And a later post for the same event stating a different price and a new description
+    When the events are extracted
+    Then the operator's price survives the merge
+    And the divergence from the confirmed record is flagged
+    And the new description is absorbed from the later post
+
   Scenario: Keep re-extraction of one post idempotent
     Given a post that already produced an event
     When that post is extracted again

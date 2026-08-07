@@ -271,6 +271,70 @@ def step_then_the_divergence_is_flagged(context):
     assert row["review_reason"] == "model_diverges_from_confirmed_record", row
 
 
+# ── Scenario 5b: field-level protection extends to the merge path ───────────
+# The coordination note on plans/260807_auto-accept-and-field-level-
+# protection.md: event_merge.merge_event_fields's confirmed-canonical branch
+# used to freeze the WHOLE row, same as event_reconciliation's confirmed
+# branch did before that plan — fixed there, but left drifting here, so an
+# operator's edit behaved two different ways depending on which runtime path
+# touched it next. This scenario drives the REAL merge_touched_events (via a
+# genuine second post, not a direct merge_event_fields call — that pure-
+# function level is covered by tests/test_event_merge.py's
+# TestFieldLevelProtectionOnTheMergePath) to prove the fix end to end.
+#
+# The edited/protected field here is PRICE, not title: compute_event_identity
+# groups candidates by (venue_id, date, normalize_title(title)), so two
+# events ever reaching merge_event_fields together are ALREADY guaranteed to
+# agree on title post-normalization — a materially different title never
+# merges at all (Scenario 5's own docstring already names this), so title
+# specifically can never be the field that "genuinely differs" in an
+# end-to-end scenario. Price has no such constraint and stands in for it.
+@given("a confirmed event whose price an operator corrected")
+def step_given_a_confirmed_event_whose_price_an_operator_corrected(context):
+    event_id = new_event_id()
+    context.ee_dao.insert_event({
+        "event_id": event_id, "venue_id": context.ee_venue_id,
+        "source_kind": "venue_post", "source_handle": context.ee_handle,
+        "source_shortcode": "oemp_price_seed", "source_event_key": "oemp_price_seed_key",
+        "status": "confirmed", "title": "Noite da Patroa",
+        "starts_at": datetime(2026, 8, 8, 22, 0, tzinfo=timezone.utc),
+        "price_text": "R$30 corrigido pelo operador",
+        "operator_edited_fields": ["price_text"],
+        "raw_extraction": {"time_known": True},
+    })
+    context.oemp_price_confirmed_event_id = event_id
+
+
+@given("a later post for the same event stating a different price and a new description")
+def step_given_a_later_post_stating_a_different_price_and_description(context):
+    _add_post(context, "oemp_price_later", timestamp=_TS_2)
+    context.ee_openai.program(_events_json([
+        {"title": "NOITE DA PATROA", "date_text": "08/08", "time_text": "22h",
+         "price_text": "R$99", "description": "Open bar até meia-noite"},
+    ]))
+
+
+@then("the operator's price survives the merge")
+def step_then_the_operators_price_survives_the_merge(context):
+    row = context.ee_dao.get_event(context.oemp_price_confirmed_event_id)
+    assert row is not None
+    assert row["price_text"] == "R$30 corrigido pelo operador", row
+
+
+@then("the divergence from the confirmed record is flagged")
+def step_then_the_divergence_from_the_confirmed_record_is_flagged(context):
+    row = context.ee_dao.get_event(context.oemp_price_confirmed_event_id)
+    assert row is not None
+    assert row["review_reason"] == "model_diverges_from_confirmed_record", row
+
+
+@then("the new description is absorbed from the later post")
+def step_then_the_new_description_is_absorbed_from_the_later_post(context):
+    row = context.ee_dao.get_event(context.oemp_price_confirmed_event_id)
+    assert row is not None
+    assert row.get("description") == "Open bar até meia-noite", row
+
+
 # ── Scenario 6: single-post re-extraction stays idempotent ──────────────────
 @given("a post that already produced an event")
 def step_given_a_post_that_already_produced_an_event(context):
