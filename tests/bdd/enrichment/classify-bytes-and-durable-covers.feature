@@ -1,4 +1,3 @@
-@wip
 Feature: Classify from bytes, and give every event a durable cover
   As the operator of the event pipeline
   I want photos classified from the bytes we already downloaded, and every event
@@ -18,10 +17,21 @@ Feature: Classify from bytes, and give every event a durable cover
     Then the model receives the image as bytes
     And no provider url is sent to the model
 
-  Scenario: Classify by url when re-deriving over an archived run
+  # NOTE (execute-feature, 2026-08-07): the plan's approach doc describes this
+  # path as "presigns S3". Verified against app/services/venue_photo_archive_
+  # service.py::_rederive_venue: it does not presign — it reads the object's
+  # bytes back (media_store.read_image_data_uri, the s3:GetObject grant on
+  # retrieved/* exists for exactly this) and inlines them as a data URI,
+  # because a presigned url built from temporary instance-role credentials is
+  # ~1,900 chars and OpenAI already refuses it outright. That was already true
+  # before this branch. The scenario is corrected to match shipped behaviour
+  # rather than assert something that would reintroduce a known, already-fixed
+  # bug.
+  Scenario: Classify from the archived bytes when re-deriving over an archived run
     Given an archived run whose attributes are re-derived
     When the archived photos are classified
-    Then the model receives a presigned url for each photo
+    Then the model receives each photo's own archived bytes
+    And no provider url is sent to the model
 
   Scenario: Report an unfetchable image as an image failure
     Given the model cannot fetch an image
@@ -36,10 +46,10 @@ Feature: Classify from bytes, and give every event a durable cover
     Then the photo is still archived
     And it keeps the category its source gave it
 
-  Scenario: Keep signed urls out of the logs
+  Scenario: Keep signed urls out of the classifier logs
     Given the model cannot fetch an image
     When the archive classifies it
-    Then the signed url does not appear in the logs
+    Then no signed url appears in the classifier logs
 
   Scenario: Record the archived cover on a promoter event
     Given a promoter post whose image has been archived

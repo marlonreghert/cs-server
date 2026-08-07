@@ -252,7 +252,11 @@ JOB_REGISTRY = {
         "markers) over the top N by priority. Zero model calls, zero external "
         "API calls.",
         "default_config": {
-            "max_evidence_venues": 25,
+            # Raised from 25 (2026-08-07 RCA) — see DEFAULT_MAX_EVIDENCE_VENUES
+            # in app/services/event_venue_targeting.py for why: this stage is
+            # free (zero model calls, zero external API calls), so a small
+            # bound protected nothing and left most of the catalog unevaluated.
+            "max_evidence_venues": 1000,
             "min_evidence_posts": 3,
             "lookback_days": 60,
             "recompute": False,

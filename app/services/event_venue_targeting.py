@@ -193,7 +193,16 @@ def category_gate(
 
 
 # ── stage 2: the bounded evidence gate ────────────────────────────────────────
-DEFAULT_MAX_EVIDENCE_VENUES = 25
+# Raised from 25 (2026-08-07 RCA): a live run had 771 category-gate survivors
+# against this bound, so 746 venues were never evaluated and
+# evidence_confirmed came back 0 — extraction then had nothing to run on. The
+# evidence gate makes ZERO model calls and ZERO external API calls
+# (plans/260804_event-venue-targeting.md §B: everything it reads was already
+# fetched by an earlier, separately-billed pipeline), so a bound sized as if
+# this stage were expensive protected nothing and made the happy path
+# unreachable. 1000 comfortably covers today's catalog with room to grow, and
+# stays a real operator-tunable control rather than a silent floor.
+DEFAULT_MAX_EVIDENCE_VENUES = 1000
 DEFAULT_MIN_EVIDENCE_POSTS = 3
 DEFAULT_LOOKBACK_DAYS = 60
 

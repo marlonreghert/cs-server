@@ -384,6 +384,174 @@ class _FakeIgClient:
         return list(self.posts)[:results_limit]
 
 
+class _RecordingDownloader:
+    """Counts calls per url — proves classification and storage share the
+    SAME downloaded bytes rather than fetching an Instagram signed url
+    twice (once for classify, once to store)."""
+
+    def __init__(self, size=32):
+        self.size = size
+        self.calls: list[str] = []
+
+    async def download(self, url, *, timeout=None, max_bytes=None):
+        self.calls.append(url)
+        data = b"\xff\xd8\xff" + b"x" * self.size
+        if max_bytes is not None and len(data) > max_bytes:
+            raise PhotoTooLarge("too big")
+        return data, "image/jpeg"
+
+
+class _RecordingClassifierClient:
+    """Stands in for OpenAIPhotoClassifierClient: records exactly what
+    string each photo reference was, so a test can prove no provider url
+    (Instagram's signed CDN link) ever reached it."""
+
+    def __init__(self):
+        self.received_batches: list[list[str]] = []
+
+    async def classify_photos(self, photo_urls, *, model=None, batch_size=10,
+                              with_attributes=True):
+        self.received_batches.append(list(photo_urls))
+        return [
+            {"index": i, "category": "interior", "confidence": 0.9}
+            for i in range(len(photo_urls))
+        ]
+
+
+class TestClassifyFromBytesNotUrl:
+    """Defect 1 (2026-08-07 RCA): OpenAI cannot fetch Instagram's signed CDN
+    urls server-side (400 invalid_image_url) — the live archive path must
+    hand the classifier the bytes it already downloaded, not the url."""
+
+    async def test_the_classifier_never_receives_the_instagram_url(self):
+        from app.services.photo_classification_service import PhotoClassificationService
+
+        apify = _FakeIgClient(posts=[{
+            "caption": "", "likes_count": 0, "comments_count": 0,
+            "timestamp": "2026-08-01T00:00:00.000Z", "post_type": "image",
+            "shortcode": "sc1", "permalink": "https://instagram.com/p/sc1/",
+            "image_urls": [
+                "https://instagram.fper12-1.fna.fbcdn.net/v/secret.jpg?sig=TOKEN"
+            ],
+        }])
+        client = _RecordingClassifierClient()
+        classifier = PhotoClassificationService(client=client)
+        downloader = _RecordingDownloader()
+        svc = _service(
+            venue_dao=_Dao(["ven_a"], instagram_handles={"ven_a": "somehandle"}),
+            apify_instagram_client=apify,
+            downloader=downloader,
+            photo_classifier=classifier,
+        )
+
+        summary = await svc.run({
+            "source": "instagram_posts", "venue_ids": "ven_a",
+            "max_photos_per_venue": 5,
+        })
+
+        assert summary["archived"] == 1
+        assert client.received_batches, "the classifier was never called"
+        sent = client.received_batches[0]
+        assert len(sent) == 1
+        assert sent[0].startswith("data:image/jpeg;base64,")
+        assert "instagram.fper12-1.fna.fbcdn.net" not in sent[0]
+        assert "TOKEN" not in sent[0]
+        assert not any(ref.startswith("http") for batch in client.received_batches for ref in batch)
+
+    async def test_the_photo_is_filed_under_its_classified_category(self):
+        from app.services.photo_classification_service import PhotoClassificationService
+
+        apify = _FakeIgClient(posts=[{
+            "caption": "", "likes_count": 0, "comments_count": 0,
+            "timestamp": "2026-08-01T00:00:00.000Z", "post_type": "image",
+            "shortcode": "sc1", "permalink": "https://instagram.com/p/sc1/",
+            "image_urls": ["https://instagram.fper12-1.fna.fbcdn.net/v/secret.jpg"],
+        }])
+        classifier = PhotoClassificationService(client=_RecordingClassifierClient())
+        svc = _service(
+            venue_dao=_Dao(["ven_a"], instagram_handles={"ven_a": "somehandle"}),
+            apify_instagram_client=apify,
+            downloader=_RecordingDownloader(),
+            photo_classifier=classifier,
+        )
+        await svc.run({
+            "source": "instagram_posts", "venue_ids": "ven_a",
+            "max_photos_per_venue": 5,
+        })
+
+        image_keys = [k for k in svc._fake_s3.objects if k.endswith(".jpg")]
+        assert image_keys and all("/media/interior/" in k for k in image_keys)
+
+    async def test_the_download_is_not_repeated_for_storage(self):
+        """Classification and storage must share the SAME bytes — a second
+        download of an Instagram signed url risks the signature having
+        already expired by the time storage gets to it."""
+        from app.services.photo_classification_service import PhotoClassificationService
+
+        apify = _FakeIgClient(posts=[{
+            "caption": "", "likes_count": 0, "comments_count": 0,
+            "timestamp": "2026-08-01T00:00:00.000Z", "post_type": "image",
+            "shortcode": "sc1", "permalink": "https://instagram.com/p/sc1/",
+            "image_urls": ["https://instagram.fper12-1.fna.fbcdn.net/v/secret.jpg"],
+        }])
+        downloader = _RecordingDownloader()
+        classifier = PhotoClassificationService(client=_RecordingClassifierClient())
+        svc = _service(
+            venue_dao=_Dao(["ven_a"], instagram_handles={"ven_a": "somehandle"}),
+            apify_instagram_client=apify,
+            downloader=downloader,
+            photo_classifier=classifier,
+        )
+        await svc.run({
+            "source": "instagram_posts", "venue_ids": "ven_a",
+            "max_photos_per_venue": 5,
+        })
+
+        assert downloader.calls == [
+            "https://instagram.fper12-1.fna.fbcdn.net/v/secret.jpg"
+        ], f"expected exactly one download, got {downloader.calls}"
+
+    async def test_a_download_failure_before_classification_still_lets_storage_retry(self):
+        """A photo whose pre-classification download fails must not be
+        silently lost: storage gets its own attempt, exactly as it always
+        has when there was no classifier bytes-first step at all."""
+        from app.services.photo_classification_service import PhotoClassificationService
+
+        class _FailsThenSucceeds:
+            def __init__(self):
+                self.calls = 0
+
+            async def download(self, url, *, timeout=None, max_bytes=None):
+                self.calls += 1
+                if self.calls == 1:
+                    raise RuntimeError("transient network blip")
+                return b"\xff\xd8\xff-bytes", "image/jpeg"
+
+        apify = _FakeIgClient(posts=[{
+            "caption": "", "likes_count": 0, "comments_count": 0,
+            "timestamp": "2026-08-01T00:00:00.000Z", "post_type": "image",
+            "shortcode": "sc1", "permalink": "https://instagram.com/p/sc1/",
+            "image_urls": ["https://instagram.fper12-1.fna.fbcdn.net/v/secret.jpg"],
+        }])
+        classifier = PhotoClassificationService(client=_RecordingClassifierClient())
+        svc = _service(
+            venue_dao=_Dao(["ven_a"], instagram_handles={"ven_a": "somehandle"}),
+            apify_instagram_client=apify,
+            downloader=_FailsThenSucceeds(),
+            photo_classifier=classifier,
+        )
+        summary = await svc.run({
+            "source": "instagram_posts", "venue_ids": "ven_a",
+            "max_photos_per_venue": 5,
+        })
+
+        # The classify-time download failed (attempt 1); storage's own
+        # attempt (attempt 2) still archived the photo, uncategorised.
+        assert summary["archived"] == 1
+        image_keys = [k for k in svc._fake_s3.objects if k.endswith(".jpg")]
+        assert image_keys
+
+
 class TestInstagramHandleCostsNothingWhenMissing:
     """The handle lookup is a database read that must resolve BEFORE any
     Apify call. Asserted on CALL COUNT, not just the `no_handle` outcome,

@@ -146,7 +146,12 @@ class TestCaptionEvidence:
 class TestParseEventTargetingConfig:
     def test_defaults_applied_when_config_is_none(self):
         cfg = parse_event_targeting_config(None)
-        assert cfg["max_evidence_venues"] == 25
+        # Raised from 25 (2026-08-07 RCA): production had 771 category-gate
+        # survivors against a default bound of 25 — 746 venues were never
+        # evaluated and evidence_confirmed was 0. The evidence gate makes
+        # ZERO model calls and ZERO external API calls (plans/260804_event-
+        # venue-targeting.md §B), so the bound was protecting nothing.
+        assert cfg["max_evidence_venues"] == 1000
         assert cfg["min_evidence_posts"] == 3
         assert cfg["lookback_days"] == 60
         assert cfg["recompute"] is False
@@ -308,3 +313,84 @@ class TestResolveEventCandidateIds:
                 evidence_score=5, evidence_sample=None, evaluated_at=None,
             )
         assert resolve_event_candidate_ids(dao, include_category_candidates=True) == ["a", "b"]
+
+
+class TestDefaultBoundCoversTheCategoryGateOutput:
+    """Defect 4 (2026-08-07 RCA): 771 category-gate survivors against a
+    default `max_evidence_venues` of 25 meant 746 venues were never
+    evaluated and evidence_confirmed was 0 — the evidence gate is free
+    (zero model calls, zero external API calls), so the bound protected
+    nothing and made the happy path unreachable."""
+
+    def _service(self):
+        store = InMemoryRdsVenueStore()
+        dao = VenueRepository(client=None, rds_store=store)
+        service = EventVenueTargetingService(venue_dao=dao, redis_client=_FakeRedis())
+        return dao, service
+
+    def test_a_default_run_evaluates_the_whole_category_gate_output(self):
+        dao, service = self._service()
+        for i in range(40):
+            vid = f"v{i}"
+            dao.upsert_venue(Venue(
+                venue_id=vid, venue_name=vid, venue_lat=-8.05, venue_lng=-34.88,
+                priority=i,
+            ))
+            dao.set_vibe_attributes(VibeAttributes(
+                venue_id=vid, google_primary_type=representative_google_type("NIGHTCLUB"),
+            ))
+
+        result = _run(service.run({}))  # no override -> the raised default applies
+
+        assert result["category_pass"] == 40
+        assert result["evidence_evaluated"] == 40
+
+
+class TestHandlelessShortCircuitPerformsNoS3Listing:
+    """The second half of defect 4: a venue with no Instagram handle can
+    produce no evidence by construction and is already recorded
+    `unevaluated` — but reaching that verdict must never cost an S3
+    listing. Asserted on the LISTING CALL COUNT (via the REAL
+    ArchivedFlyerEvidenceSource, not the generic in-memory fake the other
+    tests in this file use), because the saving is the point."""
+
+    class _ListingCountingMediaStore:
+        def __init__(self):
+            self.list_run_prefixes_calls = 0
+
+        async def list_run_prefixes(self, source):
+            self.list_run_prefixes_calls += 1
+            return []
+
+        async def read_manifest(self, prefix, venue_id):
+            raise AssertionError(
+                "a handle-less venue must never reach a manifest read"
+            )
+
+    def test_zero_listing_calls_for_a_venue_with_no_instagram_handle(self):
+        store = InMemoryRdsVenueStore()
+        dao = VenueRepository(client=None, rds_store=store)
+        media_store = self._ListingCountingMediaStore()
+        service = EventVenueTargetingService(
+            venue_dao=dao, redis_client=_FakeRedis(),
+            flyer_evidence_source=ArchivedFlyerEvidenceSource(
+                media_store, archive_source="instagram_posts",
+            ),
+        )
+        vid = "v_no_handle"
+        dao.upsert_venue(Venue(
+            venue_id=vid, venue_name=vid, venue_lat=-8.05, venue_lng=-34.88,
+        ))
+        dao.set_vibe_attributes(VibeAttributes(
+            venue_id=vid, google_primary_type=representative_google_type("NIGHTCLUB"),
+        ))
+        # Deliberately no set_venue_instagram call for this venue.
+
+        result = _run(service.run({}))
+
+        profile = dao.get_venue_event_profile(vid)
+        assert profile["tier"] == "unevaluated", profile
+        assert result["evidence_evaluated"] == 1
+        assert media_store.list_run_prefixes_calls == 0, (
+            "the handle-less short-circuit must run BEFORE any S3 listing"
+        )
