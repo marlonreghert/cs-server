@@ -1,4 +1,3 @@
-@wip
 Feature: Auto-accept clean events, protect fields not rows
   As the operator of the event pipeline
   I want events with nothing wrong to need no approval, and my own edits to be
@@ -81,7 +80,7 @@ Feature: Auto-accept clean events, protect fields not rows
     Then the event keeps the status "confirmed"
 
   Scenario: Never supersede a manually linked event that disappears
-    Given an event an operator linked manually
+    Given an event an operator manually linked to a venue
     When a later run no longer returns it
     Then the event keeps its manual link
 

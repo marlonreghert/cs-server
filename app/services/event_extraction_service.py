@@ -104,8 +104,24 @@ OUTCOME_WEEKDAY_MISMATCH = "weekday_mismatch"
 # response means the output budget was too small, not a bad model answer).
 # See plans/260806_venue-post-multi-event.md.
 OUTCOME_TRUNCATED = "truncated"
+# A single-event post's extraction had nothing wrong AND cleared the
+# auto-accept predicate (app.services.event_reconciliation.
+# is_clean_extraction) — replaces OUTCOME_EXTRACTED for that exact case
+# (plans/260807_auto-accept-and-field-level-protection.md). OUTCOME_EXTRACTED
+# stays the generic multi-event-post fallback (several events, mixed
+# outcomes, no single label applies) — this outcome is strictly the
+# single-event success case that used to report "extracted".
+OUTCOME_ACCEPTED = "accepted"
 ALL_STATUSES = (
     "pending_review", "confirmed", "rejected", "superseded", "extraction_failed",
+    # plans/260807_auto-accept-and-field-level-protection.md: listed
+    # explicitly (rather than left to the gauge's own defensive fallback)
+    # so `events_total{status="accepted"}` reports an honest 0 from the
+    # very first run after deploy — a dashboard querying it must be able to
+    # tell "genuinely zero" from "no data point yet", and the plan's own
+    # watch item ("accepted staying at zero after deploy" signals a too-
+    # strict predicate) depends on that distinction.
+    "accepted",
 )
 
 DEFAULT_MAX_VENUES = 25
@@ -509,7 +525,12 @@ class EventExtractionService:
                 elif low_confidence:
                     single_event_outcome = OUTCOME_LOW_CONFIDENCE
                 else:
-                    single_event_outcome = OUTCOME_EXTRACTED
+                    # No reason queued it, a venue post's event always has
+                    # `venue_id` (the posting venue), and `not low_confidence`
+                    # here means confidence already cleared `cfg[
+                    # "min_confidence"]` — every clause of `is_clean_
+                    # extraction` holds, so this event is auto-`accepted`.
+                    single_event_outcome = OUTCOME_ACCEPTED
 
         # The ONE thing parameterised: a venue post's events are always
         # attributed to the POSTING venue — never the resolution ladder, and
@@ -530,6 +551,7 @@ class EventExtractionService:
             now=now,
             attribute=_attribute,
             touched_event_ids=touched_event_ids,
+            min_confidence=cfg["min_confidence"],
         )
         # Recognise a countdown campaign — several posts announcing the SAME
         # night — the moment this post's own events are persisted, so a
@@ -606,5 +628,6 @@ __all__ = [
     "OUTCOME_EXTRACTED", "OUTCOME_NOT_EVENT_LIKE", "OUTCOME_NO_DATE",
     "OUTCOME_LOW_CONFIDENCE", "OUTCOME_EXTRACTION_FAILED", "OUTCOME_SKIPPED_SEEN",
     "OUTCOME_UNREAD_TIME", "OUTCOME_TRUNCATED", "OUTCOME_WEEKDAY_MISMATCH",
-    "REVIEW_REASON_UNREAD_TIME", "DEFAULT_MAX_EVENTS_PER_POST",
+    "OUTCOME_ACCEPTED",
+    "REVIEW_REASON_UNREAD_TIME", "DEFAULT_MAX_EVENTS_PER_POST", "ALL_STATUSES",
 ]

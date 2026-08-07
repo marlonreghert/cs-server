@@ -19,9 +19,11 @@ from app.dao.venue_repository import VenueRepository
 from app.services.event_reconciliation import (
     REVIEW_REASON_ABSENT_FROM_LATEST_EXTRACTION,
     REVIEW_REASON_DIVERGES_FROM_CONFIRMED,
+    STATUS_ACCEPTED,
     STATUS_CONFIRMED,
     STATUS_PENDING_REVIEW,
     STATUS_SUPERSEDED,
+    is_clean_extraction,
     reconcile_post_events,
 )
 from tests.rds_fake import InMemoryRdsVenueStore
@@ -75,7 +77,12 @@ class TestFreshInsertAndIdempotentReorder:
         assert len(rows) == 2
         assert {r["title"] for r in rows} == {"Event A", "Event B"}
         assert {r["source_event_index"] for r in rows} == {1, 2}
-        assert all(r["status"] == STATUS_PENDING_REVIEW for r in rows)
+        # Both events are clean per is_clean_extraction (no review reason, a
+        # resolved date, a linked venue, confidence 0.9 >= the 0.5 default
+        # floor) — plans/260807_auto-accept-and-field-level-protection.md
+        # auto-accepts them; a dirtier fixture is what TestAutoAccept below
+        # pins staying pending_review.
+        assert all(r["status"] == STATUS_ACCEPTED for r in rows)
         assert all(r["source_event_key"] is not None for r in rows)
 
     def test_reordering_the_same_events_creates_no_duplicates(self):
@@ -314,7 +321,9 @@ class TestConfirmedPreservationAndDivergence:
         assert confirmed["review_reason"] == REVIEW_REASON_ABSENT_FROM_LATEST_EXTRACTION
 
         new_row = by_title["Noite do Forro"]
-        assert new_row["status"] == STATUS_PENDING_REVIEW
+        # Clean per is_clean_extraction (no review reason, resolved date,
+        # linked venue, default confidence 0.9) — auto-accepted, not queued.
+        assert new_row["status"] == STATUS_ACCEPTED
         assert new_row["starts_at"].date().isoformat() == "2026-08-21"
 
     def test_attribute_is_never_invoked_for_a_confirmed_row(self):
@@ -376,7 +385,7 @@ class TestConfirmedPreservationAndDivergence:
         )
         rows = _rows(dao, "h1", "s1")
         # Both original confirmed rows survive, untouched, PLUS two new
-        # pending_review rows for the renamed events — never a guessed pairing.
+        # auto-accepted rows for the renamed events — never a guessed pairing.
         assert len(rows) == 4
         still_confirmed = {r["event_id"] for r in rows if r["status"] == STATUS_CONFIRMED}
         assert still_confirmed == confirmed_ids
@@ -388,7 +397,8 @@ class TestConfirmedPreservationAndDivergence:
                 # "genuinely replaced" case; not a fabricated divergence.
                 assert row["review_reason"] == REVIEW_REASON_ABSENT_FROM_LATEST_EXTRACTION
             else:
-                assert row["status"] == STATUS_PENDING_REVIEW
+                # Clean per is_clean_extraction — auto-accepted, not queued.
+                assert row["status"] == STATUS_ACCEPTED
                 assert row["title"] in ("Event A Renamed", "Event B Renamed")
 
 
@@ -675,3 +685,320 @@ class TestExtractionFailurePlaceholderNeverSuperseded:
 
         placeholder = dao.get_event(placeholder_id)
         assert placeholder["status"] == "extraction_failed"
+
+
+class TestCleanPredicateTruthTable:
+    """plans/260807_auto-accept-and-field-level-protection.md §A: `is_clean_
+    extraction` is the SOLE gate between `accepted` and `pending_review`,
+    so its truth table is pinned directly, independent of reconcile_post_
+    events' plumbing — every one of the four conditions must be
+    independently necessary, and all four together must be sufficient."""
+
+    _CLEAN_KWARGS = dict(
+        review_reason=None,
+        starts_at=datetime(2026, 8, 10, tzinfo=timezone.utc),
+        venue_id="v1",
+        confidence=0.9,
+        min_confidence=0.5,
+    )
+
+    def test_all_four_conditions_together_are_clean(self):
+        assert is_clean_extraction(**self._CLEAN_KWARGS) is True
+
+    def test_a_review_reason_alone_is_not_clean(self):
+        kwargs = {**self._CLEAN_KWARGS, "review_reason": "low_confidence"}
+        assert is_clean_extraction(**kwargs) is False
+
+    def test_a_missing_start_date_alone_is_not_clean(self):
+        kwargs = {**self._CLEAN_KWARGS, "starts_at": None}
+        assert is_clean_extraction(**kwargs) is False
+
+    def test_a_missing_venue_alone_is_not_clean(self):
+        kwargs = {**self._CLEAN_KWARGS, "venue_id": None}
+        assert is_clean_extraction(**kwargs) is False
+
+    def test_confidence_below_the_floor_alone_is_not_clean(self):
+        kwargs = {**self._CLEAN_KWARGS, "confidence": 0.49}
+        assert is_clean_extraction(**kwargs) is False
+
+    def test_confidence_exactly_on_the_floor_is_clean(self):
+        kwargs = {**self._CLEAN_KWARGS, "confidence": 0.5}
+        assert is_clean_extraction(**kwargs) is True
+
+    def test_a_missing_confidence_is_not_clean(self):
+        """A `None` confidence must never be silently treated as "no floor
+        to clear" — the four conditions are ALL required, never three."""
+        kwargs = {**self._CLEAN_KWARGS, "confidence": None}
+        assert is_clean_extraction(**kwargs) is False
+
+    def test_every_combination_of_the_four_conditions(self):
+        """The exhaustive 2^4 truth table: clean iff EVERY condition holds —
+        never a majority, never any single condition standing in for the
+        others."""
+        options = {
+            "review_reason": (None, "some_reason"),
+            "starts_at": (datetime(2026, 8, 10, tzinfo=timezone.utc), None),
+            "venue_id": ("v1", None),
+            "confidence": (0.9, 0.1),
+        }
+        for review_reason in options["review_reason"]:
+            for starts_at in options["starts_at"]:
+                for venue_id in options["venue_id"]:
+                    for confidence in options["confidence"]:
+                        expected = (
+                            review_reason is None
+                            and starts_at is not None
+                            and venue_id is not None
+                            and confidence is not None
+                            and confidence >= 0.5
+                        )
+                        actual = is_clean_extraction(
+                            review_reason=review_reason, starts_at=starts_at,
+                            venue_id=venue_id, confidence=confidence, min_confidence=0.5,
+                        )
+                        assert actual == expected, (
+                            review_reason, starts_at, venue_id, confidence, actual, expected,
+                        )
+
+
+class TestAutoAcceptWiring:
+    """Confirms `reconcile_post_events` actually WIRES is_clean_extraction
+    in — not just that the pure predicate is correct in isolation."""
+
+    def test_a_clean_fresh_event_is_accepted(self):
+        dao = _dao()
+        events = [_event("Clean Event", datetime(2026, 8, 10, tzinfo=timezone.utc))]
+        reconcile_post_events(
+            venue_dao=dao, source_kind="venue_post", source_handle="h1",
+            source_shortcode="s1", source_permalink=None,
+            prepared_events=events, now=NOW, attribute=_venue_attribute("v1"),
+            min_confidence=0.5,
+        )
+        row = _rows(dao, "h1", "s1")[0]
+        assert row["status"] == STATUS_ACCEPTED
+
+    def test_a_low_confidence_event_stays_pending_review_even_with_no_review_reason(self):
+        """Isolates the predicate's STANDALONE confidence check: this event
+        carries no review_reason at all (a caller could, in principle, fail
+        to fold a low reading into it) — `is_clean_extraction` must still
+        catch it via `confidence >= min_confidence` on its own."""
+        dao = _dao()
+        events = [_event(
+            "Iffy Event", datetime(2026, 8, 10, tzinfo=timezone.utc),
+            confidence=0.2, review_reason=None,
+        )]
+        reconcile_post_events(
+            venue_dao=dao, source_kind="venue_post", source_handle="h1",
+            source_shortcode="s1", source_permalink=None,
+            prepared_events=events, now=NOW, attribute=_venue_attribute("v1"),
+            min_confidence=0.5,
+        )
+        row = _rows(dao, "h1", "s1")[0]
+        assert row["status"] == STATUS_PENDING_REVIEW
+
+    def test_a_promoter_event_with_no_venue_resolved_stays_pending_review(self):
+        dao = _dao()
+        events = [_event("Unresolved Event", datetime(2026, 8, 10, tzinfo=timezone.utc))]
+
+        def unresolved_attribute(fields, event_id):
+            return {"venue_id": None, "location_resolution": "unresolved"}, None
+
+        reconcile_post_events(
+            venue_dao=dao, source_kind="promoter_post", source_handle="h1",
+            source_shortcode="s1", source_permalink=None,
+            prepared_events=events, now=NOW, attribute=unresolved_attribute,
+            min_confidence=0.5,
+        )
+        row = _rows(dao, "h1", "s1")[0]
+        assert row["status"] == STATUS_PENDING_REVIEW
+
+    def test_an_accepted_event_supersedes_normally(self):
+        """LOAD-BEARING (plans/260807_auto-accept-and-field-level-
+        protection.md §C): if `accepted` inherited the confirmed/manual
+        supersession exemption, then once most events are accepted, almost
+        nothing could ever be superseded and 0025/0026's supersede
+        behaviour would quietly become dead code."""
+        dao = _dao()
+        events = [_event("Clean Event", datetime(2026, 8, 10, tzinfo=timezone.utc))]
+        reconcile_post_events(
+            venue_dao=dao, source_kind="venue_post", source_handle="h1",
+            source_shortcode="s1", source_permalink=None,
+            prepared_events=events, now=NOW, attribute=_venue_attribute("v1"),
+            min_confidence=0.5,
+        )
+        row = _rows(dao, "h1", "s1")[0]
+        assert row["status"] == STATUS_ACCEPTED
+
+        reconcile_post_events(
+            venue_dao=dao, source_kind="venue_post", source_handle="h1",
+            source_shortcode="s1", source_permalink=None,
+            prepared_events=[], now=NOW, attribute=_venue_attribute("v1"),
+            min_confidence=0.5,
+        )
+        after = dao.get_event(row["event_id"])
+        assert after["status"] == STATUS_SUPERSEDED
+
+    def test_a_manually_linked_but_unconfirmed_event_that_is_clean_is_accepted(self):
+        """Status and supersession-exemption are independent axes: a
+        manually-linked (location_resolution == manual) event that is
+        otherwise clean is still labelled `accepted` — the manual link, not
+        the status, is what protects it from supersession."""
+        dao = _dao()
+        events = [_event("Event A", datetime(2026, 8, 10, tzinfo=timezone.utc))]
+        reconcile_post_events(
+            venue_dao=dao, source_kind="promoter_post", source_handle="h1",
+            source_shortcode="s1", source_permalink=None,
+            prepared_events=events, now=NOW, attribute=_venue_attribute("v_auto"),
+            min_confidence=0.5,
+        )
+        row = _rows(dao, "h1", "s1")[0]
+        dao.update_event(row["event_id"], {
+            "venue_id": "v_manual", "location_resolution": "manual",
+            "linked_by": "operator_x", "linked_at": NOW,
+        })
+
+        reconcile_post_events(
+            venue_dao=dao, source_kind="promoter_post", source_handle="h1",
+            source_shortcode="s1", source_permalink=None,
+            prepared_events=events, now=NOW, attribute=_venue_attribute("v_auto"),
+            min_confidence=0.5,
+        )
+        after = dao.get_event(row["event_id"])
+        assert after["status"] == STATUS_ACCEPTED
+        assert after["location_resolution"] == "manual"
+
+
+class TestFieldLevelProtectionPerFieldTable:
+    """plans/260807_auto-accept-and-field-level-protection.md §B: per field,
+    on a confirmed row's re-extraction — null/absent never degrades, an
+    equal value is a no-op, an unedited field updates, an edited field
+    holds and flags. Drives the real reconcile_post_events end to end
+    (never the private per-field helper directly) so these tests break the
+    moment the wiring — not just the table — regresses."""
+
+    def _confirmed_row(self, dao, *, edited_fields, **overrides):
+        events = [_event("Event A", datetime(2026, 8, 10, tzinfo=timezone.utc), **overrides)]
+        reconcile_post_events(
+            venue_dao=dao, source_kind="venue_post", source_handle="h1",
+            source_shortcode="s1", source_permalink=None,
+            prepared_events=events, now=NOW, attribute=_venue_attribute("v1"),
+        )
+        row = _rows(dao, "h1", "s1")[0]
+        dao.update_event(row["event_id"], {
+            "status": STATUS_CONFIRMED, "operator_edited_fields": edited_fields,
+        })
+        return row["event_id"]
+
+    def test_a_null_new_value_never_overwrites_a_known_one(self):
+        dao = _dao()
+        event_id = self._confirmed_row(dao, edited_fields=["title"], price_text="R$30")
+
+        later = [_event(
+            "Event A", datetime(2026, 8, 10, tzinfo=timezone.utc), price_text=None,
+        )]
+        reconcile_post_events(
+            venue_dao=dao, source_kind="venue_post", source_handle="h1",
+            source_shortcode="s1", source_permalink=None,
+            prepared_events=later, now=NOW, attribute=_venue_attribute("v1"),
+        )
+        after = dao.get_event(event_id)
+        assert after["price_text"] == "R$30"
+
+    def test_an_unedited_field_updates_from_the_fresh_answer(self):
+        dao = _dao()
+        event_id = self._confirmed_row(dao, edited_fields=["title"], price_text="R$30")
+
+        later = [_event(
+            "Event A", datetime(2026, 8, 10, tzinfo=timezone.utc), price_text="R$99",
+        )]
+        reconcile_post_events(
+            venue_dao=dao, source_kind="venue_post", source_handle="h1",
+            source_shortcode="s1", source_permalink=None,
+            prepared_events=later, now=NOW, attribute=_venue_attribute("v1"),
+        )
+        after = dao.get_event(event_id)
+        assert after["price_text"] == "R$99"
+        assert after["review_reason"] is None
+
+    def test_an_edited_field_holds_and_flags_when_the_fresh_answer_differs(self):
+        dao = _dao()
+        event_id = self._confirmed_row(dao, edited_fields=["price_text"], price_text="R$30")
+
+        later = [_event(
+            "Event A", datetime(2026, 8, 10, tzinfo=timezone.utc), price_text="R$99",
+        )]
+        reconcile_post_events(
+            venue_dao=dao, source_kind="venue_post", source_handle="h1",
+            source_shortcode="s1", source_permalink=None,
+            prepared_events=later, now=NOW, attribute=_venue_attribute("v1"),
+        )
+        after = dao.get_event(event_id)
+        assert after["price_text"] == "R$30"
+        assert after["review_reason"] == REVIEW_REASON_DIVERGES_FROM_CONFIRMED
+
+    def test_an_edited_field_equal_to_the_fresh_answer_is_not_flagged(self):
+        dao = _dao()
+        event_id = self._confirmed_row(dao, edited_fields=["price_text"], price_text="R$30")
+
+        later = [_event(
+            "Event A", datetime(2026, 8, 10, tzinfo=timezone.utc), price_text="R$30",
+        )]
+        reconcile_post_events(
+            venue_dao=dao, source_kind="venue_post", source_handle="h1",
+            source_shortcode="s1", source_permalink=None,
+            prepared_events=later, now=NOW, attribute=_venue_attribute("v1"),
+        )
+        after = dao.get_event(event_id)
+        assert after["price_text"] == "R$30"
+        assert after["review_reason"] is None
+
+    def test_lineup_unions_even_on_an_operator_edited_event(self):
+        dao = _dao()
+        event_id = self._confirmed_row(
+            dao, edited_fields=["title"], lineup=["DJ A", "DJ B"],
+        )
+
+        later = [_event(
+            "Event A", datetime(2026, 8, 10, tzinfo=timezone.utc), lineup=["DJ B", "DJ C"],
+        )]
+        reconcile_post_events(
+            venue_dao=dao, source_kind="venue_post", source_handle="h1",
+            source_shortcode="s1", source_permalink=None,
+            prepared_events=later, now=NOW, attribute=_venue_attribute("v1"),
+        )
+        after = dao.get_event(event_id)
+        assert after["lineup"] == ["DJ A", "DJ B", "DJ C"]
+
+    def test_a_legacy_null_operator_edited_fields_keeps_whole_row_protection(self):
+        """plans/260807_auto-accept-and-field-level-protection.md §3: a
+        confirmed row with NO record of which fields were edited (NULL —
+        every row before this migration, or one confirmed without ever
+        being PATCHed) must keep TODAY's whole-row freeze: not even an
+        unedited-seeming field updates."""
+        dao = _dao()
+        events = [_event(
+            "Event A", datetime(2026, 8, 10, tzinfo=timezone.utc), price_text="R$30",
+        )]
+        reconcile_post_events(
+            venue_dao=dao, source_kind="venue_post", source_handle="h1",
+            source_shortcode="s1", source_permalink=None,
+            prepared_events=events, now=NOW, attribute=_venue_attribute("v1"),
+        )
+        row = _rows(dao, "h1", "s1")[0]
+        # Confirmed with NO operator_edited_fields key ever set — stays NULL.
+        dao.update_event(row["event_id"], {"status": STATUS_CONFIRMED})
+        assert dao.get_event(row["event_id"]).get("operator_edited_fields") is None
+
+        later = [_event(
+            "Event A", datetime(2026, 8, 10, tzinfo=timezone.utc),
+            price_text="R$999", lineup=["DJ Z"],
+        )]
+        reconcile_post_events(
+            venue_dao=dao, source_kind="venue_post", source_handle="h1",
+            source_shortcode="s1", source_permalink=None,
+            prepared_events=later, now=NOW, attribute=_venue_attribute("v1"),
+        )
+        after = dao.get_event(row["event_id"])
+        assert after["price_text"] == "R$30"
+        assert after["lineup"] == []
+        assert after["review_reason"] is None  # title/date agree; no divergence

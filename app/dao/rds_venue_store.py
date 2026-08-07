@@ -443,8 +443,13 @@ class RdsVenueStore:
         # plans/260804_instagram-promoter-events.md (migration 0024) — how, if
         # at all, a promoter event's venue was resolved.
         "location_resolution", "location_confidence", "linked_by", "linked_at",
+        # plans/260807_auto-accept-and-field-level-protection.md (migration
+        # 0027) — the union of field names an operator has PATCHed; NULL
+        # means unknown (a legacy row, or one confirmed without ever being
+        # PATCHed) and is never invented by anything other than a real PATCH.
+        "operator_edited_fields",
     )
-    _EVENT_JSONB_COLUMNS = ("lineup",)
+    _EVENT_JSONB_COLUMNS = ("lineup", "operator_edited_fields")
     # The per-source columns `insert_event`/`update_event` route to
     # events.event_source instead of events.event — see the module-level
     # split in tests.rds_fake.InMemoryRdsVenueStore, which this mirrors.
@@ -475,6 +480,7 @@ class RdsVenueStore:
         "e.recurrence_text, e.title, e.description, e.lineup, e.ticket_url, "
         "e.price_text, e.location_text, e.confidence, e.status, e.review_reason, "
         "e.location_resolution, e.location_confidence, e.linked_by, e.linked_at, "
+        "e.operator_edited_fields, "
         "e.updated_at, v.venue_name, "
         "ps.source_kind, ps.source_handle, ps.source_shortcode, ps.source_permalink, "
         "ps.source_event_key, ps.source_event_index, ps.cover_photo_key, ps.raw_extraction, "
@@ -502,6 +508,7 @@ class RdsVenueStore:
         "e.recurrence_text, e.title, e.description, e.lineup, e.ticket_url, "
         "e.price_text, e.location_text, e.confidence, e.status, e.review_reason, "
         "e.location_resolution, e.location_confidence, e.linked_by, e.linked_at, "
+        "e.operator_edited_fields, "
         "e.updated_at, v.venue_name, "
         "es.source_kind, es.source_handle, es.source_shortcode, es.source_permalink, "
         "es.source_event_key, es.source_event_index, es.cover_photo_key, "

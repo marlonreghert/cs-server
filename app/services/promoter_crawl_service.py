@@ -543,6 +543,7 @@ class PromoterCrawlService:
             now=now,
             attribute=_attribute,
             touched_event_ids=touched_event_ids,
+            min_confidence=self.min_confidence,
         )
         # A promoter post can resolve to the SAME venue+date+title a venue's
         # own post (or another promoter post) already announced — recognise

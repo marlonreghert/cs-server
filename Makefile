@@ -104,6 +104,8 @@ test-unit:
 		tests/test_classification_batch_retry.py \
 		tests/test_photo_classifier_error_handling.py \
 		tests/test_review_queue_completeness.py \
+		tests/test_operator_edited_fields_migration.py \
+		tests/test_operator_edited_fields_patch.py \
 		-v
 
 test-integration:

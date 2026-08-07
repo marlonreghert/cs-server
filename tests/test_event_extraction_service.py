@@ -26,7 +26,7 @@ from app.services.event_extraction_service import (
     ArchivedPost,
     EventExtractionService,
     EventPostSource,
-    OUTCOME_EXTRACTED,
+    OUTCOME_ACCEPTED,
     OUTCOME_EXTRACTION_FAILED,
     OUTCOME_LOW_CONFIDENCE,
     OUTCOME_NOT_EVENT_LIKE,
@@ -245,8 +245,8 @@ class TestIdempotentReExtraction:
         r1 = _run(service.run(cfg))
         r2 = _run(service.run(cfg))
 
-        assert r1["outcomes"].get(OUTCOME_EXTRACTED) == 1
-        assert r2["outcomes"].get(OUTCOME_EXTRACTED) == 1
+        assert r1["outcomes"].get(OUTCOME_ACCEPTED) == 1
+        assert r2["outcomes"].get(OUTCOME_ACCEPTED) == 1
         matches = [
             e for e in dao.list_events(venue_id="v1")
             if e["source_shortcode"] == "s1"
@@ -279,8 +279,8 @@ class TestIdempotentReExtraction:
         r1 = _run(service.run(cfg))
         r2 = _run(service.run(cfg))
 
-        assert r1["outcomes"].get(OUTCOME_EXTRACTED) == 1
-        assert r2["outcomes"].get(OUTCOME_EXTRACTED) == 1
+        assert r1["outcomes"].get(OUTCOME_ACCEPTED) == 1
+        assert r2["outcomes"].get(OUTCOME_ACCEPTED) == 1
         matches = [
             e for e in dao.list_events(venue_id="v1")
             if e["source_shortcode"] == "s1"
@@ -288,7 +288,8 @@ class TestIdempotentReExtraction:
         assert len(matches) == 2, matches
         by_title = {m["title"]: m for m in matches}
         assert by_title["Festa"]["status"] == "superseded"
-        assert by_title["Festa 2"]["status"] == "pending_review"
+        # Clean per is_clean_extraction — auto-accepted, not queued.
+        assert by_title["Festa 2"]["status"] == "accepted"
         assert client.calls == 2
 
 
@@ -358,7 +359,7 @@ class TestSingleEventVenuePostIsByteIdenticalToTheOldPath:
         service = EventExtractionService(dao, _FakePostSource(posts), client)
         result = _run(service.run(cfg))
 
-        assert result["outcomes"].get(OUTCOME_EXTRACTED) == 1
+        assert result["outcomes"].get(OUTCOME_ACCEPTED) == 1
         stored = dao.get_event_by_source("v1_handle", "s1")
         assert stored is not None
 
@@ -388,7 +389,8 @@ class TestSingleEventVenuePostIsByteIdenticalToTheOldPath:
         assert stored["location_text"] == "Rua das Flores, 123"
         assert stored["cover_photo_key"] == "s1.jpg"
         assert stored["confidence"] == 0.87
-        assert stored["status"] == "pending_review"
+        # Clean per is_clean_extraction — auto-accepted, not queued.
+        assert stored["status"] == "accepted"
         assert stored["review_reason"] is None
         assert stored["raw_extraction"] == {
             "title": "Festa da Casa", "description": "Uma noite especial",
@@ -449,7 +451,7 @@ class TestExtractionFailureRecordsAndContinues:
         result = _run(service.run(cfg))
 
         assert result["outcomes"].get(OUTCOME_EXTRACTION_FAILED) == 1
-        assert result["outcomes"].get(OUTCOME_EXTRACTED) == 1
+        assert result["outcomes"].get(OUTCOME_ACCEPTED) == 1
         failed = dao.get_event_by_source("v1_handle", "bad")
         assert failed["status"] == "extraction_failed"
         assert failed["raw_extraction"]["raw_response"] == "not json at all {{{"
