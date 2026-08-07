@@ -118,10 +118,32 @@ class EventOut(BaseModel):
     # content to key by).
     source_event_key: Optional[str] = None
     source_event_index: Optional[int] = None
+    # plans/260807_one-event-many-posts.md: every post that announced this
+    # event, oldest first-seen first. ADDITIVE — `source_permalink`,
+    # `source_handle`, `source_shortcode` and `cover_photo_key` above are
+    # KEPT, now derived (by the DAO) from the most recently seen source
+    # rather than read from a column, so the deployed console's flyer viewer
+    # keeps working unchanged across a merge. `sources` is the new,
+    # optional-to-adopt way to see every announcing post at once.
+    sources: list["EventSourceOut"] = Field(default_factory=list)
 
 
-def _to_out(row: dict) -> EventOut:
-    return EventOut(**{**row, "lineup": row.get("lineup") or []})
+class EventSourceOut(BaseModel):
+    source_kind: str = "venue_post"
+    source_handle: str
+    source_shortcode: str
+    source_permalink: Optional[str] = None
+    cover_photo_key: Optional[str] = None
+    first_seen_at: Optional[datetime] = None
+    last_seen_at: Optional[datetime] = None
+
+
+EventOut.model_rebuild()
+
+
+def _to_out(dao, row: dict) -> EventOut:
+    sources = [EventSourceOut(**s) for s in dao.list_event_sources(row["event_id"])]
+    return EventOut(**{**row, "lineup": row.get("lineup") or [], "sources": sources})
 
 
 class EventPatch(BaseModel):
@@ -151,7 +173,7 @@ def list_events(
 ):
     dao = _dao()
     rows = dao.list_events(venue_id=venue_id, status=status, since=since, until=until)
-    return [_to_out(r) for r in rows]
+    return [_to_out(dao, r) for r in rows]
 
 
 # ── promoter registry (plans/260804_instagram-promoter-events.md) ───────────
@@ -271,8 +293,9 @@ def review_queue():
     out = []
     for row in dao.list_events_awaiting_decision():
         candidates = dao.list_event_venue_link_candidates(row["event_id"])
+        sources = [EventSourceOut(**s) for s in dao.list_event_sources(row["event_id"])]
         out.append(ReviewQueueItemOut(
-            **{**row, "lineup": row.get("lineup") or []}, candidates=candidates,
+            **{**row, "lineup": row.get("lineup") or []}, candidates=candidates, sources=sources,
         ))
     return out
 
@@ -334,7 +357,7 @@ def get_event(event_id: str):
     row = dao.get_event(event_id)
     if row is None:
         raise HTTPException(status_code=404, detail="Event not found")
-    return _to_out(row)
+    return _to_out(dao, row)
 
 
 @router.patch("/{event_id}", response_model=EventOut)
@@ -345,7 +368,7 @@ def patch_event(event_id: str, patch: EventPatch):
         raise HTTPException(status_code=404, detail="Event not found")
     fields = patch.model_dump(exclude_unset=True)
     updated = dao.update_event(event_id, fields) if fields else existing
-    return _to_out(updated)
+    return _to_out(dao, updated)
 
 
 @router.post("/{event_id}/confirm", response_model=EventOut)
@@ -359,7 +382,7 @@ def confirm_event(event_id: str):
     if existing is None:
         raise HTTPException(status_code=404, detail="Event not found")
     updated = dao.update_event(event_id, {"status": "confirmed", "review_reason": None})
-    return _to_out(updated)
+    return _to_out(dao, updated)
 
 
 @router.post("/{event_id}/reject", response_model=EventOut)
@@ -369,7 +392,7 @@ def reject_event(event_id: str):
     if existing is None:
         raise HTTPException(status_code=404, detail="Event not found")
     updated = dao.update_event(event_id, {"status": "rejected"})
-    return _to_out(updated)
+    return _to_out(dao, updated)
 
 
 # ── manual link / unlink (promoter registry + review queue are registered
@@ -402,7 +425,7 @@ def link_event(event_id: str, body: LinkRequest):
         "linked_at": datetime.now(timezone.utc),
     })
     EVENT_VENUE_LINK_TOTAL.labels(method="manual", result="manual").inc()
-    return _to_out(updated)
+    return _to_out(dao, updated)
 
 
 @router.post("/{event_id}/unlink", response_model=EventOut)
@@ -416,11 +439,11 @@ def unlink_event(event_id: str):
         "location_confidence": None, "linked_by": None, "linked_at": None,
     })
     EVENT_VENUE_LINK_TOTAL.labels(method="operator_unlink", result="unresolved").inc()
-    return _to_out(updated)
+    return _to_out(dao, updated)
 
 
 __all__ = [
-    "router", "set_container", "EventOut", "EventPatch",
+    "router", "set_container", "EventOut", "EventSourceOut", "EventPatch",
     "PromoterAccountOut", "PromoterAccountCreate", "PromoterAccountPatch",
     "LinkCandidateOut", "ReviewQueueItemOut", "LinkRequest", "EventCoverOut",
 ]

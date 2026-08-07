@@ -98,6 +98,8 @@ test-unit:
 		tests/test_multi_event_posts_migration.py \
 		tests/test_event_cover_presign.py \
 		tests/test_event_reconciliation.py \
+		tests/test_event_merge.py \
+		tests/test_event_sources_migration.py \
 		tests/test_photo_classification.py \
 		tests/test_classification_batch_retry.py \
 		tests/test_photo_classifier_error_handling.py \

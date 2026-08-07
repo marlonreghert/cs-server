@@ -169,6 +169,22 @@ class VenueRepository(RedisVenueDAO):
     def list_events_awaiting_decision(self):
         return self.rds_store.list_events_awaiting_decision()
 
+    # ── events.event_source (plans/260807_one-event-many-posts.md) ───────────
+    def list_event_sources(self, event_id: str):
+        """Every source (announcing post) attached to one event — the admin
+        API's `sources[]`."""
+        return self.rds_store.list_event_sources(event_id)
+
+    def reattach_event_sources(self, from_event_id: str, to_event_id: str) -> None:
+        """Re-point every source on `from_event_id` at `to_event_id` — step 3
+        of a cross-post merge, always followed by `delete_event(from_event_id)`."""
+        return self.rds_store.reattach_event_sources(from_event_id, to_event_id)
+
+    def delete_event(self, event_id: str) -> None:
+        """Hard delete — only ever correct for a now-sourceless duplicate a
+        merge has already reattached every source away from."""
+        return self.rds_store.delete_event(event_id)
+
     # ── instagram.handle reverse index (plans/260804_instagram-promoter-events.md) ─
     def list_instagram_handles(self):
         return self.rds_store.list_instagram_handles()
