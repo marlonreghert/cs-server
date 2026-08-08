@@ -1,4 +1,5 @@
 """Google Places API (New) client for fetching venue vibe attributes and photos."""
+
 import logging
 import time
 from contextlib import asynccontextmanager
@@ -12,6 +13,7 @@ from app.metrics import (
     GOOGLE_PLACES_API_CALL_DURATION_SECONDS,
     GOOGLE_PLACES_API_ERRORS_TOTAL,
 )
+from app.utils.text_norm import names_match
 
 logger = logging.getLogger(__name__)
 
@@ -21,56 +23,60 @@ GOOGLE_PLACES_API_BASE = "https://places.googleapis.com/v1"
 # Field mask for fetching photos (include author attributions for copyright compliance)
 # Dimensions come free in the same billed call, and a photo's aspect ratio is
 # not recoverable later without re-fetching it.
-PHOTOS_FIELDS_MASK = "photos.name,photos.authorAttributions,photos.widthPx,photos.heightPx"
+PHOTOS_FIELDS_MASK = (
+    "photos.name,photos.authorAttributions,photos.widthPx,photos.heightPx"
+)
 # Field mask for vibe-related attributes
 # See: https://developers.google.com/maps/documentation/places/web-service/place-details
-VIBE_FIELDS_MASK = ",".join([
-    "id",
-    "displayName",
-    "primaryType",
-    # Business status (OPERATIONAL, CLOSED_TEMPORARILY, CLOSED_PERMANENTLY)
-    "businessStatus",
-    # Website (used to detect Instagram URLs)
-    "websiteUri",
-    # Opening hours
-    "regularOpeningHours",           # Standard weekly hours
-    "currentOpeningHours",           # Today's hours (may differ due to holidays)
-    "currentSecondaryOpeningHours",  # Special hours (holidays, events)
-    # Boolean attributes
-    "allowsDogs",
-    "goodForChildren",
-    "goodForGroups",
-    "goodForWatchingSports",
-    "liveMusic",
-    "outdoorSeating",
-    "reservable",
-    "restroom",
-    "servesBeer",
-    "servesBreakfast",
-    "servesBrunch",
-    "servesCocktails",
-    "servesCoffee",
-    "servesDinner",
-    "servesLunch",
-    "servesVegetarianFood",
-    "servesWine",
-    # Accessibility
-    "accessibilityOptions",
-    # Summaries
-    "generativeSummary",
-    "editorialSummary",
-    # Reviews
-    "reviews",
-    # Aggregate review signal — drives the venue-card "4.5 ★ (586)" UI.
-    # Inventory-synced venues come in without these populated; enrichment
-    # backfills them onto the Venue model (see GooglePlacesEnrichmentService).
-    "rating",
-    "userRatingCount",
-    "priceLevel",
-    # Objective money range (currency + start/end). PRIMARY tier source stays the
-    # enum; this fills enum-less venues and is served as the structured range.
-    "priceRange",
-])
+VIBE_FIELDS_MASK = ",".join(
+    [
+        "id",
+        "displayName",
+        "primaryType",
+        # Business status (OPERATIONAL, CLOSED_TEMPORARILY, CLOSED_PERMANENTLY)
+        "businessStatus",
+        # Website (used to detect Instagram URLs)
+        "websiteUri",
+        # Opening hours
+        "regularOpeningHours",  # Standard weekly hours
+        "currentOpeningHours",  # Today's hours (may differ due to holidays)
+        "currentSecondaryOpeningHours",  # Special hours (holidays, events)
+        # Boolean attributes
+        "allowsDogs",
+        "goodForChildren",
+        "goodForGroups",
+        "goodForWatchingSports",
+        "liveMusic",
+        "outdoorSeating",
+        "reservable",
+        "restroom",
+        "servesBeer",
+        "servesBreakfast",
+        "servesBrunch",
+        "servesCocktails",
+        "servesCoffee",
+        "servesDinner",
+        "servesLunch",
+        "servesVegetarianFood",
+        "servesWine",
+        # Accessibility
+        "accessibilityOptions",
+        # Summaries
+        "generativeSummary",
+        "editorialSummary",
+        # Reviews
+        "reviews",
+        # Aggregate review signal — drives the venue-card "4.5 ★ (586)" UI.
+        # Inventory-synced venues come in without these populated; enrichment
+        # backfills them onto the Venue model (see GooglePlacesEnrichmentService).
+        "rating",
+        "userRatingCount",
+        "priceLevel",
+        # Objective money range (currency + start/end). PRIMARY tier source stays the
+        # enum; this fills enum-less venues and is served as the structured range.
+        "priceRange",
+    ]
+)
 
 # Language code for Portuguese (Brazil) - used for opening hours descriptions
 LANGUAGE_CODE = "pt-BR"
@@ -133,7 +139,9 @@ class GooglePlacesAPIClient:
             GOOGLE_PLACES_API_CALL_DURATION_SECONDS.labels(endpoint=endpoint).observe(
                 time.perf_counter() - start_time
             )
-            GOOGLE_PLACES_API_CALLS_TOTAL.labels(endpoint=endpoint, status="error").inc()
+            GOOGLE_PLACES_API_CALLS_TOTAL.labels(
+                endpoint=endpoint, status="error"
+            ).inc()
             error_type = _classify_google_error(e)
             if error_type is not None:
                 GOOGLE_PLACES_API_ERRORS_TOTAL.labels(
@@ -144,7 +152,9 @@ class GooglePlacesAPIClient:
             GOOGLE_PLACES_API_CALL_DURATION_SECONDS.labels(endpoint=endpoint).observe(
                 time.perf_counter() - start_time
             )
-            GOOGLE_PLACES_API_CALLS_TOTAL.labels(endpoint=endpoint, status="success").inc()
+            GOOGLE_PLACES_API_CALLS_TOTAL.labels(
+                endpoint=endpoint, status="success"
+            ).inc()
 
     async def search_place_id(
         self,
@@ -190,7 +200,12 @@ class GooglePlacesAPIClient:
 
         body = {
             "textQuery": query,
-            "maxResultCount": 1,
+            # Fetch several candidates, not just the single top hit. Text Search
+            # ranks by relevance to the whole "{name} {address}" query, so a
+            # venue that sits near a stronger listing can be outranked by that
+            # OTHER place — we verify each candidate's name below and take the
+            # first that actually matches instead of blindly trusting places[0].
+            "maxResultCount": 5,
         }
 
         # Add location bias if coordinates available
@@ -211,13 +226,33 @@ class GooglePlacesAPIClient:
                 data = response.json()
                 places = data.get("places", [])
 
-            if places:
-                # Return the first (best match) place ID
-                place_id = places[0].get("id")
-                logger.debug(f"[GooglePlacesAPIClient] Found place ID: {place_id}")
-                return place_id
+            # Accept a candidate's place_id ONLY if its Google name matches this
+            # venue's name. Text Search returns a best-effort relevance match, so
+            # a different nearby venue with a stronger listing can outrank this
+            # one for the combined query; accepting it blindly assigned the SAME
+            # place_id — and therefore the same photos — to two distinct venues.
+            # No name match → return None: a venue with no place_id shows a
+            # generic image (correct), whereas a wrong place_id shows ANOTHER
+            # venue's photos.
+            for place in places:
+                candidate_name = (place.get("displayName") or {}).get("text") or ""
+                if names_match(venue_name, candidate_name):
+                    place_id = place.get("id")
+                    logger.debug(
+                        f"[GooglePlacesAPIClient] Matched place ID {place_id} for "
+                        f"{venue_name!r} (Google: {candidate_name!r})"
+                    )
+                    return place_id
 
-            logger.warning(f"[GooglePlacesAPIClient] No place found for: {query}")
+            if places:
+                top_name = (places[0].get("displayName") or {}).get("text")
+                logger.warning(
+                    f"[GooglePlacesAPIClient] {len(places)} candidate(s) for "
+                    f"{venue_name!r} but none matched by name; refusing a "
+                    f"mismatched place_id (top candidate: {top_name!r})"
+                )
+            else:
+                logger.warning(f"[GooglePlacesAPIClient] No place found for: {query}")
             return None
 
         except httpx.HTTPStatusError as e:
@@ -229,12 +264,12 @@ class GooglePlacesAPIClient:
         except Exception as e:
             logger.error(f"[GooglePlacesAPIClient] Text search exception: {e}")
             if raise_on_error:
-                raise GooglePlacesSearchError(f"text search failed: {type(e).__name__}: {e}") from e
+                raise GooglePlacesSearchError(
+                    f"text search failed: {type(e).__name__}: {e}"
+                ) from e
             return None
 
-    async def get_place_location(
-        self, place_id: str
-    ) -> Optional[tuple[float, float]]:
+    async def get_place_location(self, place_id: str) -> Optional[tuple[float, float]]:
         """Fetch just a place's (lat, lng) via Places (New) with a minimal field
         mask. Used by the batch-add path to resolve coordinates for rows that
         carry a place_id but no coords. Returns None if unavailable.
@@ -323,7 +358,9 @@ class GooglePlacesAPIClient:
         try:
             async with self._instrumented("place_details"):
                 response = await self.client.get(url, headers=headers, params=params)
-                logger.debug(f"[GooglePlacesAPIClient] Response status: {response.status_code}")
+                logger.debug(
+                    f"[GooglePlacesAPIClient] Response status: {response.status_code}"
+                )
                 response.raise_for_status()
                 data = response.json()
 
@@ -334,7 +371,9 @@ class GooglePlacesAPIClient:
             if e.response.status_code == 404:
                 logger.warning(f"[GooglePlacesAPIClient] Place not found: {place_id}")
             elif e.response.status_code == 403:
-                logger.error(f"[GooglePlacesAPIClient] API key issue or quota exceeded: {e}")
+                logger.error(
+                    f"[GooglePlacesAPIClient] API key issue or quota exceeded: {e}"
+                )
             else:
                 logger.error(f"[GooglePlacesAPIClient] HTTP error for {place_id}: {e}")
             return None
@@ -347,7 +386,9 @@ class GooglePlacesAPIClient:
             logger.error(f"[GooglePlacesAPIClient] Request error for {place_id}: {e}")
             return None
 
-    def _parse_place_details(self, place_id: str, data: dict) -> GooglePlacesDetailsResponse:
+    def _parse_place_details(
+        self, place_id: str, data: dict
+    ) -> GooglePlacesDetailsResponse:
         """Parse the Google Places API response into our model.
 
         Args:
@@ -362,7 +403,9 @@ class GooglePlacesAPIClient:
 
         # Extract display name
         display_name_obj = data.get("displayName", {})
-        display_name = display_name_obj.get("text") if isinstance(display_name_obj, dict) else None
+        display_name = (
+            display_name_obj.get("text") if isinstance(display_name_obj, dict) else None
+        )
 
         # Extract generative summary
         generative_summary_obj = data.get("generativeSummary", {})
@@ -385,7 +428,9 @@ class GooglePlacesAPIClient:
         secondary_hours_list = data.get("currentSecondaryOpeningHours") or []
 
         # Get weekday descriptions (pre-formatted strings in Portuguese)
-        weekday_descriptions = regular_hours.get("weekdayDescriptions", []) if regular_hours else None
+        weekday_descriptions = (
+            regular_hours.get("weekdayDescriptions", []) if regular_hours else None
+        )
 
         # Get current open status
         open_now = current_hours.get("openNow") if current_hours else None
@@ -405,14 +450,22 @@ class GooglePlacesAPIClient:
         for r in raw_reviews[:5]:
             text_obj = r.get("text", {})
             author_obj = r.get("authorAttribution", {})
-            parsed_reviews.append({
-                "author_name": author_obj.get("displayName", ""),
-                "rating": r.get("rating", 0),
-                "text": text_obj.get("text", "") if isinstance(text_obj, dict) else "",
-                "relative_time": r.get("relativePublishTimeDescription", ""),
-                "language": text_obj.get("languageCode") if isinstance(text_obj, dict) else None,
-                "publish_time": r.get("publishTime"),
-            })
+            parsed_reviews.append(
+                {
+                    "author_name": author_obj.get("displayName", ""),
+                    "rating": r.get("rating", 0),
+                    "text": (
+                        text_obj.get("text", "") if isinstance(text_obj, dict) else ""
+                    ),
+                    "relative_time": r.get("relativePublishTimeDescription", ""),
+                    "language": (
+                        text_obj.get("languageCode")
+                        if isinstance(text_obj, dict)
+                        else None
+                    ),
+                    "publish_time": r.get("publishTime"),
+                }
+            )
 
         return GooglePlacesDetailsResponse(
             place_id=place_id,
@@ -440,10 +493,18 @@ class GooglePlacesAPIClient:
             serves_vegetarian_food=data.get("servesVegetarianFood"),
             serves_wine=data.get("servesWine"),
             # Accessibility
-            wheelchair_accessible_entrance=accessibility.get("wheelchairAccessibleEntrance"),
-            wheelchair_accessible_parking=accessibility.get("wheelchairAccessibleParking"),
-            wheelchair_accessible_restroom=accessibility.get("wheelchairAccessibleRestroom"),
-            wheelchair_accessible_seating=accessibility.get("wheelchairAccessibleSeating"),
+            wheelchair_accessible_entrance=accessibility.get(
+                "wheelchairAccessibleEntrance"
+            ),
+            wheelchair_accessible_parking=accessibility.get(
+                "wheelchairAccessibleParking"
+            ),
+            wheelchair_accessible_restroom=accessibility.get(
+                "wheelchairAccessibleRestroom"
+            ),
+            wheelchair_accessible_seating=accessibility.get(
+                "wheelchairAccessibleSeating"
+            ),
             # Summaries
             generative_summary=generative_summary,
             editorial_summary=editorial_summary,
@@ -579,13 +640,19 @@ class GooglePlacesAPIClient:
                 response.raise_for_status()
                 data = response.json()
         except httpx.HTTPStatusError as e:
-            logger.error(f"[GooglePlacesAPIClient] Photo details error for {place_id}: {e}")
+            logger.error(
+                f"[GooglePlacesAPIClient] Photo details error for {place_id}: {e}"
+            )
             raise
         except httpx.TimeoutException as e:
-            logger.error(f"[GooglePlacesAPIClient] Photo details timeout for {place_id}: {e}")
+            logger.error(
+                f"[GooglePlacesAPIClient] Photo details timeout for {place_id}: {e}"
+            )
             raise
         except httpx.RequestError as e:
-            logger.error(f"[GooglePlacesAPIClient] Photo details request error for {place_id}: {e}")
+            logger.error(
+                f"[GooglePlacesAPIClient] Photo details request error for {place_id}: {e}"
+            )
             raise
 
         photos = data.get("photos", []) or []
@@ -623,7 +690,9 @@ class GooglePlacesAPIClient:
                 entry["photo_name"] = photo_name
             result.append(entry)
 
-        logger.debug(f"[GooglePlacesAPIClient] Resolved {len(result)} keyless photos for {place_id}")
+        logger.debug(
+            f"[GooglePlacesAPIClient] Resolved {len(result)} keyless photos for {place_id}"
+        )
         return result
 
     async def _resolve_photo_media_uri(
@@ -644,10 +713,14 @@ class GooglePlacesAPIClient:
                 response.raise_for_status()
                 uri = (response.json() or {}).get("photoUri")
             if not uri:
-                logger.warning(f"[GooglePlacesAPIClient] media response for {photo_name} had no photoUri")
+                logger.warning(
+                    f"[GooglePlacesAPIClient] media response for {photo_name} had no photoUri"
+                )
             return uri
         except Exception as e:  # noqa: BLE001 — one bad photo must not fail the venue
-            logger.warning(f"[GooglePlacesAPIClient] media call failed for {photo_name}: {type(e).__name__}: {e}")
+            logger.warning(
+                f"[GooglePlacesAPIClient] media call failed for {photo_name}: {type(e).__name__}: {e}"
+            )
             return None
 
 
