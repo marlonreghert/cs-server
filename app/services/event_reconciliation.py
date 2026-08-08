@@ -178,6 +178,11 @@ def is_clean_extraction(
 PROTECTABLE_EVENT_FIELDS = (
     "starts_at", "ends_at", "is_recurring", "recurrence_text", "title",
     "description", "ticket_url", "price_text", "location_text", "confidence",
+    # plans/260808_event-ticket-info-and-attractions.md §B: an ordinary
+    # scalar, merged exactly like price_text/location_text. `attractions` is
+    # deliberately NOT here — see union_attractions below and §C: a list is
+    # additive, never a value to CHOOSE a winner for.
+    "ticket_info",
 )
 
 
@@ -227,6 +232,87 @@ def union_lineup(*lineups) -> list:
                 seen.add(item)
                 out.append(item)
     return out
+
+
+def union_attractions(*attraction_lists) -> list:
+    """Fold every `{name, type, stage, styles}` attraction across posts into
+    one additive list — the SAME rationale `union_lineup` already applies to
+    bare names, one level richer (plans/260808_event-ticket-info-and-
+    attractions.md §C). Called at the SAME sites `union_lineup` is: this
+    module's own confirmed-row re-extraction branch, and BOTH branches of
+    app.services.event_merge.merge_event_fields (which imports this
+    function, never re-implements it — the same discipline `union_lineup`
+    already established).
+
+    Grouped by `normalize_title(name)` — the SAME casefold/accent/whitespace
+    normalisation `event_identity` uses everywhere else two names are
+    compared, so "DJ Thomas Henry" and "dj thomas henry " never register as
+    two different acts by construction.
+
+    Within a name group:
+      - an entry whose `stage` matches an existing one for that name EXACTLY
+        (including two nulls) merges into it;
+      - a null `stage` absorbs into (or is absorbed by) a non-null one for
+        the SAME name — a teaser naming the act with no stage and a later
+        flyer placing it on one describe the same real slot;
+      - two entries for the same name with DIFFERENT non-null stages stay
+        SEPARATE — one DJ playing both pistas is two real slots, not one;
+      - `type`: a specific "dj"/"live" beats "other"; two disagreeing
+        specific types keep the FIRST seen (no principled way to prefer one
+        caption's claim over another's, so the earliest answer stands, the
+        same "first seen wins" posture styles/lineup already take);
+      - `styles`: unioned, preserving first-seen order, exactly like
+        `union_lineup` does for names.
+
+    Every element of `attraction_lists` is assumed ALREADY validated by
+    app.api.openai_event_extraction_client._normalize_attractions (name
+    non-empty, type in ATTRACTION_TYPES, styles taxonomy-filtered) — this
+    function only merges, it never re-validates.
+    """
+    slots: list[dict] = []
+
+    def _find_slot(norm: str, stage) -> Optional[dict]:
+        for slot in slots:
+            if slot["_norm"] == norm and slot["stage"] == stage:
+                return slot
+        if stage is not None:
+            for slot in slots:
+                if slot["_norm"] == norm and slot["stage"] is None:
+                    return slot
+        else:
+            for slot in slots:
+                if slot["_norm"] == norm:
+                    return slot
+        return None
+
+    for attractions in attraction_lists:
+        for attraction in (attractions or []):
+            norm = normalize_title(attraction.get("name"))
+            stage = attraction.get("stage")
+            a_type = attraction.get("type") or "other"
+            styles = attraction.get("styles") or []
+
+            slot = _find_slot(norm, stage)
+            if slot is None:
+                slots.append({
+                    "_norm": norm, "name": attraction.get("name"),
+                    "type": a_type if a_type in ("dj", "live") else "other",
+                    "stage": stage, "styles": list(dict.fromkeys(styles)),
+                })
+                continue
+
+            if slot["stage"] is None and stage is not None:
+                slot["stage"] = stage
+            if slot["type"] == "other" and a_type in ("dj", "live"):
+                slot["type"] = a_type
+            for style in styles:
+                if style not in slot["styles"]:
+                    slot["styles"].append(style)
+
+    return [
+        {"name": s["name"], "type": s["type"], "stage": s["stage"], "styles": s["styles"]}
+        for s in slots
+    ]
 
 
 def apply_operator_field_protection(
@@ -293,6 +379,12 @@ def apply_operator_field_protection(
 _TEXT_FIELDS = (
     "title", "description", "recurrence_text", "ticket_url", "price_text",
     "location_text",
+    # plans/260808_event-ticket-info-and-attractions.md §B: without this, a
+    # fresh "" compares unequal to a stored None on every re-extraction,
+    # registering a phantom change — the exact half-fix the plan calls out
+    # for omitting ticket_info from ONE of these two tuples but not the
+    # other.
+    "ticket_info",
 )
 
 
@@ -317,10 +409,13 @@ def _confirmed_update_fields(existing: dict, prepared: dict) -> tuple[dict, bool
     (`apply_operator_field_protection`) — a null/absent fresh value never
     degrades a known one; an unedited field differing from the fresh
     answer updates; an EDITED field differing from the fresh answer keeps
-    the operator's value and flags the divergence. `lineup` unions
-    regardless, in both branches — it is additive, never a contradiction to
-    protect against (see plans/260807_auto-accept-and-field-level-
-    protection.md).
+    the operator's value and flags the divergence. `lineup` and (plans/
+    260808_event-ticket-info-and-attractions.md) `attractions` union
+    UNCONDITIONALLY in THIS branch only — additive, never a value the
+    per-field table needs to choose a winner for — but, like every other
+    content field, are left untouched by the legacy whole-row freeze above:
+    a row with no record of what an operator edited gets NOTHING updated,
+    lists included, exactly as it did before either union existed.
 
     Returns `(changed_fields, diverges)`: `changed_fields` never includes
     identity/bookkeeping columns (the caller adds those), and `diverges`
@@ -349,6 +444,10 @@ def _confirmed_update_fields(existing: dict, prepared: dict) -> tuple[dict, bool
     merged_lineup = union_lineup(existing.get("lineup"), prepared.get("lineup"))
     if merged_lineup != (existing.get("lineup") or []):
         changed["lineup"] = merged_lineup
+
+    merged_attractions = union_attractions(existing.get("attractions"), prepared.get("attractions"))
+    if merged_attractions != (existing.get("attractions") or []):
+        changed["attractions"] = merged_attractions
 
     return changed, diverges
 
@@ -699,5 +798,5 @@ __all__ = [
     # Shared with app.services.event_merge's confirmed-canonical branch — see
     # the coordination note beside PROTECTABLE_EVENT_FIELDS above.
     "PROTECTABLE_EVENT_FIELDS", "event_field_is_absent", "event_time_known",
-    "union_lineup", "apply_operator_field_protection",
+    "union_lineup", "union_attractions", "apply_operator_field_protection",
 ]

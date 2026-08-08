@@ -74,7 +74,12 @@ naming no single field (the same posture `weekday_mismatch` and
 chosen between is not a value presented as settled). `lineup` is a list, not
 a scalar: it is UNIONED, preserving first-seen order and dropping duplicates
 — a teaser naming two DJs and a later flyer naming five yields five, never a
-contested choice.
+contested choice. `attractions` (plans/260808_event-ticket-info-and-
+attractions.md) is a richer list, unioned the same way via
+`app.services.event_reconciliation.union_attractions` — grouped by
+normalised name, with same-name entries on genuinely different stages kept
+apart. `ticket_info` joins the scalar table above instead — a purchase
+reference is a value to protect, not to accumulate.
 
 A CONFIRMED canonical with NO record of which fields an operator edited
 (`operator_edited_fields IS NULL` — a row confirmed before that column
@@ -106,6 +111,7 @@ from app.services.event_reconciliation import (
     REVIEW_REASON_DIVERGES_FROM_CONFIRMED,
     apply_operator_field_protection,
     event_field_is_absent as _is_empty,
+    union_attractions as _union_attractions,
     union_lineup as _union_lineup,
 )
 
@@ -246,6 +252,9 @@ def merge_event_fields(canonical: dict, duplicate: dict) -> tuple[dict, Optional
         merged_lineup = _union_lineup(canonical.get("lineup"), duplicate.get("lineup"))
         if merged_lineup != (canonical.get("lineup") or []):
             changed["lineup"] = merged_lineup
+        merged_attractions = _union_attractions(canonical.get("attractions"), duplicate.get("attractions"))
+        if merged_attractions != (canonical.get("attractions") or []):
+            changed["attractions"] = merged_attractions
         review_reason = (
             REVIEW_REASON_DIVERGES_FROM_CONFIRMED if diverges else canonical.get("review_reason")
         )
@@ -270,6 +279,10 @@ def merge_event_fields(canonical: dict, duplicate: dict) -> tuple[dict, Optional
     merged_lineup = _union_lineup(canonical.get("lineup"), duplicate.get("lineup"))
     if merged_lineup != (canonical.get("lineup") or []):
         changed["lineup"] = merged_lineup
+
+    merged_attractions = _union_attractions(canonical.get("attractions"), duplicate.get("attractions"))
+    if merged_attractions != (canonical.get("attractions") or []):
+        changed["attractions"] = merged_attractions
 
     review_reason = (
         REVIEW_REASON_SOURCES_DISAGREE if disagreed else canonical.get("review_reason")

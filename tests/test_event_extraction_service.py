@@ -392,11 +392,17 @@ class TestSingleEventVenuePostIsByteIdenticalToTheOldPath:
         # Clean per is_clean_extraction — auto-accepted, not queued.
         assert stored["status"] == "accepted"
         assert stored["review_reason"] is None
+        # `attractions`/`ticket_info` (plans/260808_event-ticket-info-and-
+        # attractions.md) now ride in raw_extraction too — this fixture's
+        # raw model JSON states neither, so both take their genuinely-absent
+        # values ([] / None), same as every OTHER field here that the model
+        # didn't state.
         assert stored["raw_extraction"] == {
             "title": "Festa da Casa", "description": "Uma noite especial",
             "date_text": "15/08", "time_text": "22h", "is_recurring": False,
             "recurrence_text": None, "lineup": ["DJ A", "DJ B"],
-            "ticket_url": "https://tickets.example/x", "price_text": "R$30",
+            "attractions": [], "ticket_url": "https://tickets.example/x",
+            "ticket_info": None, "price_text": "R$30",
             "location_text": "Rua das Flores, 123", "confidence": 0.87,
             "time_known": True,
         }
@@ -432,6 +438,12 @@ class TestSingleEventVenuePostIsByteIdenticalToTheOldPath:
             "event_id", "first_seen_at", "source_event_key", "source_event_index",
             "location_resolution", "location_confidence", "linked_by", "linked_at",
             "updated_at", "venue_name",
+            # plans/260808_event-ticket-info-and-attractions.md: unlike
+            # operator_edited_fields (never in prepared_events, so absent
+            # from a fresh insert), attractions/ticket_info are unconditional
+            # keys of EVERY prepared_events entry — present on every insert,
+            # not just once an operator or a later post touches them.
+            "attractions", "ticket_info",
         }
         assert set(stored.keys()) == expected_keys, set(stored.keys())
 

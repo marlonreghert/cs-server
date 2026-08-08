@@ -1,4 +1,3 @@
-@wip
 Feature: Capture ticket references and attractions from event flyers
   An Instagram flyer states how to buy a ticket and what is playing — which
   acts, on which stage, in which musical styles. The event row must keep both
@@ -62,7 +61,7 @@ Feature: Capture ticket references and attractions from event flyers
   Scenario: Persist nothing partial when the response truncates
     Given an extraction response that is truncated before it completes
     When the post is extracted
-    Then no event is persisted for that post
+    Then no event is stored for that post
     And the truncation is counted
 
   Scenario: Leave both fields empty for a flyer that states neither

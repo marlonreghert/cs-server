@@ -17,12 +17,14 @@ from datetime import datetime, timezone
 
 from app.dao.venue_repository import VenueRepository
 from app.services.event_reconciliation import (
+    PROTECTABLE_EVENT_FIELDS,
     REVIEW_REASON_ABSENT_FROM_LATEST_EXTRACTION,
     REVIEW_REASON_DIVERGES_FROM_CONFIRMED,
     STATUS_ACCEPTED,
     STATUS_CONFIRMED,
     STATUS_PENDING_REVIEW,
     STATUS_SUPERSEDED,
+    _TEXT_FIELDS,
     is_clean_extraction,
     reconcile_post_events,
 )
@@ -1002,3 +1004,86 @@ class TestFieldLevelProtectionPerFieldTable:
         assert after["price_text"] == "R$30"
         assert after["lineup"] == []
         assert after["review_reason"] is None  # title/date agree; no divergence
+
+
+class TestTicketInfoAndAttractions:
+    """plans/260808_event-ticket-info-and-attractions.md §B/§C: ticket_info
+    is an ordinary member of the SAME per-field table price_text already
+    goes through — proven by membership AND by driving it through
+    reconcile_post_events exactly like TestFieldLevelProtectionPerFieldTable
+    does for price_text. attractions is explicitly NOT a member (it unions
+    unconditionally instead, like lineup) — asserted directly, since adding
+    it there would quietly turn an additive list into a contested scalar."""
+
+    def test_ticket_info_is_a_protectable_and_text_field(self):
+        assert "ticket_info" in PROTECTABLE_EVENT_FIELDS
+        assert "ticket_info" in _TEXT_FIELDS
+
+    def test_attractions_is_not_a_protectable_field(self):
+        assert "attractions" not in PROTECTABLE_EVENT_FIELDS
+
+    def _confirmed_row(self, dao, *, edited_fields, **overrides):
+        events = [_event("Event A", datetime(2026, 8, 10, tzinfo=timezone.utc), **overrides)]
+        reconcile_post_events(
+            venue_dao=dao, source_kind="venue_post", source_handle="h1",
+            source_shortcode="s1", source_permalink=None,
+            prepared_events=events, now=NOW, attribute=_venue_attribute("v1"),
+        )
+        row = _rows(dao, "h1", "s1")[0]
+        dao.update_event(row["event_id"], {
+            "status": STATUS_CONFIRMED, "operator_edited_fields": edited_fields,
+        })
+        return row["event_id"]
+
+    def test_a_null_ticket_info_never_overwrites_a_known_one(self):
+        dao = _dao()
+        event_id = self._confirmed_row(
+            dao, edited_fields=["title"], ticket_info="Ingressos na entrada",
+        )
+        later = [_event(
+            "Event A", datetime(2026, 8, 10, tzinfo=timezone.utc), ticket_info=None,
+        )]
+        reconcile_post_events(
+            venue_dao=dao, source_kind="venue_post", source_handle="h1",
+            source_shortcode="s1", source_permalink=None,
+            prepared_events=later, now=NOW, attribute=_venue_attribute("v1"),
+        )
+        after = dao.get_event(event_id)
+        assert after["ticket_info"] == "Ingressos na entrada"
+        assert after["review_reason"] is None
+
+    def test_an_edited_ticket_info_holds_and_flags_when_the_fresh_answer_differs(self):
+        dao = _dao()
+        event_id = self._confirmed_row(
+            dao, edited_fields=["ticket_info"], ticket_info="Ingressos na entrada",
+        )
+        later = [_event(
+            "Event A", datetime(2026, 8, 10, tzinfo=timezone.utc),
+            ticket_info="Ingressos pelo WhatsApp",
+        )]
+        reconcile_post_events(
+            venue_dao=dao, source_kind="venue_post", source_handle="h1",
+            source_shortcode="s1", source_permalink=None,
+            prepared_events=later, now=NOW, attribute=_venue_attribute("v1"),
+        )
+        after = dao.get_event(event_id)
+        assert after["ticket_info"] == "Ingressos na entrada"
+        assert after["review_reason"] == REVIEW_REASON_DIVERGES_FROM_CONFIRMED
+
+    def test_attractions_union_even_on_an_operator_edited_event(self):
+        dao = _dao()
+        event_id = self._confirmed_row(
+            dao, edited_fields=["title"],
+            attractions=[{"name": "DJ A", "type": "dj", "stage": None, "styles": []}],
+        )
+        later = [_event(
+            "Event A", datetime(2026, 8, 10, tzinfo=timezone.utc),
+            attractions=[{"name": "DJ B", "type": "dj", "stage": None, "styles": []}],
+        )]
+        reconcile_post_events(
+            venue_dao=dao, source_kind="venue_post", source_handle="h1",
+            source_shortcode="s1", source_permalink=None,
+            prepared_events=later, now=NOW, attribute=_venue_attribute("v1"),
+        )
+        after = dao.get_event(event_id)
+        assert {a["name"] for a in after["attractions"]} == {"DJ A", "DJ B"}

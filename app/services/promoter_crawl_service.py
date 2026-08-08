@@ -44,6 +44,7 @@ from app.api.openai_event_extraction_client import (
     parse_multi_event_extraction_response,
 )
 from app.metrics import (
+    EVENT_EXTRACTION_MALFORMED_ATTRACTIONS_TOTAL,
     EVENT_EXTRACTION_MALFORMED_EVENTS_TOTAL,
     EVENT_REVIEW_QUEUE_DEPTH,
     EVENT_VENUE_LINK_TOTAL,
@@ -424,8 +425,10 @@ class PromoterCrawlService:
             return 0
 
         try:
-            events_data, malformed_count = parse_multi_event_extraction_response(
-                raw_text, max_events=self.max_events_per_post,
+            events_data, malformed_count, malformed_attractions_count = (
+                parse_multi_event_extraction_response(
+                    raw_text, max_events=self.max_events_per_post,
+                )
             )
         except EventExtractionParseError as e:
             logger.warning(f"[PromoterCrawl] extraction failed for {handle}/{shortcode}: {e}")
@@ -435,6 +438,8 @@ class PromoterCrawlService:
 
         if malformed_count:
             EVENT_EXTRACTION_MALFORMED_EVENTS_TOTAL.inc(malformed_count)
+        if malformed_attractions_count:
+            EVENT_EXTRACTION_MALFORMED_ATTRACTIONS_TOTAL.inc(malformed_attractions_count)
 
         post_ts = _parse_timestamp(post.get("timestamp")) or now
 
@@ -463,7 +468,8 @@ class PromoterCrawlService:
                 "is_recurring": resolved_date.is_recurring or bool(parsed["is_recurring"]),
                 "recurrence_text": resolved_date.recurrence_text or parsed["recurrence_text"],
                 "title": parsed["title"], "description": parsed["description"],
-                "lineup": parsed["lineup"], "ticket_url": parsed["ticket_url"],
+                "lineup": parsed["lineup"], "attractions": parsed["attractions"],
+                "ticket_url": parsed["ticket_url"], "ticket_info": parsed["ticket_info"],
                 "price_text": parsed["price_text"], "location_text": parsed["location_text"],
                 "cover_photo_key": cover_photo_key,
                 "confidence": parsed["confidence"],

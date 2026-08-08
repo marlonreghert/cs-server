@@ -1223,6 +1223,16 @@ EVENT_EXTRACTION_MALFORMED_EVENTS_TOTAL = Counter(
     "Individual malformed events skipped within an otherwise-valid multi-event extraction",
 )
 
+# plans/260808_event-ticket-info-and-attractions.md §Error Handling: one
+# malformed attraction (not an object, or with no usable name) is skipped
+# and counted, never fatal to its siblings — the SAME shape as
+# EVENT_EXTRACTION_MALFORMED_EVENTS_TOTAL above, one level down (a defect
+# inside one event's attraction list, not the event itself).
+EVENT_EXTRACTION_MALFORMED_ATTRACTIONS_TOTAL = Counter(
+    "event_extraction_malformed_attractions_total",
+    "Individual malformed attraction entries skipped within an otherwise-valid extraction",
+)
+
 # `method` is what makes this worth reading: whether links are coming from
 # exact @-mentions/location tags or from fuzzy name matching is the
 # difference between a resolver that is working and one that is guessing
