@@ -544,6 +544,58 @@ def test_event_different_source_event_key_is_not_a_duplicate(store):
     assert {r["source_event_key"] for r in rows} == {"k1", "k2"}
 
 
+def test_event_ticket_info_and_attractions_round_trip(store):
+    """plans/260808_event-ticket-info-and-attractions.md: `attractions`
+    binds through the SAME jsonb CAST(:col AS jsonb) + json.dumps() path
+    `lineup` already proves here on the real store when RDS_TEST_URL is
+    set — the fake alone has twice missed a real defect (a missing NOT NULL
+    primary key, an FK write-order bug), so this fixture is parametrized
+    across both rather than trusting the fake's shape."""
+    vid = _vid()
+    store.upsert_venue(_venue(vid))
+    shortcode = f"tia_{vid}"
+    attractions = [
+        {"name": "DJ Ramon", "type": "dj", "stage": "Pista NY", "styles": ["Pop"]},
+        {"name": "Eliza Mello", "type": "live", "stage": None, "styles": []},
+    ]
+    fields = _event_fields(
+        vid, shortcode, ticket_info="\U0001f3ab TICKETS", attractions=attractions,
+    )
+    inserted = store.insert_event(fields)
+    assert inserted["ticket_info"] == "\U0001f3ab TICKETS"
+    assert inserted["attractions"] == attractions
+
+    by_id = store.get_event(fields["event_id"])
+    assert by_id["ticket_info"] == "\U0001f3ab TICKETS"
+    assert by_id["attractions"] == attractions
+    assert isinstance(by_id["attractions"], list)
+
+    by_source = store.get_event_by_source("contract_handle", shortcode)
+    assert by_source["attractions"] == attractions
+
+    updated = store.update_event(fields["event_id"], {
+        "ticket_info": "Ingressos na bilheteria",
+        "attractions": attractions + [
+            {"name": "DJ New", "type": "dj", "stage": None, "styles": []},
+        ],
+    })
+    assert updated["ticket_info"] == "Ingressos na bilheteria"
+    assert len(updated["attractions"]) == 3
+    assert isinstance(updated["attractions"], list)
+
+
+def test_event_ticket_info_and_attractions_default_to_null_and_empty(store):
+    """No back-fill: an event inserted without either field must read back
+    ticket_info=None and attractions as empty/None, never an invented
+    value."""
+    vid = _vid()
+    store.upsert_venue(_venue(vid))
+    fields = _event_fields(vid, f"tia_none_{vid}")
+    inserted = store.insert_event(fields)
+    assert inserted.get("ticket_info") is None
+    assert inserted.get("attractions") in (None, [])
+
+
 def test_list_events_filters_by_venue_and_status(store):
     vid_a, vid_b = _vid(), _vid()
     store.upsert_venue(_venue(vid_a))

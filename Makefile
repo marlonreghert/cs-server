@@ -106,6 +106,7 @@ test-unit:
 		tests/test_review_queue_completeness.py \
 		tests/test_operator_edited_fields_migration.py \
 		tests/test_operator_edited_fields_patch.py \
+		tests/test_event_ticket_info_and_attractions_migration.py \
 		-v
 
 test-integration:

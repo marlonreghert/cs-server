@@ -241,6 +241,47 @@ class TestFieldMergeMatrix:
         changed, _reason = merge_event_fields(canonical, duplicate)
         assert "lineup" not in changed
 
+    def test_attractions_union_preserving_stage_distinctions(self):
+        """plans/260808_event-ticket-info-and-attractions.md §C: attractions
+        unions like lineup, one of the two REAL (non-confirmed) merge sites
+        — the other is TestFieldLevelProtectionOnTheMergePath's confirmed
+        analog below."""
+        canonical = _event("evt_a", attractions=[
+            {"name": "DJ A", "type": "dj", "stage": None, "styles": ["Pop"]},
+        ])
+        duplicate = _event("evt_b", attractions=[
+            {"name": "DJ A", "type": "dj", "stage": "Pista NY", "styles": ["House"]},
+            {"name": "DJ B", "type": "live", "stage": None, "styles": []},
+        ])
+        changed, _reason = merge_event_fields(canonical, duplicate)
+        by_name = {a["name"]: a for a in changed["attractions"]}
+        assert by_name["DJ A"]["stage"] == "Pista NY"
+        assert by_name["DJ A"]["styles"] == ["Pop", "House"]
+        assert by_name["DJ B"]["type"] == "live"
+
+    def test_attractions_unchanged_is_not_included_in_the_update(self):
+        canonical = _event(
+            "evt_a", attractions=[{"name": "DJ A", "type": "dj", "stage": None, "styles": []}],
+        )
+        duplicate = _event("evt_b", attractions=[])
+        changed, _reason = merge_event_fields(canonical, duplicate)
+        assert "attractions" not in changed
+
+    def test_ticket_info_disagreement_takes_the_more_recent_and_flags_it(self):
+        """ticket_info is an ORDINARY scalar here (§B) — it disagrees and
+        gets chosen/flagged exactly like ticket_url/price_text above, never
+        unioned like attractions."""
+        canonical = _event(
+            "evt_a", ticket_info="Ingressos na entrada", last_seen_at=_D1,
+        )
+        duplicate = _event(
+            "evt_b", ticket_info="Ingressos pelo WhatsApp",
+            last_seen_at=datetime(2026, 8, 9, tzinfo=timezone.utc),
+        )
+        changed, reason = merge_event_fields(canonical, duplicate)
+        assert changed["ticket_info"] == "Ingressos pelo WhatsApp"
+        assert reason == REVIEW_REASON_SOURCES_DISAGREE
+
     def test_no_disagreement_anywhere_leaves_review_reason_untouched(self):
         canonical = _event("evt_a", review_reason="low_confidence")
         duplicate = _event("evt_b")
@@ -376,6 +417,30 @@ class TestFieldLevelProtectionOnTheMergePath:
         duplicate = _event("evt_b", lineup=["DJ B"])
         changed, _reason = merge_event_fields(canonical, duplicate)
         assert changed["lineup"] == ["DJ A", "DJ B"]
+
+    def test_attractions_union_even_when_the_canonical_is_confirmed_and_edited(self):
+        """The confirmed-canonical analog of TestFieldMergeMatrix's own
+        attractions-union test above — the SECOND of the two real merge
+        sites plans/260808_event-ticket-info-and-attractions.md §C names."""
+        canonical = _event(
+            "evt_a", status="confirmed", operator_edited_fields=["title"],
+            attractions=[{"name": "DJ A", "type": "dj", "stage": None, "styles": []}],
+        )
+        duplicate = _event(
+            "evt_b", attractions=[{"name": "DJ B", "type": "dj", "stage": None, "styles": []}],
+        )
+        changed, _reason = merge_event_fields(canonical, duplicate)
+        assert {a["name"] for a in changed["attractions"]} == {"DJ A", "DJ B"}
+
+    def test_an_edited_ticket_info_that_genuinely_differs_is_kept_and_flagged(self):
+        canonical = _event(
+            "evt_a", status="confirmed", operator_edited_fields=["ticket_info"],
+            ticket_info="Ingressos na entrada", last_seen_at=_D1,
+        )
+        duplicate = _event("evt_b", ticket_info="Ingressos pelo WhatsApp", last_seen_at=_D2)
+        changed, reason = merge_event_fields(canonical, duplicate)
+        assert "ticket_info" not in changed
+        assert reason == REVIEW_REASON_DIVERGES_FROM_CONFIRMED
 
     def test_a_legacy_null_operator_edited_fields_keeps_whole_row_protection(self):
         canonical = _event(

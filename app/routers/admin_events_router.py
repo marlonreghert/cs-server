@@ -95,6 +95,10 @@ class EventOut(BaseModel):
     description: Optional[str] = None
     lineup: list = Field(default_factory=list)
     ticket_url: Optional[str] = None
+    # plans/260808_event-ticket-info-and-attractions.md: a non-URL ticket
+    # reference, captured verbatim alongside — not instead of — ticket_url.
+    # An ordinary operator-protectable scalar (EventPatch below).
+    ticket_info: Optional[str] = None
     price_text: Optional[str] = None
     location_text: Optional[str] = None
     cover_photo_key: Optional[str] = None
@@ -135,6 +139,12 @@ class EventOut(BaseModel):
     # reads exactly that distinction to keep today's whole-row protection
     # for those rows rather than guessing. Additive.
     operator_edited_fields: Optional[list[str]] = None
+    # plans/260808_event-ticket-info-and-attractions.md: every DJ/live act
+    # the pipeline found, each `{name, type, stage, styles}` — additive
+    # across the posts announcing one event (see app.services.
+    # event_reconciliation.union_attractions), never operator-editable
+    # (EventPatch below omits it, matching `lineup`).
+    attractions: list = Field(default_factory=list)
 
 
 class EventSourceOut(BaseModel):
@@ -152,7 +162,10 @@ EventOut.model_rebuild()
 
 def _to_out(dao, row: dict) -> EventOut:
     sources = [EventSourceOut(**s) for s in dao.list_event_sources(row["event_id"])]
-    return EventOut(**{**row, "lineup": row.get("lineup") or [], "sources": sources})
+    return EventOut(**{
+        **row, "lineup": row.get("lineup") or [],
+        "attractions": row.get("attractions") or [], "sources": sources,
+    })
 
 
 class EventPatch(BaseModel):
@@ -169,6 +182,7 @@ class EventPatch(BaseModel):
     recurrence_text: Optional[str] = None
     lineup: Optional[list] = None
     ticket_url: Optional[str] = None
+    ticket_info: Optional[str] = None
     price_text: Optional[str] = None
     location_text: Optional[str] = None
 
@@ -304,7 +318,11 @@ def review_queue():
         candidates = dao.list_event_venue_link_candidates(row["event_id"])
         sources = [EventSourceOut(**s) for s in dao.list_event_sources(row["event_id"])]
         out.append(ReviewQueueItemOut(
-            **{**row, "lineup": row.get("lineup") or []}, candidates=candidates, sources=sources,
+            **{
+                **row, "lineup": row.get("lineup") or [],
+                "attractions": row.get("attractions") or [],
+            },
+            candidates=candidates, sources=sources,
         ))
     return out
 

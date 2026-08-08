@@ -37,6 +37,7 @@ from app.metrics import (
     OPENAI_API_CALL_DURATION_SECONDS,
     OPENAI_TOKENS_TOTAL,
 )
+from app.models.taxonomy import TAXONOMY, validate_category_labels
 
 logger = logging.getLogger(__name__)
 
@@ -45,8 +46,41 @@ DEFAULT_MODEL = "gpt-5.6-luna"
 # Reasoning tokens (gpt-5.6 is a reasoning model) count against
 # max_completion_tokens, so this carries real headroom above a typical
 # lineup+description payload rather than the ~1-2k a non-reasoning extractor
-# would need.
-DEFAULT_MAX_COMPLETION_TOKENS = 4096
+# would need. Bumped alongside the multi-event budgets below
+# (plans/260808_event-ticket-info-and-attractions.md §E): this is a FLAT cap,
+# not scaled by event count, and turning each performer into a four-field
+# `attractions` object is a real per-entry token increase on TOP of the
+# reasoning overhead a classification/vocabulary-mapping task adds.
+DEFAULT_MAX_COMPLETION_TOKENS = 6144
+
+# plans/260808_event-ticket-info-and-attractions.md §C: `attractions[].styles`
+# is constrained to the SAME `taxonomy.musica` vocabulary the venue vibe
+# profile already validates against (`validate_category_labels`) — quoted
+# into both prompts below so the model is told the vocabulary up front
+# rather than only finding out a label was dropped after the fact.
+_MUSIC_STYLES = ", ".join(TAXONOMY["musica"])
+
+# Shared by both prompts below (single-line, embedded via an f-string) so the
+# two can never drift on what an `attractions` entry looks like — extending
+# only one prompt is the exact half-fix the plan calls out.
+_ATTRACTIONS_FIELD_DOC = f"""- attractions: array of every DJ, live act or performer named for this
+  event, each as an object — NOT a separate "lineup" field; the performer
+  list is derived from this array, so do not repeat it as its own field:
+    - name: the act/DJ name or handle, exactly as written
+    - type: "dj" for a DJ set, "live" for a live band/show, "other" when the
+      text does not say which
+    - stage: the stage/pista/room this act plays, exactly as written, or
+      null when the flyer names only one stage or none at all
+    - styles: array of this act's musical styles, using ONLY these labels:
+      {_MUSIC_STYLES}. Omit any style not in this list. Empty array if no
+      style is stated.
+  Empty array if the post names no acts at all.
+- ticket_info: any purchase reference that is NOT itself a URL — a bare
+  emoji ticket label, "link na bio", "ingressos na bilheteria", a WhatsApp
+  number, an @handle, a lote/deadline note — copied verbatim. Populate this
+  ALONGSIDE ticket_url when the caption states both a link and a note;
+  neither suppresses the other. Null when nothing about buying or entry is
+  stated."""
 
 EXTRACTION_PROMPT = """## Role
 You read a single Instagram post (caption + one flyer/event photo, when a
@@ -74,7 +108,7 @@ Never invent one.
 - is_recurring: true only if the text explicitly states a recurring
   cadence ("toda quinta", "todo sábado", "semanalmente")
 - recurrence_text: the raw recurrence phrase when is_recurring, else null
-- lineup: array of performer/DJ names, empty array if none stated
+""" + _ATTRACTIONS_FIELD_DOC + """
 - ticket_url: a ticketing link if present, else null
 - price_text: price/cover text exactly as stated (e.g. "R$30 antecipado"),
   else null
@@ -86,8 +120,9 @@ Never invent one.
 ## Output
 Reply with ONLY a JSON object, no markdown fences:
 {"title": "...", "description": null, "date_text": "15/08", "time_text": "22h",
- "is_recurring": false, "recurrence_text": null, "lineup": ["DJ X"],
- "ticket_url": null, "price_text": "R$30", "location_text": null,
+ "is_recurring": false, "recurrence_text": null,
+ "attractions": [{"name": "DJ X", "type": "dj", "stage": null, "styles": ["House"]}],
+ "ticket_url": null, "ticket_info": null, "price_text": "R$30", "location_text": null,
  "confidence": 0.85}
 """
 
@@ -134,7 +169,7 @@ venue for it.
 - is_recurring: true only if the text explicitly states a recurring
   cadence ("toda quinta", "todo sábado", "semanalmente")
 - recurrence_text: the raw recurrence phrase when is_recurring, else null
-- lineup: array of performer/DJ names, empty array if none stated
+""" + _ATTRACTIONS_FIELD_DOC + """
 - ticket_url: a ticketing link if present, else null
 - price_text: price/cover text exactly as stated (e.g. "R$30 antecipado"),
   else null
@@ -147,8 +182,9 @@ Reply with ONLY a JSON object, no markdown fences, wrapping every event in an
 "events" array (a single-event post still returns a list of one):
 {"events": [
   {"title": "...", "description": null, "date_text": "15/08", "time_text": "22h",
-   "is_recurring": false, "recurrence_text": null, "lineup": ["DJ X"],
-   "ticket_url": null, "price_text": "R$30", "location_text": "Venue A",
+   "is_recurring": false, "recurrence_text": null,
+   "attractions": [{"name": "DJ X", "type": "dj", "stage": null, "styles": ["House"]}],
+   "ticket_url": null, "ticket_info": null, "price_text": "R$30", "location_text": "Venue A",
    "confidence": 0.85}
 ]}
 """
@@ -161,8 +197,17 @@ Reply with ONLY a JSON object, no markdown fences, wrapping every event in an
 # truncating a variable-length response and losing the WHOLE batch while
 # reporting success; this budget scales with the configured per-post ceiling
 # (`event_extraction_max_events_per_post`) rather than staying flat.
-MULTI_EVENT_BASE_COMPLETION_TOKENS = 1536
-MULTI_EVENT_PER_EVENT_COMPLETION_TOKENS = 300
+#
+# Both bumped together for plans/260808_event-ticket-info-and-attractions.md
+# (E): turning each performer from a bare string into a four-field
+# `attractions` object is roughly a 4-6x per-entry token increase, and
+# gpt-5.6-luna's invisible reasoning tokens (spent classifying dj-vs-live and
+# mapping free text into the styles vocabulary) count against this SAME
+# budget. MULTI_EVENT_PER_EVENT_COMPLETION_TOKENS carries the bulk of the
+# increase (it scales per event); MULTI_EVENT_BASE_COMPLETION_TOKENS only a
+# modest one (reasoning overhead does not scale purely per event).
+MULTI_EVENT_BASE_COMPLETION_TOKENS = 2048
+MULTI_EVENT_PER_EVENT_COMPLETION_TOKENS = 500
 
 
 def compute_multi_event_max_completion_tokens(max_events: int) -> int:
@@ -189,10 +234,91 @@ def _strip_fences(raw_text: str) -> str:
     return re.sub(r"\s*```$", "", cleaned)
 
 
-def _parse_event_fields(data: dict) -> dict:
+# The coarse, event-scoped type vocabulary plans/260808_event-ticket-info-
+# and-attractions.md §C deliberately chose OVER taxonomy.music_format:
+# forcing "Show @x" into "Banda ao vivo" vs "Som ao vivo" makes the model
+# guess a detail the caption never states. An attraction whose type is
+# missing or unrecognised defaults to "other" — a coarser fact, never a
+# reason to drop the whole entry (only a missing/blank `name` is malformed;
+# see _normalize_attractions).
+ATTRACTION_TYPES = ("dj", "live", "other")
+
+
+def _normalize_attractions(raw) -> tuple[list[dict], int]:
+    """One event's raw `attractions` value -> (normalized entries, malformed
+    count). Mirrors parse_multi_event_extraction_response's own per-item
+    isolation one level down: an entry that is not an object, or IS an
+    object but has no usable `name` (the one field with no sane default —
+    everything else coarsens instead of failing), is skipped and counted,
+    never fatal to its siblings. `raw` not being a list at all (the field
+    omitted, or the model returning something else entirely) is NOT
+    malformed — it is read as "no attractions stated", the same posture
+    `lineup` already takes for a non-list value.
+
+    `type` unrecognised/absent -> "other" (never a reason to drop the
+    entry). `stage` blank/whitespace-only -> None, never an empty string
+    (event_field_is_absent-style emptiness, kept consistent for the union in
+    app.services.event_reconciliation.union_attractions). `styles` runs
+    through the SAME `validate_category_labels` the venue vibe profile uses
+    against `taxonomy.musica` — an unlisted label is DROPPED, never stored,
+    per the plan's explicit "an unvalidated label would silently corrupt the
+    vocabulary the venue side depends on."
+    """
+    if not isinstance(raw, list):
+        return [], 0
+
+    attractions: list[dict] = []
+    malformed = 0
+    for item in raw:
+        if not isinstance(item, dict):
+            malformed += 1
+            continue
+        name_raw = item.get("name")
+        name = str(name_raw).strip() if name_raw is not None else ""
+        if not name:
+            malformed += 1
+            continue
+
+        type_raw = item.get("type")
+        attraction_type = type_raw if type_raw in ATTRACTION_TYPES else "other"
+
+        stage_raw = item.get("stage")
+        stage = str(stage_raw).strip() if stage_raw is not None else ""
+        stage = stage or None
+
+        styles_raw = item.get("styles")
+        styles = [str(s) for s in styles_raw] if isinstance(styles_raw, list) else []
+        styles = validate_category_labels("musica", styles)
+
+        attractions.append({
+            "name": name, "type": attraction_type, "stage": stage, "styles": styles,
+        })
+    return attractions, malformed
+
+
+def _parse_event_fields(data: dict) -> tuple[dict, int]:
     """The per-event field normalization shared by the single-event and
     multi-event response shapes — one definition of "what a parsed event
-    looks like", never two that can drift apart."""
+    looks like", never two that can drift apart.
+
+    Returns `(fields, malformed_attractions)` — the second element is this
+    ONE event's own malformed-attraction count (see _normalize_attractions),
+    for the caller to aggregate and report
+    (EVENT_EXTRACTION_MALFORMED_ATTRACTIONS_TOTAL), the same convention
+    parse_multi_event_extraction_response already uses for a malformed EVENT
+    one level up.
+
+    `lineup` is DERIVED from `attractions[].name`, in order, whenever the
+    response carries a real `attractions` list (plans/260808_event-ticket-
+    info-and-attractions.md §C) — the model is asked for attractions only
+    (see _ATTRACTIONS_FIELD_DOC), never a separate "lineup" field, so one
+    answer yields both representations with no duplicate question. A
+    response with NO `attractions` list at all (every pre-existing BDD/unit
+    fixture simulating the OLD single-list-of-names shape) falls back to
+    reading a raw `lineup` field exactly as before — this keeps `lineup`'s
+    own cross-post union behaviour (app.services.event_reconciliation.
+    union_lineup) completely unchanged, per the plan's own non-goal.
+    """
 
     def _text(key: str) -> Optional[str]:
         value = data.get(key)
@@ -208,10 +334,15 @@ def _parse_event_fields(data: dict) -> dict:
         confidence = 0.0
     confidence = max(0.0, min(1.0, confidence))
 
-    lineup_raw = data.get("lineup")
-    lineup = [str(x) for x in lineup_raw] if isinstance(lineup_raw, list) else []
+    attractions_raw = data.get("attractions")
+    attractions, malformed_attractions = _normalize_attractions(attractions_raw)
+    if isinstance(attractions_raw, list):
+        lineup = [a["name"] for a in attractions]
+    else:
+        lineup_raw = data.get("lineup")
+        lineup = [str(x) for x in lineup_raw] if isinstance(lineup_raw, list) else []
 
-    return {
+    fields = {
         "title": _text("title"),
         "description": _text("description"),
         "date_text": _text("date_text"),
@@ -219,11 +350,14 @@ def _parse_event_fields(data: dict) -> dict:
         "is_recurring": bool(data.get("is_recurring", False)),
         "recurrence_text": _text("recurrence_text"),
         "lineup": lineup,
+        "attractions": attractions,
         "ticket_url": _text("ticket_url"),
+        "ticket_info": _text("ticket_info"),
         "price_text": _text("price_text"),
         "location_text": _text("location_text"),
         "confidence": confidence,
     }
+    return fields, malformed_attractions
 
 
 def parse_extraction_response(raw_text: str) -> dict:
@@ -239,6 +373,11 @@ def parse_extraction_response(raw_text: str) -> dict:
     event re-extraction path — both of which only ever need one event per
     post. See parse_multi_event_extraction_response for the promoter-post
     "several events in one caption" shape (plans/260806_multi-event-posts.md).
+
+    Drops the per-event malformed-attraction count `_parse_event_fields`
+    returns: this function has no metrics-aggregating caller today (both
+    real runtime paths call the multi-event shape below), so there is
+    nothing to report it to.
     """
     cleaned = _strip_fences(raw_text)
     if not cleaned:
@@ -249,13 +388,15 @@ def parse_extraction_response(raw_text: str) -> dict:
         raise EventExtractionParseError(f"invalid JSON: {e}") from e
     if not isinstance(data, dict):
         raise EventExtractionParseError("response is not a JSON object")
-    return _parse_event_fields(data)
+    fields, _malformed_attractions = _parse_event_fields(data)
+    return fields
 
 
 def parse_multi_event_extraction_response(
     raw_text: str, *, max_events: Optional[int] = None,
-) -> tuple[list[dict], int]:
-    """Parse a `{"events": [...]}` response into (parsed_events, malformed_count).
+) -> tuple[list[dict], int, int]:
+    """Parse a `{"events": [...]}` response into (parsed_events,
+    malformed_event_count, malformed_attraction_count).
 
     A post can announce several events at several venues (plans/260806_multi-
     event-posts.md) — a city-listings roundup, not a single-party flyer. Each
@@ -263,6 +404,10 @@ def parse_multi_event_extraction_response(
     (`_parse_event_fields`). An individual entry that is not a JSON object is
     MALFORMED and skipped, counted, never fatal to its siblings — the same
     per-item failure isolation the pipeline already applies per venue.
+    `malformed_attraction_count` is the SUM of each surviving event's own
+    malformed-attraction count (plans/260808_event-ticket-info-and-
+    attractions.md) — one level down: a defect inside one event's
+    `attractions` list, never fatal to that event or its siblings either.
 
     Raises EventExtractionParseError only when the response ITSELF is
     unusable (empty, invalid JSON, not an object, or missing/non-list
@@ -291,12 +436,15 @@ def parse_multi_event_extraction_response(
 
     events: list[dict] = []
     malformed = 0
+    malformed_attractions = 0
     for item in events_raw:
         if not isinstance(item, dict):
             malformed += 1
             continue
-        events.append(_parse_event_fields(item))
-    return events, malformed
+        fields, item_malformed_attractions = _parse_event_fields(item)
+        events.append(fields)
+        malformed_attractions += item_malformed_attractions
+    return events, malformed, malformed_attractions
 
 
 class OpenAIEventExtractionClient:
@@ -421,4 +569,5 @@ __all__ = [
     "compute_multi_event_max_completion_tokens",
     "DEFAULT_MODEL", "DEFAULT_MAX_COMPLETION_TOKENS",
     "MULTI_EVENT_BASE_COMPLETION_TOKENS", "MULTI_EVENT_PER_EVENT_COMPLETION_TOKENS",
+    "ATTRACTION_TYPES", "EXTRACTION_PROMPT", "MULTI_EVENT_EXTRACTION_PROMPT",
 ]

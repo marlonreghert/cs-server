@@ -54,6 +54,7 @@ from app.api.openai_event_extraction_client import (
     parse_multi_event_extraction_response,
 )
 from app.metrics import (
+    EVENT_EXTRACTION_MALFORMED_ATTRACTIONS_TOTAL,
     EVENT_EXTRACTION_MALFORMED_EVENTS_TOTAL,
     EVENT_EXTRACTION_POSTS_TOTAL,
     EVENTS_TOTAL,
@@ -427,8 +428,10 @@ class EventExtractionService:
             return OUTCOME_TRUNCATED
 
         try:
-            events_data, malformed_count = parse_multi_event_extraction_response(
-                raw_text, max_events=self.max_events_per_post,
+            events_data, malformed_count, malformed_attractions_count = (
+                parse_multi_event_extraction_response(
+                    raw_text, max_events=self.max_events_per_post,
+                )
             )
         except EventExtractionParseError as e:
             logger.warning(
@@ -439,6 +442,8 @@ class EventExtractionService:
 
         if malformed_count:
             EVENT_EXTRACTION_MALFORMED_EVENTS_TOTAL.inc(malformed_count)
+        if malformed_attractions_count:
+            EVENT_EXTRACTION_MALFORMED_ATTRACTIONS_TOTAL.inc(malformed_attractions_count)
 
         post_timestamp = post.timestamp or self._now()
         now = self._now()
@@ -500,7 +505,9 @@ class EventExtractionService:
                 "title": parsed["title"],
                 "description": parsed["description"],
                 "lineup": parsed["lineup"],
+                "attractions": parsed["attractions"],
                 "ticket_url": parsed["ticket_url"],
+                "ticket_info": parsed["ticket_info"],
                 "price_text": parsed["price_text"],
                 "location_text": parsed["location_text"],
                 "cover_photo_key": image_key,

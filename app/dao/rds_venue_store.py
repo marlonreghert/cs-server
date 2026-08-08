@@ -448,8 +448,12 @@ class RdsVenueStore:
         # means unknown (a legacy row, or one confirmed without ever being
         # PATCHed) and is never invented by anything other than a real PATCH.
         "operator_edited_fields",
+        # plans/260808_event-ticket-info-and-attractions.md (migration 0028)
+        # — ticket_info is an ordinary scalar (merged like price_text);
+        # attractions is a jsonb list, additive across posts like lineup.
+        "ticket_info", "attractions",
     )
-    _EVENT_JSONB_COLUMNS = ("lineup", "operator_edited_fields")
+    _EVENT_JSONB_COLUMNS = ("lineup", "operator_edited_fields", "attractions")
     # The per-source columns `insert_event`/`update_event` route to
     # events.event_source instead of events.event — see the module-level
     # split in tests.rds_fake.InMemoryRdsVenueStore, which this mirrors.
@@ -480,7 +484,7 @@ class RdsVenueStore:
         "e.recurrence_text, e.title, e.description, e.lineup, e.ticket_url, "
         "e.price_text, e.location_text, e.confidence, e.status, e.review_reason, "
         "e.location_resolution, e.location_confidence, e.linked_by, e.linked_at, "
-        "e.operator_edited_fields, "
+        "e.operator_edited_fields, e.ticket_info, e.attractions, "
         "e.updated_at, v.venue_name, "
         "ps.source_kind, ps.source_handle, ps.source_shortcode, ps.source_permalink, "
         "ps.source_event_key, ps.source_event_index, ps.cover_photo_key, ps.raw_extraction, "
@@ -508,7 +512,7 @@ class RdsVenueStore:
         "e.recurrence_text, e.title, e.description, e.lineup, e.ticket_url, "
         "e.price_text, e.location_text, e.confidence, e.status, e.review_reason, "
         "e.location_resolution, e.location_confidence, e.linked_by, e.linked_at, "
-        "e.operator_edited_fields, "
+        "e.operator_edited_fields, e.ticket_info, e.attractions, "
         "e.updated_at, v.venue_name, "
         "es.source_kind, es.source_handle, es.source_shortcode, es.source_permalink, "
         "es.source_event_key, es.source_event_index, es.cover_photo_key, "
