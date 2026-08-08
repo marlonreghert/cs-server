@@ -1,10 +1,18 @@
-"""Engagement write-through: favorites / hot_likes -> RDS (truth) + Redis (read).
+"""Engagement write-through: favorites / hot_likes / blocked venues -> RDS
+(truth) + Redis (read).
 
 vibes_bot calls this via the cs-server API (it no longer writes Redis directly).
 The raw user_id is pseudonymized (HMAC) before it touches RDS; the Redis
 projection keeps the existing key formats vibes_bot reads
-(`user_favorites:{user_id}`, `hot_likes:{venue_id}`). RDS-first, then Redis: if
-the Redis projection fails after the RDS commit, the caller is told to retry.
+(`user_favorites:{user_id}`, `hot_likes:{venue_id}`, `user_blocked_venues:
+{user_id}`). RDS-first, then Redis: if the Redis projection fails after the
+RDS commit, the caller is told to retry.
+
+Blocking and favoriting the same venue are mutually exclusive: `block_venue`
+clears any active favorite for that (user, venue) pair in the SAME RDS
+transaction (see `RdsVenueStore.block_venue`), and mirrors that into the
+favorites Redis projection too. Unblocking never restores a favorite —
+locked product decision, not a bug.
 """
 from __future__ import annotations
 
@@ -45,11 +53,18 @@ class EngagementService:
     # Key formats MUST match what vibes_bot reads (vibes_bot/app/daos):
     #   favorites_dao.KEY_PREFIX = "user_favorites:"  -> user_favorites:{user_id}
     #   hot_likes_dao.KEY_PREFIX = "hot_likes:v1:"    -> hot_likes:v1:{venue_id}
+    #   blocked_venues (new): user_blocked_venues:{user_id} — parallel to
+    #   favorites, deliberately named blocked_venue/block_venue (not block/
+    #   block_list) to stay unambiguous against the pre-existing, unrelated
+    #   admin eligibility "block-list" concept (venue_eligibility.py).
     def _fav_key(self, user_id: str) -> str:
         return f"user_favorites:{user_id}"
 
     def _hot_key(self, venue_id: str) -> str:
         return f"hot_likes:v1:{venue_id}"
+
+    def _blocked_key(self, user_id: str) -> str:
+        return f"user_blocked_venues:{user_id}"
 
     def add_favorite(self, user_id: str, venue_id: str) -> None:
         self.rds_store.upsert_favorite(self.pseudonymize(user_id), venue_id)  # truth
@@ -58,6 +73,26 @@ class EngagementService:
     def remove_favorite(self, user_id: str, venue_id: str) -> None:
         self.rds_store.soft_delete_favorite(self.pseudonymize(user_id), venue_id)
         self.redis.srem(self._fav_key(user_id), venue_id)
+
+    def block_venue(self, user_id: str, venue_id: str) -> bool:
+        """Block a venue: one RDS transaction upserts the block row and
+        atomically clears any active favorite for the same pair (see
+        RdsVenueStore.block_venue) — RDS-first, then the Redis projections.
+
+        Returns whether an existing favorite was actually cleared, so the
+        caller (the router response) can report `favorite_removed` without a
+        second round trip.
+        """
+        favorite_removed = self.rds_store.block_venue(self.pseudonymize(user_id), venue_id)  # truth
+        self.redis.sadd(self._blocked_key(user_id), venue_id)  # projection
+        if favorite_removed:
+            self.redis.srem(self._fav_key(user_id), venue_id)  # keep favorites projection in sync
+        return favorite_removed
+
+    def unblock_venue(self, user_id: str, venue_id: str) -> None:
+        # Unblocking never restores a favorite — locked product decision.
+        self.rds_store.soft_delete_block(self.pseudonymize(user_id), venue_id)
+        self.redis.srem(self._blocked_key(user_id), venue_id)
 
     def add_hot_like(self, user_id: str, venue_id: str, ttl_seconds: int = None) -> None:
         # Append-only event in RDS; trending set + TTL in Redis. The client
@@ -104,8 +139,9 @@ class EngagementService:
            is keyed by VENUE with user ids as members, so Redis cannot answer
            "which venues did this user like?" — only these rows can.
         2. Strip the projections (every hot-likes membership, then the favorites
-           key). Idempotent: re-running `srem`/`delete` on an already-clean key is
-           a no-op.
+           key, then the blocked-venues key — the last two are single per-user
+           sets, like favorites, so no enumeration is needed). Idempotent:
+           re-running `srem`/`delete` on an already-clean key is a no-op.
         3. Hard-delete the RDS rows.
 
         Steps 2 and 3 are in this order **so a retry can converge**. The write
@@ -133,6 +169,7 @@ class EngagementService:
         for venue_id in venue_ids:
             self.redis.srem(self._hot_key(venue_id), user_id)
         self.redis.delete(self._fav_key(user_id))
+        self.redis.delete(self._blocked_key(user_id))
 
         # 3. System of record.
         removed = dict(self.rds_store.purge_user_engagement(pseudo))

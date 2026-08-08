@@ -1,4 +1,3 @@
-@wip
 Feature: Per-user venue blocking is mutually exclusive with favorites
   As the engagement system of record, cs-server must let a user block a venue
   so it stops appearing in their feed, and unblock it later. Blocking and
@@ -20,7 +19,7 @@ Feature: Per-user venue blocking is mutually exclusive with favorites
     Given the user "user-a" has favorited "Bar Alfa"
     When user "user-a" blocks venue "Bar Alfa" through the engagement API
     Then RDS holds an active block for user "user-a" on "Bar Alfa"
-    And RDS no longer holds an active favorite for "user-a" on "Bar Alfa"
+    And the favorite for "user-a" on "Bar Alfa" is no longer active
     And the favorites projection for "user-a" no longer includes "Bar Alfa"
     And the block response reports that a favorite was removed
 
