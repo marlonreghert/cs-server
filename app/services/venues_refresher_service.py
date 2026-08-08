@@ -1,8 +1,10 @@
 """Venues refresher service with background job orchestration."""
+
 import json
 import logging
 from dataclasses import dataclass
 from collections import defaultdict
+from typing import Optional
 
 from app.api import BestTimeAPIClient
 from app.dao import RedisVenueDAO
@@ -13,6 +15,7 @@ from app.models import (
     VenueFilterVenue,
 )
 from app.services.price_signal import GOOGLE_SOURCES, derive_price_signal
+from app.utils.text_norm import names_match
 from app.metrics import (
     VENUES_TOTAL,
     VENUES_WITH_ATTRIBUTE,
@@ -48,11 +51,19 @@ logger = logging.getLogger(__name__)
 @dataclass
 class Location:
     """Location configuration for venue discovery."""
+
     lat: float
     lng: float
     radius: int  # Meters
-    limit: int   # Max venues to fetch
+    limit: int  # Max venues to fetch
 
+
+# Cross-id de-dup radius for discovery (meters). A discovered venue that lands
+# within this distance of an already-stored, name-matching venue under a
+# DIFFERENT venue_id is the same physical place — skip it rather than create a
+# duplicate row. Kept tight and equal to the add path's dedup radius
+# (add_venue_handler.DEFAULT_FALLBACK_RADIUS_M) so both ingestion paths agree.
+DISCOVERY_DEDUP_RADIUS_M = 50
 
 # Default locations for venue discovery (radius in meters)
 DEFAULT_LOCATIONS = [
@@ -215,7 +226,9 @@ class VenuesRefresherService:
         try:
             all_venues = self.venue_dao.list_all_venues()
         except Exception as e:
-            logger.error(f"[VenuesRefresherService] Failed to list venues for metrics: {e}")
+            logger.error(
+                f"[VenuesRefresherService] Failed to list venues for metrics: {e}"
+            )
             return
 
         venues = [venue for venue in all_venues if venue.is_active()]
@@ -231,9 +244,7 @@ class VenuesRefresherService:
             if venue.is_deprecated():
                 reason_counts[venue.deprecated_reason or "unknown"] += 1
         known_reasons = (
-            set(ALL_REASONS)
-            | {"google_places_closed_permanently"}
-            | set(reason_counts)
+            set(ALL_REASONS) | {"google_places_closed_permanently"} | set(reason_counts)
         )
         for reason in known_reasons:
             VENUES_DEPRECATED_BY_REASON.labels(reason=reason).set(
@@ -242,7 +253,16 @@ class VenuesRefresherService:
 
         if total == 0:
             # Reset all gauges to 0 when no venues
-            for attr in ["address", "lat_lng", "rating", "reviews", "price_level", "type", "dwell_time", "forecast"]:
+            for attr in [
+                "address",
+                "lat_lng",
+                "rating",
+                "reviews",
+                "price_level",
+                "type",
+                "dwell_time",
+                "forecast",
+            ]:
                 VENUES_WITH_ATTRIBUTE.labels(attribute=attr).set(0)
             VENUES_WITH_LIVE_FORECAST.set(0)
             VENUES_WITH_WEEKLY_FORECAST.set(0)
@@ -305,7 +325,10 @@ class VenuesRefresherService:
                 type_counts[venue.venue_type] += 1
 
             # Dwell time
-            if venue.venue_dwell_time_min is not None or venue.venue_dwell_time_max is not None:
+            if (
+                venue.venue_dwell_time_min is not None
+                or venue.venue_dwell_time_max is not None
+            ):
                 with_dwell_time += 1
 
             # Forecast data
@@ -427,7 +450,9 @@ class VenuesRefresherService:
 
         return venue
 
-    def _apply_besttime_refresh_price(self, venue: Venue, existing: "Venue | None") -> None:
+    def _apply_besttime_refresh_price(
+        self, venue: Venue, existing: "Venue | None"
+    ) -> None:
         """Set the served price tier on a refreshed venue from its BestTime price,
         WITHOUT clobbering a Google-derived tier.
 
@@ -449,6 +474,37 @@ class VenuesRefresherService:
         derived = derive_price_signal(None, None, venue.besttime_price_level)
         venue.price_level = derived.price_level
         venue.price_level_source = derived.source
+
+    def _find_stored_duplicate(self, venue: Venue) -> Optional[Venue]:
+        """Return an already-stored, active venue at the SAME place as `venue`
+        but under a DIFFERENT venue_id, or None. "Same place" = within
+        DISCOVERY_DEDUP_RADIUS_M metres AND a folded-name match — the same test
+        the add path uses (AddVenueHandler._geo_lookup), so the two ingestion
+        paths agree on what counts as a duplicate."""
+        if venue.venue_lat is None or venue.venue_lng is None:
+            return None
+        try:
+            nearby = self.venue_dao.get_nearby_venues(
+                venue.venue_lat,
+                venue.venue_lng,
+                DISCOVERY_DEDUP_RADIUS_M / 1000.0,
+            )
+        except Exception as e:
+            # A geo-lookup failure must never abort the refresh; fall back to the
+            # pre-existing no-dedup behaviour for this one venue.
+            logger.warning(
+                f"[VenuesRefresherService] dedup geo lookup failed for "
+                f"{venue.venue_id}: {e}"
+            )
+            return None
+        for other in nearby:
+            if other.venue_id == venue.venue_id:
+                continue
+            if not other.is_active():
+                continue
+            if names_match(venue.venue_name or "", other.venue_name or ""):
+                return other
+        return None
 
     async def discover_and_upsert_venues_via_filter(
         self,
@@ -535,6 +591,29 @@ class VenuesRefresherService:
                     # counter drift, BestTime is the source of truth).
                     existing_venue = None
                 was_new_to_redis = existing_venue is None
+
+            # Cross-id de-dup (Bug: duplicate cards). Discovery's seen_ids/
+            # seen_names above only catch repeats WITHIN this one /venues/filter
+            # response. A physical place that already exists under a DIFFERENT
+            # venue_id — e.g. operator-added, or found by another discovery
+            # point over an overlapping radius — would otherwise be created as a
+            # second row and enriched separately (two near-identical cards). The
+            # add path already guards its direction (AddVenueHandler._geo_lookup);
+            # this is the symmetric guard for discovery. Only new-to-Redis ids
+            # can be duplicates — an existing id is just its own record updating.
+            if was_new_to_redis:
+                duplicate = self._find_stored_duplicate(venue)
+                if duplicate is not None:
+                    logger.info(
+                        "[VenuesRefresherService] Skipping discovered venue "
+                        f"id={venue.venue_id} name={venue.venue_name!r}: same "
+                        f"place already stored as id={duplicate.venue_id} "
+                        f"name={duplicate.venue_name!r} within "
+                        f"{DISCOVERY_DEDUP_RADIUS_M}m"
+                    )
+                    REFRESH_DUPLICATES_SKIPPED.labels(reason="geo_name_duplicate").inc()
+                    continue
+
             self._apply_besttime_refresh_price(venue, existing_venue)
 
             try:
@@ -627,7 +706,9 @@ class VenuesRefresherService:
                         f"[VenuesRefresherService] No error but LiveForecast not available, "
                         f"maybe venue is closed, for {vid}, removing cache"
                     )
-                    LIVE_FORECAST_FETCH_RESULTS.labels(result="deleted_not_available").inc()
+                    LIVE_FORECAST_FETCH_RESULTS.labels(
+                        result="deleted_not_available"
+                    ).inc()
 
                 try:
                     self.venue_dao.delete_live_forecast(vid)
@@ -692,7 +773,9 @@ class VenuesRefresherService:
             config = json.loads(raw)
             return config.get("points", [])
         except Exception as e:
-            logger.error(f"[VenuesRefresherService] Failed to read discovery points: {e}")
+            logger.error(
+                f"[VenuesRefresherService] Failed to read discovery points: {e}"
+            )
             return []
 
     def _save_discovery_points(self, points: list[dict]) -> None:
@@ -705,7 +788,9 @@ class VenuesRefresherService:
                 json.dumps({"points": points}, ensure_ascii=False),
             )
         except Exception as e:
-            logger.error(f"[VenuesRefresherService] Failed to save discovery points: {e}")
+            logger.error(
+                f"[VenuesRefresherService] Failed to save discovery points: {e}"
+            )
 
     def recount_discovery_points(self) -> list[dict]:
         """Recount venues for each discovery point using GEORADIUS.
@@ -733,7 +818,9 @@ class VenuesRefresherService:
             )
 
         self._save_discovery_points(points)
-        logger.info(f"[VenuesRefresherService] Recount complete for {len(points)} points")
+        logger.info(
+            f"[VenuesRefresherService] Recount complete for {len(points)} points"
+        )
         return points
 
     async def _discover_venues_at(
@@ -757,7 +844,9 @@ class VenuesRefresherService:
             own_venues_only=False,
             types=VENUE_TYPES,
         )
-        ids = await self.discover_and_upsert_venues_via_filter(params, fetch_and_cache_live)
+        ids = await self.discover_and_upsert_venues_via_filter(
+            params, fetch_and_cache_live
+        )
         return len(ids)
 
     async def _refresh_with_discovery_points(
@@ -792,7 +881,9 @@ class VenuesRefresherService:
             if remaining_budget >= 0:
                 effective_limit = min(effective_limit, remaining_budget)
                 if effective_limit <= 0:
-                    logger.info("[VenuesRefresherService] Global budget reached, skipping remaining")
+                    logger.info(
+                        "[VenuesRefresherService] Global budget reached, skipping remaining"
+                    )
                     break
 
             logger.info(
@@ -810,7 +901,9 @@ class VenuesRefresherService:
                     f"[VenuesRefresherService] Discovery point '{point_id}': "
                     f"upserted {fetched_count} venues"
                 )
-                REFRESH_VENUES_DISCOVERED.labels(location=location_label).set(fetched_count)
+                REFRESH_VENUES_DISCOVERED.labels(location=location_label).set(
+                    fetched_count
+                )
 
                 point["current"] = current + fetched_count
                 points_updated = True
@@ -826,7 +919,9 @@ class VenuesRefresherService:
 
         if points_updated:
             self._save_discovery_points(points)
-            logger.info("[VenuesRefresherService] Updated discovery point counters in Redis")
+            logger.info(
+                "[VenuesRefresherService] Updated discovery point counters in Redis"
+            )
 
         return total_inserted
 
@@ -841,7 +936,9 @@ class VenuesRefresherService:
 
         for loc in locations:
             effective_limit = (
-                self.fetch_venue_limit_override if self.fetch_venue_limit_override > 0 else loc.limit
+                self.fetch_venue_limit_override
+                if self.fetch_venue_limit_override > 0
+                else loc.limit
             )
             if remaining_budget >= 0:
                 effective_limit = min(effective_limit, remaining_budget)
@@ -867,7 +964,9 @@ class VenuesRefresherService:
                     f"[VenuesRefresherService] Successfully upserted {fetched_count} venues "
                     f"for lat={loc.lat:.6f}, lng={loc.lng:.6f}"
                 )
-                REFRESH_VENUES_DISCOVERED.labels(location=location_label).set(fetched_count)
+                REFRESH_VENUES_DISCOVERED.labels(location=location_label).set(
+                    fetched_count
+                )
                 total_inserted += fetched_count
                 if remaining_budget >= 0:
                     remaining_budget -= fetched_count
@@ -1005,15 +1104,23 @@ class VenuesRefresherService:
                     lat=self.dev_lat,
                     lng=self.dev_lng,
                     radius=self.dev_radius,
-                    limit=self.fetch_venue_total_limit if self.fetch_venue_total_limit > 0 else 500,
+                    limit=(
+                        self.fetch_venue_total_limit
+                        if self.fetch_venue_total_limit > 0
+                        else 500
+                    ),
                 )
             ]
             logger.info(
                 f"[VenuesRefresherService] DEV MODE: using single location "
                 f"lat={self.dev_lat:.5f}, lng={self.dev_lng:.5f}, radius={self.dev_radius}"
             )
-            total = await self._refresh_with_locations(locations, remaining_budget, fetch_and_cache_live)
-            logger.info(f"[VenuesRefresherService] DEV MODE refresh done; total={total}")
+            total = await self._refresh_with_locations(
+                locations, remaining_budget, fetch_and_cache_live
+            )
+            logger.info(
+                f"[VenuesRefresherService] DEV MODE refresh done; total={total}"
+            )
             self.update_data_quality_metrics()
             return
 
