@@ -1163,6 +1163,17 @@ class RdsVenueStore:
                 "WHERE user_pseudo=:u AND venue_id=:v"
             ), {"u": user_pseudo, "v": venue_id})
 
+    def get_favorite(self, user_pseudo, venue_id) -> Optional[dict]:
+        """Mirrors get_block exactly (same SELECT shape, over engagement.favorite
+        instead of engagement.blocked_venue) — the symmetric read accessor for
+        favorites, used to assert the block-clears-favorite atomicity directly."""
+        with self.engine.connect() as conn:
+            row = conn.execute(text(
+                "SELECT user_pseudo, venue_id, created_at, deleted_at, updated_at "
+                "FROM engagement.favorite WHERE user_pseudo=:u AND venue_id=:v"
+            ), {"u": user_pseudo, "v": venue_id}).mappings().first()
+            return dict(row) if row else None
+
     def block_venue(self, user_pseudo, venue_id) -> bool:
         """Block a venue and atomically clear any active favorite for the same
         (user_pseudo, venue_id) — ONE transaction, so a venue is never
