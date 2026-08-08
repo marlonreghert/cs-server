@@ -6,6 +6,7 @@ Exposes metrics for:
 3. Background job metrics (runs, duration, errors)
 4. Data quality metrics (venues with various attributes)
 """
+
 from prometheus_client import Counter, Histogram, Gauge, Info
 
 # =============================================================================
@@ -74,8 +75,8 @@ BESTTIME_API_ERRORS_TOTAL = Counter(
     "besttime_api_errors_total",
     "Total number of BestTime API errors",
     ["endpoint", "error_type"],  # error_type: http_error, timeout,
-                                 # connection_error, invalid_json,
-                                 # invalid_response_schema
+    # connection_error, invalid_json,
+    # invalid_response_schema
 )
 
 # Client-side pacing + 429 handling for the BestTime venue-search family
@@ -85,8 +86,8 @@ BESTTIME_SEARCH_RATE_LIMIT_TOTAL = Counter(
     "besttime_search_rate_limit_total",
     "BestTime venue-search rate-limit events",
     ["endpoint", "event"],  # event: waited (paced before send),
-                            # retry_429 (server 429, retrying),
-                            # rejected (wait budget exhausted)
+    # retry_429 (server 429, retrying),
+    # rejected (wait budget exhausted)
 )
 
 # Analysis day entries dropped while parsing a POST /forecasts (create venue)
@@ -139,9 +140,9 @@ VENUE_PHOTO_RESOLVE_TOTAL = Counter(
     "venue_photo_resolve_total",
     "Outcomes of on-demand venue photo resolution",
     ["result"],  # resolved (>=1 photo, full Google resolve) | empty (no place_id
-                 # or zero photos) | error (Google exception) | cache_hit (served
-                 # from the cached entry, no Google call) | upgraded (cached entry
-                 # held fewer than requested; re-resolved and overwritten)
+    # or zero photos) | error (Google exception) | cache_hit (served
+    # from the cached entry, no Google call) | upgraded (cached entry
+    # held fewer than requested; re-resolved and overwritten)
 )
 
 VENUE_PHOTO_RESOLVE_DURATION_SECONDS = Histogram(
@@ -315,7 +316,10 @@ INSTAGRAM_APIFY_COST_ESTIMATE = Counter(
 SERPAPI_API_CALLS_TOTAL = Counter(
     "serpapi_api_calls_total",
     "Total number of SerpApi API calls",
-    ["endpoint", "status"],  # endpoint: resolve_data_id, fetch_photos; status: success, error
+    [
+        "endpoint",
+        "status",
+    ],  # endpoint: resolve_data_id, fetch_photos; status: success, error
 )
 
 # API call latency
@@ -341,7 +345,9 @@ SERPAPI_API_ERRORS_TOTAL = Counter(
 MENU_PHOTO_ENRICHMENT_RESULTS = Counter(
     "menu_photo_enrichment_results_total",
     "Results of menu photo enrichment operations",
-    ["result"],  # result: enriched, cached, no_place_id, no_photos_found, error, credit_exhausted
+    [
+        "result"
+    ],  # result: enriched, cached, no_place_id, no_photos_found, error, credit_exhausted
 )
 
 # Venues with menu photos (snapshot gauge)
@@ -405,7 +411,7 @@ DATALAKE_RECORDS_DROPPED_TOTAL = Counter(
     "datalake_records_dropped_total",
     "Raw API responses that never reached the data lake",
     ["source", "dataset", "reason"],  # reason: queue_full, serialize_error,
-                                      # flush_failed, unexpected
+    # flush_failed, unexpected
 )
 
 DATALAKE_FLUSH_TOTAL = Counter(
@@ -858,7 +864,9 @@ VENUES_TOTAL = Gauge(
 VENUES_WITH_ATTRIBUTE = Gauge(
     "venues_with_attribute",
     "Number of venues with a specific attribute populated",
-    ["attribute"],  # attribute: address, lat_lng, rating, reviews, price_level, type, dwell_time, forecast
+    [
+        "attribute"
+    ],  # attribute: address, lat_lng, rating, reviews, price_level, type, dwell_time, forecast
 )
 
 # Venues by type
@@ -932,7 +940,8 @@ REFRESH_VENUES_UPSERTED = Gauge(
 REFRESH_DUPLICATES_SKIPPED = Counter(
     "refresh_duplicates_skipped_total",
     "Total number of duplicate venues skipped during refresh",
-    ["reason"],  # reason: duplicate_id, duplicate_name, no_id_or_name
+    # reason: duplicate_id, duplicate_name, no_id_or_name, geo_name_duplicate
+    ["reason"],
 )
 
 # Live forecast fetch results
@@ -1019,20 +1028,20 @@ ADD_VENUE_BY_ADDRESS_TOTAL = Counter(
     "add_venue_by_address_total",
     "Outcomes of POST /admin/venues/by-address",
     ["result"],  # created | created_recovered_timeout | already_exists |
-                 # matched_via_geo_fallback | quota_exhausted |
-                 # besttime_monthly_cap | besttime_error |
-                 # besttime_bad_response | besttime_rejected_no_geo_match |
-                 # timeout_unconfirmed | validation_error |
-                 # geo_link_undone | geo_link_undo_rejected |
-                 # created_google_only (the geo fallback found no match, the flag
-                 #   is on, and Google resolved the venue) |
-                 # google_only_enrichment_failed (the flag is on but Google could
-                 #   not resolve the place or fetch its details)
-                 #
-                 # NOTE: with the Google-only flag off, the geo-fallback-no-match
-                 # branch still emits besttime_rejected_no_geo_match (unchanged) —
-                 # it does NOT get its own label, so the flag-off deploy stays a
-                 # genuine metric no-op.
+    # matched_via_geo_fallback | quota_exhausted |
+    # besttime_monthly_cap | besttime_error |
+    # besttime_bad_response | besttime_rejected_no_geo_match |
+    # timeout_unconfirmed | validation_error |
+    # geo_link_undone | geo_link_undo_rejected |
+    # created_google_only (the geo fallback found no match, the flag
+    #   is on, and Google resolved the venue) |
+    # google_only_enrichment_failed (the flag is on but Google could
+    #   not resolve the place or fetch its details)
+    #
+    # NOTE: with the Google-only flag off, the geo-fallback-no-match
+    # branch still emits besttime_rejected_no_geo_match (unchanged) —
+    # it does NOT get its own label, so the flag-off deploy stays a
+    # genuine metric no-op.
 )
 
 INVENTORY_SYNC_VENUES_TOTAL = Counter(
@@ -1150,15 +1159,15 @@ EVENT_EXTRACTION_POSTS_TOTAL = Counter(
     "event_extraction_posts_total",
     "Instagram posts examined by event extraction, by outcome",
     ["outcome"],  # extracted, not_event_like, no_date, low_confidence,
-                  # extraction_failed, skipped_seen, unread_time, truncated
-                  # (a venue post's multi-event response cut off mid-list —
-                  # plans/260806_venue-post-multi-event.md), weekday_mismatch
-                  # (the explicit date resolved but disagreed with a stated
-                  # weekday — plans/260807_date-resolution-correctness.md).
-                  # A rise in "no_date" after that same change is the date
-                  # resolver correctly refusing a guess it used to silently
-                  # make, not a regression — a stale outcome list here is how
-                  # the next reader misreads a dashboard.
+    # extraction_failed, skipped_seen, unread_time, truncated
+    # (a venue post's multi-event response cut off mid-list —
+    # plans/260806_venue-post-multi-event.md), weekday_mismatch
+    # (the explicit date resolved but disagreed with a stated
+    # weekday — plans/260807_date-resolution-correctness.md).
+    # A rise in "no_date" after that same change is the date
+    # resolver correctly refusing a guess it used to silently
+    # make, not a regression — a stale outcome list here is how
+    # the next reader misreads a dashboard.
 )
 
 # Cumulative vision-model spend on event extraction, in USD, priced from the
@@ -1197,7 +1206,7 @@ PROMOTER_CRAWL_POSTS_TOTAL = Counter(
     "promoter_crawl_posts_total",
     "Promoter posts examined by the promoter crawl, by outcome",
     ["outcome"],  # archived, not_event_like, extracted, extraction_failed,
-                  # manual_preserved, account_unavailable, truncated
+    # manual_preserved, account_unavailable, truncated
 )
 
 # =============================================================================
@@ -1308,7 +1317,9 @@ APP_INFO = Info(
 )
 
 # Set application info at module load
-APP_INFO.info({
-    "version": "1.0.0",
-    "description": "Venue discovery and crowd tracking service",
-})
+APP_INFO.info(
+    {
+        "version": "1.0.0",
+        "description": "Venue discovery and crowd tracking service",
+    }
+)
