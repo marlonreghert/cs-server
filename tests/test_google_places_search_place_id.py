@@ -42,8 +42,16 @@ async def test_zero_results_returns_none_even_with_raise_on_error():
 
 @pytest.mark.asyncio
 async def test_found_result_returns_place_id():
+    # displayName is part of the request's field mask ("places.id,
+    # places.displayName"), so a real Text Search hit always carries one --
+    # and since #158 the candidate is only accepted when that name matches
+    # the venue. A fixture without displayName is not a response Google can
+    # actually return, and would be rejected as an unverifiable candidate.
     def handler(request):
-        return httpx.Response(200, json={"places": [{"id": "places/ABC"}]})
+        return httpx.Response(
+            200,
+            json={"places": [{"id": "places/ABC", "displayName": {"text": "Bar X"}}]},
+        )
 
     client = _client_with_handler(handler)
     result = await client.search_place_id("Bar X", "Rua Y, 1")
