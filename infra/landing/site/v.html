@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>VibeSense — Bora pro rolê?</title>
+
+  <!-- Chat-app link preview (WhatsApp/iMessage/etc.). Generic per-venue copy:
+       every /v/<id> path serves this one page, so the card can't name the
+       specific venue without server-side rendering (a later phase). -->
+  <meta property="og:type" content="website" />
+  <meta property="og:site_name" content="VibeSense" />
+  <meta property="og:title" content="Bora pro rolê? 🎉" />
+  <meta property="og:description" content="Veja o movimento agora e abra no VibeSense." />
+  <!-- No og:image yet — a per-venue preview image needs server-side rendering
+       (later phase). Omitted rather than pointing at a nonexistent file. -->
+  <meta name="theme-color" content="#7C3AED" />
+
+  <style>
+    :root { --violet: #7C3AED; --violet-2: #A78BFA; --ink: #2E1065; }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; height: 100%; }
+    body {
+      font-family: Roboto, -apple-system, BlinkMacSystemFont, "Segoe UI",
+        "Helvetica Neue", Arial, sans-serif;
+      background: linear-gradient(160deg, #1B0B3B 0%, #2E1065 60%, #3B1080 100%);
+      color: #fff;
+      display: flex; align-items: center; justify-content: center;
+      padding: 24px; text-align: center;
+    }
+    .card { max-width: 420px; width: 100%; }
+    .logo {
+      width: 72px; height: 72px; border-radius: 18px; margin: 0 auto 20px;
+      background: var(--violet); display: flex; align-items: center;
+      justify-content: center; font-size: 40px; font-weight: 800;
+      box-shadow: 0 10px 30px rgba(124, 58, 237, .45);
+    }
+    h1 { font-size: 24px; margin: 0 0 8px; }
+    p { color: #C4B5FD; margin: 0 0 28px; line-height: 1.5; }
+    .stores { display: flex; flex-direction: column; gap: 12px; }
+    a.btn {
+      display: block; text-decoration: none; padding: 14px 20px;
+      border-radius: 999px; font-weight: 600; font-size: 16px;
+    }
+    a.ios { background: #fff; color: #111827; }
+    a.android { background: var(--violet); color: #fff; }
+    .muted { margin-top: 24px; font-size: 13px; color: #A78BFA; }
+    .muted a { color: #fff; }
+    .spinner {
+      width: 28px; height: 28px; margin: 0 auto 20px;
+      border: 3px solid rgba(255,255,255,.25); border-top-color: #fff;
+      border-radius: 50%; animation: spin .8s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    #fallback { display: none; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <!-- Shown briefly while we send mobile users to their store. -->
+    <div id="redirecting">
+      <div class="spinner"></div>
+      <p>Abrindo o VibeSense…</p>
+    </div>
+
+    <!-- Shown on desktop, or if the automatic redirect doesn't fire. -->
+    <div id="fallback">
+      <div class="logo">V</div>
+      <h1>Bora pro rolê? 🎉</h1>
+      <p>Baixe o VibeSense para ver o movimento agora e abrir esse local.</p>
+      <div class="stores">
+        <a class="btn ios" href="https://apps.apple.com/br/app/id6785763377">Baixar na App Store</a>
+        <a class="btn android" href="https://play.google.com/store/apps/details?id=com.vibesense.app">Baixar no Google Play</a>
+      </div>
+      <p class="muted">Já tem o app? <a href="https://www.vibesense.live">vibesense.live</a></p>
+    </div>
+  </div>
+
+  <script>
+    (function () {
+      var APP_STORE = "https://apps.apple.com/br/app/id6785763377";
+      var PLAY_STORE = "https://play.google.com/store/apps/details?id=com.vibesense.app";
+
+      // NOTE: on a device with the app installed, iOS/Android intercept this
+      // URL (Universal Link / App Link) and open the app BEFORE this page ever
+      // loads. So reaching this script means the app is NOT installed (or the
+      // user is on desktop) — send them to the right store.
+      var ua = navigator.userAgent || navigator.vendor || "";
+      var isIOS = /iPad|iPhone|iPod/.test(ua) && !window.MSStream;
+      var isAndroid = /android/i.test(ua);
+
+      if (isIOS) {
+        window.location.replace(APP_STORE);
+      } else if (isAndroid) {
+        window.location.replace(PLAY_STORE);
+      } else {
+        // Desktop / unknown — no store to jump to, so show the chooser.
+        document.getElementById("redirecting").style.display = "none";
+        document.getElementById("fallback").style.display = "block";
+      }
+
+      // Safety net: if the store redirect is blocked or slow, reveal the
+      // manual buttons after a moment rather than spinning forever.
+      setTimeout(function () {
+        var fb = document.getElementById("fallback");
+        if (fb.style.display !== "block") {
+          document.getElementById("redirecting").style.display = "none";
+          fb.style.display = "block";
+        }
+      }, 2500);
+    })();
+  </script>
+</body>
+</html>
