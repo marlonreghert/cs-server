@@ -1,8 +1,15 @@
-"""Engagement API: vibes_bot writes favorites/hot_likes here (reads stay Redis).
+"""Engagement API: vibes_bot writes favorites/hot_likes/blocks here (reads stay
+Redis).
 
 Write-through: the service commits RDS then projects Redis. If the projection
 fails after the RDS commit, the endpoint returns 5xx so vibes_bot retries
 (idempotent), keeping the user's read path consistent within seconds.
+
+POST/DELETE /v1/blocks reuse the favorites' EngagementRequest DTO and
+error-handling conventions. Blocking a venue also atomically clears any
+existing favorite for that (user, venue) pair (see EngagementService.
+block_venue) — the POST response's `favorite_removed` reports whether that
+happened. Unblocking never restores a favorite (locked product decision).
 """
 import logging
 from typing import Optional
@@ -10,7 +17,11 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
-from app.metrics import ENGAGEMENT_SESSION_TOTAL, ENGAGEMENT_USER_DELETION_TOTAL
+from app.metrics import (
+    ENGAGEMENT_BLOCK_FAVORITE_CLEARED_TOTAL,
+    ENGAGEMENT_SESSION_TOTAL,
+    ENGAGEMENT_USER_DELETION_TOTAL,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +76,43 @@ def remove_favorite(req: EngagementRequest):
     except Exception as e:
         logger.error(f"[Engagement] remove_favorite failed: {e}")
         raise HTTPException(status_code=502, detail="unfavorite write failed; retry")
+    return {"status": "ok"}
+
+
+def _require_ids(req: EngagementRequest) -> None:
+    # EngagementRequest itself allows blank strings (favorites/hot-likes never
+    # needed this), but a block/unblock with a missing id must be rejected at
+    # the request boundary rather than silently no-op — see
+    # plans/260808_blocked-venues.md's acceptance criteria.
+    if not req.user_id or not req.venue_id:
+        raise HTTPException(status_code=422, detail="user_id and venue_id are required")
+
+
+@router.post("/blocks")
+def block_venue(req: EngagementRequest):
+    _require_ids(req)
+    try:
+        favorite_removed = _svc().block_venue(req.user_id, req.venue_id)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"[Engagement] block_venue failed: {e}")
+        raise HTTPException(status_code=502, detail="block write failed; retry")
+    if favorite_removed:
+        ENGAGEMENT_BLOCK_FAVORITE_CLEARED_TOTAL.inc()
+    return {"status": "ok", "favorite_removed": favorite_removed}
+
+
+@router.delete("/blocks")
+def unblock_venue(req: EngagementRequest):
+    _require_ids(req)
+    try:
+        _svc().unblock_venue(req.user_id, req.venue_id)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"[Engagement] unblock_venue failed: {e}")
+        raise HTTPException(status_code=502, detail="unblock write failed; retry")
     return {"status": "ok"}
 
 

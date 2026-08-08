@@ -1163,6 +1163,61 @@ class RdsVenueStore:
                 "WHERE user_pseudo=:u AND venue_id=:v"
             ), {"u": user_pseudo, "v": venue_id})
 
+    def get_favorite(self, user_pseudo, venue_id) -> Optional[dict]:
+        """Mirrors get_block exactly (same SELECT shape, over engagement.favorite
+        instead of engagement.blocked_venue) — the symmetric read accessor for
+        favorites, used to assert the block-clears-favorite atomicity directly."""
+        with self.engine.connect() as conn:
+            row = conn.execute(text(
+                "SELECT user_pseudo, venue_id, created_at, deleted_at, updated_at "
+                "FROM engagement.favorite WHERE user_pseudo=:u AND venue_id=:v"
+            ), {"u": user_pseudo, "v": venue_id}).mappings().first()
+            return dict(row) if row else None
+
+    def block_venue(self, user_pseudo, venue_id) -> bool:
+        """Block a venue and atomically clear any active favorite for the same
+        (user_pseudo, venue_id) — ONE transaction, so a venue is never
+        observably both blocked and favorited, and a mid-transaction failure
+        (e.g. the venue_id FK violation) leaves neither write applied. Mirrors
+        the upsert shape `upsert_favorite` uses (ON CONFLICT DO UPDATE SET
+        deleted_at=NULL) plus a conditional favorite soft-delete, the same
+        multi-statement-one-`engine.begin()` pattern `set_geo_fence` and
+        `purge_user_engagement` already use.
+
+        Returns:
+            True when this call actually soft-deleted an active favorite for
+            this (user, venue) pair, False otherwise (nothing to clear).
+        """
+        with self.engine.begin() as conn:
+            conn.execute(text(
+                "INSERT INTO engagement.blocked_venue (user_pseudo, venue_id, deleted_at, updated_at) "
+                "VALUES (:u, :v, NULL, now()) "
+                "ON CONFLICT (user_pseudo, venue_id) DO UPDATE SET deleted_at=NULL, updated_at=now()"
+            ), {"u": user_pseudo, "v": venue_id})
+            result = conn.execute(text(
+                "UPDATE engagement.favorite SET deleted_at=now(), updated_at=now() "
+                "WHERE user_pseudo=:u AND venue_id=:v AND deleted_at IS NULL"
+            ), {"u": user_pseudo, "v": venue_id})
+            return (result.rowcount or 0) > 0
+
+    def soft_delete_block(self, user_pseudo, venue_id) -> None:
+        """Unblock: soft-delete the block row only. Deliberately does NOT touch
+        engagement.favorite — restoring a favorite on unblock is a locked
+        product non-goal, not an oversight."""
+        with self.engine.begin() as conn:
+            conn.execute(text(
+                "UPDATE engagement.blocked_venue SET deleted_at=now(), updated_at=now() "
+                "WHERE user_pseudo=:u AND venue_id=:v"
+            ), {"u": user_pseudo, "v": venue_id})
+
+    def get_block(self, user_pseudo, venue_id) -> Optional[dict]:
+        with self.engine.connect() as conn:
+            row = conn.execute(text(
+                "SELECT user_pseudo, venue_id, created_at, deleted_at, updated_at "
+                "FROM engagement.blocked_venue WHERE user_pseudo=:u AND venue_id=:v"
+            ), {"u": user_pseudo, "v": venue_id}).mappings().first()
+            return dict(row) if row else None
+
     def add_hot_like_event(self, user_pseudo, venue_id, business_period) -> bool:
         """Idempotent per (user_pseudo, venue_id, business_period): the unique
         index (migration 0016) + ON CONFLICT DO NOTHING absorb a retried write
@@ -1217,10 +1272,15 @@ class RdsVenueStore:
                 text("DELETE FROM engagement.app_session_day WHERE user_pseudo = :p"),
                 {"p": user_pseudo},
             ).rowcount or 0
+            blocked_venues = conn.execute(
+                text("DELETE FROM engagement.blocked_venue WHERE user_pseudo = :p"),
+                {"p": user_pseudo},
+            ).rowcount or 0
         return {
             "favorites": favorites,
             "hot_like_events": hot_likes,
             "app_sessions": sessions,
+            "blocked_venues": blocked_venues,
         }
 
     def record_app_session(self, user_pseudo, activity_date) -> None:

@@ -52,6 +52,8 @@ class InMemoryRdsVenueStore:
         self.closure_signals: dict[str, dict] = {}
         self.live_forecast: dict[str, dict] = {}
         self.favorites: dict[tuple[str, str], dict] = {}
+        # engagement.blocked_venue — same PK/soft-delete shape as favorites.
+        self.blocked_venues: dict[tuple[str, str], dict] = {}
         self.hot_like_events: list[dict] = []
         # Dedup set mirroring the real store's unique index on
         # (user_pseudo, venue_id, business_period) + ON CONFLICT DO NOTHING.
@@ -981,6 +983,28 @@ class InMemoryRdsVenueStore:
             if up == user_pseudo and row.get("deleted_at") is None
         ]
 
+    def block_venue(self, user_pseudo, venue_id) -> bool:
+        """Mirrors the real store's single-transaction block_venue: upserts the
+        block row and, if an active favorite exists for the same pair,
+        soft-deletes it — returning whether that happened."""
+        self._guard()
+        self.blocked_venues[(user_pseudo, venue_id)] = {"deleted_at": None, "updated_at": _now()}
+        fav = self.favorites.get((user_pseudo, venue_id))
+        if fav is not None and fav.get("deleted_at") is None:
+            fav["deleted_at"] = _now()
+            fav["updated_at"] = _now()
+            return True
+        return False
+
+    def soft_delete_block(self, user_pseudo, venue_id) -> None:
+        self._guard()
+        row = self.blocked_venues.get((user_pseudo, venue_id))
+        if row is not None:
+            row["deleted_at"] = _now()
+
+    def get_block(self, user_pseudo, venue_id) -> Optional[dict]:
+        return self.blocked_venues.get((user_pseudo, venue_id))
+
     def add_hot_like_event(self, user_pseudo, venue_id, business_period) -> bool:
         """Mirrors the real store's unique index + ON CONFLICT DO NOTHING:
         returns True when this (user, venue, day) tuple is new, False when
@@ -1029,10 +1053,15 @@ class InMemoryRdsVenueStore:
         session_rows = {s for s in self.app_sessions if s[0] == user_pseudo}
         self.app_sessions -= session_rows
 
+        block_keys = [k for k in self.blocked_venues if k[0] == user_pseudo]
+        for key in block_keys:
+            del self.blocked_venues[key]
+
         return {
             "favorites": len(fav_keys),
             "hot_like_events": hot_before - len(self.hot_like_events),
             "app_sessions": len(session_rows),
+            "blocked_venues": len(block_keys),
         }
 
     # ── app activity (one row per user per day; total + active-window counts) ──
@@ -1144,6 +1173,7 @@ class InMemoryRdsVenueStore:
         import json
         blob = json.dumps({
             "fav": list(self.favorites.keys()),
+            "blocked": list(self.blocked_venues.keys()),
             "hot": self.hot_like_events,
             "act": [[up, str(d)] for up, d in self.app_sessions],
         }, default=str)  # business_period / dates aren't natively JSON-serializable

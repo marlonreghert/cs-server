@@ -1113,6 +1113,17 @@ ENGAGEMENT_HOT_LIKE_DEDUP_TOTAL = Counter(
     "(user, venue, business_period) row via ON CONFLICT DO NOTHING",
 )
 
+# POST /v1/blocks: how often blocking a venue also cleared an existing
+# favorite for that (user, venue) pair (the atomic block+auto-unfavorite
+# transaction — see RdsVenueStore.block_venue). Plain counter, no labels, same
+# style as ENGAGEMENT_HOT_LIKE_DEDUP_TOTAL — the first engagement counter tied
+# to the block path specifically (favorites has none today).
+ENGAGEMENT_BLOCK_FAVORITE_CLEARED_TOTAL = Counter(
+    "engagement_block_favorite_cleared_total",
+    "Total POST /v1/blocks calls that atomically cleared an existing favorite "
+    "for the same (user, venue) pair",
+)
+
 # =============================================================================
 # EVENT VENUE TARGETING (plans/260804_event-venue-targeting.md)
 # =============================================================================

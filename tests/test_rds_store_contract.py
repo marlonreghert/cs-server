@@ -296,6 +296,125 @@ def test_favorite_and_hot_like_event(store):
     assert store.add_hot_like_event("pseudo-abc", vid, date.today()) is True  # first write
 
 
+def test_block_venue_reports_no_favorite_removed_when_none_existed(store):
+    vid = _vid()
+    store.upsert_venue(_venue(vid))
+    assert store.block_venue("pseudo-blk1", vid) is False
+    row = store.get_block("pseudo-blk1", vid)
+    assert row is not None and row["deleted_at"] is None
+
+
+def test_block_venue_atomically_clears_an_active_favorite(store):
+    """The critical cross-repo contract: blocking a favorited venue clears the
+    favorite in the SAME call, and reports that it did."""
+    vid = _vid()
+    store.upsert_venue(_venue(vid))
+    store.upsert_favorite("pseudo-blk2", vid)
+
+    assert store.block_venue("pseudo-blk2", vid) is True
+
+    fav = store.get_favorite("pseudo-blk2", vid)
+    assert fav is not None and fav["deleted_at"] is not None, "favorite must be soft-deleted"
+    block = store.get_block("pseudo-blk2", vid)
+    assert block is not None and block["deleted_at"] is None, "block must be active"
+
+
+def test_block_venue_does_not_report_removal_for_an_already_removed_favorite(store):
+    """An inactive (already unfavorited) favorite must not be reported as
+    removed a second time -- the DAO's UPDATE ... WHERE deleted_at IS NULL
+    guard, not just presence of a row."""
+    vid = _vid()
+    store.upsert_venue(_venue(vid))
+    store.upsert_favorite("pseudo-blk3", vid)
+    store.soft_delete_favorite("pseudo-blk3", vid)
+
+    assert store.block_venue("pseudo-blk3", vid) is False
+
+
+def test_block_venue_is_idempotent(store):
+    """Blocking the same venue twice must not create a second row or flip any
+    state -- ON CONFLICT DO UPDATE onto the same active row."""
+    vid = _vid()
+    store.upsert_venue(_venue(vid))
+    assert store.block_venue("pseudo-blk4", vid) is False
+    assert store.block_venue("pseudo-blk4", vid) is False
+    row = store.get_block("pseudo-blk4", vid)
+    assert row is not None and row["deleted_at"] is None
+
+
+def test_unblock_never_restores_a_favorite(store):
+    """Locked product decision: soft_delete_block only touches the block row,
+    never engagement.favorite."""
+    vid = _vid()
+    store.upsert_venue(_venue(vid))
+    store.upsert_favorite("pseudo-blk5", vid)
+    store.block_venue("pseudo-blk5", vid)  # clears the favorite
+
+    store.soft_delete_block("pseudo-blk5", vid)
+
+    block = store.get_block("pseudo-blk5", vid)
+    assert block is not None and block["deleted_at"] is not None
+    fav = store.get_favorite("pseudo-blk5", vid)
+    assert fav is not None and fav["deleted_at"] is not None, "unblock must not resurrect the favorite"
+
+
+def test_unblock_a_never_blocked_venue_is_a_safe_no_op(store):
+    vid = _vid()
+    store.upsert_venue(_venue(vid))
+    store.soft_delete_block("pseudo-blk6", vid)  # no row exists yet
+    assert store.get_block("pseudo-blk6", vid) is None
+
+
+def test_purge_user_engagement_includes_blocked_venues_count(store):
+    vid = _vid()
+    store.upsert_venue(_venue(vid))
+    store.block_venue("pseudo-blk7", vid)
+
+    removed = store.purge_user_engagement("pseudo-blk7")
+    assert removed["blocked_venues"] == 1
+    assert store.get_block("pseudo-blk7", vid) is None, "purge must hard-delete, not soft-delete"
+
+
+@pytest.mark.skipif(
+    not os.environ.get("RDS_TEST_URL"),
+    reason="requires a real Postgres (RDS_TEST_URL) -- the in-memory fake has no transactions to roll back",
+)
+def test_block_venue_transaction_rolls_back_atomically_on_mid_transaction_failure():
+    """Forces a failure AFTER the block-row INSERT but BEFORE the favorite
+    UPDATE, inside block_venue's single `engine.begin()` block, and proves the
+    whole transaction rolled back: the block row must not exist afterwards,
+    and the favorite must remain exactly as it was. This is the one part of
+    the "no window where a venue is both blocked and favorited" contract the
+    in-memory fake (non-transactional) cannot prove."""
+    from unittest.mock import patch
+
+    from sqlalchemy.engine import Connection
+
+    from app.dao.rds_venue_store import RdsVenueStore
+
+    real_store = RdsVenueStore(os.environ["RDS_TEST_URL"])
+    vid = _vid()
+    real_store.upsert_venue(_venue(vid))
+    real_store.upsert_favorite("pseudo-fk2", vid)
+
+    original_execute = Connection.execute
+    calls = {"n": 0}
+
+    def _boom_on_second_call(self, *args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise RuntimeError("forced failure mid-transaction")
+        return original_execute(self, *args, **kwargs)
+
+    with patch.object(Connection, "execute", _boom_on_second_call):
+        with pytest.raises(RuntimeError):
+            real_store.block_venue("pseudo-fk2", vid)
+
+    assert real_store.get_block("pseudo-fk2", vid) is None, "the block INSERT must have rolled back"
+    fav = real_store.get_favorite("pseudo-fk2", vid)
+    assert fav is not None and fav["deleted_at"] is None, "the favorite must be untouched by the rollback"
+
+
 def test_hot_like_event_idempotent_per_business_period(store):
     """A retried write (vibes_bot retries on a 5xx per the engagement_router
     contract) for the same (user, venue, Recife day) must not persist a second

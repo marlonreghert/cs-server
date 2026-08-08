@@ -107,6 +107,8 @@ test-unit:
 		tests/test_operator_edited_fields_migration.py \
 		tests/test_operator_edited_fields_patch.py \
 		tests/test_event_ticket_info_and_attractions_migration.py \
+		tests/test_blocked_venues_migration.py \
+		tests/test_engagement_blocked_venues.py \
 		-v
 
 test-integration:
