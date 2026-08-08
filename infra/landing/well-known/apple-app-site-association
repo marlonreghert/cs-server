@@ -1,0 +1,15 @@
+{
+  "applinks": {
+    "details": [
+      {
+        "appIDs": ["FL9N8KGA99.com.vibesense.app"],
+        "components": [
+          {
+            "/": "/v/*",
+            "comment": "Shared venue links open the app on that venue"
+          }
+        ]
+      }
+    ]
+  }
+}

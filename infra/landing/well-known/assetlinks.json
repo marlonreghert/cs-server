@@ -1,0 +1,12 @@
+[
+  {
+    "relation": ["delegate_permission/common.handle_all_urls"],
+    "target": {
+      "namespace": "android_app",
+      "package_name": "com.vibesense.app",
+      "sha256_cert_fingerprints": [
+        "B7:16:1D:78:E6:14:DA:8F:D4:AE:67:C3:FD:A6:6F:5D:5A:A8:3C:5E:5D:35:C0:46:C0:A6:B0:6C:F9:D1:73:54"
+      ]
+    }
+  }
+]
