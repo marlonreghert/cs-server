@@ -155,11 +155,23 @@ Manual or integration checks:
   deploy step and the operator's DNS changes both need.
 
 ## Open Questions
-- **Registrar/DNS host for `apivibesensemiddleware.click` is unknown** — no
-  Route53 zone or other reference found in either repo. Needed before Phase A
-  (ACM DNS validation) and before the final DNS cutover. Must be resolved
-  with the operator before `/execute-feature` reaches the apply steps.
-- Confirm the EC2 host's current public IP (or whether it's behind an Elastic
-  IP) so the new `admin-origin.apivibesensemiddleware.click` A record points
-  at a stable address — check `docker-compose.yml`/deployment docs or ask the
-  operator during execution.
+- ~~Registrar/DNS host for `apivibesensemiddleware.click` is unknown~~ —
+  **resolved during execution**: `dig +short apivibesensemiddleware.click NS`
+  returns `awsdns-*` nameservers, i.e. the zone is Route53-hosted, not at an
+  external registrar like `vibesense.live`'s GoDaddy. This let the stack drop
+  `infra/landing/`'s two-phase manual-CNAME apply — ACM validation is fully
+  Terraform-automated via `aws_route53_record`. **Residual, apply-time-only
+  check**: confirm the zone is in *this* AWS account (839287955684), not just
+  Route53-hosted somewhere — `aws sso login --profile vibesense` was expired
+  during planning/execution, so this wasn't queried live. See
+  `infra/admin/README.md` Prerequisites; the stack's `data
+  "aws_route53_zone"` lookup fails loudly at apply time if it's wrong, it
+  will not silently misconfigure anything.
+- ~~Confirm the EC2 host's current public IP~~ — **resolved**: `dig +short`
+  against `admin.`, `vibesbot.`, and `grafana.apivibesensemiddleware.click`
+  all resolve to `54.145.54.177` today, so that's the address the new
+  `admin-origin.apivibesensemiddleware.click` record targets
+  (`infra/admin/variables.tf`'s `origin_ip`). **Residual, apply-time-only
+  check**: confirm it's allocated as an Elastic IP (stable across instance
+  restarts) rather than an ephemeral public IP — see `infra/admin/README.md`
+  Prerequisites.
