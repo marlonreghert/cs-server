@@ -18,9 +18,18 @@ still guards defensively at sync time too, but this is the primary gate.
 building an APScheduler trigger (APScheduler's own day-of-week numbering is
 different — `0`=Monday — and its `CronTrigger.from_crontab` does NOT
 translate; see `instagram_crawl_service.py`'s module-level comment on
-`build_cron_trigger` for how this was found and fixed). `next_fire_at` below
+`build_cron_trigger` for how this was found and fixed). `next_run_at` below
 goes through the SAME translation, so it is always consistent with what a
 target will actually do, never a second, disagreeing interpretation.
+
+Two additions per the cross-repo contract (../plans/260809_automated-event-
+crawl.md, pinned for vibes_bot's console): a budget read model
+(`GET /budget`) and, on every target row, the venues its handle covers
+(`venues`) — both DERIVED HERE, never recomputed by the console. `next_run_at`
+and `venues` are named exactly as that contract's "read model" row says;
+`cursor_age_seconds` is deliberately NOT included — the console already has
+the raw cursor timestamp and subtracting it from "now" is rendering, not
+business logic, per an explicit, accepted deviation.
 """
 from __future__ import annotations
 
@@ -28,13 +37,15 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
+from app.config import settings
 from app.services.instagram_crawl_service import (
     KIND_PROMOTER,
     KIND_VENUE,
     InvalidCrawlTargetConfig,
     build_cron_trigger,
+    group_venue_ids_by_handle,
     validate_crontab,
 )
 from app.services.instagram_handle_sources import normalize_handle
@@ -71,6 +82,15 @@ def _crawl_service():
     return svc
 
 
+def _budget_dao():
+    if _container is None:
+        raise HTTPException(status_code=503, detail="Container not initialized")
+    dao = getattr(_container, "crawl_budget_dao", None)
+    if dao is None:
+        raise HTTPException(status_code=503, detail="Crawl budget not configured")
+    return dao
+
+
 def _require_valid_kind(kind: Optional[str]) -> None:
     if kind is not None and kind not in _VALID_KINDS:
         raise HTTPException(
@@ -85,6 +105,11 @@ def _require_valid_cron(cron: Optional[str]) -> None:
         validate_crontab(cron)
     except InvalidCrawlTargetConfig as e:
         raise HTTPException(status_code=422, detail=str(e))
+
+
+class CrawlTargetVenueRef(BaseModel):
+    venue_id: str
+    venue_name: Optional[str] = None
 
 
 class CrawlTargetOut(BaseModel):
@@ -110,22 +135,66 @@ class CrawlTargetOut(BaseModel):
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
     # Computed, not stored — the read model's own convenience so an operator
-    # does not have to parse a crontab string by hand.
-    next_fire_at: Optional[datetime] = None
+    # does not have to parse a crontab string by hand. Named `next_run_at` to
+    # match the cross-repo contract exactly (../plans/260809_automated-event-
+    # crawl.md's read-model row).
+    next_run_at: Optional[datetime] = None
+    # The venues currently pointing at this handle — derived HERE (never by
+    # the console): the whole reason targets are keyed by handle rather than
+    # venue_id is that 48 production venues share one with another venue, so
+    # an operator working from a per-venue mental model needs this to find
+    # their venue's target at all. ALWAYS a list, never null — a promoter-
+    # kind target, or a venue-kind one no venue currently references, is an
+    # empty list, not an absent field the console has to special-case.
+    venues: list[CrawlTargetVenueRef] = Field(default_factory=list)
 
 
-def _with_next_fire(row: dict) -> dict:
-    """Best-effort next-fire time from the stored cron/timezone. Never
-    raises — a target with a since-corrupted cron (should not happen; write
-    time already validates it) reads as `next_fire_at: null` rather than
-    breaking the whole list/get response."""
+def _venue_coverage(dao, handle: str) -> list[CrawlTargetVenueRef]:
+    """Every venue whose `instagram.handle` currently normalizes to this
+    target's handle. Reuses `group_venue_ids_by_handle` — the SAME reverse
+    index `ScheduledInstagramCrawlService._chain` uses to find who to
+    archive/extract for — so the read model and the crawl's own chaining
+    target can never disagree about which venues a handle covers."""
+    handles = dao.list_instagram_handles() or {}
+    venue_ids = group_venue_ids_by_handle(handles).get(handle, [])
+    out = []
+    for venue_id in venue_ids:
+        venue = dao.get_venue(venue_id)
+        out.append(CrawlTargetVenueRef(
+            venue_id=venue_id, venue_name=venue.venue_name if venue is not None else None,
+        ))
+    return out
+
+
+def _to_out(dao, row: dict) -> dict:
+    """The full read model for one row: the stored fields, plus the two
+    derived ones the cross-repo contract requires (`next_run_at`, `venues`).
+    Next-fire computation is best-effort and never raises — a target with a
+    since-corrupted cron (should not happen; write time already validates
+    it) reads as `next_run_at: null` rather than breaking the whole
+    list/get response."""
     out = dict(row)
     try:
         trigger = build_cron_trigger(row["cron"], timezone=row.get("timezone") or "America/Recife")
-        out["next_fire_at"] = trigger.get_next_fire_time(None, datetime.now(timezone.utc))
+        out["next_run_at"] = trigger.get_next_fire_time(None, datetime.now(timezone.utc))
     except Exception:
-        out["next_fire_at"] = None
+        out["next_run_at"] = None
+    out["venues"] = _venue_coverage(dao, row["handle"])
     return out
+
+
+class CrawlBudgetOut(BaseModel):
+    """The console's own words for this: "run now" has to reflect what's
+    left, and the remaining budget is shown above the table — an operator
+    clicking a paid action with no idea what's left is exactly the
+    situation the monthly budget exists to prevent. `unit_cost_usd` is
+    included so the console renders dollars without holding its own copy of
+    the price."""
+    year_month: str
+    used: int
+    limit: int
+    remaining: int
+    unit_cost_usd: float
 
 
 class CrawlTargetCreate(BaseModel):
@@ -171,40 +240,66 @@ class RunNowResult(BaseModel):
 
 @router.get("", response_model=list[CrawlTargetOut])
 def list_crawl_targets(enabled: Optional[bool] = None, kind: Optional[str] = None):
-    rows = _dao().list_crawl_targets(enabled=enabled, kind=kind) or []
-    return [_with_next_fire(r) for r in rows]
+    dao = _dao()
+    rows = dao.list_crawl_targets(enabled=enabled, kind=kind) or []
+    return [_to_out(dao, r) for r in rows]
+
+
+# Registered BEFORE the "/{handle}" routes below: FastAPI/Starlette matches
+# routes in REGISTRATION ORDER, and "/{handle}" is a single path segment —
+# exactly the shape of "/budget" too. Registered after it, a request for
+# GET /admin/crawl-targets/budget would be swallowed by
+# get_crawl_target(handle="budget") and returned as a 404 "crawl target not
+# found" instead of ever reaching this code — the same trap
+# admin_events_router.py's "/promoters"/"/review" routes already document
+# and guard against for this exact reason. See
+# tests/test_admin_crawl_router.py for the regression test.
+@router.get("/budget", response_model=CrawlBudgetOut)
+def get_crawl_budget():
+    dao = _budget_dao()
+    year_month = dao.current_year_month_utc()
+    used = dao.get_month_count(year_month)
+    limit = int(settings.crawl_monthly_result_budget)
+    return CrawlBudgetOut(
+        year_month=year_month, used=used, limit=limit,
+        remaining=max(limit - used, 0),
+        unit_cost_usd=float(settings.apify_instagram_post_cost_usd),
+    )
 
 
 @router.get("/{handle}", response_model=CrawlTargetOut)
 def get_crawl_target(handle: str):
-    row = _dao().get_crawl_target(normalize_handle(handle))
+    dao = _dao()
+    row = dao.get_crawl_target(normalize_handle(handle))
     if row is None:
         raise HTTPException(status_code=404, detail="crawl target not found")
-    return _with_next_fire(row)
+    return _to_out(dao, row)
 
 
 @router.post("", response_model=CrawlTargetOut, status_code=201)
 def create_crawl_target(body: CrawlTargetCreate):
+    dao = _dao()
     handle = normalize_handle(body.handle)
     if not handle:
         raise HTTPException(status_code=422, detail="handle is required")
     _require_valid_kind(body.kind)
     _require_valid_cron(body.cron)
     fields = body.model_dump(exclude={"handle"})
-    row = _dao().upsert_crawl_target(handle, fields)
-    return _with_next_fire(row)
+    row = dao.upsert_crawl_target(handle, fields)
+    return _to_out(dao, row)
 
 
 @router.patch("/{handle}", response_model=CrawlTargetOut)
 def update_crawl_target(handle: str, body: CrawlTargetPatch):
+    dao = _dao()
     handle = normalize_handle(handle)
-    if _dao().get_crawl_target(handle) is None:
+    if dao.get_crawl_target(handle) is None:
         raise HTTPException(status_code=404, detail="crawl target not found")
     fields = body.model_dump(exclude_unset=True)
     _require_valid_kind(fields.get("kind"))
     _require_valid_cron(fields.get("cron"))
-    row = _dao().upsert_crawl_target(handle, fields)
-    return _with_next_fire(row)
+    row = dao.upsert_crawl_target(handle, fields)
+    return _to_out(dao, row)
 
 
 @router.delete("/{handle}", status_code=204)
