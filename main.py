@@ -26,7 +26,7 @@ from app.services.pipeline_run_registry import (
     new_run_id,
     run_scope,
 )
-from app.routers import venue_router, set_venue_handler, debug_router, set_debug_dependencies, admin_trigger_router, set_admin_container, engagement_router, set_engagement_service, internal_router, set_internal_container, admin_events_router, set_admin_events_container
+from app.routers import venue_router, set_venue_handler, debug_router, set_debug_dependencies, admin_trigger_router, set_admin_container, engagement_router, set_engagement_service, internal_router, set_internal_container, admin_events_router, set_admin_events_container, admin_crawl_router, set_admin_crawl_container
 from app.middleware import PrometheusMiddleware
 from app.services.refresh_interval_watch import (
     WATCH_INTERVAL_SECONDS,
@@ -394,6 +394,24 @@ def register_refresh_jobs(scheduler, settings: Settings):
     )
 
     # Job 3: Weekly forecast refresh (always scheduled)
+    # NOTE (found while building the crawl-target scheduler, plans/260809_
+    # scheduled-incremental-instagram-crawl.md): `CronTrigger.from_crontab`
+    # passes its day-of-week digit straight through to APScheduler's OWN
+    # 0=Monday..6=Sunday numbering, with NO translation to standard Unix
+    # cron's 0=Sunday..6=Saturday. `weekly_forecast_cron`'s default
+    # "0 0 * * 0" — commented "Sundays at 00:00" below — is very likely
+    # actually firing MONDAY 00:00 in production, despite its own comment.
+    # Deliberately left AS-IS here: this is a live, already-scheduled job,
+    # and changing which day it fires on is an operational decision for the
+    # operator to make, not a side effect of an unrelated feature branch.
+    # This site intentionally does NOT go through `app.services.
+    # instagram_crawl_service.build_cron_trigger` (the day-of-week-safe
+    # helper that feature introduces) — it keeps APScheduler-native
+    # semantics on purpose, so the divergence stays visible rather than
+    # being silently "fixed" into a different fire day out from under
+    # anyone relying on the current (buggy, but current) Monday behavior.
+    # See tests/test_scheduler.py::test_weekly_forecast_cron_currently_
+    # fires_monday_not_sunday_apscheduler_native_quirk, which pins this.
     schedule(
         scheduler,
         enabled=True,
@@ -404,6 +422,42 @@ def register_refresh_jobs(scheduler, settings: Settings):
         enabled_log=(
             f"[Scheduler] Scheduled weekly forecast refresh with cron: "
             f"{settings.weekly_forecast_cron}"
+        ),
+    )
+
+
+def register_crawl_schedule_sync(scheduler, settings: Settings) -> None:
+    """Registers the periodic job that keeps the scheduler's dynamic
+    per-target crawl jobs in sync with `events.crawl_target`
+    (`CrawlScheduleSync`, app/services/crawl_schedule_sync.py). Applies the
+    current registry once immediately (so a fresh deploy does not wait a
+    full sync interval before an already-configured target's next fire),
+    then re-syncs on `crawl_schedule_sync_interval_minutes`."""
+    if not (settings.crawl_scheduler_enabled and container.instagram_crawl_service is not None):
+        logger.info(
+            "[Scheduler] Instagram crawl schedule sync disabled "
+            "(CRAWL_SCHEDULER_ENABLED=false or missing Apify API token)"
+        )
+        return
+
+    from app.services.crawl_schedule_sync import CrawlScheduleSync
+
+    sync = CrawlScheduleSync(
+        venue_dao=container.pipeline_repository,
+        crawl_service=container.instagram_crawl_service,
+        scheduler=scheduler,
+    )
+    sync.sync_once()
+    schedule(
+        scheduler,
+        enabled=True,
+        func=sync.run,
+        trigger=IntervalTrigger(minutes=settings.crawl_schedule_sync_interval_minutes),
+        id="crawl_schedule_sync",
+        name="Instagram Crawl Schedule Sync",
+        enabled_log=(
+            f"[Scheduler] Scheduled Instagram crawl schedule sync every "
+            f"{settings.crawl_schedule_sync_interval_minutes} minutes"
         ),
     )
 
@@ -602,6 +656,18 @@ def start_background_jobs(settings: Settings):
         ),
     )
 
+    # Job 13: Scheduled Incremental Instagram Crawl — schedule sync
+    # (plans/260809_scheduled-incremental-instagram-crawl.md §D). This does
+    # NOT itself scrape anything: it periodically re-reads events.crawl_target
+    # and reconciles the SCHEDULER'S OWN dynamic `crawl_target:<handle>` jobs
+    # to match (one CronTrigger per enabled target, in the target's own
+    # timezone), so an admin write to a target's cron/enabled flag takes
+    # effect without a restart, the same guarantee refresh_interval_watch
+    # already gives live_forecast_refresh. OFF by default (crawl_scheduler_
+    # enabled=false) and inert without an Apify token, matching every other
+    # optional Instagram pipeline registered above.
+    register_crawl_schedule_sync(scheduler, settings)
+
     # Start scheduler
     scheduler.start()
     logger.info("[Scheduler] Background jobs started")
@@ -640,6 +706,9 @@ async def startup_essential(settings: Settings):
 
     # Inject container for the admin events review API.
     set_admin_events_container(container)
+
+    # Inject container for the admin crawl-target CRUD + run-now API.
+    set_admin_crawl_container(container)
 
     # Rebuild the eligibility serving mirror from its rows so a Redis flush before
     # this start does not leave filtering on the hardcoded defaults. Runs OFF the
@@ -752,6 +821,7 @@ app.include_router(admin_trigger_router)
 app.include_router(engagement_router)
 app.include_router(internal_router)
 app.include_router(admin_events_router)
+app.include_router(admin_crawl_router)
 
 
 # Health check endpoint

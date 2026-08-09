@@ -1,0 +1,704 @@
+"""Unit tests for app/services/instagram_crawl_service.py.
+
+Covers the plan's own unit test plan (plans/260809_scheduled-incremental-
+instagram-crawl.md):
+  - the exact bound string sent to the actor, for every case
+  - cursor selection is the max timestamp, not run-clock, out-of-order safe
+  - the cursor is UTC while the cron trigger is Recife-local — a case that
+    FAILS if the two are swapped
+  - overlap arithmetic at 3h and 6h
+  - handle-keyed dedup: two venue rows, one handle, one Apify call
+  - the budget gate refuses BEFORE the client is called (call count, not
+    return value)
+  - crontab validation rejects a malformed string at write time
+  - reels and posts cursors move independently
+
+BDD (tests/bdd/enrichment/scheduled-incremental-instagram-crawl.feature)
+covers the externally observable behavior end to end; these tests pin the
+lower-level functions and edge cases directly, per CLAUDE.md's "Do not
+duplicate BDD assertions in pytest unless the unit test protects a lower
+level edge case or failure mode."
+"""
+from __future__ import annotations
+
+import asyncio
+from datetime import datetime, timedelta, timezone
+
+import pytest
+
+from app.api.apify_instagram_client import ApifyCreditExhaustedError
+from app.dao.venue_repository import VenueRepository
+from app.models.instagram import VenueInstagram
+from app.models.venue import Venue
+from app.services.instagram_crawl_service import (
+    CrawlServiceConfig,
+    InstagramCrawlChainer,
+    InvalidCrawlTargetConfig,
+    ScheduledInstagramCrawlService,
+    _newest_timestamp,
+    _split_kept_and_dropped,
+    build_cron_trigger,
+    compute_bound,
+    group_venue_ids_by_handle,
+    validate_crontab,
+)
+from tests.rds_fake import InMemoryRdsVenueStore
+
+
+def _run(coro):
+    return asyncio.new_event_loop().run_until_complete(coro)
+
+
+NOW = datetime(2026, 8, 8, 0, 0, 0, tzinfo=timezone.utc)
+
+
+# ── compute_bound: exact string sent to the actor ───────────────────────────
+class TestComputeBound:
+    def test_no_cursor_sends_the_configured_lookback_unparsed(self):
+        bound = compute_bound(None, overlap_hours=6.0, lookback_text="3 months", now=NOW)
+        assert bound.actor_value == "3 months"
+
+    def test_no_cursor_sends_a_targets_own_lookback_when_configured(self):
+        bound = compute_bound(None, overlap_hours=6.0, lookback_text="45 days", now=NOW)
+        assert bound.actor_value == "45 days"
+
+    def test_a_cursor_sends_cursor_minus_overlap_as_utc_iso(self):
+        cursor = datetime(2026, 8, 7, 12, 0, 0, tzinfo=timezone.utc)
+        bound = compute_bound(cursor, overlap_hours=6.0, lookback_text="3 months", now=NOW)
+        assert bound.actor_value == "2026-08-07T06:00:00Z"
+
+    def test_overlap_arithmetic_at_3_hours(self):
+        cursor = datetime(2026, 8, 7, 12, 0, 0, tzinfo=timezone.utc)
+        bound = compute_bound(cursor, overlap_hours=3.0, lookback_text="3 months", now=NOW)
+        assert bound.actor_value == "2026-08-07T09:00:00Z"
+
+    def test_overlap_arithmetic_at_6_hours(self):
+        cursor = datetime(2026, 8, 7, 12, 0, 0, tzinfo=timezone.utc)
+        bound = compute_bound(cursor, overlap_hours=6.0, lookback_text="3 months", now=NOW)
+        assert bound.actor_value == "2026-08-07T06:00:00Z"
+
+    def test_cursor_bound_never_uses_the_run_wall_clock(self):
+        # `now` is far ahead of the cursor; the bound must track the CURSOR,
+        # never drift to reflect when the run happened.
+        cursor = datetime(2026, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
+        later_now = datetime(2026, 8, 8, 12, 0, 0, tzinfo=timezone.utc)
+        bound = compute_bound(cursor, overlap_hours=6.0, lookback_text="3 months", now=later_now)
+        assert bound.actor_value == "2025-12-31T18:00:00Z"
+
+
+# ── cursor selection: max timestamp, order-independent ──────────────────────
+class TestNewestTimestamp:
+    def test_picks_the_max_not_the_last_element(self):
+        posts = [
+            {"timestamp": "2026-08-01T10:00:00.000Z"},
+            {"timestamp": "2026-08-05T10:00:00.000Z"},  # newest, in the middle
+            {"timestamp": "2026-08-03T10:00:00.000Z"},
+        ]
+        assert _newest_timestamp(posts) == datetime(2026, 8, 5, 10, 0, tzinfo=timezone.utc)
+
+    def test_an_unparseable_timestamp_is_ignored_not_fatal(self):
+        posts = [{"timestamp": "not-a-date"}, {"timestamp": "2026-08-01T10:00:00.000Z"}]
+        assert _newest_timestamp(posts) == datetime(2026, 8, 1, 10, 0, tzinfo=timezone.utc)
+
+    def test_empty_list_yields_none(self):
+        assert _newest_timestamp([]) is None
+
+
+# ── §G: pinned-post drop, never moves the cursor ─────────────────────────────
+class TestSplitKeptAndDropped:
+    def test_a_pinned_post_older_than_the_cutoff_is_dropped_and_counted(self):
+        cutoff = datetime(2026, 8, 1, 0, 0, tzinfo=timezone.utc)
+        posts = [
+            {"shortcode": "fresh", "timestamp": "2026-08-05T10:00:00.000Z", "is_pinned": False},
+            {"shortcode": "oldpin", "timestamp": "2023-09-20T14:07:30.000Z", "is_pinned": True},
+        ]
+        kept, dropped = _split_kept_and_dropped(posts, cutoff)
+        assert [p["shortcode"] for p in kept] == ["fresh"]
+        assert dropped == 1
+
+    def test_a_non_pinned_old_post_is_kept_not_dropped(self):
+        # Only a PINNED post can be older than the bound at all (the actor's
+        # own filter already excludes a non-pinned one) — this must never be
+        # treated as a reason to drop.
+        cutoff = datetime(2026, 8, 1, 0, 0, tzinfo=timezone.utc)
+        posts = [{"shortcode": "old", "timestamp": "2023-01-01T00:00:00.000Z", "is_pinned": False}]
+        kept, dropped = _split_kept_and_dropped(posts, cutoff)
+        assert len(kept) == 1 and dropped == 0
+
+    def test_no_cutoff_keeps_everything(self):
+        posts = [{"shortcode": "a", "timestamp": "2020-01-01T00:00:00.000Z", "is_pinned": True}]
+        kept, dropped = _split_kept_and_dropped(posts, None)
+        assert kept == posts and dropped == 0
+
+
+# ── crontab validation at write time ─────────────────────────────────────────
+class TestValidateCrontab:
+    def test_a_valid_crontab_does_not_raise(self):
+        validate_crontab("0 22 * * 5,6")
+
+    def test_a_malformed_crontab_raises_at_write_time(self):
+        with pytest.raises(InvalidCrawlTargetConfig):
+            validate_crontab("not a crontab")
+
+
+# ── day-of-week: build_cron_trigger means STANDARD Unix cron, not
+# APScheduler-native ─────────────────────────────────────────────────────────
+# `CronTrigger.from_crontab` passes a day-of-week digit straight through to
+# APScheduler's OWN 0=Monday..6=Sunday field with NO translation, despite its
+# docstring claiming "a standard crontab expression" (standard cron is
+# 0/7=Sunday..6=Saturday). Verified independently, live, against APScheduler
+# 3.10.4 in America/Recife: `CronTrigger.from_crontab("0 22 * * 5", ...)`
+# fires SATURDAY. These tests pin the weekday `build_cron_trigger` actually
+# fires on — not just that a trigger object was built — and would FAIL
+# against the unfixed `CronTrigger.from_crontab` path.
+class TestBuildCronTriggerWeekday:
+    # Monday NOON UTC = Monday 09:00 in America/Recife (UTC-3) — squarely
+    # inside Monday in BOTH frames, so "the next Friday/Saturday/Sunday
+    # 22:00" is unambiguous. (A midnight-UTC anchor converts to Sunday
+    # 21:00 in Recife and silently matches the SAME evening — a real trap
+    # this test tripped over while being written.)
+    AFTER_MONDAY = datetime(2026, 8, 10, 12, 0, tzinfo=timezone.utc)
+
+    def _next_weekday(self, cron: str, *, after=None) -> str:
+        trigger = build_cron_trigger(cron, timezone="America/Recife")
+        fire = trigger.get_next_fire_time(None, after or self.AFTER_MONDAY)
+        return fire.strftime("%A")
+
+    def test_digit_5_means_friday(self):
+        assert self._next_weekday("0 22 * * 5") == "Friday"
+
+    def test_digit_0_means_sunday(self):
+        assert self._next_weekday("0 0 * * 0") == "Sunday"
+
+    def test_digit_7_also_means_sunday(self):
+        assert self._next_weekday("0 0 * * 7") == "Sunday"
+
+    def test_digit_6_means_saturday(self):
+        assert self._next_weekday("0 22 * * 6") == "Saturday"
+
+    def test_list_5_6_0_means_friday_saturday_sunday(self):
+        trigger = build_cron_trigger("0 22 * * 5,6,0", timezone="America/Recife")
+        seen = set()
+        cursor = self.AFTER_MONDAY
+        for _ in range(3):
+            fire = trigger.get_next_fire_time(None, cursor)
+            seen.add(fire.strftime("%A"))
+            cursor = fire + timedelta(minutes=1)  # strictly past this fire, or it re-matches
+        assert seen == {"Friday", "Saturday", "Sunday"}, seen
+
+    def test_named_weekday_passes_through_unchanged(self):
+        assert self._next_weekday("0 22 * * fri") == "Friday"
+
+    def test_ascending_range_5_dash_6_is_friday_and_saturday(self):
+        trigger = build_cron_trigger("0 22 * * 5-6", timezone="America/Recife")
+        fire1 = trigger.get_next_fire_time(None, self.AFTER_MONDAY)
+        fire2 = trigger.get_next_fire_time(None, fire1 + timedelta(minutes=1))
+        assert {fire1.strftime("%A"), fire2.strftime("%A")} == {"Friday", "Saturday"}
+
+    def test_step_expression_is_rejected_not_guessed(self):
+        with pytest.raises(InvalidCrawlTargetConfig):
+            build_cron_trigger("0 22 * * */2")
+
+    def test_a_week_wrapping_range_is_rejected_not_guessed(self):
+        # Standard-cron "6-1" = Saturday through Monday, which wraps past
+        # Sunday once translated into APScheduler's Monday-first ordering —
+        # genuinely ambiguous to resolve silently.
+        with pytest.raises(InvalidCrawlTargetConfig):
+            build_cron_trigger("0 22 * * 6-1")
+
+    def test_wrong_field_count_is_rejected(self):
+        with pytest.raises(InvalidCrawlTargetConfig):
+            build_cron_trigger("0 22 * *")
+
+    def test_out_of_range_digit_is_rejected(self):
+        with pytest.raises(InvalidCrawlTargetConfig):
+            build_cron_trigger("0 22 * * 8")
+
+
+# ── §D: cursor is UTC, cron trigger is Recife-local — fails if swapped ──────
+def test_cursor_bound_is_utc_and_cron_trigger_is_recife_local_not_swapped():
+    """If the cursor's UTC formatting and the cron trigger's local timezone
+    were ever swapped (cursor sent local, cron evaluated as UTC), every
+    bound this feature computes would be off by exactly Recife's fixed
+    3-hour UTC offset (Brazil has had no DST since 2019, so this is a
+    constant, not a seasonal flake). This test fails on EITHER swap.
+    """
+    # Cursor side: a cursor already in UTC must round-trip EXACTLY (no extra
+    # -3h/+3h shift applied on top).
+    cursor = datetime(2026, 8, 7, 23, 30, 0, tzinfo=timezone.utc)
+    bound = compute_bound(cursor, overlap_hours=0.0, lookback_text="3 months", now=NOW)
+    assert bound.actor_value == "2026-08-07T23:30:00Z"
+
+    # Cron side: "0 22 * * *" (22:00 every day) interpreted in America/Recife
+    # (UTC-3) must fire at 01:00 UTC THE NEXT DAY — three hours LATER in UTC
+    # than the wrong reading you'd get by evaluating the same crontab as UTC
+    # (which would fire at 22:00 UTC the SAME day). A daily cron carries no
+    # day-of-week field to translate, so this is irrelevant to what THIS
+    # test proves (the UTC/local HOUR arithmetic only) — see
+    # TestBuildCronTriggerWeekday below for the separate day-of-week fix.
+    trigger = build_cron_trigger("0 22 * * *", timezone="America/Recife")
+    fire = trigger.get_next_fire_time(None, datetime(2026, 8, 7, 0, 0, tzinfo=timezone.utc))
+    fire_utc = fire.astimezone(timezone.utc)
+    assert (fire_utc.month, fire_utc.day, fire_utc.hour) == (8, 7, 1), fire_utc
+    # And the UTC-mistaken reading is a DIFFERENT, distinguishable moment —
+    # proves the assertion above actually depends on the timezone being
+    # honored, not just close enough to pass by coincidence.
+    wrong_utc_reading = datetime(2026, 8, 6, 22, 0, tzinfo=timezone.utc)
+    assert fire_utc != wrong_utc_reading
+
+
+# ── group_venue_ids_by_handle: the whole 1,114/1,066 argument ──────────────
+def test_group_venue_ids_by_handle_keeps_every_venue_sharing_a_handle():
+    handles = {"venue_a": "sharedhandle", "venue_b": "SharedHandle", "venue_c": "otherhandle"}
+    grouped = group_venue_ids_by_handle(handles)
+    assert grouped["sharedhandle"] == ["venue_a", "venue_b"]
+    assert grouped["otherhandle"] == ["venue_c"]
+
+
+# ── service-level: handle-keyed dedup, budget gate, reels/posts independence ─
+class _FakeApifyClient:
+    def __init__(self):
+        self.calls: list[dict] = []
+        self._posts: dict[tuple[str, str], list[dict]] = {}
+        self._next_error: dict[tuple[str, str], Exception] = {}
+
+    def program(self, handle, results_type, posts):
+        self._posts[(handle, results_type)] = posts
+
+    def fail_next(self, handle, results_type, exc):
+        self._next_error[(handle, results_type)] = exc
+
+    async def fetch_recent_posts(
+        self, handle, results_limit=10, *, only_posts_newer_than=None, results_type="posts",
+    ):
+        self.calls.append({
+            "handle": handle, "results_limit": results_limit,
+            "only_posts_newer_than": only_posts_newer_than, "results_type": results_type,
+        })
+        key = (handle, results_type)
+        if key in self._next_error:
+            raise self._next_error.pop(key)
+        return list(self._posts.get(key, []))
+
+
+class _FakeBudgetDao:
+    def __init__(self):
+        self._counts: dict[str, int] = {}
+
+    def current_year_month_utc(self, now=None):
+        now = now or datetime.now(timezone.utc)
+        return now.strftime("%Y-%m")
+
+    def get_month_count(self, year_month):
+        return self._counts.get(year_month, 0)
+
+    def increment_month(self, year_month, n):
+        self._counts[year_month] = self._counts.get(year_month, 0) + n
+        return self._counts[year_month]
+
+
+def _venue_dao():
+    return VenueRepository(client=None, rds_store=InMemoryRdsVenueStore())
+
+
+def _service(venue_dao, apify_client, budget_dao, **config_overrides):
+    config = CrawlServiceConfig(
+        overlap_hours=6.0, default_initial_lookback="3 months", default_results_limit=10,
+        monthly_result_budget=1000, max_consecutive_failures=5, result_cost_usd=0.0027,
+    )
+    for k, v in config_overrides.items():
+        setattr(config, k, v)
+    return ScheduledInstagramCrawlService(
+        venue_dao=venue_dao, apify_client=apify_client, budget_dao=budget_dao,
+        config=config, chainer=None, now_provider=lambda: NOW,
+    )
+
+
+def test_handle_keyed_dedup_two_venue_rows_one_handle_one_call():
+    dao = _venue_dao()
+    dao.upsert_venue(Venue(venue_id="v1", venue_name="Venue 1", venue_lat=-8.0, venue_lng=-34.9))
+    dao.upsert_venue(Venue(venue_id="v2", venue_name="Venue 2", venue_lat=-8.0, venue_lng=-34.9))
+    dao.set_venue_instagram(VenueInstagram(venue_id="v1", instagram_handle="onehandle", status="found"))
+    dao.set_venue_instagram(VenueInstagram(venue_id="v2", instagram_handle="onehandle", status="found"))
+    dao.upsert_crawl_target("onehandle", {"kind": "venue", "cron": "0 22 * * 5,6"})
+
+    apify = _FakeApifyClient()
+    service = _service(dao, apify, _FakeBudgetDao())
+
+    _run(service.run_target("onehandle"))
+
+    calls = [c for c in apify.calls if c["results_type"] == "posts"]
+    assert len(calls) == 1, calls
+
+
+def test_budget_gate_refuses_before_the_client_is_called():
+    """Asserted on CALL COUNT, not on the return value — a gate that runs
+    AFTER the spend is not a gate (the plan's own words)."""
+    dao = _venue_dao()
+    dao.upsert_crawl_target("budgeted", {"kind": "venue", "cron": "0 22 * * 5,6"})
+    apify = _FakeApifyClient()
+    budget = _FakeBudgetDao()
+    budget.increment_month(budget.current_year_month_utc(NOW), 1000)  # fully spent
+    service = _service(dao, apify, budget, monthly_result_budget=1000)
+
+    report = _run(service.run_target("budgeted"))
+
+    assert apify.calls == []
+    assert report["streams"]["posts"]["outcome"] == "skipped_budget"
+
+
+def test_reels_and_posts_cursors_move_independently():
+    dao = _venue_dao()
+    dao.upsert_venue(Venue(venue_id="v1", venue_name="V1", venue_lat=-8.0, venue_lng=-34.9))
+    dao.set_venue_instagram(VenueInstagram(venue_id="v1", instagram_handle="reelshandle", status="found"))
+    dao.upsert_crawl_target("reelshandle", {"kind": "venue", "cron": "0 22 * * 5,6", "crawl_reels": True})
+    apify = _FakeApifyClient()
+    apify.program("reelshandle", "posts", [{
+        "shortcode": "p1", "timestamp": "2026-08-05T09:00:00.000Z", "is_pinned": False,
+        "caption": "", "image_urls": [],
+    }])
+    # No reels programmed -> empty list -> reels outcome is "empty", cursor
+    # must stay untouched (null, since it was never set).
+    service = _service(dao, apify, _FakeBudgetDao())
+
+    _run(service.run_target("reelshandle"))
+
+    row = dao.get_crawl_target("reelshandle")
+    assert row["cursor_posts_at"] == datetime(2026, 8, 5, 9, 0, tzinfo=timezone.utc)
+    assert row["cursor_reels_at"] is None
+
+
+def test_credit_exhaustion_is_reported_and_does_not_raise():
+    dao = _venue_dao()
+    dao.upsert_crawl_target("exhausted", {"kind": "venue", "cron": "0 22 * * 5,6"})
+    apify = _FakeApifyClient()
+    apify.fail_next("exhausted", "posts", ApifyCreditExhaustedError("no credit"))
+    service = _service(dao, apify, _FakeBudgetDao())
+
+    report = _run(service.run_target("exhausted"))
+
+    assert report["credit_exhausted"] is True
+    assert report["streams"]["posts"]["outcome"] == "credit_exhausted"
+
+
+def test_consecutive_failures_increments_on_failure_and_resets_on_success():
+    dao = _venue_dao()
+    dao.upsert_crawl_target("flaky", {"kind": "venue", "cron": "0 22 * * 5,6"})
+    apify = _FakeApifyClient()
+    apify.fail_next("flaky", "posts", RuntimeError("boom"))
+    service = _service(dao, apify, _FakeBudgetDao())
+
+    _run(service.run_target("flaky"))
+    assert dao.get_crawl_target("flaky")["consecutive_failures"] == 1
+
+    apify.program("flaky", "posts", [])  # succeeds (empty result)
+    _run(service.run_target("flaky"))
+    assert dao.get_crawl_target("flaky")["consecutive_failures"] == 0
+
+
+def test_a_target_past_the_failure_threshold_is_skipped_without_a_call():
+    dao = _venue_dao()
+    dao.upsert_crawl_target(
+        "deadhandle", {"kind": "venue", "cron": "0 22 * * 5,6", "consecutive_failures": 5},
+    )
+    apify = _FakeApifyClient()
+    service = _service(dao, apify, _FakeBudgetDao(), max_consecutive_failures=5)
+
+    report = _run(service.run_target("deadhandle"))
+
+    assert apify.calls == []
+    assert report["outcome"] == "skipped_failures"
+
+
+# ── §H promoter-kind chaining: `InstagramCrawlChainer.chain_promoter` ───────
+# calls PromoterCrawlService's OWN per-post units (`_archive_post_images`,
+# `_process_post`) directly rather than `.run()` — see instagram_crawl_
+# service.py's module docstring for why `.run()` would either re-fetch (
+# double-billing) or silently skip a target not ALSO marked active in the
+# separate promoter_account registry. This test proves that reuse actually
+# persists a real event through the shared reconciliation path, using the
+# same fakes-at-the-boundary pattern tests/test_promoter_crawl_service.py
+# already established for PromoterCrawlService itself.
+class _FakePromoterDownloader:
+    async def download(self, url, timeout=15.0, max_bytes=None):
+        return b"FAKE_IMAGE_BYTES", "image/jpeg"
+
+
+class _FakePromoterMediaStore:
+    def __init__(self):
+        self.images: list[str] = []
+        self.manifests: list[tuple] = []
+
+    async def put_promoter_image(self, *, prefix, handle, photo_id, data, content_type, category=None):
+        key = f"{prefix}promoter={handle}/media/{photo_id}.jpg"
+        self.images.append(key)
+        return key
+
+    async def put_promoter_manifest(self, *, prefix, handle, manifest):
+        self.manifests.append((prefix, handle, manifest))
+        return f"{prefix}promoter={handle}/info/_manifest.json"
+
+
+class _FakePromoterOpenAIClient:
+    def __init__(self, response: str):
+        self._response = response
+        self.calls = 0
+
+    async def extract_events(self, *, caption, image_data_uri=None, max_events):
+        import json as _json
+
+        self.calls += 1
+        wrapped = _json.dumps({"events": [_json.loads(self._response)]})
+        return wrapped, False
+
+
+def test_chain_promoter_archives_and_persists_a_real_event():
+    from app.services.promoter_crawl_service import PromoterCrawlService
+
+    dao = _venue_dao()
+    media_store = _FakePromoterMediaStore()
+    downloader = _FakePromoterDownloader()
+    openai_client = _FakePromoterOpenAIClient(
+        '{"title": "Festa", "description": null, "date_text": null, '
+        '"time_text": null, "is_recurring": false, "recurrence_text": null, '
+        '"lineup": [], "ticket_url": null, "price_text": null, '
+        '"location_text": null, "confidence": 0.9}'
+    )
+    promoter_service = PromoterCrawlService(
+        venue_dao=dao, posts_client=None, media_store=media_store,
+        downloader=downloader, openai_client=openai_client, min_confidence=0.0,
+    )
+    chainer = InstagramCrawlChainer(
+        media_store=None, downloader=None, event_extraction_service=None,
+        promoter_crawl_service=promoter_service,
+    )
+    post = {
+        "shortcode": "promopost1", "caption": "Ingressos abertos! Vem pro role.",
+        "permalink": "https://instagram.com/p/promopost1", "timestamp": "2026-08-05T20:00:00.000Z",
+        "image_urls": ["https://cdn.example.com/promopost1.jpg"], "is_pinned": False,
+    }
+
+    report = _run(chainer.chain_promoter(handle="promohandle", new_posts=[post], now=NOW))
+
+    assert report.archived == 1
+    assert report.extracted is True
+    assert openai_client.calls == 1
+    row = dao.get_event_by_source("promohandle", "promopost1")
+    assert row is not None and row["title"] == "Festa"
+
+
+def test_chain_venue_and_chain_promoter_no_op_without_new_posts():
+    chainer = InstagramCrawlChainer()
+    report = _run(chainer.chain_venue(handle="h", venue_ids=["v1"], new_posts=[], now=NOW))
+    assert report.archived == 0 and report.extracted is False
+    report2 = _run(chainer.chain_promoter(handle="h", new_posts=[], now=NOW))
+    assert report2.archived == 0 and report2.extracted is False
+
+
+# ── §H venue-kind chaining classifies images: an image-only flyer must
+# still reach extraction ────────────────────────────────────────────────────
+# The scheduled crawl REPLACES a manual VenuePhotoArchiveService run that
+# already classifies photos (flyer detection). Before this fix,
+# `chain_venue` wrote manifest entries with no `category` at all, so
+# `post_qualifies` (event_extraction_service.py) could only ever qualify a
+# post via `matches_event_marker(caption)` — an image-only flyer (the
+# graphic carries every word, the caption is a few emoji) was silently
+# skipped, and the outcome (`not_event_like`) read as "no event" rather
+# than "never classified". These tests prove classification now runs by
+# default, reaches extraction end-to-end, is skippable per target, and is
+# distinguishable in CRAWL_CHAIN_CLASSIFICATION_TOTAL when it does not run.
+class _FakeVenueMediaStore:
+    """Implements BOTH the write side `InstagramCrawlChainer` calls
+    (`put_image`/`put_manifest`) and the read side the REAL `EventPostSource`
+    calls (`list_run_prefixes`/`read_manifest`) over one in-memory dict —
+    mirrors tests/bdd/steps/scheduled_incremental_instagram_crawl_steps.py's
+    `_FakeMediaStore`, proving archiving and extraction are wired together
+    end to end rather than asserted as two independent mock calls."""
+
+    def __init__(self):
+        self.images: list[str] = []
+        self.manifests: dict[tuple, dict] = {}
+        self._prefixes: list[str] = []
+
+    async def put_image(self, *, prefix, venue_id, photo_id, data, content_type, category=None):
+        key = f"{prefix}venue_id={venue_id}/media/{photo_id}.jpg"
+        self.images.append(key)
+        return key
+
+    async def put_manifest(self, *, prefix, venue_id, manifest):
+        self.manifests[(prefix, venue_id)] = manifest
+        if prefix not in self._prefixes:
+            self._prefixes.append(prefix)
+        return f"{prefix}venue_id={venue_id}/info/_manifest.json"
+
+    async def list_run_prefixes(self, source):
+        return sorted(self._prefixes)
+
+    async def read_manifest(self, prefix, venue_id):
+        return self.manifests.get((prefix, venue_id))
+
+    async def read_image_data_uri(self, key):
+        return f"data:image/jpeg;base64,FAKE_{key}" if key else None
+
+
+class _FakeVenueDownloader:
+    async def download(self, url, timeout=15.0, max_bytes=None):
+        return b"FAKE_IMAGE_BYTES", "image/jpeg"
+
+
+class _FakePhotoClassifier:
+    """Simulates `PhotoClassificationService.annotate`: attaches `category`/
+    `classification_confidence` to every photo IN PLACE — the exact contract
+    `InstagramCrawlChainer` depends on."""
+
+    def __init__(self, category="flyer", confidence=0.92):
+        self.category = category
+        self.confidence = confidence
+        self.calls = 0
+
+    async def annotate(self, photos, *, derive_attributes=True, venue_id="", require_bytes=False):
+        self.calls += 1
+        for photo in photos:
+            photo["category"] = self.category
+            photo["classification_confidence"] = self.confidence
+        return {
+            "classified": len(photos), "attributed": 0, "cost_usd": 0.0,
+            "input_tokens": 0, "output_tokens": 0,
+        }
+
+
+class _FailingPhotoClassifier:
+    async def annotate(self, photos, *, derive_attributes=True, venue_id="", require_bytes=False):
+        raise RuntimeError("classifier exploded")
+
+
+def _venue_extraction_service(dao, media_store, openai_client):
+    from app.services.archive_sources import SOURCE_INSTAGRAM_POSTS
+    from app.services.event_extraction_service import EventExtractionService, EventPostSource
+
+    return EventExtractionService(
+        venue_dao=dao,
+        post_source=EventPostSource(media_store=media_store, archive_source=SOURCE_INSTAGRAM_POSTS),
+        openai_client=openai_client, min_confidence=0.0, now_provider=lambda: NOW,
+    )
+
+
+def test_image_only_flyer_with_no_caption_marker_reaches_extraction_when_classified():
+    dao = _venue_dao()
+    dao.upsert_venue(Venue(venue_id="v1", venue_name="V1", venue_lat=-8.0, venue_lng=-34.9))
+    dao.set_venue_instagram(VenueInstagram(venue_id="v1", instagram_handle="flyerhandle", status="found"))
+
+    media_store = _FakeVenueMediaStore()
+    classifier = _FakePhotoClassifier(category="flyer", confidence=0.92)
+    openai_client = _FakePromoterOpenAIClient(
+        '{"title": "Festa Surpresa", "description": null, "date_text": null, '
+        '"time_text": null, "is_recurring": false, "recurrence_text": null, '
+        '"lineup": [], "ticket_url": null, "price_text": null, '
+        '"location_text": null, "confidence": 0.9}'
+    )
+    extraction_service = _venue_extraction_service(dao, media_store, openai_client)
+    chainer = InstagramCrawlChainer(
+        media_store=media_store, downloader=_FakeVenueDownloader(),
+        event_extraction_service=extraction_service, photo_classifier=classifier,
+    )
+    # No event-marker anywhere in the caption — pure emoji, exactly the
+    # image-only-flyer case that was silently dropped before this fix.
+    post = {
+        "shortcode": "flyerpost1", "caption": "\U0001F525\U0001F525\U0001F525",
+        "permalink": "https://instagram.com/p/flyerpost1", "timestamp": "2026-08-05T20:00:00.000Z",
+        "image_urls": ["https://cdn.example.com/flyerpost1.jpg"], "is_pinned": False,
+    }
+
+    report = _run(chainer.chain_venue(
+        handle="flyerhandle", venue_ids=["v1"], new_posts=[post], now=NOW, classify_images=True,
+    ))
+
+    assert classifier.calls == 1
+    assert report.classification_outcome == "classified"
+    assert openai_client.calls == 1, "extraction must have run for the image-only flyer"
+    row = dao.get_event_by_source("flyerhandle", "flyerpost1")
+    assert row is not None and row["title"] == "Festa Surpresa"
+
+
+def test_image_only_flyer_is_missed_when_classification_is_skipped():
+    """The BEFORE picture, pinned as a contrast: with no classifier wired,
+    the same image-only-caption post never qualifies for extraction — proves
+    the fix in the previous test is what makes the difference, not an
+    unrelated change."""
+    dao = _venue_dao()
+    dao.upsert_venue(Venue(venue_id="v1", venue_name="V1", venue_lat=-8.0, venue_lng=-34.9))
+    dao.set_venue_instagram(VenueInstagram(venue_id="v1", instagram_handle="noclassifierhandle", status="found"))
+
+    media_store = _FakeVenueMediaStore()
+    openai_client = _FakePromoterOpenAIClient('{"title": "x", "description": null, '
+        '"date_text": null, "time_text": null, "is_recurring": false, '
+        '"recurrence_text": null, "lineup": [], "ticket_url": null, '
+        '"price_text": null, "location_text": null, "confidence": 0.9}')
+    extraction_service = _venue_extraction_service(dao, media_store, openai_client)
+    chainer = InstagramCrawlChainer(
+        media_store=media_store, downloader=_FakeVenueDownloader(),
+        event_extraction_service=extraction_service, photo_classifier=None,
+    )
+    post = {
+        "shortcode": "noclassifierpost1", "caption": "\U0001F525\U0001F525\U0001F525",
+        "permalink": "https://instagram.com/p/noclassifierpost1", "timestamp": "2026-08-05T20:00:00.000Z",
+        "image_urls": ["https://cdn.example.com/noclassifierpost1.jpg"], "is_pinned": False,
+    }
+
+    report = _run(chainer.chain_venue(
+        handle="noclassifierhandle", venue_ids=["v1"], new_posts=[post], now=NOW, classify_images=True,
+    ))
+
+    assert report.classification_outcome == "skipped_no_classifier"
+    assert openai_client.calls == 0, "an unclassified, caption-less flyer must not qualify"
+    assert dao.get_event_by_source("noclassifierhandle", "noclassifierpost1") is None
+
+
+def test_classify_images_false_skips_classification_even_with_a_classifier_wired():
+    dao = _venue_dao()
+    dao.upsert_venue(Venue(venue_id="v1", venue_name="V1", venue_lat=-8.0, venue_lng=-34.9))
+    dao.set_venue_instagram(VenueInstagram(venue_id="v1", instagram_handle="cheapmodehandle", status="found"))
+
+    media_store = _FakeVenueMediaStore()
+    classifier = _FakePhotoClassifier()
+    chainer = InstagramCrawlChainer(
+        media_store=media_store, downloader=_FakeVenueDownloader(),
+        event_extraction_service=None, photo_classifier=classifier,
+    )
+    post = {
+        "shortcode": "cheapmodepost1", "caption": "no marker here",
+        "permalink": "https://instagram.com/p/cheapmodepost1", "timestamp": "2026-08-05T20:00:00.000Z",
+        "image_urls": ["https://cdn.example.com/cheapmodepost1.jpg"], "is_pinned": False,
+    }
+
+    report = _run(chainer.chain_venue(
+        handle="cheapmodehandle", venue_ids=["v1"], new_posts=[post], now=NOW, classify_images=False,
+    ))
+
+    assert classifier.calls == 0, "the per-target toggle must gate the classifier call itself"
+    assert report.classification_outcome == "skipped_target_disabled"
+
+
+def test_a_classifier_failure_archives_without_a_category_and_is_recorded_as_failed():
+    dao = _venue_dao()
+    dao.upsert_venue(Venue(venue_id="v1", venue_name="V1", venue_lat=-8.0, venue_lng=-34.9))
+    dao.set_venue_instagram(VenueInstagram(venue_id="v1", instagram_handle="failinghandle", status="found"))
+
+    media_store = _FakeVenueMediaStore()
+    chainer = InstagramCrawlChainer(
+        media_store=media_store, downloader=_FakeVenueDownloader(),
+        event_extraction_service=None, photo_classifier=_FailingPhotoClassifier(),
+    )
+    post = {
+        "shortcode": "failingpost1", "caption": "no marker here",
+        "permalink": "https://instagram.com/p/failingpost1", "timestamp": "2026-08-05T20:00:00.000Z",
+        "image_urls": ["https://cdn.example.com/failingpost1.jpg"], "is_pinned": False,
+    }
+
+    report = _run(chainer.chain_venue(
+        handle="failinghandle", venue_ids=["v1"], new_posts=[post], now=NOW, classify_images=True,
+    ))
+
+    # A blown-up classifier must never cost the photo its archive.
+    assert report.archived == 1
+    assert report.classification_outcome == "classification_failed"

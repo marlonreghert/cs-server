@@ -5,6 +5,7 @@ from app.routers.admin_trigger_router import router as admin_trigger_router, set
 from app.routers.engagement_router import router as engagement_router, set_engagement_service
 from app.routers.internal_router import router as internal_router, set_container as set_internal_container
 from app.routers.admin_events_router import router as admin_events_router, set_container as set_admin_events_container
+from app.routers.admin_crawl_router import router as admin_crawl_router, set_container as set_admin_crawl_container
 
 __all__ = [
     "venue_router", "set_venue_handler",
@@ -13,4 +14,5 @@ __all__ = [
     "engagement_router", "set_engagement_service",
     "internal_router", "set_internal_container",
     "admin_events_router", "set_admin_events_container",
+    "admin_crawl_router", "set_admin_crawl_container",
 ]

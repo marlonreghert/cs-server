@@ -708,6 +708,64 @@ class Container:
         else:
             logger.info("[Container] Promoter crawl disabled (needs Apify API token)")
 
+        # Scheduled Incremental Instagram Crawl
+        # (plans/260809_scheduled-incremental-instagram-crawl.md). Reuses the
+        # SAME Apify Instagram client every other Instagram path already
+        # uses, plus event_extraction_service and promoter_crawl_service for
+        # chaining (§H) — see instagram_crawl_service.py's own module
+        # docstring for why it calls their low-level pieces rather than
+        # `.run()` itself. Needs only the Apify client to exist at all;
+        # archiving/extraction chaining degrade gracefully (skipped, not
+        # failed) when their own dependencies are absent, the same
+        # dependency-aware posture every other optional enrichment path in
+        # this container takes.
+        self.crawl_budget_dao = None
+        self.instagram_crawl_service = None
+        if self.apify_instagram_client is not None:
+            from app.dao.crawl_budget_dao import CrawlBudgetDao
+            from app.services.archive_sources import SOURCE_INSTAGRAM_POSTS
+            from app.services.instagram_crawl_service import (
+                CrawlServiceConfig,
+                InstagramCrawlChainer,
+                ScheduledInstagramCrawlService,
+            )
+            from app.services.venue_photo_archive_service import HttpPhotoDownloader
+
+            self.crawl_budget_dao = CrawlBudgetDao(redis_internal_client)
+            crawl_chainer = InstagramCrawlChainer(
+                media_store=getattr(self, "media_archive_store", None),
+                downloader=HttpPhotoDownloader(),
+                event_extraction_service=self.event_extraction_service,
+                promoter_crawl_service=self.promoter_crawl_service,
+                # The SAME classifier VenuePhotoArchiveService uses — reused,
+                # not duplicated, so an image-only flyer archived by the
+                # scheduled crawl gets the SAME flyer detection a manual
+                # archive run already gives it. None (not configured/no
+                # OpenAI key) degrades to the pre-existing caption-only gate,
+                # recorded as such via CRAWL_CHAIN_CLASSIFICATION_TOTAL.
+                photo_classifier=self.photo_classification_service,
+                archive_source=SOURCE_INSTAGRAM_POSTS,
+            )
+            self.instagram_crawl_service = ScheduledInstagramCrawlService(
+                venue_dao=self.pipeline_repository,
+                apify_client=self.apify_instagram_client,
+                budget_dao=self.crawl_budget_dao,
+                config=CrawlServiceConfig(
+                    overlap_hours=settings.crawl_cursor_overlap_hours,
+                    default_initial_lookback=settings.crawl_default_initial_lookback,
+                    default_results_limit=settings.crawl_default_results_limit,
+                    monthly_result_budget=settings.crawl_monthly_result_budget,
+                    max_consecutive_failures=settings.crawl_max_consecutive_failures,
+                    result_cost_usd=settings.apify_instagram_post_cost_usd,
+                ),
+                chainer=crawl_chainer,
+            )
+            logger.info("[Container] Scheduled Instagram crawl service initialized")
+        else:
+            logger.info(
+                "[Container] Scheduled Instagram crawl disabled (needs Apify API token)"
+            )
+
         # The serve handler resolves the live-busyness freshness window through the
         # admin-config mirror; wire it now that the service exists (venue_handler
         # was built above, before admin_config_service).

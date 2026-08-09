@@ -144,6 +144,13 @@ class Settings(BaseSettings):
     # 43200 minutes = 30 days
     venues_catalog_refresh_minutes: int = 43200
     venues_live_refresh_minutes: int = 5
+    # "Sundays at 00:00" is this setting's INTENT, not its verified behavior:
+    # main.py registers it via bare `CronTrigger.from_crontab`, whose
+    # day-of-week field is APScheduler-native (0=Monday), not standard cron
+    # (0=Sunday) — see the NOTE at that registration site and
+    # tests/test_scheduler.py. Left as-is deliberately; changing which day a
+    # live job fires on is an operator decision, out of scope for the
+    # crawl-target feature that found this.
     weekly_forecast_cron: str = "0 0 * * 0"  # Sundays at 00:00
 
     # Serve-time live-busyness freshness gate. The stale window is DERIVED from
@@ -531,6 +538,52 @@ class Settings(BaseSettings):
     # How many distinct already-extracted event posts must mention a handle
     # before discovery proposes it as a candidate account.
     promoter_mention_threshold: int = 3
+
+    # Scheduled Incremental Instagram Crawl
+    # (plans/260809_scheduled-incremental-instagram-crawl.md). Turns event
+    # crawling from an operator-triggered, full re-scrape into a scheduled,
+    # per-handle incremental one. Opt-in per target (events.crawl_target) —
+    # never a catalog-wide schedule (the plan's own measurement: one pass at
+    # 10 posts across the ~1,066 distinct handles in the catalog today is
+    # ~$30, six times the operator's $5 balance).
+    crawl_scheduler_enabled: bool = False
+    # How often the scheduler re-reads events.crawl_target and re-registers
+    # APScheduler jobs — so an admin API write to a target's cron/enabled
+    # flag takes effect without a restart (§D), the same "re-read and
+    # re-registered" guarantee main.py's RefreshIntervalWatcher already
+    # gives live_forecast_refresh.
+    crawl_schedule_sync_interval_minutes: int = 5
+    # §B: how far behind a target's newest-seen post the next crawl's
+    # `onlyPostsNewerThan` bound reaches — deliberately NOT a day. The
+    # operator asked for 3-6h; six hours of overlap on a venue posting twice
+    # a day is about one and a half cents a month at $0.0027/result, and
+    # re-fetched posts are absorbed without duplicates by S3 skip-if-exists
+    # and `source_event_key` idempotency, both already tested. Hours, not
+    # timedelta, so it is a plain admin-editable number.
+    crawl_cursor_overlap_hours: float = 6.0
+    # §C: the date bound a brand-new target (null cursor) is seeded under,
+    # in Apify's own relative-date syntax ("1 day", "2 months", "3 years") so
+    # it can be sent to `onlyPostsNewerThan` unparsed.
+    crawl_default_initial_lookback: str = "3 months"
+    # §C: the per-run result cap a target falls back to when it sets none of
+    # its own — applied ALONGSIDE the date bound, never instead of it, so a
+    # high-volume account's first-ever seed can't spend past a known worst
+    # case regardless of how far back the date bound reaches.
+    crawl_default_results_limit: int = 10
+    # §F, the direct successor to docs/venue-retrieval-storage.md §3's
+    # retired "No cron" guarantee: a hard ceiling on total results (posts +
+    # reels combined) the scheduled crawl may spend in one calendar month,
+    # checked BEFORE every actor call. ~1,000 results is ~$2.70 at
+    # $0.0027/result — comfortably inside the operator's $5 balance with
+    # headroom for other Apify spend the same month, and large enough that a
+    # handful of opted-in targets on a weekly cadence will not brush it.
+    # Operator-tunable; 0 disables scheduled crawling entirely (refuses
+    # every call, matching "on exhaustion, scheduled crawls stop").
+    crawl_monthly_result_budget: int = 1000
+    # A target that fails this many scheduled crawls IN A ROW is skipped
+    # (not disabled — an operator can still see and re-enable it) so a dead
+    # handle cannot burn the shared monthly budget on retries forever.
+    crawl_max_consecutive_failures: int = 5
 
     # Event Cover Presign (plans/260806_event-cover-presign.md). Short-lived
     # on purpose: the url is handed to a browser and IS the grant to that one

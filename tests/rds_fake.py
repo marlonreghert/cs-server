@@ -40,6 +40,10 @@ def _coerce_dt(value):
 
 
 class InMemoryRdsVenueStore:
+    # events.crawl_target's ck_crawl_target_kind CHECK constraint
+    # (migration 0030_crawl_target) — enforced below, not just documented.
+    _CRAWL_TARGET_KINDS = ("venue", "promoter")
+
     def __init__(self) -> None:
         self.venues: dict[str, dict] = {}
         # Ex3: venues.address (1:1) — address raw text + structured components +
@@ -99,6 +103,9 @@ class InMemoryRdsVenueStore:
         self.promoter_accounts: dict[str, dict] = {}
         # events.event_venue_link_candidate: event_id -> ranked candidate rows.
         self.event_link_candidates: dict[str, list[dict]] = {}
+        # events.crawl_target: handle -> row (see plans/260809_scheduled-
+        # incremental-instagram-crawl.md, migration 0030_crawl_target).
+        self.crawl_targets: dict[str, dict] = {}
         self._down = False
 
     # ── test controls ────────────────────────────────────────────────────────
@@ -798,6 +805,81 @@ class InMemoryRdsVenueStore:
             row["updated_at"] = now
         self.promoter_accounts[handle] = row
         return copy.deepcopy(row)
+
+    # ── events.crawl_target (plans/260809_scheduled-incremental-instagram-crawl.md) ──
+    def get_crawl_target(self, handle: str) -> Optional[dict]:
+        row = self.crawl_targets.get(handle)
+        return copy.deepcopy(row) if row else None
+
+    def list_crawl_targets(
+        self, *, enabled: Optional[bool] = None, kind: Optional[str] = None,
+    ) -> list[dict]:
+        rows = [
+            copy.deepcopy(r) for r in self.crawl_targets.values()
+            if (enabled is None or r.get("enabled") == enabled)
+            and (kind is None or r.get("kind") == kind)
+        ]
+        rows.sort(key=lambda r: r["handle"])
+        return rows
+
+    def upsert_crawl_target(self, handle: str, fields: dict) -> dict:
+        """INSERT-or-update by handle, mirroring `upsert_promoter_account`'s
+        partial-update contract.
+
+        Enforces the two real NOT NULL-with-no-default columns migration
+        0030_crawl_target declares (`kind`, `cron`) on first insert — a bare
+        dict-update fake would happily accept a schedule-less target and let
+        a real Postgres NotNullViolation be the first place this was ever
+        caught in production, exactly the "models the happy path, not the
+        constraints" trap this file has hit twice before (CLAUDE.md). Also
+        enforces `ck_crawl_target_kind` (`kind IN ('venue', 'promoter')`) on
+        both insert and update, mirroring the real CHECK constraint.
+        """
+        self._guard()
+        existing = self.crawl_targets.get(handle)
+        now = _now()
+        if "kind" in fields and fields["kind"] not in self._CRAWL_TARGET_KINDS:
+            raise ValueError(
+                f"crawl_target.kind must be one of {self._CRAWL_TARGET_KINDS}, "
+                f"got {fields['kind']!r}"
+            )
+        if existing is None:
+            kind = fields.get("kind")
+            cron = fields.get("cron")
+            if not kind:
+                raise ValueError(
+                    "crawl_target.kind is NOT NULL (migration 0030_crawl_target)"
+                )
+            if not cron:
+                raise ValueError(
+                    "crawl_target.cron is NOT NULL (migration 0030_crawl_target)"
+                )
+            row = {
+                "handle": handle, "kind": kind, "enabled": True, "cron": cron,
+                "timezone": "America/Recife", "crawl_reels": False,
+                # Defaults TRUE — a scheduled crawl replaces a manual archive
+                # run that already classifies; FALSE is an explicit per-target
+                # opt-out, never a silent inherited cheap mode.
+                "classify_images": True,
+                "initial_lookback": None, "results_limit": None,
+                "cursor_posts_at": None, "cursor_reels_at": None,
+                "last_run_at": None, "last_run_results": 0,
+                "last_run_cost_usd": None, "consecutive_failures": 0,
+                "notes": None, "created_at": now, "updated_at": now,
+            }
+            row.update({k: v for k, v in fields.items() if k != "handle"})
+        else:
+            row = dict(existing)
+            row.update(fields)
+            row["updated_at"] = now
+        self.crawl_targets[handle] = row
+        return copy.deepcopy(row)
+
+    def delete_crawl_target(self, handle: str) -> bool:
+        """Hard delete — no soft-delete column on this table (see migration
+        0030's downgrade note). Returns True iff a row existed."""
+        self._guard()
+        return self.crawl_targets.pop(handle, None) is not None
 
     # ── events.event_venue_link_candidate (plans/260804_instagram-promoter-events.md) ─
     def replace_event_venue_link_candidates(self, event_id: str, candidates: list[dict]) -> None:

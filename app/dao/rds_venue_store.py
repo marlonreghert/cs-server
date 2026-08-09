@@ -1465,3 +1465,89 @@ class RdsVenueStore:
                 + self._OUTSIDE_CIRCLES_SQL
             )).first()
         return int(row[0]) if row else 0
+
+    # ── events.crawl_target (plans/260809_scheduled-incremental-instagram-crawl.md) ──
+    _CRAWL_TARGET_KINDS = ("venue", "promoter")
+    _CRAWL_TARGET_COLUMNS = (
+        "handle", "kind", "enabled", "cron", "timezone", "crawl_reels",
+        "classify_images", "initial_lookback", "results_limit",
+        "cursor_posts_at", "cursor_reels_at", "last_run_at", "last_run_results",
+        "last_run_cost_usd", "consecutive_failures", "notes",
+    )
+    _CRAWL_TARGET_SELECT = (
+        "SELECT handle, kind, enabled, cron, timezone, crawl_reels, "
+        "classify_images, initial_lookback, results_limit, cursor_posts_at, "
+        "cursor_reels_at, last_run_at, last_run_results, last_run_cost_usd, "
+        "consecutive_failures, notes, created_at, updated_at FROM events.crawl_target"
+    )
+
+    def get_crawl_target(self, handle: str) -> Optional[dict]:
+        with self.engine.connect() as conn:
+            row = conn.execute(
+                text(f"{self._CRAWL_TARGET_SELECT} WHERE handle=:h"), {"h": handle},
+            ).mappings().first()
+            return dict(row) if row else None
+
+    def list_crawl_targets(
+        self, *, enabled: Optional[bool] = None, kind: Optional[str] = None,
+    ) -> list[dict]:
+        sql = self._CRAWL_TARGET_SELECT
+        clauses = []
+        params: dict = {}
+        if enabled is not None:
+            clauses.append("enabled=:enabled")
+            params["enabled"] = enabled
+        if kind is not None:
+            clauses.append("kind=:kind")
+            params["kind"] = kind
+        if clauses:
+            sql += " WHERE " + " AND ".join(clauses)
+        sql += " ORDER BY handle"
+        with self.engine.connect() as conn:
+            return [dict(r) for r in conn.execute(text(sql), params).mappings()]
+
+    def upsert_crawl_target(self, handle: str, fields: dict) -> dict:
+        """INSERT ... ON CONFLICT (handle) DO UPDATE, mirroring
+        `upsert_promoter_account`'s partial-update contract: only the keys
+        present in `fields` are set (insert or update alike); the primary key
+        and any column the caller omitted on an UPDATE are left untouched.
+
+        `kind` and `cron` are NOT NULL with no database default (migration
+        0030_crawl_target) — a target is created BY an operator WITH a
+        schedule, never inserted schedule-less. The caller (the admin router)
+        validates both before this is ever reached; this method trusts
+        `fields` on insert and lets a genuinely missing NOT NULL column raise
+        from Postgres itself, exactly like `upsert_promoter_account` does for
+        its own NOT NULL columns."""
+        cols = [c for c in self._CRAWL_TARGET_COLUMNS if c in fields and c != "handle"]
+        assign = {c: fields[c] for c in cols}
+        assign["handle"] = handle
+        insert_cols = ["handle"] + cols
+        col_list = ", ".join(insert_cols)
+        val_list = ", ".join(f":{c}" for c in insert_cols)
+        if cols:
+            update_clause = ", ".join(f"{c}=:{c}" for c in cols) + ", updated_at=now()"
+            conflict_sql = f"DO UPDATE SET {update_clause}"
+        else:
+            conflict_sql = "DO NOTHING"
+        with self.engine.begin() as conn:
+            conn.execute(
+                text(
+                    f"INSERT INTO events.crawl_target ({col_list}) "
+                    f"VALUES ({val_list}) "
+                    f"ON CONFLICT (handle) {conflict_sql}"
+                ),
+                assign,
+            )
+        return self.get_crawl_target(handle)
+
+    def delete_crawl_target(self, handle: str) -> bool:
+        """Hard delete — there is no soft-delete column on this table (see
+        migration 0030's downgrade note: losing a target's cursor only means
+        its next crawl re-seeds from a lookback window, never a destructive
+        loss of event data). Returns True iff a row existed."""
+        with self.engine.begin() as conn:
+            result = conn.execute(
+                text("DELETE FROM events.crawl_target WHERE handle=:h"), {"h": handle},
+            )
+            return result.rowcount > 0

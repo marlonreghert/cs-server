@@ -109,6 +109,12 @@ test-unit:
 		tests/test_event_ticket_info_and_attractions_migration.py \
 		tests/test_blocked_venues_migration.py \
 		tests/test_engagement_blocked_venues.py \
+		tests/test_crawl_target_migration.py \
+		tests/test_crawl_target_dao.py \
+		tests/test_instagram_crawl_service.py \
+		tests/test_crawl_schedule_sync.py \
+		tests/test_admin_crawl_router.py \
+		tests/test_scheduler.py \
 		-v
 
 test-integration:

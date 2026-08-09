@@ -193,14 +193,40 @@ class ApifyInstagramClient:
         return results
 
     async def fetch_recent_posts(
-        self, username: str, results_limit: int = 10
+        self,
+        username: str,
+        results_limit: int = 10,
+        *,
+        only_posts_newer_than: Optional[str] = None,
+        results_type: str = "posts",
     ) -> list[dict]:
-        """Fetch recent posts for an Instagram profile.
+        """Fetch recent posts (or reels) for an Instagram profile.
 
-        Uses apify/instagram-scraper with resultsType="posts". Returns caption
-        text, engagement metrics, AND the post's image urls — the media archive
-        pipeline is what needed these; `InstagramPostsEnrichmentService` reads
-        only the caption-era keys and keeps working unchanged.
+        Uses apify/instagram-scraper. `resultsType` defaults to "posts" (the
+        original, unchanged behaviour); passing "reels" runs the SAME actor
+        against the account's reels tab instead — a separate billed run, not
+        a flag on the posts one (plans/260809_scheduled-incremental-
+        instagram-crawl.md §Evidence). Verified against a live run (that
+        plan's Step 0 probe, @entreamigos.praia, resultsLimit=1): reel items
+        carry the identical shape posts do (including `timestamp`), so the
+        item-to-dict mapping below needs no reels-specific branch.
+
+        `only_posts_newer_than` is Apify's own `onlyPostsNewerThan` filter —
+        `YYYY-MM-DD`, ISO-8601, or a relative string ("1 day", "2 months").
+        Its docs say times are interpreted in UTC, not local time; verified
+        for `resultsType="reels"` specifically by the same Step 0 probe (the
+        field is named for posts and documented generically, so this was not
+        assumed). None (the default) omits the filter entirely, which is the
+        pre-existing, unbounded behaviour every caller of this method got
+        before this parameter existed — so the three existing callers
+        (`archive_sources._fetch_instagram`, `ApifyPromoterPostsClient.
+        fetch_recent_posts`, `InstagramPostsEnrichmentService.
+        enrich_all_venues`) are UNAFFECTED until they explicitly opt in.
+
+        Pinned posts can appear even when `only_posts_newer_than` is set
+        (Apify's own documented caveat, reconfirmed by the Step 0 probe) — a
+        pinned item arrives billed and must be filtered by the CALLER after
+        the fact, never assumed absent here.
 
         The image urls are signed with a short-lived Instagram CDN signature:
         they are only good within the run that fetched them, and a caller that
@@ -210,17 +236,22 @@ class ApifyInstagramClient:
         Args:
             username: Instagram username (without @)
             results_limit: Max posts to return (default 10)
+            only_posts_newer_than: Apify's `onlyPostsNewerThan` filter value,
+                or None to omit it (fetch without a lower bound).
+            results_type: "posts" (default) or "reels".
 
         Returns:
             List of post dicts with keys: caption, likes_count, comments_count,
-            timestamp, post_type, shortcode, permalink, image_urls. Empty list
-            on error.
+            timestamp, post_type, shortcode, permalink, image_urls,
+            is_pinned. Empty list on error.
         """
         run_input = {
             "directUrls": [f"https://www.instagram.com/{username}/"],
-            "resultsType": "posts",
+            "resultsType": results_type,
             "resultsLimit": results_limit,
         }
+        if only_posts_newer_than:
+            run_input["onlyPostsNewerThan"] = only_posts_newer_than
 
         items = await self._run_actor_sync(
             "apify~instagram-scraper", run_input, endpoint_label="instagram_posts"
@@ -242,10 +273,14 @@ class ApifyInstagramClient:
                 "shortcode": item.get("shortCode") or None,
                 "permalink": item.get("url") or None,
                 "image_urls": _post_image_urls(item),
+                # Needed by the scheduled crawl (§G) to drop a pinned item
+                # that bypassed `only_posts_newer_than` without ever letting
+                # it move a cursor; every other existing caller ignores it.
+                "is_pinned": bool(item.get("isPinned", False)),
             })
 
         logger.info(
-            f"[ApifyInstagram] Fetched {len(posts)} posts for @{username}"
+            f"[ApifyInstagram] Fetched {len(posts)} {results_type} for @{username}"
         )
         return posts
 
