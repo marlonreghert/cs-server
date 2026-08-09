@@ -78,7 +78,7 @@ def test_sync_once_removes_a_job_whose_target_was_disabled_since_the_last_sync()
     sync.sync_once()
     assert job_id_for("flippy") in {job.id for job in scheduler.get_jobs()}
 
-    dao.upsert_crawl_target("flippy", {"enabled": False})
+    dao.update_crawl_target("flippy", {"enabled": False})
     sync.sync_once()
 
     assert job_id_for("flippy") not in {job.id for job in scheduler.get_jobs()}

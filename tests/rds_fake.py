@@ -823,17 +823,22 @@ class InMemoryRdsVenueStore:
         return rows
 
     def upsert_crawl_target(self, handle: str, fields: dict) -> dict:
-        """INSERT-or-update by handle, mirroring `upsert_promoter_account`'s
-        partial-update contract.
+        """CREATE-only, mirroring the real `RdsVenueStore.upsert_crawl_target`
+        (see its docstring for the production incident that restricted this):
+        `kind` and `cron` are NOT NULL with no database default (migration
+        0030_crawl_target), and a real `INSERT ... ON CONFLICT DO UPDATE`
+        validates NOT NULL against the fully-constructed insert tuple BEFORE
+        it ever evaluates `ON CONFLICT` — on EVERY call, not just when the row
+        is genuinely new. A bare dict-update fake that only checked this on
+        first insert would happily accept a partial "update" a real Postgres
+        rejects, exactly the "models the happy path, not the constraints"
+        trap this file has hit twice before (CLAUDE.md) — and did a third
+        time here, in production, before this method was hardened to match.
+        Use `update_crawl_target` for a partial update of a row known to
+        already exist.
 
-        Enforces the two real NOT NULL-with-no-default columns migration
-        0030_crawl_target declares (`kind`, `cron`) on first insert — a bare
-        dict-update fake would happily accept a schedule-less target and let
-        a real Postgres NotNullViolation be the first place this was ever
-        caught in production, exactly the "models the happy path, not the
-        constraints" trap this file has hit twice before (CLAUDE.md). Also
-        enforces `ck_crawl_target_kind` (`kind IN ('venue', 'promoter')`) on
-        both insert and update, mirroring the real CHECK constraint.
+        Also enforces `ck_crawl_target_kind` (`kind IN ('venue', 'promoter')`)
+        on every call, mirroring the real CHECK constraint.
         """
         self._guard()
         existing = self.crawl_targets.get(handle)
@@ -843,17 +848,23 @@ class InMemoryRdsVenueStore:
                 f"crawl_target.kind must be one of {self._CRAWL_TARGET_KINDS}, "
                 f"got {fields['kind']!r}"
             )
+        if not fields.get("kind"):
+            raise ValueError(
+                "crawl_target.kind is NOT NULL (migration 0030_crawl_target) -- "
+                "upsert_crawl_target is CREATE-only and requires it on every call, "
+                "even against an existing row; use update_crawl_target for a "
+                "partial update."
+            )
+        if not fields.get("cron"):
+            raise ValueError(
+                "crawl_target.cron is NOT NULL (migration 0030_crawl_target) -- "
+                "upsert_crawl_target is CREATE-only and requires it on every call, "
+                "even against an existing row; use update_crawl_target for a "
+                "partial update."
+            )
         if existing is None:
-            kind = fields.get("kind")
-            cron = fields.get("cron")
-            if not kind:
-                raise ValueError(
-                    "crawl_target.kind is NOT NULL (migration 0030_crawl_target)"
-                )
-            if not cron:
-                raise ValueError(
-                    "crawl_target.cron is NOT NULL (migration 0030_crawl_target)"
-                )
+            kind = fields["kind"]
+            cron = fields["cron"]
             row = {
                 "handle": handle, "kind": kind, "enabled": True, "cron": cron,
                 "timezone": "America/Recife", "crawl_reels": False,
@@ -881,6 +892,28 @@ class InMemoryRdsVenueStore:
             row = dict(existing)
             row.update(fields)
             row["updated_at"] = now
+        self.crawl_targets[handle] = row
+        return copy.deepcopy(row)
+
+    def update_crawl_target(self, handle: str, fields: dict) -> Optional[dict]:
+        """Plain partial update, mirroring the real store's method of the
+        same name: NEVER creates a row (a missing handle is a safe no-op
+        returning None, exactly like `UPDATE ... WHERE handle=:h` affecting
+        zero rows), so it carries none of `upsert_crawl_target`'s NOT NULL
+        requirements. Still enforces the CHECK constraint on `kind` if the
+        caller is changing it."""
+        self._guard()
+        existing = self.crawl_targets.get(handle)
+        if existing is None:
+            return None
+        if "kind" in fields and fields["kind"] not in self._CRAWL_TARGET_KINDS:
+            raise ValueError(
+                f"crawl_target.kind must be one of {self._CRAWL_TARGET_KINDS}, "
+                f"got {fields['kind']!r}"
+            )
+        row = dict(existing)
+        row.update(fields)
+        row["updated_at"] = _now()
         self.crawl_targets[handle] = row
         return copy.deepcopy(row)
 

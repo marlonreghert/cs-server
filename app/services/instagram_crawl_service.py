@@ -102,6 +102,13 @@ OUTCOME_SKIPPED_DISABLED = "skipped_disabled"
 OUTCOME_SKIPPED_FAILURES = "skipped_failures"
 OUTCOME_SKIPPED_BUDGET = "skipped_budget"
 OUTCOME_NOT_FOUND = "not_found"
+# The post-run bookkeeping write itself failed (see `run_target`) — results
+# were already scraped and BILLED by the time this can happen, so it is
+# reported distinctly from OUTCOME_FAILED (a failed *fetch*, which bills
+# nothing): a target stuck here is spending money and landing nothing, which
+# `consecutive_failures` alone would hide until an operator happened to
+# notice `last_run_at` had stopped advancing.
+OUTCOME_BOOKKEEPING_FAILED = "bookkeeping_failed"
 # `start_run`-only reason: the admin run-now endpoint's fast refusal when
 # the per-handle lock (`lock_name_for`) is already held — by a scheduled
 # fire or by another run-now call for the same handle. Never an `OUTCOME_*`
@@ -882,7 +889,41 @@ class ScheduledInstagramCrawlService:
                 int(target.get("consecutive_failures") or 0) + 1 if any_failed else 0
             )
         if updates:
-            self.venue_dao.upsert_crawl_target(handle, updates)
+            try:
+                self.venue_dao.update_crawl_target(handle, updates)
+            except Exception as e:
+                # Results for this run are already scraped and BILLED (see
+                # `_run_stream`'s CRAWL_RESULTS_TOTAL/budget increment, which
+                # already happened above) — this write only persists the
+                # bookkeeping, so its failure must not look like a healthy
+                # run. Count it as a failure (bumping the SAME
+                # `consecutive_failures` counter `run_target`'s own
+                # enabled/failure-threshold gate reads) via a second, minimal
+                # write that carries none of the fields that may have caused
+                # the first one to fail — otherwise a target stuck here would
+                # keep `consecutive_failures` at 0 forever, look perfectly
+                # healthy, and keep spending on every future run while
+                # landing nothing (the exact production incident this guards
+                # against: 2026-08-09, entreamigos.praia, $0.10 billed and
+                # discarded with `consecutive_failures` still 0).
+                CRAWL_RUNS_TOTAL.labels(
+                    handle_kind=kind, result_type=STREAM_POSTS, outcome=OUTCOME_BOOKKEEPING_FAILED,
+                ).inc()
+                logger.error(
+                    f"[InstagramCrawl] {handle}: post-run bookkeeping write failed "
+                    f"AFTER {total_results} results were already scraped and billed "
+                    f"(≈${updates.get('last_run_cost_usd', 0):.4f}): {e}"
+                )
+                failures = int(target.get("consecutive_failures") or 0) + 1
+                try:
+                    self.venue_dao.update_crawl_target(handle, {"consecutive_failures": failures})
+                except Exception as e2:
+                    logger.error(
+                        f"[InstagramCrawl] {handle}: could not even record the "
+                        f"bookkeeping failure itself — target will look healthy "
+                        f"until this is fixed: {e2}"
+                    )
+                raise
 
         self._record_cursor_age(handle, target, updates, now)
 
