@@ -677,6 +677,21 @@ class ScheduledInstagramCrawlService:
         self.config = config
         self.chainer = chainer
         self._now = now_provider or (lambda: datetime.now(timezone.utc))
+        # `asyncio.create_task`'s return value is the ONLY strong reference
+        # the event loop gives you — the loop itself holds a weak one, and
+        # CPython's own asyncio docs warn that an unreferenced task "can
+        # disappear mid-execution" via garbage collection. A crawl started
+        # by `start_run` is the longest-lived task in this codebase (a
+        # 3-month seed with downloads, classification, and chained
+        # extraction — minutes of awaits, exactly the profile that gives
+        # the collector opportunities), and if IT disappears mid-flight,
+        # `finally` does not reliably run: the per-handle lock is never
+        # released, and that handle becomes uncrawlable for the rest of the
+        # process's life — every future scheduled fire hits `try_acquire`,
+        # logs "already running", and silently skips, forever. This set is
+        # the strong reference; `add_done_callback` drops each task the
+        # moment it finishes so the set cannot grow unbounded.
+        self._background_tasks: set[asyncio.Task] = set()
 
     # ── one stream (posts or reels) of one target ────────────────────────────
     async def _run_stream(self, target: dict, stream: str, *, now: datetime) -> dict:
@@ -934,5 +949,11 @@ class ScheduledInstagramCrawlService:
             finally:
                 job_lock.release(lock_name)
 
-        asyncio.create_task(_run_and_release())
+        task = asyncio.create_task(_run_and_release())
+        # Hold a STRONG reference for the task's whole lifetime (see the
+        # comment on `self._background_tasks` in `__init__` for why this is
+        # not optional here) and drop it the moment the task finishes, so
+        # the set never grows past however many crawls are truly in flight.
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
         return {"started": True}

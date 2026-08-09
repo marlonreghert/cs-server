@@ -771,6 +771,41 @@ async def test_start_run_returns_immediately_and_running_flips_true_then_false()
     assert row["last_run_at"] is not None  # the background task actually completed
 
 
+async def test_start_run_holds_a_strong_reference_to_the_background_task_until_it_completes():
+    """`asyncio.create_task`'s return value is only WEAKLY referenced by the
+    event loop — CPython's own docs warn an unreferenced task "can
+    disappear mid-execution" via garbage collection. Here that would mean
+    the per-handle lock's `finally` never runs: the handle becomes
+    uncrawlable for the rest of the process's life. This asserts the
+    bookkeeping that prevents it — the task is tracked while in flight and
+    untracked once done — WITHOUT provoking garbage collection, which would
+    be slow, flaky, and prove nothing an honest test couldn't already
+    show more directly."""
+    dao = _venue_dao()
+    dao.upsert_crawl_target("refheldhandle", {"kind": "venue", "cron": "0 22 * * *"})
+    gate = asyncio.Event()
+    apify = _GatedApifyClient(gate)
+    service = _service(dao, apify, _FakeBudgetDao())
+
+    assert service._background_tasks == set()
+
+    result = await service.start_run("refheldhandle")
+    assert result == {"started": True}
+    await asyncio.sleep(0)  # let the task actually start and reach the gate
+
+    assert len(service._background_tasks) == 1
+    in_flight_task = next(iter(service._background_tasks))
+    assert not in_flight_task.done()
+
+    gate.set()
+    for _ in range(100):
+        if not service._background_tasks:
+            break
+        await asyncio.sleep(0)
+    assert service._background_tasks == set()
+    assert in_flight_task.done()
+
+
 async def test_a_second_run_now_while_one_is_in_flight_is_refused_without_calling_the_actor():
     dao = _venue_dao()
     dao.upsert_crawl_target("racyhandle", {"kind": "venue", "cron": "0 22 * * *"})
