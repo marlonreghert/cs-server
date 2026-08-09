@@ -132,6 +132,49 @@ def test_seed_results_limit_is_a_separate_field_from_results_limit():
     assert resp2.json()["results_limit"] == 10  # untouched by the seed-cap patch
 
 
+def test_reels_caps_are_separate_fields_that_round_trip_independently():
+    client, dao = _client()
+    resp = client.post("/admin/crawl-targets", json={
+        "handle": "reelscaptarget", "kind": "venue", "cron": "0 22 * * *",
+        "crawl_reels": True, "reels_results_limit": 4, "reels_seed_results_limit": 40,
+    })
+    assert resp.status_code == 201, resp.text
+    body = resp.json()
+    assert body["reels_results_limit"] == 4
+    assert body["reels_seed_results_limit"] == 40
+
+    resp2 = client.patch("/admin/crawl-targets/reelscaptarget", json={"reels_seed_results_limit": 90})
+    assert resp2.status_code == 200, resp2.text
+    assert resp2.json()["reels_seed_results_limit"] == 90
+    assert resp2.json()["reels_results_limit"] == 4  # untouched
+
+
+def test_effective_caps_resolve_the_fallback_chain_the_console_can_use_for_a_worst_case():
+    """Proves the read model's `effective_*` fields are actually computed
+    (not just present) via the SAME fallback chain the real crawl uses —
+    so the console can state a reels-enabled target's true worst-case cost
+    (`effective_seed_results_limit + effective_reels_seed_results_limit`)
+    without re-implementing the reels-falls-back-to-posts chain itself."""
+    client, dao = _client()
+    resp = client.post("/admin/crawl-targets", json={
+        "handle": "worstcasetarget", "kind": "venue", "cron": "0 22 * * *",
+        "crawl_reels": True, "seed_results_limit": 150,
+        # No reels_seed_results_limit set -> must fall back to the posts
+        # seed cap (150) above, not the settings default (200).
+    })
+    assert resp.status_code == 201, resp.text
+    body = resp.json()
+    assert body["effective_seed_results_limit"] == 150
+    assert body["effective_reels_seed_results_limit"] == 150
+    # settings.crawl_default_results_limit is 10 (app/config.py); neither
+    # results_limit nor reels_results_limit was set on this target.
+    assert body["effective_results_limit"] == 10
+    assert body["effective_reels_results_limit"] == 10
+
+    worst_case_first_run = body["effective_seed_results_limit"] + body["effective_reels_seed_results_limit"]
+    assert worst_case_first_run == 300
+
+
 def test_patch_missing_target_is_404():
     client, _ = _client()
     resp = client.patch("/admin/crawl-targets/nosuch", json={"enabled": False})

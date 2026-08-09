@@ -491,6 +491,201 @@ class TestBudgetCapsTheEffectiveLimit:
         assert report["streams"]["posts"]["outcome"] != "skipped_budget"
 
 
+# ── reels-specific caps: their own fallback chain, never a new setting ──────
+# Posts and reels are already separate billed actor runs with independent
+# cursors, so one shared cap over-fetches the higher-volume stream and
+# starves the other. `reels_results_limit`/`reels_seed_results_limit` are
+# per-target overrides that fall back to the POSTS column, then the same
+# settings default posts would use — deliberately no `crawl_default_reels_*`
+# setting (three months of reels is far fewer items than three months of
+# posts, so the existing seed default will rarely bind on reels anyway).
+class TestReelsSpecificCaps:
+    def test_reels_seed_falls_back_to_the_posts_seed_cap_when_unset(self):
+        dao = _venue_dao()
+        dao.upsert_venue(Venue(venue_id="v1", venue_name="V1", venue_lat=-8.0, venue_lng=-34.9))
+        dao.set_venue_instagram(VenueInstagram(venue_id="v1", instagram_handle="reelsfallback1", status="found"))
+        dao.upsert_crawl_target("reelsfallback1", {
+            "kind": "venue", "cron": "0 22 * * *", "crawl_reels": True, "seed_results_limit": 77,
+        })
+        apify = _FakeApifyClient()
+        service = _service(dao, apify, _FakeBudgetDao())
+
+        _run(service.run_target("reelsfallback1"))
+
+        calls_by_type = {c["results_type"]: c["results_limit"] for c in apify.calls}
+        assert calls_by_type["reels"] == 77  # the POSTS seed cap, not the settings default (200)
+
+    def test_reels_seed_uses_its_own_override_over_the_posts_seed_cap(self):
+        dao = _venue_dao()
+        dao.upsert_venue(Venue(venue_id="v1", venue_name="V1", venue_lat=-8.0, venue_lng=-34.9))
+        dao.set_venue_instagram(VenueInstagram(venue_id="v1", instagram_handle="reelsoverride1", status="found"))
+        dao.upsert_crawl_target("reelsoverride1", {
+            "kind": "venue", "cron": "0 22 * * *", "crawl_reels": True,
+            "seed_results_limit": 77, "reels_seed_results_limit": 5,
+        })
+        apify = _FakeApifyClient()
+        service = _service(dao, apify, _FakeBudgetDao())
+
+        _run(service.run_target("reelsoverride1"))
+
+        calls_by_type = {c["results_type"]: c["results_limit"] for c in apify.calls}
+        assert calls_by_type["posts"] == 77   # posts untouched by the reels override
+        assert calls_by_type["reels"] == 5    # reels' own override wins
+
+    def test_reels_steady_state_falls_back_to_the_posts_cap_when_unset(self):
+        dao = _venue_dao()
+        dao.upsert_venue(Venue(venue_id="v1", venue_name="V1", venue_lat=-8.0, venue_lng=-34.9))
+        dao.set_venue_instagram(VenueInstagram(venue_id="v1", instagram_handle="reelsfallback2", status="found"))
+        dao.upsert_crawl_target("reelsfallback2", {
+            "kind": "venue", "cron": "0 22 * * *", "crawl_reels": True, "results_limit": 8,
+            "cursor_posts_at": datetime(2026, 8, 1, tzinfo=timezone.utc),
+            "cursor_reels_at": datetime(2026, 8, 1, tzinfo=timezone.utc),
+        })
+        apify = _FakeApifyClient()
+        service = _service(dao, apify, _FakeBudgetDao())
+
+        _run(service.run_target("reelsfallback2"))
+
+        calls_by_type = {c["results_type"]: c["results_limit"] for c in apify.calls}
+        assert calls_by_type["reels"] == 8  # the POSTS steady-state cap, not the settings default (10)
+
+    def test_reels_steady_state_uses_its_own_override_over_the_posts_cap(self):
+        dao = _venue_dao()
+        dao.upsert_venue(Venue(venue_id="v1", venue_name="V1", venue_lat=-8.0, venue_lng=-34.9))
+        dao.set_venue_instagram(VenueInstagram(venue_id="v1", instagram_handle="reelsoverride2", status="found"))
+        dao.upsert_crawl_target("reelsoverride2", {
+            "kind": "venue", "cron": "0 22 * * *", "crawl_reels": True,
+            "results_limit": 8, "reels_results_limit": 3,
+            "cursor_posts_at": datetime(2026, 8, 1, tzinfo=timezone.utc),
+            "cursor_reels_at": datetime(2026, 8, 1, tzinfo=timezone.utc),
+        })
+        apify = _FakeApifyClient()
+        service = _service(dao, apify, _FakeBudgetDao())
+
+        _run(service.run_target("reelsoverride2"))
+
+        calls_by_type = {c["results_type"]: c["results_limit"] for c in apify.calls}
+        assert calls_by_type["posts"] == 8
+        assert calls_by_type["reels"] == 3
+
+    def test_reels_falls_all_the_way_through_to_the_settings_default(self):
+        """Neither the reels column NOR the posts column is set — reels
+        must land on the exact same settings default posts would use."""
+        dao = _venue_dao()
+        dao.upsert_venue(Venue(venue_id="v1", venue_name="V1", venue_lat=-8.0, venue_lng=-34.9))
+        dao.set_venue_instagram(VenueInstagram(venue_id="v1", instagram_handle="reelsdefault", status="found"))
+        dao.upsert_crawl_target("reelsdefault", {"kind": "venue", "cron": "0 22 * * *", "crawl_reels": True})
+        apify = _FakeApifyClient()
+        service = _service(dao, apify, _FakeBudgetDao(), default_seed_results_limit=200)
+
+        _run(service.run_target("reelsdefault"))
+
+        calls_by_type = {c["results_type"]: c["results_limit"] for c in apify.calls}
+        assert calls_by_type["posts"] == 200
+        assert calls_by_type["reels"] == 200
+
+
+class TestPostsPathUnchangedByReelsCaps:
+    """The explicit regression the coordinator asked for: a target with NO
+    reels-specific overrides must produce EXACTLY the same posts request it
+    did before reels-specific caps existed — proven by setting reels
+    columns to values that would be obviously visible if they leaked into
+    the posts resolution."""
+
+    def test_posts_ignores_reels_columns_entirely_seed_case(self):
+        dao = _venue_dao()
+        dao.upsert_crawl_target("postsunaffected1", {
+            "kind": "venue", "cron": "0 22 * * *",
+            # No posts overrides; reels set to a very different, obviously
+            # distinguishable value that must NEVER reach the posts stream.
+            "reels_seed_results_limit": 999,
+        })
+        apify = _FakeApifyClient()
+        service = _service(dao, apify, _FakeBudgetDao(), default_seed_results_limit=200)
+
+        _run(service.run_target("postsunaffected1"))
+
+        assert apify.calls[0]["results_type"] == "posts"
+        assert apify.calls[0]["results_limit"] == 200  # the plain settings default, untouched
+
+    def test_posts_ignores_reels_columns_entirely_steady_state_case(self):
+        dao = _venue_dao()
+        dao.upsert_crawl_target("postsunaffected2", {
+            "kind": "venue", "cron": "0 22 * * *", "results_limit": 6,
+            "cursor_posts_at": datetime(2026, 8, 1, tzinfo=timezone.utc),
+            "reels_results_limit": 999,
+        })
+        apify = _FakeApifyClient()
+        service = _service(dao, apify, _FakeBudgetDao())
+
+        _run(service.run_target("postsunaffected2"))
+
+        assert apify.calls[0]["results_type"] == "posts"
+        assert apify.calls[0]["results_limit"] == 6  # its own cap, not the reels override
+
+    def test_resolve_results_limit_posts_output_is_identical_with_and_without_reels_columns_present(self):
+        """Directly against the pure resolver: adding/removing reels-only
+        keys on the target dict must never change what POSTS resolves to,
+        for both the seed and steady-state cases."""
+        from app.services.instagram_crawl_service import resolve_results_limit
+
+        config = CrawlServiceConfig(default_results_limit=10, default_seed_results_limit=200)
+        base_seed = {"handle": "h", "kind": "venue"}
+        with_reels_seed = {**base_seed, "reels_seed_results_limit": 1, "reels_results_limit": 2}
+        assert (
+            resolve_results_limit(base_seed, "posts", is_seed=True, config=config)
+            == resolve_results_limit(with_reels_seed, "posts", is_seed=True, config=config)
+            == 200
+        )
+
+        base_steady = {"handle": "h", "kind": "venue", "results_limit": 15}
+        with_reels_steady = {**base_steady, "reels_seed_results_limit": 1, "reels_results_limit": 2}
+        assert (
+            resolve_results_limit(base_steady, "posts", is_seed=False, config=config)
+            == resolve_results_limit(with_reels_steady, "posts", is_seed=False, config=config)
+            == 15
+        )
+
+
+# ── the budget IS re-read between streams within one run ────────────────────
+# Confirmed (not assumed, per the coordinator's instruction) by inspection of
+# `_run_stream`/`run_target`: the loop in `run_target` `await`s each stream
+# to completion before starting the next (no concurrency), and `_run_stream`
+# reads `self.budget_dao.get_month_count(...)` FRESH on every call — never a
+# snapshot taken once and shared. So a reels seed that runs after a posts
+# seed in the SAME `run_target` call sees the budget already reduced by
+# whatever posts just spent, and clamps accordingly. This test proves it
+# rather than trusting the reading of the code.
+async def test_the_reels_seed_sees_the_budget_already_spent_by_the_posts_seed_in_the_same_run():
+    dao = _venue_dao()
+    dao.upsert_venue(Venue(venue_id="v1", venue_name="V1", venue_lat=-8.0, venue_lng=-34.9))
+    dao.set_venue_instagram(VenueInstagram(venue_id="v1", instagram_handle="budgetsharedhandle", status="found"))
+    dao.upsert_crawl_target("budgetsharedhandle", {"kind": "venue", "cron": "0 22 * * *", "crawl_reels": True})
+
+    apify = _FakeApifyClient()
+    # Exactly 200 posts programmed so requesting the (unclamped) 200-seed
+    # cap returns exactly 200 results — making the budget arithmetic exact,
+    # not an upper bound.
+    apify.program("budgetsharedhandle", "posts", [
+        {"shortcode": f"p{i}", "timestamp": "2026-08-05T09:00:00.000Z", "is_pinned": False,
+         "caption": "", "image_urls": []}
+        for i in range(200)
+    ])
+    budget = _FakeBudgetDao()
+    budget.increment_month(budget.current_year_month_utc(NOW), 750)  # 250 left of 1000
+    service = _service(dao, apify, budget, monthly_result_budget=1000, default_seed_results_limit=200)
+
+    await service.run_target("budgetsharedhandle")
+
+    calls_by_type = {c["results_type"]: c["results_limit"] for c in apify.calls}
+    assert calls_by_type["posts"] == 200, "250 remaining >= 200 cap: posts is not reduced"
+    assert calls_by_type["reels"] == 50, (
+        "reels must see remaining=50 (250 - the 200 posts ACTUALLY spent), "
+        "not the pre-run snapshot of 250 — a stale snapshot would send 200 "
+        "here too and let the run spend 400 against only 250 available"
+    )
+
+
 def test_reels_and_posts_cursors_move_independently():
     dao = _venue_dao()
     dao.upsert_venue(Venue(venue_id="v1", venue_name="V1", venue_lat=-8.0, venue_lng=-34.9))
