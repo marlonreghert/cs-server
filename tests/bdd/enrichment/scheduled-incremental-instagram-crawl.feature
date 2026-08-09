@@ -13,7 +13,17 @@ Feature: Crawl Instagram targets on a schedule, incrementally
     Given a crawl target that has never been crawled
     When its scheduled crawl runs
     Then the scrape is bounded to the default three-month lookback
-    And the scrape is also bounded by the target's result cap
+    And the scrape is also bounded by the target's seed result cap
+
+  Scenario: A seed uses the seed cap even when a steady-state cap is also set
+    Given a crawl target with a steady-state cap but no cursor
+    When its scheduled crawl runs
+    Then the scrape is bounded by the seed cap, not the steady-state cap
+
+  Scenario: A target's own seed cap overrides the default
+    Given a crawl target with its own seed cap and no cursor
+    When its scheduled crawl runs
+    Then the scrape is bounded by that target's own seed cap
 
   Scenario: Resume an existing target from its cursor
     Given a crawl target whose newest seen post is known
@@ -92,10 +102,15 @@ Feature: Crawl Instagram targets on a schedule, incrementally
     Then no scrape is requested at all
     And the refusal is recorded
 
-  Scenario: Apply the per-run result cap alongside the date bound
-    Given a crawl target with a result cap
+  Scenario: Apply the steady-state result cap alongside the date bound
+    Given a crawl target with a known cursor and a steady-state result cap
     When its scheduled crawl runs
     Then the scrape carries both the date bound and the cap
+
+  Scenario: The remaining monthly budget caps an oversized request
+    Given the monthly result budget has less remaining than the target's cap
+    When its scheduled crawl runs
+    Then the scrape is capped to the remaining budget, not the full cap
 
   Scenario: Stop the whole cycle when Apify reports credit exhaustion
     Given several crawl targets are due

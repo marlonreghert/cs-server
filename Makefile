@@ -110,6 +110,7 @@ test-unit:
 		tests/test_blocked_venues_migration.py \
 		tests/test_engagement_blocked_venues.py \
 		tests/test_crawl_target_migration.py \
+		tests/test_crawl_target_seed_cap_migration.py \
 		tests/test_crawl_target_dao.py \
 		tests/test_instagram_crawl_service.py \
 		tests/test_crawl_schedule_sync.py \

@@ -565,11 +565,26 @@ class Settings(BaseSettings):
     # in Apify's own relative-date syntax ("1 day", "2 months", "3 years") so
     # it can be sent to `onlyPostsNewerThan` unparsed.
     crawl_default_initial_lookback: str = "3 months"
-    # §C: the per-run result cap a target falls back to when it sets none of
-    # its own — applied ALONGSIDE the date bound, never instead of it, so a
-    # high-volume account's first-ever seed can't spend past a known worst
-    # case regardless of how far back the date bound reaches.
+    # §C: the STEADY-STATE per-run result cap a target falls back to when it
+    # sets none of its own, applied on a run whose relevant cursor is
+    # already set (not a seed) — ALONGSIDE the date bound, never instead of
+    # it. Deliberately small: steady state is a venue posting a handful of
+    # times between two scheduled fires, and this cap exists to stop a
+    # prolific account from running away, not to bound history depth.
     crawl_default_results_limit: int = 10
+    # The operator's own words: "a default config to get a huge amount of
+    # posts starting from 3 months ago." A SEPARATE cap from the one above
+    # — applied ONLY when the relevant cursor (posts or reels,
+    # independently) is null, i.e. exactly once per target per stream, ever.
+    # Steady state wants a SMALL cap (a handful of posts between fires);
+    # the seed wants a LARGE one (depth, once). One cap cannot serve both:
+    # a shared value of 10 was silently undoing the 3-month date bound's own
+    # job — a venue posting daily has ~90 posts in that window, and the seed
+    # was taking the first 10. 200 is ~$0.54 at $0.0027/result — a starting
+    # point pending operator confirmation, not a fact, but the underlying
+    # SEPARATION from the steady-state cap is the fix regardless of the
+    # exact number.
+    crawl_default_seed_results_limit: int = 200
     # §F, the direct successor to docs/venue-retrieval-storage.md §3's
     # retired "No cron" guarantee: a hard ceiling on total results (posts +
     # reels combined) the scheduled crawl may spend in one calendar month,

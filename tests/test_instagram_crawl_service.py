@@ -356,6 +356,141 @@ def test_budget_gate_refuses_before_the_client_is_called():
     assert report["streams"]["posts"]["outcome"] == "skipped_budget"
 
 
+# ── §C split in two: the seed cap vs the steady-state cap ───────────────────
+# A brand-new target with a null cursor used to be capped by the SAME small
+# `results_limit` (default 10) a steady-state run uses — silently undoing
+# the 3-month seed date bound's own job (a venue posting daily has ~90 posts
+# in that window). `seed_results_limit` (default 200) is now a SEPARATE
+# setting, applied ONLY when the relevant cursor (posts/reels, independently)
+# is still null.
+class TestSeedVsSteadyStateCap:
+    def test_a_null_cursor_uses_the_seed_cap_not_the_steady_state_default(self):
+        dao = _venue_dao()
+        dao.upsert_crawl_target("seedtarget", {"kind": "venue", "cron": "0 22 * * *"})
+        apify = _FakeApifyClient()
+        service = _service(dao, apify, _FakeBudgetDao(), default_seed_results_limit=200)
+
+        _run(service.run_target("seedtarget"))
+
+        assert apify.calls[0]["results_limit"] == 200
+
+    def test_a_null_cursor_uses_the_targets_own_seed_cap_over_the_default(self):
+        dao = _venue_dao()
+        dao.upsert_crawl_target(
+            "ownseedtarget", {"kind": "venue", "cron": "0 22 * * *", "seed_results_limit": 42},
+        )
+        apify = _FakeApifyClient()
+        service = _service(dao, apify, _FakeBudgetDao())
+
+        _run(service.run_target("ownseedtarget"))
+
+        assert apify.calls[0]["results_limit"] == 42
+
+    def test_a_set_cursor_uses_the_steady_state_cap_not_the_seed_default(self):
+        dao = _venue_dao()
+        dao.upsert_crawl_target("steadytarget", {
+            "kind": "venue", "cron": "0 22 * * *",
+            "cursor_posts_at": datetime(2026, 8, 1, tzinfo=timezone.utc),
+        })
+        apify = _FakeApifyClient()
+        service = _service(
+            dao, apify, _FakeBudgetDao(), default_results_limit=10, default_seed_results_limit=200,
+        )
+
+        _run(service.run_target("steadytarget"))
+
+        assert apify.calls[0]["results_limit"] == 10
+
+    def test_a_targets_own_steady_state_cap_is_never_used_for_its_seed(self):
+        """The core regression: a target with an explicit STEADY-STATE
+        `results_limit` but no cursor yet must still use the SEED cap for
+        its first crawl — the two settings are independent, not one
+        falling back to the other."""
+        dao = _venue_dao()
+        dao.upsert_crawl_target(
+            "mixedcaptarget", {"kind": "venue", "cron": "0 22 * * *", "results_limit": 5},
+        )
+        apify = _FakeApifyClient()
+        service = _service(dao, apify, _FakeBudgetDao(), default_seed_results_limit=200)
+
+        _run(service.run_target("mixedcaptarget"))
+
+        assert apify.calls[0]["results_limit"] == 200
+
+    def test_posts_and_reels_seed_independently_by_their_own_cursor(self):
+        """A target whose POSTS stream already has a cursor but whose REELS
+        stream has never run must seed reels (large cap) while posts stays
+        steady-state (small cap) — the seed/steady split is per-stream, the
+        same way the cursor itself already is."""
+        dao = _venue_dao()
+        dao.upsert_venue(Venue(venue_id="v1", venue_name="V1", venue_lat=-8.0, venue_lng=-34.9))
+        dao.set_venue_instagram(VenueInstagram(venue_id="v1", instagram_handle="mixedstreamtarget", status="found"))
+        dao.upsert_crawl_target("mixedstreamtarget", {
+            "kind": "venue", "cron": "0 22 * * *", "crawl_reels": True,
+            "cursor_posts_at": datetime(2026, 8, 1, tzinfo=timezone.utc),
+            # cursor_reels_at intentionally left null.
+        })
+        apify = _FakeApifyClient()
+        service = _service(
+            dao, apify, _FakeBudgetDao(), default_results_limit=10, default_seed_results_limit=200,
+        )
+
+        _run(service.run_target("mixedstreamtarget"))
+
+        calls_by_type = {c["results_type"]: c["results_limit"] for c in apify.calls}
+        assert calls_by_type["posts"] == 10
+        assert calls_by_type["reels"] == 200
+
+
+# ── the monthly budget as an effective cap, not just a refusal ─────────────
+# §F's budget check used to be pure refusal ("is there any left at all?"),
+# which left a hole: a 200-result seed cap against, say, 50 remaining could
+# overshoot to 200 before anything noticed. Refusing outright instead
+# (remaining < cap) was considered and rejected — a target with 150 left
+# would never seed at all, worse than seeding 150 deep — so the remaining
+# budget becomes the EFFECTIVE cap for that call instead.
+class TestBudgetCapsTheEffectiveLimit:
+    def test_remaining_budget_below_the_cap_reduces_the_request(self):
+        dao = _venue_dao()
+        dao.upsert_crawl_target("cappedbybudget", {"kind": "venue", "cron": "0 22 * * *"})
+        apify = _FakeApifyClient()
+        budget = _FakeBudgetDao()
+        budget.increment_month(budget.current_year_month_utc(NOW), 950)  # 50 left of 1000
+        service = _service(dao, apify, budget, monthly_result_budget=1000, default_seed_results_limit=200)
+
+        _run(service.run_target("cappedbybudget"))
+
+        assert apify.calls[0]["results_limit"] == 50
+
+    def test_remaining_budget_at_or_above_the_cap_does_not_reduce_it(self):
+        dao = _venue_dao()
+        dao.upsert_crawl_target("plentyofbudget", {"kind": "venue", "cron": "0 22 * * *"})
+        apify = _FakeApifyClient()
+        budget = _FakeBudgetDao()
+        budget.increment_month(budget.current_year_month_utc(NOW), 800)  # 200 left of 1000
+        service = _service(dao, apify, budget, monthly_result_budget=1000, default_seed_results_limit=200)
+
+        _run(service.run_target("plentyofbudget"))
+
+        assert apify.calls[0]["results_limit"] == 200  # exactly the cap, not reduced further
+
+    def test_exactly_one_remaining_still_calls_the_actor_for_one(self):
+        """The boundary just above the existing `remaining <= 0` refusal —
+        1 remaining must still attempt a call (for 1), never silently
+        collapse into the same refusal as 0."""
+        dao = _venue_dao()
+        dao.upsert_crawl_target("oneleft", {"kind": "venue", "cron": "0 22 * * *"})
+        apify = _FakeApifyClient()
+        budget = _FakeBudgetDao()
+        budget.increment_month(budget.current_year_month_utc(NOW), 999)  # 1 left of 1000
+        service = _service(dao, apify, budget, monthly_result_budget=1000)
+
+        report = _run(service.run_target("oneleft"))
+
+        assert apify.calls[0]["results_limit"] == 1
+        assert report["streams"]["posts"]["outcome"] != "skipped_budget"
+
+
 def test_reels_and_posts_cursors_move_independently():
     dao = _venue_dao()
     dao.upsert_venue(Venue(venue_id="v1", venue_name="V1", venue_lat=-8.0, venue_lng=-34.9))

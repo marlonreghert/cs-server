@@ -862,6 +862,10 @@ class InMemoryRdsVenueStore:
                 # opt-out, never a silent inherited cheap mode.
                 "classify_images": True,
                 "initial_lookback": None, "results_limit": None,
+                # NULL means "use settings.crawl_default_seed_results_limit"
+                # — the SEPARATE, larger cap applied only on a run whose
+                # relevant cursor is still null (migration 0031).
+                "seed_results_limit": None,
                 "cursor_posts_at": None, "cursor_reels_at": None,
                 "last_run_at": None, "last_run_results": 0,
                 "last_run_cost_usd": None, "consecutive_failures": 0,

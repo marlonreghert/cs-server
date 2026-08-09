@@ -754,6 +754,7 @@ class Container:
                     overlap_hours=settings.crawl_cursor_overlap_hours,
                     default_initial_lookback=settings.crawl_default_initial_lookback,
                     default_results_limit=settings.crawl_default_results_limit,
+                    default_seed_results_limit=settings.crawl_default_seed_results_limit,
                     monthly_result_budget=settings.crawl_monthly_result_budget,
                     max_consecutive_failures=settings.crawl_max_consecutive_failures,
                     result_cost_usd=settings.apify_instagram_post_cost_usd,

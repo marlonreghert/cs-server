@@ -1470,15 +1470,16 @@ class RdsVenueStore:
     _CRAWL_TARGET_KINDS = ("venue", "promoter")
     _CRAWL_TARGET_COLUMNS = (
         "handle", "kind", "enabled", "cron", "timezone", "crawl_reels",
-        "classify_images", "initial_lookback", "results_limit",
+        "classify_images", "initial_lookback", "results_limit", "seed_results_limit",
         "cursor_posts_at", "cursor_reels_at", "last_run_at", "last_run_results",
         "last_run_cost_usd", "consecutive_failures", "notes",
     )
     _CRAWL_TARGET_SELECT = (
         "SELECT handle, kind, enabled, cron, timezone, crawl_reels, "
-        "classify_images, initial_lookback, results_limit, cursor_posts_at, "
-        "cursor_reels_at, last_run_at, last_run_results, last_run_cost_usd, "
-        "consecutive_failures, notes, created_at, updated_at FROM events.crawl_target"
+        "classify_images, initial_lookback, results_limit, seed_results_limit, "
+        "cursor_posts_at, cursor_reels_at, last_run_at, last_run_results, "
+        "last_run_cost_usd, consecutive_failures, notes, created_at, updated_at "
+        "FROM events.crawl_target"
     )
 
     def get_crawl_target(self, handle: str) -> Optional[dict]:

@@ -144,9 +144,19 @@ catalog.** It is asked of the most recent *existing* partition instead.
      ACTUAL billed result count — never predicted from the requested cap,
      and never checked only after the call returns. On exhaustion, scheduled
      crawling stops and says so; an operator-triggered run still refuses too.
-  2. **A per-run result cap** (`results_limit`), always applied alongside the
-     date bound — the worst case for a brand-new target's first crawl is
-     knowable in advance because of this cap, not despite it.
+     When the budget remaining is smaller than the cap a run is about to
+     request, the remaining amount becomes the effective cap for that call
+     (never the other way — the cap never raises what the budget allows) —
+     a target with 50 left is capped to 50, not refused outright, so it
+     still makes partial progress instead of never running at all.
+  2. **Two per-run result caps, not one**, both applied alongside the date
+     bound: `results_limit` (steady state — small, so a busy account cannot
+     run away between two scheduled fires) and `seed_results_limit`
+     (applied ONLY the one time a target's cursor is still null — large,
+     because a seed's whole purpose is depth). A single shared cap was
+     silently undoing the 3-month seed date bound's own job by taking only
+     its first 10 results; the worst case for a brand-new target's first
+     crawl is still knowable in advance, now from the seed cap specifically.
   3. **The cursor** (`cursor_posts_at` / `cursor_reels_at`, one per stream) —
      an unchanged target's next crawl asks Apify for results newer than its
      own last-seen post and gets (and costs) nothing.
