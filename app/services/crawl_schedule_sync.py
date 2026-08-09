@@ -41,7 +41,7 @@ from app.metrics import (
     JOB_LOCK_REJECTED_TOTAL,
 )
 from app.services import job_lock
-from app.services.instagram_crawl_service import build_cron_trigger
+from app.services.instagram_crawl_service import build_cron_trigger, lock_name_for
 
 logger = logging.getLogger(__name__)
 
@@ -55,12 +55,13 @@ def job_id_for(handle: str) -> str:
     return f"{JOB_ID_PREFIX}{handle}"
 
 
-def lock_name_for(handle: str) -> str:
-    """Per-handle lock namespace, distinct from `job_lock.LOCKED_JOB_NAMES`'s
-    fixed 4 names (those cover a different, static set of jobs). Guarantees
-    §D's "two crawls of the same handle can never overlap" while leaving
-    different handles free to run concurrently."""
-    return f"crawl_target:{handle}"
+# `lock_name_for` is imported from instagram_crawl_service.py, NOT redefined
+# here — `ScheduledInstagramCrawlService.start_run` (the admin run-now
+# endpoint) acquires the exact same per-handle lock this module's scheduled
+# jobs do, so a scheduled fire and a manual trigger of the same handle can
+# never overlap. Two functions computing "the same" name independently is
+# exactly how that guarantee would silently drift apart; see that function's
+# own docstring.
 
 
 class CrawlScheduleSync:

@@ -52,6 +52,7 @@ services already use for the posts it already has in hand — never re-fetching:
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from dataclasses import dataclass
@@ -66,6 +67,7 @@ from app.metrics import (
     CRAWL_RESULTS_TOTAL,
     CRAWL_RUNS_TOTAL,
 )
+from app.services import job_lock
 from app.services.archive_sources import SOURCE_INSTAGRAM_POSTS, _parse_post_timestamp
 from app.services.event_venue_resolution import build_handle_index, build_venue_catalog
 from app.services.instagram_handle_sources import normalize_handle
@@ -78,6 +80,20 @@ KIND_PROMOTER = "promoter"
 STREAM_POSTS = "posts"
 STREAM_REELS = "reels"
 
+
+def lock_name_for(handle: str) -> str:
+    """Per-handle concurrency lock — the SAME namespace both `crawl_
+    schedule_sync.py`'s per-target APScheduler job and
+    `ScheduledInstagramCrawlService.start_run` (the admin run-now endpoint)
+    acquire, so a scheduled fire and a manual trigger of the SAME handle can
+    never run concurrently. §D requires "two crawls of the same handle can
+    never overlap"; #164 gave the scheduler that guarantee but not run-now,
+    which called `run_target` directly with no lock at all — a real defect
+    this closes. Defined HERE (not in crawl_schedule_sync.py, which imports
+    it from this module) so there is exactly one function computing this
+    name, never two that could drift apart."""
+    return f"crawl_target:{handle}"
+
 OUTCOME_SUCCESS = "success"
 OUTCOME_EMPTY = "empty"
 OUTCOME_FAILED = "failed"
@@ -86,6 +102,13 @@ OUTCOME_SKIPPED_DISABLED = "skipped_disabled"
 OUTCOME_SKIPPED_FAILURES = "skipped_failures"
 OUTCOME_SKIPPED_BUDGET = "skipped_budget"
 OUTCOME_NOT_FOUND = "not_found"
+# `start_run`-only reason: the admin run-now endpoint's fast refusal when
+# the per-handle lock (`lock_name_for`) is already held — by a scheduled
+# fire or by another run-now call for the same handle. Never an `OUTCOME_*`
+# because `run_target`/`_run_stream` have no concept of "the lock" at all;
+# they run WHILE the lock is held (by whichever caller acquired it), they
+# never check it themselves.
+REASON_ALREADY_RUNNING = "already_running"
 
 
 class InvalidCrawlTargetConfig(ValueError):
@@ -826,3 +849,90 @@ class ScheduledInstagramCrawlService:
                 stopped_early = True
                 break
         return {"targets": reports, "stopped_early": stopped_early}
+
+    # ── admin run-now: backgrounded, locked, never blocks the caller ────────
+    def is_running(self, handle: str) -> bool:
+        """Whether a crawl of this handle is in flight right now — scheduled
+        OR admin-triggered, since both hold the SAME lock (`lock_name_for`).
+        Backs `CrawlTargetOut.running` in the admin API, the console's live
+        indicator (polled the same way the Jobs page already polls
+        `job.running`)."""
+        return job_lock.is_running(lock_name_for(handle))
+
+    def _start_refusal(self, target: dict) -> Optional[str]:
+        """Whether `start_run` must refuse before doing anything, checked
+        while its lock is already held so the caller can release it and
+        answer immediately — never starting a background task that would
+        only discover the same refusal itself a moment later.
+
+        Deliberately NOT shared with `run_target`'s own inline enabled/
+        failure-threshold checks or `_run_stream`'s own budget check: this
+        is an ADDITIONAL fast-path gate for the synchronous response
+        `start_run` owes its caller, not a replacement for either existing,
+        already-tested gate — refactoring them together risked changing
+        `run_target`'s tested outcome/streams shape for no behavioral gain.
+        """
+        if not target.get("enabled", True):
+            return OUTCOME_SKIPPED_DISABLED
+        if int(target.get("consecutive_failures") or 0) >= self.config.max_consecutive_failures:
+            return OUTCOME_SKIPPED_FAILURES
+        now = self._now()
+        year_month = self.budget_dao.current_year_month_utc(now)
+        spent = self.budget_dao.get_month_count(year_month)
+        if (self.config.monthly_result_budget - spent) <= 0:
+            return OUTCOME_SKIPPED_BUDGET
+        return None
+
+    async def start_run(self, handle: str) -> dict:
+        """Starts `handle`'s crawl in the BACKGROUND and returns
+        immediately — never blocks on the crawl finishing.
+
+        Why this exists (found chasing an operator request for an
+        immediate first crawl after setting a cron): `run_crawl_target_now`
+        used to await `run_target` inline. A 3-month seed — scrape,
+        download, classify, chain extraction — takes minutes; vibes_bot's
+        admin proxy times out at 10s and Caddy at 180s. A synchronous call
+        either times out while the crawl keeps running server-side (the
+        operator sees a failure, clicks again, and now races their OWN
+        first click) or simply cannot be shown as "in progress" at all. It
+        also took NO lock, so a run-now could race a scheduled fire of the
+        same handle — two Apify bills, two cursor writes, last-write-wins
+        on a field whose whole purpose is to never move backwards. Both are
+        closed here: the SAME per-handle lock the scheduler uses is held
+        for the crawl's entire duration, and every gate that must run
+        before anything is spent (enabled, failure threshold, the monthly
+        budget) runs BEFORE the background task is even created — a
+        backgrounded start must never become a way around them.
+
+        Returns `{"started": True}` once the lock is held and the
+        background task is scheduled, or `{"started": False, "reason":
+        ...}` when it refuses to start at all (`not_found`,
+        `already_running`, `skipped_disabled`, `skipped_failures`,
+        `skipped_budget`) — a reason string the caller can surface
+        verbatim. Completion stays observable through the fields
+        `run_target` already writes: `last_run_at`, `last_run_results`,
+        `last_run_cost_usd`, `consecutive_failures`.
+        """
+        target = self.venue_dao.get_crawl_target(handle)
+        if target is None:
+            return {"started": False, "reason": OUTCOME_NOT_FOUND}
+
+        lock_name = lock_name_for(handle)
+        if not job_lock.try_acquire(lock_name):
+            return {"started": False, "reason": REASON_ALREADY_RUNNING}
+
+        refusal = self._start_refusal(target)
+        if refusal is not None:
+            job_lock.release(lock_name)
+            return {"started": False, "reason": refusal}
+
+        async def _run_and_release() -> None:
+            try:
+                await self.run_target(handle)
+            except Exception as e:
+                logger.error(f"[InstagramCrawl] backgrounded run-now failed for {handle}: {e}")
+            finally:
+                job_lock.release(lock_name)
+
+        asyncio.create_task(_run_and_release())
+        return {"started": True}
