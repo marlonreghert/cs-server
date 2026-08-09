@@ -206,6 +206,19 @@ class VenueRepository(RedisVenueDAO):
     def list_event_venue_link_candidates(self, event_id: str):
         return self.rds_store.list_event_venue_link_candidates(event_id)
 
+    # ── events.crawl_target (plans/260809_scheduled-incremental-instagram-crawl.md) ──
+    def get_crawl_target(self, handle: str):
+        return self.rds_store.get_crawl_target(handle)
+
+    def list_crawl_targets(self, *, enabled=None, kind=None):
+        return self.rds_store.list_crawl_targets(enabled=enabled, kind=kind)
+
+    def upsert_crawl_target(self, handle: str, fields: dict):
+        return self.rds_store.upsert_crawl_target(handle, fields)
+
+    def delete_crawl_target(self, handle: str) -> bool:
+        return self.rds_store.delete_crawl_target(handle)
+
     # ── writes: RDS-only — the projector is the sole Redis writer ────────────────
     # ── core venue ────────────────────────────────────────────────────────────
     def upsert_venue(self, venue) -> None:

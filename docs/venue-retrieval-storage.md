@@ -127,7 +127,33 @@ catalog.** It is asked of the most recent *existing* partition instead.
   bounds the fetch, so photos the venue cap would discard are never downloaded.
   The venue cap always wins.
 - `dry_run` — selection + estimate, **zero calls, nothing written**
-- **No cron.** Operator-triggered only, so steady-state spend is $0.
+- `VenuePhotoArchiveService.run()` itself is still **operator-triggered only** —
+  nothing in this section changed for it.
+- **"No cron" is retired for Instagram, replaced, not deleted.** This bullet
+  used to read *"No cron. Operator-triggered only, so steady-state spend is
+  $0."* That was correct only because there was no cursor: a scheduled run
+  would have re-bought the whole catalog on every tick. It no longer holds —
+  `events.crawl_target` (plans/260809_scheduled-incremental-instagram-crawl.md)
+  now schedules the incremental Instagram posts/reels crawl
+  (`app/services/instagram_crawl_service.py`, a SEPARATE service from
+  `VenuePhotoArchiveService` above) to run unattended, per target. Its
+  replacement guarantees, checked in the same before-the-fetch position this
+  section's two orderings already require:
+  1. **A hard monthly result budget** (`crawl_monthly_result_budget`),
+     checked BEFORE every scheduled Apify call and decremented by each run's
+     ACTUAL billed result count — never predicted from the requested cap,
+     and never checked only after the call returns. On exhaustion, scheduled
+     crawling stops and says so; an operator-triggered run still refuses too.
+  2. **A per-run result cap** (`results_limit`), always applied alongside the
+     date bound — the worst case for a brand-new target's first crawl is
+     knowable in advance because of this cap, not despite it.
+  3. **The cursor** (`cursor_posts_at` / `cursor_reels_at`, one per stream) —
+     an unchanged target's next crawl asks Apify for results newer than its
+     own last-seen post and gets (and costs) nothing.
+  4. **Scheduling stays opt-in per target, never catalog-wide.** One pass at
+     10 posts across every Instagram handle in the catalog today is ~$30 —
+     six times the operator's balance — so nothing schedules itself; an
+     operator creates each `crawl_target` row explicitly.
 
 ---
 

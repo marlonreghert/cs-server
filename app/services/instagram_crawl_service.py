@@ -1,0 +1,595 @@
+"""Scheduled, incremental Instagram crawling — one target per Instagram
+handle, resuming from a cursor instead of re-scraping the whole feed every
+time. See plans/260809_scheduled-incremental-instagram-crawl.md.
+
+Turns event crawling from an operator-triggered, full-re-scrape action
+(`PromoterCrawlService.run` / `VenuePhotoArchiveService.run` with the
+`instagram_posts` source, both still exactly as they were) into a scheduled
+one: each `events.crawl_target` (§A) carries its own cron, its own cursor
+per stream (§B posts, §E reels), and its own reels flag, so an unchanged
+target costs nothing and a busy one is still bounded by its own result cap
+and the shared monthly budget (§F).
+
+## Why this does not call `PromoterCrawlService.run()` / `VenuePhotoArchive-
+Service.run()` for the actual fetch
+
+Both of those re-derive their OWN eligibility (an active `events.
+promoter_account` row; the archive's own venue selection + skip-before-spend
+logic) and would either re-fetch from Apify a second time (double-billing
+the exact posts this module already paid for) or silently skip a
+`crawl_target` whose promoter isn't ALSO marked `active` in the separate
+promoter registry — which the plan is explicit is a DIFFERENT concern
+(`events.promoter_account` answers "is this account worth crawling";
+`events.crawl_target` answers "when and from where do we crawl it"). So this
+module owns the fetch (bound + cursor + budget + pinned-post handling)
+itself, then reuses the SAME low-level archiving/extraction primitives those
+services already use for the posts it already has in hand — never re-fetching:
+
+  - venue kind: writes photos + a per-venue manifest through the same
+    `MediaArchiveStore.put_image`/`put_manifest` calls
+    `archive_sources._fetch_instagram` uses, then calls the REAL,
+    unmodified `EventExtractionService.run()` scoped to just this handle's
+    venue(s) via its existing `eligibility.mode="venue_ids"` — the exact
+    integration point `admin_events_router`'s manual-trigger config already
+    exposes; nothing new is invented on the extraction side.
+  - promoter kind: calls the injected `PromoterCrawlService` instance's own
+    `_archive_post_images`/`_process_post` — the SAME per-post units its
+    `run()` loop calls, just fed this module's already-fetched, already-
+    cursor-bounded posts instead of letting `run()` fetch and gate them
+    again. These are read-only over `self` (media_store/downloader/
+    openai_client/venue_dao), so sharing the container's singleton instance
+    across concurrently-running targets is safe.
+"""
+from __future__ import annotations
+
+import logging
+import re
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
+from typing import Optional
+
+from app.api.apify_instagram_client import ApifyCreditExhaustedError
+from app.metrics import (
+    CRAWL_BUDGET_REMAINING,
+    CRAWL_CURSOR_AGE_SECONDS,
+    CRAWL_RESULTS_TOTAL,
+    CRAWL_RUNS_TOTAL,
+)
+from app.services.archive_sources import SOURCE_INSTAGRAM_POSTS, _parse_post_timestamp
+from app.services.event_venue_resolution import build_handle_index, build_venue_catalog
+from app.services.instagram_handle_sources import normalize_handle
+from app.services.venue_photo_archive_service import new_run_id, run_prefix
+
+logger = logging.getLogger(__name__)
+
+KIND_VENUE = "venue"
+KIND_PROMOTER = "promoter"
+STREAM_POSTS = "posts"
+STREAM_REELS = "reels"
+
+OUTCOME_SUCCESS = "success"
+OUTCOME_EMPTY = "empty"
+OUTCOME_FAILED = "failed"
+OUTCOME_CREDIT_EXHAUSTED = "credit_exhausted"
+OUTCOME_SKIPPED_DISABLED = "skipped_disabled"
+OUTCOME_SKIPPED_FAILURES = "skipped_failures"
+OUTCOME_SKIPPED_BUDGET = "skipped_budget"
+OUTCOME_NOT_FOUND = "not_found"
+
+
+class InvalidCrawlTargetConfig(ValueError):
+    """A crawl target write failed validation (e.g. an unparseable crontab)
+    — raised at WRITE time by `validate_crontab`, never discovered later at
+    fire time."""
+
+
+def validate_crontab(cron: str) -> None:
+    """Reject a malformed crontab string immediately, at write time — the
+    unit test plan's own requirement. Reuses APScheduler's own parser
+    (already a dependency, already what `main.py` registers every cron job
+    through) rather than a second hand-rolled validator; the trigger object
+    it builds is discarded, this call is for its side effect of raising on a
+    bad string."""
+    from apscheduler.triggers.cron import CronTrigger
+
+    try:
+        CronTrigger.from_crontab(cron)
+    except Exception as e:
+        raise InvalidCrawlTargetConfig(f"invalid crontab {cron!r}: {e}") from e
+
+
+def _as_utc_dt(value) -> Optional[datetime]:
+    """A cursor value as an aware UTC datetime, however it comes back
+    (a real `datetime` from SQLAlchemy/the in-memory fake, or an ISO string
+    read back through a JSON boundary such as the admin API). None passes
+    through as None; an unparseable string returns None rather than raising
+    — a corrupt cursor must not crash the crawl, only be treated as absent
+    (falling back to the seed-lookback path, the same as a brand-new
+    target)."""
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+    if isinstance(value, str):
+        try:
+            text = value.replace("Z", "+00:00")
+            dt = datetime.fromisoformat(text)
+            return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
+        except ValueError:
+            return None
+    return None
+
+
+def _format_utc(dt: datetime) -> str:
+    """`onlyPostsNewerThan` in the exact ISO-8601 UTC shape Apify's own
+    dataset items use (verified live in the plan's Step 0 probe:
+    `2026-08-03T14:36:36.000Z`) — sent back in the same shape it is read in,
+    so nothing about this value is ever assumed rather than round-tripped."""
+    dt = dt.astimezone(timezone.utc)
+    return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+_RELATIVE_LOOKBACK_RE = re.compile(
+    r"^\s*(\d+)\s*(day|days|month|months|year|years)\s*$", re.IGNORECASE
+)
+_RELATIVE_LOOKBACK_UNIT_DAYS = {"day": 1, "month": 30, "year": 365}
+
+
+def _parse_relative_lookback(text: str, now: datetime) -> Optional[datetime]:
+    """Best-effort local approximation of Apify's own relative-date parsing
+    ("3 months" etc, the format `initial_lookback` is stored in and sent to
+    the actor UNPARSED). Used ONLY to compute a local cutoff for the pinned-
+    post drop (§G) — never sent anywhere — so a 30/365-day-per-month/year
+    approximation is fine: Apify computes the REAL filter itself from the
+    same string. An unparseable string returns None (no local cutoff; §G's
+    drop is skipped for that stream rather than guessing)."""
+    if not text:
+        return None
+    m = _RELATIVE_LOOKBACK_RE.match(text)
+    if not m:
+        return None
+    n = int(m.group(1))
+    unit = m.group(2).lower().rstrip("s")
+    days = _RELATIVE_LOOKBACK_UNIT_DAYS.get(unit)
+    if days is None:
+        return None
+    return now - timedelta(days=n * days)
+
+
+@dataclass(frozen=True)
+class CrawlBound:
+    """What one stream's fetch is bounded by. `actor_value` is exactly what
+    is sent as `onlyPostsNewerThan`; `cutoff_at` is this module's own best-
+    effort absolute UTC cutoff for the SAME bound, used only to decide
+    whether a pinned post (§G) is older than what was requested — never sent
+    to Apify itself."""
+
+    actor_value: str
+    cutoff_at: Optional[datetime]
+
+
+def compute_bound(
+    cursor: Optional[datetime], *, overlap_hours: float, lookback_text: str, now: datetime,
+) -> CrawlBound:
+    """§B (cursor path) / §C (seed path).
+
+    A target WITH a cursor sends `cursor - overlap`, always UTC, always an
+    absolute timestamp — never the run's wall clock (§B: the actor filters
+    in UTC, the scheduler fires in Recife time, and Instagram's own
+    timestamps lag publication; a wall-clock cursor silently and PERMANENTLY
+    drops any post that lands inside that gap).
+
+    A target with NO cursor (brand new, or a stream that has never
+    succeeded) sends its configured (or default) lookback UNPARSED, in
+    Apify's own relative-date syntax — never converted to an absolute date
+    on this side, so Apify's own "now" (not this process's) is what the
+    seed window is actually measured from.
+    """
+    if cursor is not None:
+        cutoff = cursor - timedelta(hours=overlap_hours)
+        return CrawlBound(actor_value=_format_utc(cutoff), cutoff_at=cutoff)
+    return CrawlBound(
+        actor_value=lookback_text, cutoff_at=_parse_relative_lookback(lookback_text, now),
+    )
+
+
+def _split_kept_and_dropped(posts: list[dict], cutoff_at: Optional[datetime]) -> tuple[list[dict], int]:
+    """§G: a post is dropped when it is PINNED (the only documented way a
+    post bypasses `onlyPostsNewerThan` at all) AND older than our own
+    cutoff for this bound. A non-pinned post is never dropped here — the
+    actor's own filter already bounded it (mod the deliberate overlap). An
+    unparseable/missing timestamp is KEPT, not dropped — mirrors this
+    repo's existing "a bad value never disqualifies, it just sorts/behaves
+    conservatively" convention (`archive_sources._sort_posts_newest_first`).
+    Returns (kept, dropped_count) — the count is what the plan requires be
+    recorded even though the post itself is discarded."""
+    if cutoff_at is None:
+        return list(posts), 0
+    kept: list[dict] = []
+    dropped = 0
+    for post in posts:
+        ts = _parse_post_timestamp(post.get("timestamp"))
+        if post.get("is_pinned") and ts is not None and ts < cutoff_at:
+            dropped += 1
+            continue
+        kept.append(post)
+    return kept, dropped
+
+
+def _newest_timestamp(posts: list[dict]) -> Optional[datetime]:
+    """§B: the cursor is the newest POST timestamp among what was actually
+    kept — never the run's wall clock, and never influenced by array order
+    (a batch can return out of order; this is a max, not "the last one")."""
+    best: Optional[datetime] = None
+    for post in posts:
+        ts = _parse_post_timestamp(post.get("timestamp"))
+        if ts is not None and (best is None or ts > best):
+            best = ts
+    return best
+
+
+def group_venue_ids_by_handle(instagram_handles: dict[str, str]) -> dict[str, list[str]]:
+    """Reverses `venue_id -> instagram_handle` (RdsVenueStore.
+    list_instagram_handles) into `normalized_handle -> [venue_id, ...]`.
+
+    Deliberately NOT `event_venue_resolution.build_handle_index`, which
+    collapses to ONE winning venue_id per handle (fine for its own job: the
+    promoter resolution ladder picks a single best venue). This feature's
+    whole reason to key `crawl_target` on the handle rather than the
+    venue_id is the 1,114-handle-rows/1,066-distinct-handles gap — 48
+    handles are shared by two venue rows — so archiving/extraction chaining
+    for a `kind='venue'` target must reach EVERY venue currently pointing at
+    that handle, not just one."""
+    out: dict[str, list[str]] = {}
+    for venue_id, raw_handle in (instagram_handles or {}).items():
+        handle = normalize_handle(raw_handle)
+        if not handle:
+            continue
+        out.setdefault(handle, []).append(venue_id)
+    for ids in out.values():
+        ids.sort()
+    return out
+
+
+@dataclass
+class _ChainReport:
+    archived: int = 0
+    extracted: bool = False
+
+
+class InstagramCrawlChainer:
+    """§H: after a crawl that returned new posts, archive them and run
+    extraction — "nothing new is invented: the chain calls the same
+    services the operator's manual sequence calls today, in the same
+    order." See the module docstring for exactly which existing pieces each
+    kind reuses and why `.run()` itself is not the reuse point.
+
+    Every collaborator is optional and independently dependency-aware,
+    matching every other enrichment path in this codebase (CLAUDE.md
+    "Architecture Guardrails"): missing media storage means no archiving
+    happens; missing extraction/promoter services mean that half is
+    skipped. A crawl never fails because chaining could not run — the posts
+    are still fetched, cursored, and billed for either way.
+    """
+
+    def __init__(
+        self,
+        *,
+        media_store=None,
+        downloader=None,
+        event_extraction_service=None,
+        promoter_crawl_service=None,
+        archive_source: str = SOURCE_INSTAGRAM_POSTS,
+    ):
+        self.media_store = media_store
+        self.downloader = downloader
+        self.event_extraction_service = event_extraction_service
+        self.promoter_crawl_service = promoter_crawl_service
+        self.archive_source = archive_source
+
+    async def chain_venue(
+        self, *, handle: str, venue_ids: list[str], new_posts: list[dict], now: datetime,
+    ) -> _ChainReport:
+        report = _ChainReport()
+        if not venue_ids or not new_posts:
+            return report
+        if self.media_store is not None and self.downloader is not None:
+            prefix = run_prefix(self.archive_source, now, new_run_id(now))
+            for venue_id in venue_ids:
+                manifest_entries = await self._archive_venue_posts(prefix, venue_id, handle, new_posts)
+                if manifest_entries:
+                    try:
+                        await self.media_store.put_manifest(
+                            prefix=prefix, venue_id=venue_id, manifest={"photos": manifest_entries},
+                        )
+                        report.archived += len(manifest_entries)
+                    except Exception as e:
+                        logger.error(
+                            f"[InstagramCrawl] manifest write failed for venue {venue_id}: {e}"
+                        )
+        if self.event_extraction_service is not None:
+            try:
+                await self.event_extraction_service.run(
+                    {"eligibility": {"mode": "venue_ids", "venue_ids": ",".join(venue_ids)}}
+                )
+                report.extracted = True
+            except Exception as e:
+                logger.error(f"[InstagramCrawl] event extraction failed for {handle}: {e}")
+        return report
+
+    async def _archive_venue_posts(
+        self, prefix: str, venue_id: str, handle: str, posts: list[dict],
+    ) -> list[dict]:
+        entries: list[dict] = []
+        for post in posts:
+            shortcode = post.get("shortcode")
+            urls = post.get("image_urls") or []
+            for idx, url in enumerate(urls, start=1):
+                try:
+                    data, content_type = await self.downloader.download(url)
+                except Exception as e:
+                    logger.warning(
+                        f"[InstagramCrawl] image download failed for {handle}/{shortcode}: {e}"
+                    )
+                    continue
+                photo_id = f"{shortcode}_{idx}" if len(urls) > 1 else (shortcode or f"post_{idx}")
+                try:
+                    key = await self.media_store.put_image(
+                        prefix=prefix, venue_id=venue_id, photo_id=photo_id,
+                        data=data, content_type=content_type,
+                    )
+                except Exception as e:
+                    logger.warning(
+                        f"[InstagramCrawl] image archive failed for {handle}/{shortcode}: {e}"
+                    )
+                    continue
+                entries.append({
+                    "key": key, "instagram_photo_id": photo_id, "caption": post.get("caption"),
+                    "permalink": post.get("permalink"), "shortcode": shortcode,
+                    "uploaded_at": post.get("timestamp") or None,
+                    "likes_count": post.get("likes_count"), "comments_count": post.get("comments_count"),
+                    "post_type": post.get("post_type"), "photo_name": None,
+                })
+        return entries
+
+    async def chain_promoter(
+        self, *, handle: str, new_posts: list[dict], now: datetime,
+    ) -> _ChainReport:
+        report = _ChainReport()
+        svc = self.promoter_crawl_service
+        if svc is None or not new_posts:
+            return report
+        prefix = (
+            run_prefix(svc.archive_source, now, new_run_id(now))
+            if svc.media_store is not None else None
+        )
+        venues = build_venue_catalog(svc.venue_dao)
+        handle_index = build_handle_index(svc.venue_dao)
+        manifest_entries: list[dict] = []
+        for post in new_posts:
+            archived_images: list[dict] = []
+            if prefix is not None:
+                archived_images = await svc._archive_post_images(prefix, handle, post)
+                manifest_entries.extend(archived_images)
+            persisted = await svc._process_post(
+                handle=handle, post=post, venues=venues, handle_index=handle_index,
+                now=now, archived_images=archived_images,
+            )
+            if persisted:
+                report.extracted = True
+        if prefix is not None and manifest_entries:
+            try:
+                await svc.media_store.put_promoter_manifest(
+                    prefix=prefix, handle=handle,
+                    manifest={"handle": handle, "photos": manifest_entries},
+                )
+                report.archived = len(manifest_entries)
+            except Exception as e:
+                logger.error(f"[InstagramCrawl] promoter manifest write failed for {handle}: {e}")
+        return report
+
+
+@dataclass
+class CrawlServiceConfig:
+    overlap_hours: float = 6.0
+    default_initial_lookback: str = "3 months"
+    default_results_limit: int = 10
+    monthly_result_budget: int = 1000
+    max_consecutive_failures: int = 5
+    result_cost_usd: float = 0.0027
+
+
+class ScheduledInstagramCrawlService:
+    """Orchestrates one crawl target end to end: gate -> bound -> fetch ->
+    pinned-post filtering -> cursor advance (success only) -> chaining. See
+    `run_due_targets` for the multi-target, stop-on-credit-exhaustion entry
+    point the plan's §Error Handling and the "stop the whole cycle" scenario
+    describe."""
+
+    def __init__(
+        self,
+        *,
+        venue_dao,
+        apify_client,
+        budget_dao,
+        config: CrawlServiceConfig,
+        chainer: Optional[InstagramCrawlChainer] = None,
+        now_provider=None,
+    ):
+        self.venue_dao = venue_dao
+        self.apify_client = apify_client
+        self.budget_dao = budget_dao
+        self.config = config
+        self.chainer = chainer
+        self._now = now_provider or (lambda: datetime.now(timezone.utc))
+
+    # ── one stream (posts or reels) of one target ────────────────────────────
+    async def _run_stream(self, target: dict, stream: str, *, now: datetime) -> dict:
+        handle = target["handle"]
+        kind = target["kind"]
+        cursor_field = "cursor_posts_at" if stream == STREAM_POSTS else "cursor_reels_at"
+        cursor = _as_utc_dt(target.get(cursor_field))
+        lookback = target.get("initial_lookback") or self.config.default_initial_lookback
+        bound = compute_bound(
+            cursor, overlap_hours=self.config.overlap_hours, lookback_text=lookback, now=now,
+        )
+        results_limit = int(target.get("results_limit") or self.config.default_results_limit)
+
+        year_month = self.budget_dao.current_year_month_utc(now)
+        spent = self.budget_dao.get_month_count(year_month)
+        remaining = self.config.monthly_result_budget - spent
+        CRAWL_BUDGET_REMAINING.set(max(remaining, 0))
+        if remaining <= 0:
+            CRAWL_RUNS_TOTAL.labels(handle_kind=kind, result_type=stream, outcome=OUTCOME_SKIPPED_BUDGET).inc()
+            logger.warning(
+                f"[InstagramCrawl] {handle} {stream}: monthly result budget exhausted "
+                f"({spent}/{self.config.monthly_result_budget}); refusing to call Apify"
+            )
+            return {"outcome": OUTCOME_SKIPPED_BUDGET, "results": 0, "dropped_pinned": 0, "kept": []}
+
+        try:
+            raw_posts = await self.apify_client.fetch_recent_posts(
+                handle, results_limit=results_limit,
+                only_posts_newer_than=bound.actor_value, results_type=stream,
+            )
+        except ApifyCreditExhaustedError:
+            CRAWL_RUNS_TOTAL.labels(handle_kind=kind, result_type=stream, outcome=OUTCOME_CREDIT_EXHAUSTED).inc()
+            logger.error(f"[InstagramCrawl] {handle} {stream}: Apify credit exhausted")
+            return {"outcome": OUTCOME_CREDIT_EXHAUSTED, "results": 0, "dropped_pinned": 0, "kept": []}
+        except Exception as e:
+            CRAWL_RUNS_TOTAL.labels(handle_kind=kind, result_type=stream, outcome=OUTCOME_FAILED).inc()
+            logger.error(f"[InstagramCrawl] {handle} {stream}: fetch failed: {e}")
+            return {"outcome": OUTCOME_FAILED, "results": 0, "dropped_pinned": 0, "kept": [], "error": str(e)}
+
+        result_count = len(raw_posts or [])
+        if result_count:
+            # The billed number — counted regardless of what happens to each
+            # item next (a pinned drop is still a billed result — §G).
+            CRAWL_RESULTS_TOTAL.labels(result_type=stream).inc(result_count)
+            new_spent = self.budget_dao.increment_month(year_month, result_count)
+            CRAWL_BUDGET_REMAINING.set(max(self.config.monthly_result_budget - new_spent, 0))
+
+        kept, dropped = _split_kept_and_dropped(raw_posts or [], bound.cutoff_at)
+
+        if not kept:
+            CRAWL_RUNS_TOTAL.labels(handle_kind=kind, result_type=stream, outcome=OUTCOME_EMPTY).inc()
+            return {
+                "outcome": OUTCOME_EMPTY, "results": result_count,
+                "dropped_pinned": dropped, "kept": [],
+            }
+
+        CRAWL_RUNS_TOTAL.labels(handle_kind=kind, result_type=stream, outcome=OUTCOME_SUCCESS).inc()
+        return {
+            "outcome": OUTCOME_SUCCESS, "results": result_count, "dropped_pinned": dropped,
+            "kept": kept, "new_cursor": _newest_timestamp(kept),
+        }
+
+    # ── one target (all its streams) ─────────────────────────────────────────
+    async def run_target(self, handle: str) -> dict:
+        target = self.venue_dao.get_crawl_target(handle)
+        if target is None:
+            return {"handle": handle, "outcome": OUTCOME_NOT_FOUND, "streams": {}}
+
+        kind = target["kind"]
+        if not target.get("enabled", True):
+            CRAWL_RUNS_TOTAL.labels(handle_kind=kind, result_type=STREAM_POSTS, outcome=OUTCOME_SKIPPED_DISABLED).inc()
+            return {"handle": handle, "outcome": OUTCOME_SKIPPED_DISABLED, "streams": {}}
+        if int(target.get("consecutive_failures") or 0) >= self.config.max_consecutive_failures:
+            CRAWL_RUNS_TOTAL.labels(handle_kind=kind, result_type=STREAM_POSTS, outcome=OUTCOME_SKIPPED_FAILURES).inc()
+            return {"handle": handle, "outcome": OUTCOME_SKIPPED_FAILURES, "streams": {}}
+
+        now = self._now()
+        streams = [STREAM_POSTS] + ([STREAM_REELS] if target.get("crawl_reels") else [])
+
+        stream_reports: dict[str, dict] = {}
+        credit_exhausted = False
+        any_failed = False
+        cursor_updates: dict[str, datetime] = {}
+        new_posts_by_stream: dict[str, list[dict]] = {}
+
+        for stream in streams:
+            stream_report = await self._run_stream(target, stream, now=now)
+            stream_reports[stream] = stream_report
+            outcome = stream_report["outcome"]
+            if outcome == OUTCOME_CREDIT_EXHAUSTED:
+                credit_exhausted = True
+                break
+            if outcome == OUTCOME_FAILED:
+                any_failed = True
+                continue
+            if outcome == OUTCOME_SUCCESS:
+                field_name = "cursor_posts_at" if stream == STREAM_POSTS else "cursor_reels_at"
+                cursor_updates[field_name] = stream_report["new_cursor"]
+                new_posts_by_stream[stream] = stream_report["kept"]
+
+        total_results = sum(r.get("results", 0) for r in stream_reports.values())
+        updates: dict = dict(cursor_updates)
+        if not credit_exhausted:
+            updates["last_run_at"] = now
+            updates["last_run_results"] = total_results
+            updates["last_run_cost_usd"] = round(total_results * self.config.result_cost_usd, 6)
+            updates["consecutive_failures"] = (
+                int(target.get("consecutive_failures") or 0) + 1 if any_failed else 0
+            )
+        if updates:
+            self.venue_dao.upsert_crawl_target(handle, updates)
+
+        self._record_cursor_age(handle, target, updates, now)
+
+        all_new_posts = [p for posts in new_posts_by_stream.values() for p in posts]
+        chained = None
+        if all_new_posts and not credit_exhausted and self.chainer is not None:
+            chained = await self._chain(target, all_new_posts, now)
+
+        return {
+            "handle": handle, "kind": kind, "streams": stream_reports,
+            "credit_exhausted": credit_exhausted, "chained": chained,
+        }
+
+    async def _chain(self, target: dict, new_posts: list[dict], now: datetime):
+        handle = target["handle"]
+        if target["kind"] == KIND_PROMOTER:
+            return await self.chainer.chain_promoter(handle=handle, new_posts=new_posts, now=now)
+        handles = self.venue_dao.list_instagram_handles() or {}
+        venue_ids = group_venue_ids_by_handle(handles).get(handle, [])
+        if not venue_ids:
+            logger.warning(
+                f"[InstagramCrawl] {handle}: kind=venue crawl target has no venue "
+                "currently pointing at this handle; nothing to archive/extract"
+            )
+            return None
+        return await self.chainer.chain_venue(
+            handle=handle, venue_ids=venue_ids, new_posts=new_posts, now=now,
+        )
+
+    def _record_cursor_age(self, handle: str, target: dict, updates: dict, now: datetime) -> None:
+        for stream, field_name in ((STREAM_POSTS, "cursor_posts_at"), (STREAM_REELS, "cursor_reels_at")):
+            cursor = _as_utc_dt(updates.get(field_name, target.get(field_name)))
+            if cursor is not None:
+                CRAWL_CURSOR_AGE_SECONDS.labels(handle=handle, result_type=stream).set(
+                    max((now - cursor).total_seconds(), 0.0)
+                )
+
+    # ── several targets, one gated cycle ─────────────────────────────────────
+    async def run_due_targets(self, handles: list[str]) -> dict:
+        """Runs each handle in order via `run_target`, STOPPING before the
+        next one the moment a target's scrape reports Apify credit
+        exhaustion (§Error Handling: "a scheduled run that exhausts credit
+        has to stop the whole cycle, not fail one target and continue into
+        an empty balance for the rest") — mirrors the exact break-on-
+        `ApifyCreditExhaustedError` shape `InstagramPostsEnrichmentService.
+        enrich_all_venues` and `PromoterCrawlService.run` already use for
+        their own catalog-wide loops.
+
+        Each individually-scheduled per-target APScheduler job (main.py)
+        calls this with a single-element list; an admin "run several due
+        targets now" action is the natural multi-element caller."""
+        reports = []
+        stopped_early = False
+        for handle in handles:
+            report = await self.run_target(handle)
+            reports.append(report)
+            if report.get("credit_exhausted"):
+                stopped_early = True
+                break
+        return {"targets": reports, "stopped_early": stopped_early}

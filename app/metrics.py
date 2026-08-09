@@ -1319,6 +1319,58 @@ EVENT_MERGE_TOTAL = Counter(
 )
 
 # =============================================================================
+# SCHEDULED INCREMENTAL INSTAGRAM CRAWL
+# (plans/260809_scheduled-incremental-instagram-crawl.md)
+# =============================================================================
+
+# Every scheduled crawl attempt, by handle kind, result type, and outcome.
+# `handle_kind` is 'venue'|'promoter' (bounded, matching events.crawl_target.
+# kind's own CHECK constraint) — NOT the handle itself, which never becomes a
+# label here (unbounded-ish in principle, and `crawl_cursor_age_seconds`
+# below is where a per-handle label is actually needed and deliberately
+# allowed instead).
+CRAWL_RUNS_TOTAL = Counter(
+    "crawl_runs_total",
+    "Scheduled Instagram crawl attempts, by handle kind, result type, and outcome",
+    ["handle_kind", "result_type", "outcome"],
+    # result_type: posts, reels
+    # outcome: success, empty, failed, skipped_disabled, skipped_failures,
+    #          skipped_budget, credit_exhausted
+)
+
+# The number that maps to money: every BILLED result the actor returned,
+# summed regardless of what happened to it afterwards (kept, or dropped as an
+# out-of-bound pinned post — §G. A pinned post is billed whether or not it is
+# processed, so it must still be counted here).
+CRAWL_RESULTS_TOTAL = Counter(
+    "crawl_results_total",
+    "Instagram results returned by the scheduled crawl (billed, whether kept or dropped)",
+    ["result_type"],
+)
+
+# §F's monthly ceiling, the direct successor to docs/venue-retrieval-
+# storage.md §3's retired "No cron" guarantee. Sampled after every gate
+# check (spend or refusal) so a dashboard shows the SAME number the next
+# gate check will compare against, not a stale one.
+CRAWL_BUDGET_REMAINING = Gauge(
+    "crawl_budget_remaining",
+    "Results remaining in this calendar month's scheduled-crawl budget",
+)
+
+# §Error Handling: "watch this above all" — a cursor that stops advancing
+# while runs keep succeeding is the ONLY observable symptom every silent
+# failure mode in §B/§E/§G would produce (a wall-clock cursor, a shared
+# posts/reels cursor, or a pinned post moving the cursor). `handle` is
+# explicitly allowed as a label here (unlike CRAWL_RUNS_TOTAL's
+# `handle_kind`): targets are opt-in and few, so its cardinality is bounded
+# by how many an operator has scheduled, not by the catalog.
+CRAWL_CURSOR_AGE_SECONDS = Gauge(
+    "crawl_cursor_age_seconds",
+    "Seconds between now and a crawl target's cursor timestamp",
+    ["handle", "result_type"],
+)
+
+# =============================================================================
 # APPLICATION INFO
 # =============================================================================
 

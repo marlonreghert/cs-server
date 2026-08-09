@@ -140,3 +140,60 @@ class TestResultsLimit:
         client._run_actor_sync = _fake_run_actor_sync
         asyncio.run(client.fetch_recent_posts("somehandle", results_limit=3))
         assert seen["resultsLimit"] == 3
+
+
+class TestScheduledCrawlParameters:
+    """plans/260809_scheduled-incremental-instagram-crawl.md: `only_posts_
+    newer_than` and `results_type` default to the pre-existing, unbounded
+    behaviour so the three existing callers stay unaffected until they opt
+    in — pinned here at the wire-format level."""
+
+    def test_defaults_omit_the_date_filter_and_request_posts(self):
+        seen = {}
+
+        client = ApifyInstagramClient(api_token="t")
+
+        async def _fake_run_actor_sync(actor_id, run_input, endpoint_label):
+            seen["run_input"] = run_input
+            return []
+
+        client._run_actor_sync = _fake_run_actor_sync
+        asyncio.run(client.fetch_recent_posts("somehandle", results_limit=5))
+        assert "onlyPostsNewerThan" not in seen["run_input"]
+        assert seen["run_input"]["resultsType"] == "posts"
+
+    def test_only_posts_newer_than_is_forwarded_verbatim(self):
+        seen = {}
+
+        client = ApifyInstagramClient(api_token="t")
+
+        async def _fake_run_actor_sync(actor_id, run_input, endpoint_label):
+            seen["run_input"] = run_input
+            return []
+
+        client._run_actor_sync = _fake_run_actor_sync
+        asyncio.run(client.fetch_recent_posts(
+            "somehandle", results_limit=5, only_posts_newer_than="2026-08-01T00:00:00Z",
+        ))
+        assert seen["run_input"]["onlyPostsNewerThan"] == "2026-08-01T00:00:00Z"
+
+    def test_results_type_reels_is_forwarded_and_is_a_separate_run_from_posts(self):
+        seen = {}
+
+        client = ApifyInstagramClient(api_token="t")
+
+        async def _fake_run_actor_sync(actor_id, run_input, endpoint_label):
+            seen["run_input"] = run_input
+            return []
+
+        client._run_actor_sync = _fake_run_actor_sync
+        asyncio.run(client.fetch_recent_posts("somehandle", results_limit=1, results_type="reels"))
+        assert seen["run_input"]["resultsType"] == "reels"
+
+    def test_is_pinned_is_read_from_the_raw_item(self):
+        posts = _fetch([
+            {"shortCode": "pinned1", "isPinned": True, "timestamp": "2023-01-01T00:00:00.000Z"},
+            {"shortCode": "notpinned1", "timestamp": "2026-08-01T00:00:00.000Z"},
+        ])
+        assert posts[0]["is_pinned"] is True
+        assert posts[1]["is_pinned"] is False

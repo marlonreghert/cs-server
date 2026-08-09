@@ -1,4 +1,3 @@
-@wip
 Feature: Crawl Instagram targets on a schedule, incrementally
   Each crawl target is crawled on its own schedule and resumes from the newest
   post it already saw, so an unchanged target costs nothing and a busy one is
