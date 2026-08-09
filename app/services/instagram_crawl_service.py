@@ -664,6 +664,49 @@ class CrawlServiceConfig:
     result_cost_usd: float = 0.0027
 
 
+def resolve_results_limit(
+    target: dict, stream: str, *, is_seed: bool, config: CrawlServiceConfig,
+) -> int:
+    """The exact fallback chain `_run_stream` resolves a stream's cap
+    through — extracted to a pure function so the admin read model
+    (`CrawlTargetOut`'s `effective_*_results_limit` fields) can expose the
+    SAME resolution without re-implementing it and risking drift.
+
+    Posts: `results_limit`/`seed_results_limit` -> the matching settings
+    default. Unchanged from before reels-specific overrides existed —
+    this is the byte-for-byte-unchanged path the operator asked to be kept
+    that way.
+
+    Reels: a THIRD, reels-specific column first, THEN the posts column,
+    THEN the same settings default posts would use — never a separate
+    `crawl_default_reels_*` setting. Deliberately rejected: three months
+    of reels is far fewer items than three months of posts, so the
+    existing seed default (200) will rarely bind on reels anyway, and a
+    second pair of defaults would be config sprawl bought against no
+    observed need. A target that sets neither reels column falls all the
+    way through to exactly what posts would use, unchanged.
+    """
+    if stream == STREAM_REELS:
+        if is_seed:
+            value = (
+                target.get("reels_seed_results_limit")
+                or target.get("seed_results_limit")
+                or config.default_seed_results_limit
+            )
+        else:
+            value = (
+                target.get("reels_results_limit")
+                or target.get("results_limit")
+                or config.default_results_limit
+            )
+    else:
+        if is_seed:
+            value = target.get("seed_results_limit") or config.default_seed_results_limit
+        else:
+            value = target.get("results_limit") or config.default_results_limit
+    return int(value)
+
+
 class ScheduledInstagramCrawlService:
     """Orchestrates one crawl target end to end: gate -> bound -> fetch ->
     pinned-post filtering -> cursor advance (success only) -> chaining. See
@@ -719,11 +762,13 @@ class ScheduledInstagramCrawlService:
         # to stop a prolific account running away between fires. One shared
         # cap silently undid the date bound's own job on every seed — a
         # venue posting daily has ~90 posts in the 3-month seed window, and
-        # a cap of 10 took only the first 10 of them.
-        if cursor is None:
-            results_limit = int(target.get("seed_results_limit") or self.config.default_seed_results_limit)
-        else:
-            results_limit = int(target.get("results_limit") or self.config.default_results_limit)
+        # a cap of 10 took only the first 10 of them. Split again by STREAM
+        # (posts vs reels each get their own fallback chain) — see
+        # `resolve_results_limit`'s own docstring for the full chain and why
+        # there is no separate `crawl_default_reels_*` setting.
+        results_limit = resolve_results_limit(
+            target, stream, is_seed=(cursor is None), config=self.config,
+        )
 
         year_month = self.budget_dao.current_year_month_utc(now)
         spent = self.budget_dao.get_month_count(year_month)

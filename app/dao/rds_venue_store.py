@@ -1471,12 +1471,14 @@ class RdsVenueStore:
     _CRAWL_TARGET_COLUMNS = (
         "handle", "kind", "enabled", "cron", "timezone", "crawl_reels",
         "classify_images", "initial_lookback", "results_limit", "seed_results_limit",
+        "reels_results_limit", "reels_seed_results_limit",
         "cursor_posts_at", "cursor_reels_at", "last_run_at", "last_run_results",
         "last_run_cost_usd", "consecutive_failures", "notes",
     )
     _CRAWL_TARGET_SELECT = (
         "SELECT handle, kind, enabled, cron, timezone, crawl_reels, "
         "classify_images, initial_lookback, results_limit, seed_results_limit, "
+        "reels_results_limit, reels_seed_results_limit, "
         "cursor_posts_at, cursor_reels_at, last_run_at, last_run_results, "
         "last_run_cost_usd, consecutive_failures, notes, created_at, updated_at "
         "FROM events.crawl_target"

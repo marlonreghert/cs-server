@@ -81,6 +81,16 @@ Feature: Crawl Instagram targets on a schedule, incrementally
     When its scheduled crawl runs
     Then only posts are scraped
 
+  Scenario: Reels falls back to the posts cap when it has no cap of its own
+    Given a crawl target with reels enabled and only a posts seed cap
+    When its scheduled crawl runs
+    Then reels is bounded by that same posts seed cap
+
+  Scenario: A reels-specific cap overrides the posts cap for reels only
+    Given a crawl target with its own reels seed cap alongside a posts seed cap
+    When its scheduled crawl runs
+    Then reels is bounded by its own cap and posts is bounded by its own
+
   # --- Pinned posts --------------------------------------------------------
 
   Scenario: Drop a pinned post older than the requested bound

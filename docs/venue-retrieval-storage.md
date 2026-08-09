@@ -157,6 +157,25 @@ catalog.** It is asked of the most recent *existing* partition instead.
      silently undoing the 3-month seed date bound's own job by taking only
      its first 10 results; the worst case for a brand-new target's first
      crawl is still knowable in advance, now from the seed cap specifically.
+     `reels_results_limit`/`reels_seed_results_limit` are OPTIONAL per-target
+     overrides of the same two caps, used only for the reels stream — posts
+     and reels are already separate billed actor runs with independent
+     cursors, so a single shared cap over-fetches whichever stream posts
+     more. Unset, reels falls back to the posts column, then the same
+     settings default posts uses; there is no separate `crawl_default_
+     reels_*` setting. **A reels-enabled target's true worst-case first run
+     is the SUM of both streams' resolved seed caps** (by default 200 + 200
+     = 400 results ≈ $1.08, not the single seed cap alone) — `resolve_
+     results_limit` (app/services/instagram_crawl_service.py) is the one
+     place that resolution lives, and `GET /admin/crawl-targets/{handle}`
+     exposes all four resolved values (`effective_results_limit`,
+     `effective_seed_results_limit`, `effective_reels_results_limit`,
+     `effective_reels_seed_results_limit`) so this is computable exactly,
+     never assumed. The monthly budget still clamps each stream's actual
+     request to whatever remains AT THE TIME that stream runs — re-read
+     fresh per stream, never a snapshot shared across both — so the
+     two-stream total can never exceed what was available when the run
+     started, regardless of how large either cap is configured.
   3. **The cursor** (`cursor_posts_at` / `cursor_reels_at`, one per stream) —
      an unchanged target's next crawl asks Apify for results newer than its
      own last-seen post and gets (and costs) nothing.

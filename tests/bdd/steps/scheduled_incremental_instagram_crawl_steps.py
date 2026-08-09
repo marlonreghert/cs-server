@@ -267,6 +267,7 @@ def _create_venue(context, handle: str, *, lat=RECIFE_LAT, lng=RECIFE_LNG) -> st
 def _create_target(
     context, handle: str, *, kind="venue", cron="0 22 * * 5,6", timezone_name="America/Recife",
     enabled=True, crawl_reels=False, results_limit=None, seed_results_limit=None,
+    reels_results_limit=None, reels_seed_results_limit=None,
     initial_lookback=None,
     cursor_posts_at=None, cursor_reels_at=None, consecutive_failures=0, link_venue=True,
 ) -> str:
@@ -278,6 +279,10 @@ def _create_target(
         fields["results_limit"] = results_limit
     if seed_results_limit is not None:
         fields["seed_results_limit"] = seed_results_limit
+    if reels_results_limit is not None:
+        fields["reels_results_limit"] = reels_results_limit
+    if reels_seed_results_limit is not None:
+        fields["reels_seed_results_limit"] = reels_seed_results_limit
     if initial_lookback is not None:
         fields["initial_lookback"] = initial_lookback
     if cursor_posts_at is not None:
@@ -529,6 +534,42 @@ def step_given_target_with_reels_disabled(context):
 def step_then_only_posts_scraped(context):
     types = [c["results_type"] for c in context.ic_apify.calls if c["handle"] == context.ic_handle]
     assert types == ["posts"], types
+
+
+@given("a crawl target with reels enabled and only a posts seed cap")
+def step_given_target_reels_enabled_only_posts_seed_cap(context):
+    _ensure_context(context)
+    context.ic_handle = _create_target(
+        context, "reelsfallbackcaptarget", crawl_reels=True, seed_results_limit=33,
+    )
+
+
+@then("reels is bounded by that same posts seed cap")
+def step_then_reels_bounded_by_posts_seed_cap(context):
+    calls_by_type = {
+        c["results_type"]: c["results_limit"]
+        for c in context.ic_apify.calls if c["handle"] == context.ic_handle
+    }
+    assert calls_by_type["reels"] == 33, calls_by_type
+
+
+@given("a crawl target with its own reels seed cap alongside a posts seed cap")
+def step_given_target_with_own_reels_seed_cap(context):
+    _ensure_context(context)
+    context.ic_handle = _create_target(
+        context, "reelsowncaptarget", crawl_reels=True,
+        seed_results_limit=33, reels_seed_results_limit=7,
+    )
+
+
+@then("reels is bounded by its own cap and posts is bounded by its own")
+def step_then_reels_and_posts_bounded_by_their_own_caps(context):
+    calls_by_type = {
+        c["results_type"]: c["results_limit"]
+        for c in context.ic_apify.calls if c["handle"] == context.ic_handle
+    }
+    assert calls_by_type["posts"] == 33, calls_by_type
+    assert calls_by_type["reels"] == 7, calls_by_type
 
 
 # ── Pinned posts ──────────────────────────────────────────────────────────

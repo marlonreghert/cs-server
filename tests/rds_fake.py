@@ -866,6 +866,11 @@ class InMemoryRdsVenueStore:
                 # — the SEPARATE, larger cap applied only on a run whose
                 # relevant cursor is still null (migration 0031).
                 "seed_results_limit": None,
+                # NULL means "fall through": reels_results_limit ->
+                # results_limit -> the settings default; reels_seed_
+                # results_limit -> seed_results_limit -> its default
+                # (migration 0032). Posts never reads either column.
+                "reels_results_limit": None, "reels_seed_results_limit": None,
                 "cursor_posts_at": None, "cursor_reels_at": None,
                 "last_run_at": None, "last_run_results": 0,
                 "last_run_cost_usd": None, "consecutive_failures": 0,

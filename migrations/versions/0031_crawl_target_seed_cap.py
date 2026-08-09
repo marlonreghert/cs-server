@@ -41,13 +41,16 @@ never reads it again regardless of whether the column exists.
 Revision ID: 0031_crawl_target_seed_cap
 Revises: 0030_crawl_target
 
-(Revision id kept SHORT deliberately — `alembic_version.version_num` was
-widened to 32 chars by migration 0011_widen_alembic_version, and the more
-descriptive `0031_crawl_target_seed_results_limit` is 36, over the limit.
-Caught here, offline, by tests/test_crawl_target_seed_cap_migration.py's
-own `len(revision) <= 32` assertion — the same class of "only caught by a
-real Postgres" identifier trap CLAUDE.md warns about for index/constraint
-names, just one level up, at the revision id itself.)
+(Revision id kept SHORT deliberately. NOT a database constraint —
+migration 0011_widen_alembic_version widened `alembic_version.version_num`
+to `varchar(128)` precisely so descriptive ids would fit — but this repo's
+OWN test convention asserts `len(revision) <= 32` (present in nine
+migration test files, including tests/test_crawl_target_seed_cap_migration.py
+here); the more descriptive `0031_crawl_target_seed_results_limit` is 36
+chars, over that house-style limit. Caught offline by the test's own
+assertion before it could become a review comment. House style, not a
+Postgres limitation — corrected here after initially describing it as
+the latter.)
 """
 from alembic import op
 

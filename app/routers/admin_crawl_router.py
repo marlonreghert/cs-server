@@ -44,6 +44,16 @@ services/instagram_crawl_service.py) now owns the fix: it acquires the same
 per-handle lock the scheduler uses before returning, and `running` below
 reads that same lock, so the console can poll it exactly like the Jobs page
 already polls `job.running`.
+
+`effective_results_limit`/`effective_seed_results_limit`/`effective_reels_
+results_limit`/`effective_reels_seed_results_limit` on `CrawlTargetOut` are
+the FOUR caps `resolve_results_limit` (app/services/instagram_crawl_service.py
+— the same pure function `_run_stream` itself calls) resolves for this row
+RIGHT NOW, regardless of current cursor state — so the console can compute a
+target's true worst-case cost (e.g. a reels-enabled target's first run is
+`effective_seed_results_limit + effective_reels_seed_results_limit`, NOT a
+single shared number) without re-implementing the reels-falls-back-to-posts
+fallback chain itself.
 """
 from __future__ import annotations
 
@@ -57,9 +67,13 @@ from app.config import settings
 from app.services.instagram_crawl_service import (
     KIND_PROMOTER,
     KIND_VENUE,
+    STREAM_POSTS,
+    STREAM_REELS,
+    CrawlServiceConfig,
     InvalidCrawlTargetConfig,
     build_cron_trigger,
     group_venue_ids_by_handle,
+    resolve_results_limit,
     validate_crontab,
 )
 from app.services.instagram_handle_sources import normalize_handle
@@ -147,6 +161,16 @@ class CrawlTargetOut(BaseModel):
     # seed_results_limit`), because the seed's whole purpose is depth, not
     # steady-state restraint. Null means "use the settings-level default."
     seed_results_limit: Optional[int] = None
+    # REELS-SPECIFIC overrides of the two caps above. Null means "fall
+    # through": reels_results_limit -> results_limit -> the settings
+    # default; reels_seed_results_limit -> seed_results_limit -> its
+    # default. No separate `crawl_default_reels_*` setting exists —
+    # posts and reels are already separate billed actor runs with
+    # independent cursors, so a single shared cap over-fetches the
+    # higher-volume stream and starves the other; these overrides exist for
+    # the (expected to be rare) target where that fallback isn't right.
+    reels_results_limit: Optional[int] = None
+    reels_seed_results_limit: Optional[int] = None
     cursor_posts_at: Optional[datetime] = None
     cursor_reels_at: Optional[datetime] = None
     last_run_at: Optional[datetime] = None
@@ -175,6 +199,17 @@ class CrawlTargetOut(BaseModel):
     # console's live indicator: poll this the same way the Jobs page
     # already polls `job.running`.
     running: bool = False
+    # The FOUR caps `resolve_results_limit` actually resolves for this row
+    # right now, regardless of current cursor state — derived HERE (never
+    # by the console), same principle as `venues`/`next_run_at` above. Lets
+    # the console compute a target's true worst-case cost (e.g. a
+    # reels-enabled target's first run is `effective_seed_results_limit +
+    # effective_reels_seed_results_limit`, not one shared number) without
+    # re-implementing the reels-falls-back-to-posts chain itself.
+    effective_results_limit: int = 0
+    effective_seed_results_limit: int = 0
+    effective_reels_results_limit: int = 0
+    effective_reels_seed_results_limit: int = 0
 
 
 def _venue_coverage(dao, handle: str) -> list[CrawlTargetVenueRef]:
@@ -202,13 +237,25 @@ def _is_running(handle: str) -> bool:
     return bool(svc is not None and svc.is_running(handle))
 
 
+def _resolved_config() -> CrawlServiceConfig:
+    """The settings-level defaults `resolve_results_limit` falls back to,
+    read fresh each call (cheap, no state) rather than reaching into the
+    crawl service's own config — so the read model still resolves correctly
+    even when `instagram_crawl_service` is unwired (no Apify token)."""
+    return CrawlServiceConfig(
+        default_results_limit=int(settings.crawl_default_results_limit),
+        default_seed_results_limit=int(settings.crawl_default_seed_results_limit),
+    )
+
+
 def _to_out(dao, row: dict) -> dict:
     """The full read model for one row: the stored fields, plus the derived
-    ones the cross-repo contract requires (`next_run_at`, `venues`) and the
-    live `running` indicator. Next-fire computation is best-effort and never
-    raises — a target with a since-corrupted cron (should not happen; write
-    time already validates it) reads as `next_run_at: null` rather than
-    breaking the whole list/get response."""
+    ones the cross-repo contract requires (`next_run_at`, `venues`), the
+    live `running` indicator, and the four resolved `effective_*` caps.
+    Next-fire computation is best-effort and never raises — a target with a
+    since-corrupted cron (should not happen; write time already validates
+    it) reads as `next_run_at: null` rather than breaking the whole
+    list/get response."""
     out = dict(row)
     try:
         trigger = build_cron_trigger(row["cron"], timezone=row.get("timezone") or "America/Recife")
@@ -217,6 +264,13 @@ def _to_out(dao, row: dict) -> dict:
         out["next_run_at"] = None
     out["venues"] = _venue_coverage(dao, row["handle"])
     out["running"] = _is_running(row["handle"])
+    config = _resolved_config()
+    out["effective_results_limit"] = resolve_results_limit(row, STREAM_POSTS, is_seed=False, config=config)
+    out["effective_seed_results_limit"] = resolve_results_limit(row, STREAM_POSTS, is_seed=True, config=config)
+    out["effective_reels_results_limit"] = resolve_results_limit(row, STREAM_REELS, is_seed=False, config=config)
+    out["effective_reels_seed_results_limit"] = resolve_results_limit(
+        row, STREAM_REELS, is_seed=True, config=config,
+    )
     return out
 
 
@@ -267,6 +321,10 @@ class CrawlTargetCreate(BaseModel):
     results_limit: Optional[int] = None
     # Seed-only cap, applied once, when the relevant cursor is still null.
     seed_results_limit: Optional[int] = None
+    # Reels-specific overrides; null falls back to the posts column above,
+    # then the settings default — see CrawlTargetOut's own comment.
+    reels_results_limit: Optional[int] = None
+    reels_seed_results_limit: Optional[int] = None
     notes: Optional[str] = None
 
 
@@ -280,6 +338,8 @@ class CrawlTargetPatch(BaseModel):
     initial_lookback: Optional[str] = None
     results_limit: Optional[int] = None
     seed_results_limit: Optional[int] = None
+    reels_results_limit: Optional[int] = None
+    reels_seed_results_limit: Optional[int] = None
     notes: Optional[str] = None
 
 
