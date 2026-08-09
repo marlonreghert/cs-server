@@ -30,13 +30,27 @@ and `venues` are named exactly as that contract's "read model" row says;
 `cursor_age_seconds` is deliberately NOT included — the console already has
 the raw cursor timestamp and subtracting it from "now" is rendering, not
 business logic, per an explicit, accepted deviation.
+
+`POST /{handle}/run` is BACKGROUNDED — it starts the crawl and returns
+immediately, it never awaits `run_target` inline. That used to block until
+the whole crawl finished, which for a brand-new target's 3-month seed
+(scrape, download, classify, chain extraction) takes minutes; vibes_bot's
+admin proxy times out at 10s and Caddy at 180s, so the console's button
+would time out while the crawl kept running server-side — the operator sees
+a failure, the work silently continues, and the natural next move (click
+again) used to be able to race the FIRST click, because the old endpoint
+took no lock at all. `ScheduledInstagramCrawlService.start_run` (app/
+services/instagram_crawl_service.py) now owns the fix: it acquires the same
+per-handle lock the scheduler uses before returning, and `running` below
+reads that same lock, so the console can poll it exactly like the Jobs page
+already polls `job.running`.
 """
 from __future__ import annotations
 
 from datetime import datetime, timezone
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Response
 from pydantic import BaseModel, Field
 
 from app.config import settings
@@ -147,6 +161,12 @@ class CrawlTargetOut(BaseModel):
     # kind target, or a venue-kind one no venue currently references, is an
     # empty list, not an absent field the console has to special-case.
     venues: list[CrawlTargetVenueRef] = Field(default_factory=list)
+    # Whether a crawl of this handle is in flight RIGHT NOW — scheduled or
+    # admin-triggered, since both hold the SAME per-handle lock
+    # (`ScheduledInstagramCrawlService.lock_name_for`/`is_running`). The
+    # console's live indicator: poll this the same way the Jobs page
+    # already polls `job.running`.
+    running: bool = False
 
 
 def _venue_coverage(dao, handle: str) -> list[CrawlTargetVenueRef]:
@@ -166,13 +186,21 @@ def _venue_coverage(dao, handle: str) -> list[CrawlTargetVenueRef]:
     return out
 
 
+def _is_running(handle: str) -> bool:
+    """False whenever the crawl service isn't configured at all (no Apify
+    token) — there is no possible in-flight crawl to report in that case,
+    so this degrades safely rather than raising out of a list/get response."""
+    svc = getattr(_container, "instagram_crawl_service", None) if _container is not None else None
+    return bool(svc is not None and svc.is_running(handle))
+
+
 def _to_out(dao, row: dict) -> dict:
-    """The full read model for one row: the stored fields, plus the two
-    derived ones the cross-repo contract requires (`next_run_at`, `venues`).
-    Next-fire computation is best-effort and never raises — a target with a
-    since-corrupted cron (should not happen; write time already validates
-    it) reads as `next_run_at: null` rather than breaking the whole
-    list/get response."""
+    """The full read model for one row: the stored fields, plus the derived
+    ones the cross-repo contract requires (`next_run_at`, `venues`) and the
+    live `running` indicator. Next-fire computation is best-effort and never
+    raises — a target with a since-corrupted cron (should not happen; write
+    time already validates it) reads as `next_run_at: null` rather than
+    breaking the whole list/get response."""
     out = dict(row)
     try:
         trigger = build_cron_trigger(row["cron"], timezone=row.get("timezone") or "America/Recife")
@@ -180,6 +208,7 @@ def _to_out(dao, row: dict) -> dict:
     except Exception:
         out["next_run_at"] = None
     out["venues"] = _venue_coverage(dao, row["handle"])
+    out["running"] = _is_running(row["handle"])
     return out
 
 
@@ -233,9 +262,17 @@ class CrawlTargetPatch(BaseModel):
 
 
 class RunNowResult(BaseModel):
+    """Shape changed in the same window it shipped in (#164) but before the
+    console consumed it, so there is no compatibility concern: `started`
+    replaces the old synchronous `outcome`/`credit_exhausted` pair, because
+    the endpoint no longer waits to find out either of those — it returns
+    the moment the crawl is scheduled to run in the background, or the
+    moment it decides not to. `reason` is populated only when `started` is
+    False, with a string the console can show verbatim (`already_running`,
+    `skipped_budget`, `skipped_disabled`, `skipped_failures`)."""
     handle: str
-    outcome: Optional[str] = None
-    credit_exhausted: bool = False
+    started: bool
+    reason: Optional[str] = None
 
 
 @router.get("", response_model=list[CrawlTargetOut])
@@ -310,12 +347,17 @@ def delete_crawl_target(handle: str):
 
 
 @router.post("/{handle}/run", response_model=RunNowResult)
-async def run_crawl_target_now(handle: str):
+async def run_crawl_target_now(handle: str, response: Response):
+    """Starts the crawl in the background and returns immediately — never
+    awaits the crawl itself (see the module docstring for why: a 3-month
+    seed takes minutes, well past the console's proxy timeout). `202` when
+    it actually starts; `200` with a `reason` when it correctly declines to
+    (already running, disabled, past its failure threshold, or the monthly
+    budget is spent) — none of those are HTTP-level errors, only `404`
+    (unknown handle) is."""
     handle = normalize_handle(handle)
     if _dao().get_crawl_target(handle) is None:
         raise HTTPException(status_code=404, detail="crawl target not found")
-    report = await _crawl_service().run_target(handle)
-    return RunNowResult(
-        handle=handle, outcome=report.get("outcome"),
-        credit_exhausted=bool(report.get("credit_exhausted")),
-    )
+    result = await _crawl_service().start_run(handle)
+    response.status_code = 202 if result.get("started") else 200
+    return RunNowResult(handle=handle, started=bool(result.get("started")), reason=result.get("reason"))

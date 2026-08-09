@@ -2,10 +2,13 @@
 budget read model and venue coverage the cross-repo console contract
 (../plans/260809_automated-event-crawl.md) requires — over a REAL
 VenueRepository backed by the in-memory RDS fake. No live Apify; the
-run-now test wires a stub crawl service since it only needs to prove the
-route dispatches to `.run_target` and shapes the response, not the crawl
-logic itself (covered by tests/test_instagram_crawl_service.py and the BDD
-feature)."""
+run-now tests wire a stub crawl service since they only need to prove the
+route dispatches to `.start_run`/`.is_running` and shapes the response
+(202/200/404, `started`/`reason`, `running`) — not the backgrounding/locking
+mechanism itself, which is service-level behavior covered by
+tests/test_instagram_crawl_service.py (genuinely concurrent, using the REAL
+`ScheduledInstagramCrawlService`) and tests/test_crawl_schedule_sync.py (the
+scheduled-vs-run-now cross-mechanism lock)."""
 from __future__ import annotations
 
 from fastapi import FastAPI
@@ -19,13 +22,17 @@ from tests.rds_fake import InMemoryRdsVenueStore
 
 
 class _StubCrawlService:
-    def __init__(self, report):
-        self._report = report
+    def __init__(self, start_result=None, running=False):
+        self._start_result = start_result if start_result is not None else {"started": True}
+        self._running = running
         self.calls: list[str] = []
 
-    async def run_target(self, handle):
+    async def start_run(self, handle):
         self.calls.append(handle)
-        return self._report
+        return self._start_result
+
+    def is_running(self, handle):
+        return self._running
 
 
 class _FakeBudgetDao:
@@ -122,26 +129,63 @@ def test_delete_then_get_is_404():
     assert resp2.status_code == 404
 
 
-def test_run_now_dispatches_to_the_crawl_service():
-    stub = _StubCrawlService({"outcome": "success", "credit_exhausted": False})
+def test_run_now_starts_in_the_background_and_returns_202():
+    """`202`, never a blocking wait for the crawl to finish — the endpoint's
+    whole point after the fix is that it does NOT await the crawl."""
+    stub = _StubCrawlService(start_result={"started": True})
     client, dao = _client(crawl_service=stub)
     dao.upsert_crawl_target("runnow", {"kind": "venue", "cron": "0 22 * * *"})
 
     resp = client.post("/admin/crawl-targets/runnow/run")
 
-    assert resp.status_code == 200, resp.text
-    assert resp.json()["outcome"] == "success"
+    assert resp.status_code == 202, resp.text
+    assert resp.json() == {"handle": "runnow", "started": True, "reason": None}
     assert stub.calls == ["runnow"]
 
 
+def test_run_now_returns_200_with_a_reason_when_it_cannot_start():
+    """Not an HTTP error — a well-formed, synchronous answer describing WHY
+    nothing started, verbatim from the service (`already_running`,
+    `skipped_budget`, `skipped_disabled`, `skipped_failures`, ...)."""
+    stub = _StubCrawlService(start_result={"started": False, "reason": "already_running"})
+    client, dao = _client(crawl_service=stub)
+    dao.upsert_crawl_target("busyhandle", {"kind": "venue", "cron": "0 22 * * *"})
+
+    resp = client.post("/admin/crawl-targets/busyhandle/run")
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json() == {"handle": "busyhandle", "started": False, "reason": "already_running"}
+
+
 def test_run_now_missing_target_is_404_and_never_calls_the_service():
-    stub = _StubCrawlService({"outcome": "success"})
+    stub = _StubCrawlService()
     client, _ = _client(crawl_service=stub)
 
     resp = client.post("/admin/crawl-targets/nosuch/run")
 
     assert resp.status_code == 404
     assert stub.calls == []
+
+
+# ── `running` (the console's live indicator) ────────────────────────────────
+def test_running_field_reflects_the_crawl_services_lock_state():
+    dao = VenueRepository(client=None, rds_store=InMemoryRdsVenueStore())
+    dao.upsert_crawl_target("idlehandle", {"kind": "venue", "cron": "0 22 * * *"})
+
+    client_idle, _ = _client(dao=dao, crawl_service=_StubCrawlService(running=False))
+    assert client_idle.get("/admin/crawl-targets/idlehandle").json()["running"] is False
+
+    client_busy, _ = _client(dao=dao, crawl_service=_StubCrawlService(running=True))
+    assert client_busy.get("/admin/crawl-targets/idlehandle").json()["running"] is True
+
+
+def test_running_defaults_false_without_a_crawl_service_configured():
+    client, dao = _client()  # no crawl_service wired at all
+    dao.upsert_crawl_target("noservicehandle", {"kind": "venue", "cron": "0 22 * * *"})
+
+    resp = client.get("/admin/crawl-targets/noservicehandle")
+
+    assert resp.json()["running"] is False
 
 
 def test_list_filters_by_enabled_and_kind():

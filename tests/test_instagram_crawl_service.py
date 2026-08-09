@@ -30,6 +30,7 @@ from app.api.apify_instagram_client import ApifyCreditExhaustedError
 from app.dao.venue_repository import VenueRepository
 from app.models.instagram import VenueInstagram
 from app.models.venue import Venue
+from app.services import job_lock
 from app.services.instagram_crawl_service import (
     CrawlServiceConfig,
     InstagramCrawlChainer,
@@ -40,9 +41,17 @@ from app.services.instagram_crawl_service import (
     build_cron_trigger,
     compute_bound,
     group_venue_ids_by_handle,
+    lock_name_for,
     validate_crontab,
 )
 from tests.rds_fake import InMemoryRdsVenueStore
+
+
+def setup_function(_):
+    """`job_lock` is a module-level registry (app/services/job_lock.py) —
+    it persists across tests otherwise, exactly like tests/test_job_lock.py
+    already has to guard against for the SAME module."""
+    job_lock._running.clear()
 
 
 def _run(coro):
@@ -702,3 +711,183 @@ def test_a_classifier_failure_archives_without_a_category_and_is_recorded_as_fai
     # A blown-up classifier must never cost the photo its archive.
     assert report.archived == 1
     assert report.classification_outcome == "classification_failed"
+
+
+# ── `start_run`/`is_running`: the admin run-now endpoint's two defects ──────
+# #164 shipped `run_crawl_target_now` awaiting `run_target` inline, with no
+# lock. Both bite hardest on exactly the run an operator wants most: the big
+# historical seed of a target they just created. Fixed by `start_run`, which
+# acquires the SAME per-handle lock the scheduler uses (`lock_name_for`) and
+# returns immediately via `asyncio.create_task` — these tests are genuine
+# `async def` tests (this repo's pytest-asyncio runs in auto mode) so a
+# background task actually gets a chance to run concurrently with the test
+# body, which a sync test wrapped in its own fresh event loop cannot exercise
+# at all.
+class _GatedApifyClient:
+    """`fetch_recent_posts` blocks on an `asyncio.Event` until the test lets
+    it proceed — the seam that makes "start_run returns before the crawl
+    finishes" and "running flips true then false" provable rather than
+    assumed."""
+
+    def __init__(self, gate: asyncio.Event):
+        self._gate = gate
+        self.calls = 0
+
+    async def fetch_recent_posts(
+        self, handle, results_limit=10, *, only_posts_newer_than=None, results_type="posts",
+    ):
+        self.calls += 1
+        await self._gate.wait()
+        return []
+
+
+async def test_start_run_returns_immediately_and_running_flips_true_then_false():
+    dao = _venue_dao()
+    dao.upsert_crawl_target("slowhandle", {"kind": "venue", "cron": "0 22 * * *"})
+    gate = asyncio.Event()
+    apify = _GatedApifyClient(gate)
+    service = _service(dao, apify, _FakeBudgetDao())
+
+    assert service.is_running("slowhandle") is False
+
+    result = await service.start_run("slowhandle")
+
+    # Returned WITHOUT waiting for fetch_recent_posts (still blocked on the
+    # gate) to complete — the whole point of the fix.
+    assert result == {"started": True}
+    assert service.is_running("slowhandle") is True
+
+    await asyncio.sleep(0)  # let the background task actually run up to the gate
+    assert apify.calls == 1
+
+    gate.set()
+    for _ in range(100):
+        if not service.is_running("slowhandle"):
+            break
+        await asyncio.sleep(0)
+    assert service.is_running("slowhandle") is False
+
+    row = dao.get_crawl_target("slowhandle")
+    assert row["last_run_at"] is not None  # the background task actually completed
+
+
+async def test_start_run_holds_a_strong_reference_to_the_background_task_until_it_completes():
+    """`asyncio.create_task`'s return value is only WEAKLY referenced by the
+    event loop — CPython's own docs warn an unreferenced task "can
+    disappear mid-execution" via garbage collection. Here that would mean
+    the per-handle lock's `finally` never runs: the handle becomes
+    uncrawlable for the rest of the process's life. This asserts the
+    bookkeeping that prevents it — the task is tracked while in flight and
+    untracked once done — WITHOUT provoking garbage collection, which would
+    be slow, flaky, and prove nothing an honest test couldn't already
+    show more directly."""
+    dao = _venue_dao()
+    dao.upsert_crawl_target("refheldhandle", {"kind": "venue", "cron": "0 22 * * *"})
+    gate = asyncio.Event()
+    apify = _GatedApifyClient(gate)
+    service = _service(dao, apify, _FakeBudgetDao())
+
+    assert service._background_tasks == set()
+
+    result = await service.start_run("refheldhandle")
+    assert result == {"started": True}
+    await asyncio.sleep(0)  # let the task actually start and reach the gate
+
+    assert len(service._background_tasks) == 1
+    in_flight_task = next(iter(service._background_tasks))
+    assert not in_flight_task.done()
+
+    gate.set()
+    for _ in range(100):
+        if not service._background_tasks:
+            break
+        await asyncio.sleep(0)
+    assert service._background_tasks == set()
+    assert in_flight_task.done()
+
+
+async def test_a_second_run_now_while_one_is_in_flight_is_refused_without_calling_the_actor():
+    dao = _venue_dao()
+    dao.upsert_crawl_target("racyhandle", {"kind": "venue", "cron": "0 22 * * *"})
+    gate = asyncio.Event()
+    apify = _GatedApifyClient(gate)
+    service = _service(dao, apify, _FakeBudgetDao())
+
+    first = await service.start_run("racyhandle")
+    assert first == {"started": True}
+    await asyncio.sleep(0)  # let the background task actually run up to the gate
+    assert apify.calls == 1
+
+    second = await service.start_run("racyhandle")
+
+    assert second == {"started": False, "reason": "already_running"}
+    assert apify.calls == 1, "the second attempt must never reach the actor"
+
+    gate.set()
+    for _ in range(100):
+        if not service.is_running("racyhandle"):
+            break
+        await asyncio.sleep(0)
+
+
+async def test_start_run_budget_gate_refuses_before_the_client_is_called():
+    """Asserted on call count, not on the return value — the plan's own
+    words, now also true of the BACKGROUNDED entry point: a backgrounded
+    start must never become a way around the check."""
+    dao = _venue_dao()
+    dao.upsert_crawl_target("budgetedhandle", {"kind": "venue", "cron": "0 22 * * *"})
+    apify = _FakeApifyClient()
+    budget = _FakeBudgetDao()
+    budget.increment_month(budget.current_year_month_utc(NOW), 1000)  # fully spent
+    service = _service(dao, apify, budget, monthly_result_budget=1000)
+
+    result = await service.start_run("budgetedhandle")
+
+    assert result == {"started": False, "reason": "skipped_budget"}
+    assert apify.calls == []
+    assert service.is_running("budgetedhandle") is False, "the lock must be released, not held forever"
+
+
+async def test_start_run_refuses_a_disabled_target_without_a_lock_left_behind():
+    dao = _venue_dao()
+    dao.upsert_crawl_target("disabledhandle", {"kind": "venue", "cron": "0 22 * * *", "enabled": False})
+    apify = _FakeApifyClient()
+    service = _service(dao, apify, _FakeBudgetDao())
+
+    result = await service.start_run("disabledhandle")
+
+    assert result == {"started": False, "reason": "skipped_disabled"}
+    assert apify.calls == []
+    assert service.is_running("disabledhandle") is False
+
+
+async def test_start_run_refuses_a_target_past_the_failure_threshold():
+    dao = _venue_dao()
+    dao.upsert_crawl_target(
+        "failedoutthreshold", {"kind": "venue", "cron": "0 22 * * *", "consecutive_failures": 5},
+    )
+    apify = _FakeApifyClient()
+    service = _service(dao, apify, _FakeBudgetDao(), max_consecutive_failures=5)
+
+    result = await service.start_run("failedoutthreshold")
+
+    assert result == {"started": False, "reason": "skipped_failures"}
+    assert apify.calls == []
+
+
+async def test_start_run_missing_target_is_reported_not_raised():
+    dao = _venue_dao()
+    service = _service(dao, _FakeApifyClient(), _FakeBudgetDao())
+
+    result = await service.start_run("nosuchhandle")
+
+    assert result == {"started": False, "reason": "not_found"}
+
+
+def test_lock_name_for_matches_the_namespace_crawl_schedule_sync_imports():
+    """crawl_schedule_sync.py imports THIS function rather than defining its
+    own — asserting identity here would be circular; asserting the shape is
+    what actually matters: any string is fine as long as there is exactly
+    ONE function computing it, which the import (not a duplicate literal)
+    is what guarantees."""
+    assert lock_name_for("somehandle") == "crawl_target:somehandle"
