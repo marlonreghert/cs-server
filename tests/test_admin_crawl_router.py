@@ -112,6 +112,26 @@ def test_patch_updates_only_given_fields():
     assert resp.json()["cron"] == "0 22 * * *"  # untouched
 
 
+def test_seed_results_limit_is_a_separate_field_from_results_limit():
+    """Round-trips independently through create/patch/get — a separate
+    setting from `results_limit` because the two want opposite values (see
+    app/services/instagram_crawl_service.py's `_run_stream`)."""
+    client, dao = _client()
+    resp = client.post("/admin/crawl-targets", json={
+        "handle": "seedcaptarget", "kind": "venue", "cron": "0 22 * * *",
+        "results_limit": 10, "seed_results_limit": 300,
+    })
+    assert resp.status_code == 201, resp.text
+    body = resp.json()
+    assert body["results_limit"] == 10
+    assert body["seed_results_limit"] == 300
+
+    resp2 = client.patch("/admin/crawl-targets/seedcaptarget", json={"seed_results_limit": 50})
+    assert resp2.status_code == 200, resp2.text
+    assert resp2.json()["seed_results_limit"] == 50
+    assert resp2.json()["results_limit"] == 10  # untouched by the seed-cap patch
+
+
 def test_patch_missing_target_is_404():
     client, _ = _client()
     resp = client.patch("/admin/crawl-targets/nosuch", json={"enabled": False})
@@ -215,6 +235,11 @@ def test_get_budget_returns_month_used_limit_remaining_and_unit_price():
     assert body["limit"] == 1000
     assert body["remaining"] == 750
     assert body["unit_cost_usd"] > 0
+    # So the console can show "up to N results ~ $X" on the one-click
+    # run-now flow with nothing typed (settings.crawl_default_results_limit
+    # is 10, settings.crawl_default_seed_results_limit is 200).
+    assert body["default_results_limit"] == 10
+    assert body["default_seed_results_limit"] == 200
 
 
 def test_get_budget_remaining_never_goes_negative_when_over_spent():

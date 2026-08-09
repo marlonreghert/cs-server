@@ -138,7 +138,15 @@ class CrawlTargetOut(BaseModel):
     # an operator sets it FALSE per target for an explicit cheap mode.
     classify_images: bool = True
     initial_lookback: Optional[str] = None
+    # The STEADY-STATE per-run cap (applied once the relevant cursor is
+    # set). NOT the seed cap — see `seed_results_limit` below; the two are
+    # deliberately separate settings because they want opposite values.
     results_limit: Optional[int] = None
+    # The cap applied ONLY on this target's one-time seed (the relevant
+    # cursor still null) — large by default (see `settings.crawl_default_
+    # seed_results_limit`), because the seed's whole purpose is depth, not
+    # steady-state restraint. Null means "use the settings-level default."
+    seed_results_limit: Optional[int] = None
     cursor_posts_at: Optional[datetime] = None
     cursor_reels_at: Optional[datetime] = None
     last_run_at: Optional[datetime] = None
@@ -218,12 +226,21 @@ class CrawlBudgetOut(BaseModel):
     clicking a paid action with no idea what's left is exactly the
     situation the monthly budget exists to prevent. `unit_cost_usd` is
     included so the console renders dollars without holding its own copy of
-    the price."""
+    the price.
+
+    `default_results_limit`/`default_seed_results_limit` are the EFFECTIVE
+    fallbacks a target with no override of its own gets — surfaced so the
+    console can state "up to N results ≈ $X" on the one-click "run the
+    first crawl now" flow with nothing typed, rather than disabling it
+    until an operator fills in a number it had no way to state a ceiling
+    for."""
     year_month: str
     used: int
     limit: int
     remaining: int
     unit_cost_usd: float
+    default_results_limit: int
+    default_seed_results_limit: int
 
 
 class CrawlTargetCreate(BaseModel):
@@ -245,7 +262,11 @@ class CrawlTargetCreate(BaseModel):
     # event-marker). An operator opts a target OUT explicitly for cheap mode.
     classify_images: bool = True
     initial_lookback: Optional[str] = None
+    # Steady-state per-run cap. Separate from `seed_results_limit` below —
+    # see that field's own comment.
     results_limit: Optional[int] = None
+    # Seed-only cap, applied once, when the relevant cursor is still null.
+    seed_results_limit: Optional[int] = None
     notes: Optional[str] = None
 
 
@@ -258,6 +279,7 @@ class CrawlTargetPatch(BaseModel):
     classify_images: Optional[bool] = None
     initial_lookback: Optional[str] = None
     results_limit: Optional[int] = None
+    seed_results_limit: Optional[int] = None
     notes: Optional[str] = None
 
 
@@ -301,6 +323,8 @@ def get_crawl_budget():
         year_month=year_month, used=used, limit=limit,
         remaining=max(limit - used, 0),
         unit_cost_usd=float(settings.apify_instagram_post_cost_usd),
+        default_results_limit=int(settings.crawl_default_results_limit),
+        default_seed_results_limit=int(settings.crawl_default_seed_results_limit),
     )
 
 

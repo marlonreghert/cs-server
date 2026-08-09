@@ -228,7 +228,8 @@ def _reset_context(context) -> None:
     )
     context.ic_config = CrawlServiceConfig(
         overlap_hours=6.0, default_initial_lookback="3 months",
-        default_results_limit=10, monthly_result_budget=1000,
+        default_results_limit=10, default_seed_results_limit=200,
+        monthly_result_budget=1000,
         max_consecutive_failures=5, result_cost_usd=0.0027,
     )
     context.ic_service = ScheduledInstagramCrawlService(
@@ -265,7 +266,8 @@ def _create_venue(context, handle: str, *, lat=RECIFE_LAT, lng=RECIFE_LNG) -> st
 
 def _create_target(
     context, handle: str, *, kind="venue", cron="0 22 * * 5,6", timezone_name="America/Recife",
-    enabled=True, crawl_reels=False, results_limit=None, initial_lookback=None,
+    enabled=True, crawl_reels=False, results_limit=None, seed_results_limit=None,
+    initial_lookback=None,
     cursor_posts_at=None, cursor_reels_at=None, consecutive_failures=0, link_venue=True,
 ) -> str:
     fields = {
@@ -274,6 +276,8 @@ def _create_target(
     }
     if results_limit is not None:
         fields["results_limit"] = results_limit
+    if seed_results_limit is not None:
+        fields["seed_results_limit"] = seed_results_limit
     if initial_lookback is not None:
         fields["initial_lookback"] = initial_lookback
     if cursor_posts_at is not None:
@@ -329,10 +333,35 @@ def step_then_bounded_to_default_lookback(context):
     assert call["only_posts_newer_than"] == context.ic_config.default_initial_lookback, call
 
 
-@then("the scrape is also bounded by the target's result cap")
+@then("the scrape is also bounded by the target's seed result cap")
 def step_then_bounded_by_default_result_cap(context):
     call = context.ic_apify.calls[0]
-    assert call["results_limit"] == context.ic_config.default_results_limit, call
+    assert call["results_limit"] == context.ic_config.default_seed_results_limit, call
+
+
+@given("a crawl target with a steady-state cap but no cursor")
+def step_given_target_with_steady_state_cap_no_cursor(context):
+    _ensure_context(context)
+    context.ic_handle = _create_target(context, "steadycapnocursortarget", results_limit=5)
+
+
+@then("the scrape is bounded by the seed cap, not the steady-state cap")
+def step_then_bounded_by_seed_cap_not_steady_state(context):
+    call = context.ic_apify.calls[0]
+    assert call["results_limit"] == context.ic_config.default_seed_results_limit, call
+    assert call["results_limit"] != 5, call
+
+
+@given("a crawl target with its own seed cap and no cursor")
+def step_given_target_with_own_seed_cap_no_cursor(context):
+    _ensure_context(context)
+    context.ic_handle = _create_target(context, "ownseedcaptarget", seed_results_limit=42)
+
+
+@then("the scrape is bounded by that target's own seed cap")
+def step_then_bounded_by_own_seed_cap(context):
+    call = context.ic_apify.calls[0]
+    assert call["results_limit"] == 42, call
 
 
 @then("the scrape is bounded to that post's time minus the configured overlap")
@@ -571,17 +600,44 @@ def step_then_refusal_recorded(context):
     )
 
 
-@given("a crawl target with a result cap")
-def step_given_target_with_a_result_cap(context):
+@given("a crawl target with a known cursor and a steady-state result cap")
+def step_given_target_with_cursor_and_steady_state_cap(context):
     _ensure_context(context)
-    context.ic_handle = _create_target(context, "captarget", results_limit=3)
+    # A CURSOR, deliberately — `results_limit` is now the STEADY-STATE cap
+    # specifically (see the seed-cap scenarios above); a null-cursor target
+    # would use the seed cap instead, and this scenario is about the other one.
+    context.ic_cursor = datetime(2026, 8, 1, 12, 0, tzinfo=timezone.utc)
+    context.ic_handle = _create_target(
+        context, "captarget", results_limit=3, cursor_posts_at=context.ic_cursor,
+    )
 
 
 @then("the scrape carries both the date bound and the cap")
 def step_then_scrape_carries_bound_and_cap(context):
     call = context.ic_apify.calls[0]
-    assert call["only_posts_newer_than"] == context.ic_config.default_initial_lookback, call
+    expected_bound = _format_utc(context.ic_cursor - timedelta(hours=context.ic_config.overlap_hours))
+    assert call["only_posts_newer_than"] == expected_bound, call
     assert call["results_limit"] == 3, call
+
+
+@given("the monthly result budget has less remaining than the target's cap")
+def step_given_budget_less_than_cap(context):
+    _ensure_context(context)
+    # No cursor -> this is a SEED run, capped by the seed cap (default 200,
+    # per context.ic_config.default_seed_results_limit) — deliberately not
+    # overridden, so "the target's cap" here IS that default.
+    context.ic_handle = _create_target(context, "overbudgetcaptarget")
+    # Default monthly budget is 1000; spend all but 50 of it so the
+    # REMAINING (50) is smaller than the target's own (seed) cap (200).
+    context.ic_budget.increment_month(
+        context.ic_budget.current_year_month_utc(context.ic_now), 950,
+    )
+
+
+@then("the scrape is capped to the remaining budget, not the full cap")
+def step_then_scrape_capped_to_remaining_budget(context):
+    call = context.ic_apify.calls[0]
+    assert call["results_limit"] == 50, call
 
 
 @given("several crawl targets are due")

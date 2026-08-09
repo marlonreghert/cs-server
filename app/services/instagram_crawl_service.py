@@ -648,7 +648,17 @@ class InstagramCrawlChainer:
 class CrawlServiceConfig:
     overlap_hours: float = 6.0
     default_initial_lookback: str = "3 months"
+    # The STEADY-STATE per-run cap (a run whose relevant cursor is already
+    # set) — small on purpose, see `default_seed_results_limit` below for
+    # why this is not also the seed's cap.
     default_results_limit: int = 10
+    # The SEED cap — applied only when the relevant cursor is null, i.e. at
+    # most once per target per stream, ever. Separate from
+    # `default_results_limit` because the two want opposite values: steady
+    # state wants small (stop a prolific account running away between
+    # fires); the seed wants large (its whole purpose is depth). A shared
+    # cap of 10 was silently undoing the 3-month date bound's own job.
+    default_seed_results_limit: int = 200
     monthly_result_budget: int = 1000
     max_consecutive_failures: int = 5
     result_cost_usd: float = 0.0027
@@ -703,7 +713,17 @@ class ScheduledInstagramCrawlService:
         bound = compute_bound(
             cursor, overlap_hours=self.config.overlap_hours, lookback_text=lookback, now=now,
         )
-        results_limit = int(target.get("results_limit") or self.config.default_results_limit)
+        # §C, split in two: a SEED (this stream's cursor still null — at most
+        # once per target per stream, ever) wants a large cap for depth; a
+        # steady-state run (cursor already set) wants the existing small one
+        # to stop a prolific account running away between fires. One shared
+        # cap silently undid the date bound's own job on every seed — a
+        # venue posting daily has ~90 posts in the 3-month seed window, and
+        # a cap of 10 took only the first 10 of them.
+        if cursor is None:
+            results_limit = int(target.get("seed_results_limit") or self.config.default_seed_results_limit)
+        else:
+            results_limit = int(target.get("results_limit") or self.config.default_results_limit)
 
         year_month = self.budget_dao.current_year_month_utc(now)
         spent = self.budget_dao.get_month_count(year_month)
@@ -717,9 +737,24 @@ class ScheduledInstagramCrawlService:
             )
             return {"outcome": OUTCOME_SKIPPED_BUDGET, "results": 0, "dropped_pinned": 0, "kept": []}
 
+        # The cap itself is never allowed to exceed what remains this month
+        # — a 200-result seed cap against 50 remaining must ask for at most
+        # 50, not 200-then-hope. Refusing outright instead (remaining < cap)
+        # was considered and rejected: a target with 150 left would never
+        # seed at all, which is worse than seeding 150 deep. This is the
+        # ONLY place the cap and the budget interact; `remaining <= 0` above
+        # is unchanged and still the sole refusal condition.
+        effective_limit = min(results_limit, remaining)
+        if effective_limit < results_limit:
+            logger.info(
+                f"[InstagramCrawl] {handle} {stream}: cap reduced from "
+                f"{results_limit} to {effective_limit} by the remaining "
+                f"monthly budget ({remaining})"
+            )
+
         try:
             raw_posts = await self.apify_client.fetch_recent_posts(
-                handle, results_limit=results_limit,
+                handle, results_limit=effective_limit,
                 only_posts_newer_than=bound.actor_value, results_type=stream,
             )
         except ApifyCreditExhaustedError:
