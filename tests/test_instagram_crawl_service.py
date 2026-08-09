@@ -1221,3 +1221,165 @@ def test_lock_name_for_matches_the_namespace_crawl_schedule_sync_imports():
     ONE function computing it, which the import (not a duplicate literal)
     is what guarantees."""
     assert lock_name_for("somehandle") == "crawl_target:somehandle"
+
+
+# ── the post-run bookkeeping write failing must not look like a healthy run ──
+# Production incident, 2026-08-09 (entreamigos.praia): the bookkeeping write
+# used to be `upsert_crawl_target(handle, updates)` — a partial field set
+# (cursor/last_run only, no kind/cron) against a row that already existed.
+# A real Postgres validates NOT NULL on the INSERT attempt itself, before it
+# ever evaluates ON CONFLICT, so the write raised NotNullViolation even
+# though the row certainly existed — AFTER 32 results had already been
+# scraped and billed. The exception escaped past the path that increments
+# `consecutive_failures`, so the target looked perfectly healthy (0 failures,
+# `running` false — the lock's own `finally` released it correctly) while
+# spending money and landing nothing, forever, on every future run.
+class _BookkeepingFailsOnceDao:
+    """Wraps a real VenueRepository (backed by the in-memory fake, so reads
+    reflect a genuine row shape) and makes exactly the FIRST
+    `update_crawl_target` call raise — simulating the incident's real write
+    failure. Every later call (the fallback failure-count write, and
+    anything a later run does) goes through to the real delegate."""
+
+    def __init__(self, inner):
+        self._inner = inner
+        self._armed = True
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+    def update_crawl_target(self, handle, fields):
+        if self._armed:
+            self._armed = False
+            raise RuntimeError('null value in column "kind" violates not-null constraint')
+        return self._inner.update_crawl_target(handle, fields)
+
+
+class _BookkeepingAlwaysFailsDao:
+    """Every `update_crawl_target` call raises — simulating the database
+    itself being unreachable, so even the fallback failure-count write
+    cannot land."""
+
+    def __init__(self, inner):
+        self._inner = inner
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+    def update_crawl_target(self, handle, fields):
+        raise RuntimeError("connection refused")
+
+
+class TestBookkeepingWriteFailureCountsAsAFailure:
+    def test_a_successful_scrape_whose_bookkeeping_write_then_fails_reraises_and_still_bills(self):
+        """The scrape and the billing (CRAWL_RESULTS_TOTAL / the budget
+        increment) already happened inside `_run_stream`, entirely before
+        the bookkeeping write — proven here by the actor call count, exactly
+        the code-path evidence (not S3 inference) for "did the $0.10 buy
+        anything real": yes, the scrape and the bill, but nothing else."""
+        inner = _venue_dao()
+        inner.upsert_crawl_target("bookkeepfail", {"kind": "venue", "cron": "0 22 * * *"})
+        dao = _BookkeepingFailsOnceDao(inner)
+        apify = _FakeApifyClient()
+        apify.program("bookkeepfail", "posts", [
+            {"shortcode": "a", "timestamp": "2026-08-08T10:00:00.000Z"},
+        ])
+        budget = _FakeBudgetDao()
+        service = _service(dao, apify, budget)
+
+        with pytest.raises(RuntimeError):
+            _run(service.run_target("bookkeepfail"))
+
+        assert len(apify.calls) == 1  # the scrape genuinely happened, once
+
+        row = inner.get_crawl_target("bookkeepfail")
+        assert row["consecutive_failures"] == 1, (
+            "a bookkeeping failure must count as a failure -- otherwise the "
+            "target looks healthy forever while spending and landing nothing"
+        )
+        # The failed write's OWN fields (cursor/last_run_*) never landed —
+        # only the fallback failure-count write did.
+        assert row["last_run_at"] is None
+        assert row["cursor_posts_at"] is None
+
+    def test_the_failure_count_accumulates_on_top_of_prior_failures(self):
+        inner = _venue_dao()
+        inner.upsert_crawl_target(
+            "bookkeepfail2", {"kind": "venue", "cron": "0 22 * * *", "consecutive_failures": 2},
+        )
+        dao = _BookkeepingFailsOnceDao(inner)
+        apify = _FakeApifyClient()
+        apify.program("bookkeepfail2", "posts", [
+            {"shortcode": "a", "timestamp": "2026-08-08T10:00:00.000Z"},
+        ])
+        service = _service(dao, apify, _FakeBudgetDao())
+
+        with pytest.raises(RuntimeError):
+            _run(service.run_target("bookkeepfail2"))
+
+        assert inner.get_crawl_target("bookkeepfail2")["consecutive_failures"] == 3
+
+    def test_a_wholly_unreachable_database_still_reraises_the_original_error(self):
+        """If even the fallback failure-count write cannot land (the
+        database itself is down, not just the first write's field set),
+        this must not be swallowed -- there is nothing left to record, so
+        the original exception is the only signal left, and it must reach
+        the caller (run_due_targets' per-handle scheduled job, or start_run's
+        backgrounded task) so its own error handling and metrics see it."""
+        inner = _venue_dao()
+        inner.upsert_crawl_target("bookkeepfail3", {"kind": "venue", "cron": "0 22 * * *"})
+        dao = _BookkeepingAlwaysFailsDao(inner)
+        apify = _FakeApifyClient()
+        apify.program("bookkeepfail3", "posts", [
+            {"shortcode": "a", "timestamp": "2026-08-08T10:00:00.000Z"},
+        ])
+        service = _service(dao, apify, _FakeBudgetDao())
+
+        with pytest.raises(RuntimeError, match="connection refused"):
+            _run(service.run_target("bookkeepfail3"))
+
+    def test_the_archive_and_extract_chain_never_runs_when_the_bookkeeping_write_fails(self):
+        """Established from the CODE PATH, not inferred from S3: `_chain`
+        (archive/download/classify/extract) is called strictly AFTER the
+        bookkeeping write in `run_target` — proven here by making the write
+        raise and asserting the chainer is never invoked, for the exact
+        target/posts pair that WOULD have been chained had the write
+        succeeded."""
+        inner = _venue_dao()
+        inner.upsert_venue(Venue(venue_id="cv1", venue_name="CV1", venue_lat=-8.0, venue_lng=-34.9))
+        inner.set_venue_instagram(
+            VenueInstagram(venue_id="cv1", instagram_handle="bookkeepfail4", status="found")
+        )
+        inner.upsert_crawl_target("bookkeepfail4", {"kind": "venue", "cron": "0 22 * * *"})
+        dao = _BookkeepingFailsOnceDao(inner)
+        apify = _FakeApifyClient()
+        apify.program("bookkeepfail4", "posts", [
+            {"shortcode": "a", "timestamp": "2026-08-08T10:00:00.000Z"},
+        ])
+
+        class _RecordingChainer:
+            def __init__(self):
+                self.calls = 0
+
+            async def chain_venue(self, **kwargs):
+                self.calls += 1
+                return None
+
+            async def chain_promoter(self, **kwargs):
+                self.calls += 1
+                return None
+
+        chainer = _RecordingChainer()
+        config = CrawlServiceConfig(
+            overlap_hours=6.0, default_initial_lookback="3 months", default_results_limit=10,
+            monthly_result_budget=1000, max_consecutive_failures=5, result_cost_usd=0.0027,
+        )
+        service = ScheduledInstagramCrawlService(
+            venue_dao=dao, apify_client=apify, budget_dao=_FakeBudgetDao(),
+            config=config, chainer=chainer, now_provider=lambda: NOW,
+        )
+
+        with pytest.raises(RuntimeError):
+            _run(service.run_target("bookkeepfail4"))
+
+        assert chainer.calls == 0, "archiving must never run past a failed bookkeeping write"

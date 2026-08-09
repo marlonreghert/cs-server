@@ -419,7 +419,14 @@ def update_crawl_target(handle: str, body: CrawlTargetPatch):
     fields = body.model_dump(exclude_unset=True)
     _require_valid_kind(fields.get("kind"))
     _require_valid_cron(fields.get("cron"))
-    row = dao.upsert_crawl_target(handle, fields)
+    # A plain UPDATE, not an upsert: the existence check above already
+    # proved this row is here, and PATCH is very often partial (e.g. just
+    # `{"enabled": false}`) with no `kind`/`cron` in the body at all.
+    # `upsert_crawl_target` requires both on every call now — see its
+    # docstring for the production incident that forced this split — so
+    # using it here would make nearly every real-world PATCH fail exactly
+    # the way the post-run bookkeeping write did.
+    row = dao.update_crawl_target(handle, fields)
     return _to_out(dao, row)
 
 

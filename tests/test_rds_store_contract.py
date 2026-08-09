@@ -731,3 +731,81 @@ def test_list_events_filters_by_venue_and_status(store):
         if e["venue_id"] in (vid_a, vid_b)
     }
     assert confirmed == {f"la_{vid_a}", f"lc_{vid_b}"}
+
+
+# ── events.crawl_target write shape (production incident, 2026-08-09) ────────
+# `upsert_crawl_target(handle, updates)` used to be the ONLY write for both
+# create AND the post-run bookkeeping update. That bookkeeping call passes a
+# partial field set (cursor/last_run/consecutive_failures — never kind/cron).
+# The in-memory fake accepted it happily (a bare dict-update has no concept
+# of NOT NULL), so nothing caught it until a real Postgres did, in
+# production: `kind`/`cron` are NOT NULL with no default (migration
+# 0030_crawl_target), and Postgres validates NOT NULL against the fully
+# constructed INSERT tuple BEFORE it ever evaluates ON CONFLICT — so the
+# write raised NotNullViolation even though the row certainly already
+# existed, AFTER the scrape had already been billed. This is the third time
+# this fake has been more permissive than the database (CLAUDE.md already
+# names the other two), so — per that pattern — this is parametrized across
+# both the fake and a real Postgres (RDS_TEST_URL) rather than trusted to the
+# fake's shape alone.
+def _crawl_handle() -> str:
+    return f"ct_{uuid.uuid4().hex[:12]}"
+
+
+def test_crawl_target_bookkeeping_write_succeeds_against_an_existing_row(store):
+    """The fix: `update_crawl_target` is a plain UPDATE with no INSERT
+    branch, so it cannot trip the NOT NULL-on-insert-attempt failure. This is
+    the literal shape of the incident's write — cursor/last_run/consecutive_
+    failures only, no kind/cron — proven to succeed against a REAL row when
+    RDS_TEST_URL is set, not just the fake."""
+    handle = _crawl_handle()
+    store.upsert_crawl_target(handle, {"kind": "venue", "cron": "0 3 * * 2,5"})
+
+    updated = store.update_crawl_target(handle, {
+        "cursor_posts_at": datetime(2026, 8, 9, 12, 0, tzinfo=timezone.utc),
+        "last_run_at": datetime(2026, 8, 9, 12, 5, tzinfo=timezone.utc),
+        "last_run_results": 32,
+        "last_run_cost_usd": 0.0864,
+        "consecutive_failures": 0,
+    })
+
+    assert updated["kind"] == "venue"           # untouched NOT NULL column survives
+    assert updated["cron"] == "0 3 * * 2,5"      # untouched NOT NULL column survives
+    assert updated["last_run_results"] == 32
+    assert updated["last_run_cost_usd"] == 0.0864
+
+    reread = store.get_crawl_target(handle)
+    assert reread["last_run_results"] == 32
+
+
+def test_crawl_target_upsert_is_create_only_and_refuses_the_incidents_exact_shape(store):
+    """Confirms the OLD call would fail before ever reaching this fix: calling
+    `upsert_crawl_target` (now CREATE-only) with the incident's exact partial
+    field set against a row that already exists must refuse loudly (raises
+    here, in Python) rather than reach a real Postgres NotNullViolation."""
+    handle = _crawl_handle()
+    store.upsert_crawl_target(handle, {"kind": "venue", "cron": "0 3 * * 2,5"})
+
+    with pytest.raises(Exception):
+        store.upsert_crawl_target(handle, {
+            "cursor_posts_at": datetime(2026, 8, 9, 12, 0, tzinfo=timezone.utc),
+            "last_run_at": datetime(2026, 8, 9, 12, 5, tzinfo=timezone.utc),
+            "last_run_results": 32,
+            "last_run_cost_usd": 0.0864,
+            "consecutive_failures": 0,
+        })
+
+
+def test_crawl_target_update_on_a_missing_handle_is_a_safe_no_op(store):
+    assert store.update_crawl_target(_crawl_handle(), {"enabled": False}) is None
+
+
+def test_crawl_target_update_with_no_fields_returns_the_row_unchanged(store):
+    handle = _crawl_handle()
+    store.upsert_crawl_target(handle, {"kind": "venue", "cron": "0 22 * * *"})
+    before = store.get_crawl_target(handle)
+
+    after = store.update_crawl_target(handle, {})
+
+    assert after["kind"] == before["kind"]
+    assert after["cron"] == before["cron"]

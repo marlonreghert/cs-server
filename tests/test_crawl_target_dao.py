@@ -39,7 +39,20 @@ def test_kind_check_also_enforced_on_update():
     dao = _dao()
     dao.upsert_crawl_target("goodkind", {"kind": "venue", "cron": "0 22 * * *"})
     with pytest.raises(ValueError):
-        dao.upsert_crawl_target("goodkind", {"kind": "not_a_real_kind"})
+        dao.update_crawl_target("goodkind", {"kind": "not_a_real_kind"})
+
+
+def test_upsert_is_create_only_and_refuses_a_partial_write_against_an_existing_row():
+    """The production incident (2026-08-09): a partial `upsert_crawl_target`
+    call against a row that already exists reaches a real Postgres
+    NotNullViolation on `kind`/`cron`, because Postgres validates NOT NULL on
+    the INSERT attempt itself, before ON CONFLICT ever runs. `upsert_
+    crawl_target` is now CREATE-only and refuses this here too, in Python,
+    rather than letting a real database be the first place it's caught."""
+    dao = _dao()
+    dao.upsert_crawl_target("existing", {"kind": "venue", "cron": "0 22 * * *"})
+    with pytest.raises(ValueError):
+        dao.upsert_crawl_target("existing", {"enabled": False})
 
 
 def test_a_valid_insert_gets_real_column_defaults():
@@ -62,10 +75,24 @@ def test_a_valid_insert_gets_real_column_defaults():
 def test_update_is_partial_and_leaves_other_columns_untouched():
     dao = _dao()
     dao.upsert_crawl_target("partial", {"kind": "venue", "cron": "0 22 * * *", "notes": "keep me"})
-    row = dao.upsert_crawl_target("partial", {"enabled": False})
+    row = dao.update_crawl_target("partial", {"enabled": False})
     assert row["enabled"] is False
     assert row["notes"] == "keep me"
     assert row["cron"] == "0 22 * * *"
+
+
+def test_update_on_a_missing_handle_is_a_safe_no_op():
+    dao = _dao()
+    assert dao.update_crawl_target("ghost", {"enabled": False}) is None
+
+
+def test_update_with_no_fields_returns_the_row_unchanged():
+    dao = _dao()
+    dao.upsert_crawl_target("asis", {"kind": "venue", "cron": "0 22 * * *"})
+    before = dao.get_crawl_target("asis")
+    after = dao.update_crawl_target("asis", {})
+    assert after["kind"] == before["kind"]
+    assert after["cron"] == before["cron"]
 
 
 def test_get_list_and_delete_round_trip():

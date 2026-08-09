@@ -216,6 +216,9 @@ class VenueRepository(RedisVenueDAO):
     def upsert_crawl_target(self, handle: str, fields: dict):
         return self.rds_store.upsert_crawl_target(handle, fields)
 
+    def update_crawl_target(self, handle: str, fields: dict):
+        return self.rds_store.update_crawl_target(handle, fields)
+
     def delete_crawl_target(self, handle: str) -> bool:
         return self.rds_store.delete_crawl_target(handle)
 

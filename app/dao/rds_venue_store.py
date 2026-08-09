@@ -1510,36 +1510,81 @@ class RdsVenueStore:
             return [dict(r) for r in conn.execute(text(sql), params).mappings()]
 
     def upsert_crawl_target(self, handle: str, fields: dict) -> dict:
-        """INSERT ... ON CONFLICT (handle) DO UPDATE, mirroring
-        `upsert_promoter_account`'s partial-update contract: only the keys
-        present in `fields` are set (insert or update alike); the primary key
-        and any column the caller omitted on an UPDATE are left untouched.
+        """CREATE-only: INSERT ... ON CONFLICT (handle) DO UPDATE. Reserved
+        for the admin router's POST (create) endpoint, whose `CrawlTargetCreate`
+        model always supplies every NOT NULL column — `kind` defaults to
+        `"venue"`, `cron` is required — so the INSERT branch is always safe.
 
-        `kind` and `cron` are NOT NULL with no database default (migration
-        0030_crawl_target) — a target is created BY an operator WITH a
-        schedule, never inserted schedule-less. The caller (the admin router)
-        validates both before this is ever reached; this method trusts
-        `fields` on insert and lets a genuinely missing NOT NULL column raise
-        from Postgres itself, exactly like `upsert_promoter_account` does for
-        its own NOT NULL columns."""
+        DO NOT call this for a partial update of a row that may already
+        exist: `kind` and `cron` are NOT NULL with no database default
+        (migration 0030_crawl_target), and Postgres validates NOT NULL
+        constraints against the FULLY CONSTRUCTED insert tuple — every column
+        the statement's column list omits defaults to NULL — BEFORE it ever
+        evaluates `ON CONFLICT`. That check runs on every call, regardless of
+        whether the row already has `kind`/`cron` from a previous insert, so
+        a partial `fields` dict fails with `NotNullViolation` even though the
+        row certainly exists. This is not hypothetical: a production
+        incident (2026-08-09) hit exactly this from `run_target`'s post-run
+        bookkeeping write, which passed only cursor/last_run fields — the
+        crawl was billed and scraped successfully, then this call raised and
+        silently discarded every result. That write now goes through
+        `update_crawl_target` below, a plain UPDATE with no INSERT branch to
+        trip this on; the admin router's PATCH endpoint does too.
+
+        Enforced here in Python (raising `ValueError` before any SQL runs)
+        rather than left to Postgres, so the mistake is loud and immediate
+        wherever this is called from, not just in production against a real
+        database.
+        """
+        missing = [c for c in ("kind", "cron") if not fields.get(c)]
+        if missing:
+            raise ValueError(
+                f"upsert_crawl_target requires {missing} (NOT NULL, no database "
+                "default) on every call — it is CREATE-only. For a partial update "
+                "of a row known to already exist, use update_crawl_target instead."
+            )
         cols = [c for c in self._CRAWL_TARGET_COLUMNS if c in fields and c != "handle"]
         assign = {c: fields[c] for c in cols}
         assign["handle"] = handle
         insert_cols = ["handle"] + cols
         col_list = ", ".join(insert_cols)
         val_list = ", ".join(f":{c}" for c in insert_cols)
-        if cols:
-            update_clause = ", ".join(f"{c}=:{c}" for c in cols) + ", updated_at=now()"
-            conflict_sql = f"DO UPDATE SET {update_clause}"
-        else:
-            conflict_sql = "DO NOTHING"
+        update_clause = ", ".join(f"{c}=:{c}" for c in cols) + ", updated_at=now()"
         with self.engine.begin() as conn:
             conn.execute(
                 text(
                     f"INSERT INTO events.crawl_target ({col_list}) "
                     f"VALUES ({val_list}) "
-                    f"ON CONFLICT (handle) {conflict_sql}"
+                    f"ON CONFLICT (handle) DO UPDATE SET {update_clause}"
                 ),
+                assign,
+            )
+        return self.get_crawl_target(handle)
+
+    def update_crawl_target(self, handle: str, fields: dict) -> Optional[dict]:
+        """Plain `UPDATE ... WHERE handle=:handle` — the honest statement for
+        every write that KNOWS the row already exists (the post-run
+        bookkeeping write in `instagram_crawl_service.py` and the admin
+        router's PATCH endpoint, both of which fetch/confirm the row before
+        ever calling this). A plain UPDATE has no INSERT branch, so it can
+        never trip the NOT NULL-on-insert-attempt failure `upsert_crawl_target`
+        is restricted to guard against (see its docstring for the production
+        incident that forced this split).
+
+        Only the keys present in `fields` are set; everything else is left
+        untouched. An empty `fields` (there is no valid empty SQL SET clause)
+        or a `handle` that doesn't exist are both safe no-ops — the latter
+        returns None, exactly like the UPDATE affecting zero rows.
+        """
+        cols = [c for c in self._CRAWL_TARGET_COLUMNS if c in fields and c != "handle"]
+        if not cols:
+            return self.get_crawl_target(handle)
+        assign = {c: fields[c] for c in cols}
+        assign["handle"] = handle
+        set_clause = ", ".join(f"{c}=:{c}" for c in cols) + ", updated_at=now()"
+        with self.engine.begin() as conn:
+            conn.execute(
+                text(f"UPDATE events.crawl_target SET {set_clause} WHERE handle=:handle"),
                 assign,
             )
         return self.get_crawl_target(handle)
