@@ -48,6 +48,7 @@ def test_a_valid_insert_gets_real_column_defaults():
     assert row["enabled"] is True
     assert row["timezone"] == "America/Recife"
     assert row["crawl_reels"] is False
+    assert row["classify_images"] is True
     assert row["cursor_posts_at"] is None
     assert row["cursor_reels_at"] is None
     assert row["last_run_results"] == 0

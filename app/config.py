@@ -144,6 +144,13 @@ class Settings(BaseSettings):
     # 43200 minutes = 30 days
     venues_catalog_refresh_minutes: int = 43200
     venues_live_refresh_minutes: int = 5
+    # "Sundays at 00:00" is this setting's INTENT, not its verified behavior:
+    # main.py registers it via bare `CronTrigger.from_crontab`, whose
+    # day-of-week field is APScheduler-native (0=Monday), not standard cron
+    # (0=Sunday) — see the NOTE at that registration site and
+    # tests/test_scheduler.py. Left as-is deliberately; changing which day a
+    # live job fires on is an operator decision, out of scope for the
+    # crawl-target feature that found this.
     weekly_forecast_cron: str = "0 0 * * 0"  # Sundays at 00:00
 
     # Serve-time live-busyness freshness gate. The stale window is DERIVED from

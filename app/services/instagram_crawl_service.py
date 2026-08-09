@@ -25,13 +25,23 @@ module owns the fetch (bound + cursor + budget + pinned-post handling)
 itself, then reuses the SAME low-level archiving/extraction primitives those
 services already use for the posts it already has in hand — never re-fetching:
 
-  - venue kind: writes photos + a per-venue manifest through the same
-    `MediaArchiveStore.put_image`/`put_manifest` calls
-    `archive_sources._fetch_instagram` uses, then calls the REAL,
-    unmodified `EventExtractionService.run()` scoped to just this handle's
-    venue(s) via its existing `eligibility.mode="venue_ids"` — the exact
-    integration point `admin_events_router`'s manual-trigger config already
-    exposes; nothing new is invented on the extraction side.
+  - venue kind: downloads and CLASSIFIES photos through the same
+    `PhotoClassificationService.annotate` call `VenuePhotoArchiveService.
+    _classify_photos` makes (so an image-only flyer — no caption event-
+    marker at all — still gets a `category`/`classification_confidence`
+    `post_qualifies` can act on, exactly like a manually-archived venue's
+    posts already do), writes photos + a per-venue manifest through the
+    same `MediaArchiveStore.put_image`/`put_manifest` calls `archive_
+    sources._fetch_instagram` uses, then calls the REAL, unmodified
+    `EventExtractionService.run()` scoped to just this handle's venue(s)
+    via its existing `eligibility.mode="venue_ids"` — the exact integration
+    point `admin_events_router`'s manual-trigger config already exposes;
+    nothing new is invented on the extraction side. Classification is
+    on by default (`crawl_target.classify_images`) — a scheduled crawl
+    REPLACES a manual archive run that already classifies, so defaulting
+    to the weaker caption-only gate would be a coverage regression, not
+    parity with the promoter path (which never classifies at all, by a
+    SEPARATE and deliberate design choice covered in §Non-goals).
   - promoter kind: calls the injected `PromoterCrawlService` instance's own
     `_archive_post_images`/`_process_post` — the SAME per-post units its
     `run()` loop calls, just fed this module's already-fetched, already-
@@ -51,6 +61,7 @@ from typing import Optional
 from app.api.apify_instagram_client import ApifyCreditExhaustedError
 from app.metrics import (
     CRAWL_BUDGET_REMAINING,
+    CRAWL_CHAIN_CLASSIFICATION_TOTAL,
     CRAWL_CURSOR_AGE_SECONDS,
     CRAWL_RESULTS_TOTAL,
     CRAWL_RUNS_TOTAL,
@@ -78,24 +89,140 @@ OUTCOME_NOT_FOUND = "not_found"
 
 
 class InvalidCrawlTargetConfig(ValueError):
-    """A crawl target write failed validation (e.g. an unparseable crontab)
-    — raised at WRITE time by `validate_crontab`, never discovered later at
-    fire time."""
+    """A crawl target write failed validation (e.g. an unparseable crontab,
+    or a day-of-week form this module refuses to guess at) — raised at
+    WRITE time by `validate_crontab`, never discovered later at fire time."""
+
+
+# `CronTrigger.from_crontab` looked like the right tool (it IS what
+# `main.py` already registers every other cron job through) but it is a
+# trap for this field specifically: its own source just splits the string
+# and passes `values[4]` straight through as `day_of_week=`, with NO
+# translation. APScheduler's `day_of_week` is 0=Monday..6=Sunday (it comes
+# from `date.weekday()`); standard Unix crontab(5) — what every operator
+# means when they write a cron string, and what this feature's own console
+# plan promises to render back in words — is 0/7=Sunday..6=Saturday.
+# Verified independently against a live APScheduler 3.10.4/America-Recife
+# install: "0 22 * * 5" (intended Friday) actually fires Saturday.
+#
+# The fix is to never let a bare digit reach APScheduler's day_of_week field
+# at all: translate every standard-cron day-of-week token to APScheduler's
+# own UNAMBIGUOUS three-letter names (mon/tue/wed/thu/fri/sat/sun) before
+# building the trigger, and build it from explicit fields
+# (`build_cron_trigger`) rather than `from_crontab`. `validate_crontab`
+# (write time, admin_crawl_router.py) and `CrawlScheduleSync` (fire time,
+# crawl_schedule_sync.py) BOTH go through `build_cron_trigger` — the same
+# function — so validation and execution can never disagree about what a
+# `cron` string means.
+_APSCHEDULER_DOW_ORDER = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
+_APSCHEDULER_DOW_NAMES = frozenset(_APSCHEDULER_DOW_ORDER)
+# Standard crontab(5): 0 AND 7 both mean Sunday.
+_CRON_DOW_NAME_BY_NUMBER = {
+    0: "sun", 1: "mon", 2: "tue", 3: "wed", 4: "thu", 5: "fri", 6: "sat", 7: "sun",
+}
+
+
+def _translate_dow_atom(atom: str, cron: str) -> str:
+    """One day-of-week token (a name or a standard-cron digit) to
+    APScheduler's own three-letter name. Already-named input passes through
+    unchanged (an operator who writes `fri` never hits the ambiguity this
+    exists to fix)."""
+    value = atom.strip().lower()
+    if not value:
+        raise InvalidCrawlTargetConfig(f"invalid crontab {cron!r}: empty day-of-week token")
+    if value in _APSCHEDULER_DOW_NAMES:
+        return value
+    if not value.isdigit():
+        raise InvalidCrawlTargetConfig(
+            f"invalid crontab {cron!r}: unrecognized day-of-week value {atom!r}"
+        )
+    number = int(value)
+    if number not in _CRON_DOW_NAME_BY_NUMBER:
+        raise InvalidCrawlTargetConfig(
+            f"invalid crontab {cron!r}: day-of-week value {atom!r} out of range 0-7"
+        )
+    return _CRON_DOW_NAME_BY_NUMBER[number]
+
+
+def _translate_day_of_week_field(raw: str, cron: str) -> str:
+    """The 5th crontab field, translated atom by atom. Handles `*`,
+    comma-separated lists, and ascending ranges (`fri-sun`, or `5-0` written
+    in standard-cron digits). REJECTS — never guesses at — a step expression
+    (`*/2`) or a range that would wrap across the week boundary once
+    translated (e.g. standard-cron `6-1`, Saturday-through-Monday): both are
+    genuinely ambiguous to resolve silently, and this feature's own
+    principle throughout is that an ambiguous bound is refused at write
+    time, not guessed at fire time."""
+    raw = raw.strip()
+    if raw == "*":
+        return raw
+    translated_atoms = []
+    for atom in raw.split(","):
+        atom = atom.strip()
+        if "/" in atom:
+            raise InvalidCrawlTargetConfig(
+                f"invalid crontab {cron!r}: day-of-week step expressions "
+                f"({atom!r}) are not supported — list the days explicitly, "
+                "e.g. '5,6,0' for Friday, Saturday, Sunday"
+            )
+        if "-" in atom:
+            start_raw, _, end_raw = atom.partition("-")
+            start = _translate_dow_atom(start_raw, cron)
+            end = _translate_dow_atom(end_raw, cron)
+            if _APSCHEDULER_DOW_ORDER.index(start) > _APSCHEDULER_DOW_ORDER.index(end):
+                raise InvalidCrawlTargetConfig(
+                    f"invalid crontab {cron!r}: day-of-week range {atom!r} wraps "
+                    "across the week boundary — list the days explicitly instead"
+                )
+            translated_atoms.append(f"{start}-{end}")
+        else:
+            translated_atoms.append(_translate_dow_atom(atom, cron))
+    return ",".join(translated_atoms)
+
+
+def _translate_cron(cron: str) -> tuple[str, str, str, str, str]:
+    """(minute, hour, day, month, day_of_week) with ONLY the day_of_week
+    field translated — the other four fields carry no such ambiguity
+    (APScheduler's minute/hour/day/month fields already match standard
+    cron)."""
+    fields = cron.split()
+    if len(fields) != 5:
+        raise InvalidCrawlTargetConfig(
+            f"invalid crontab {cron!r}: expected 5 fields "
+            f"(minute hour day month day_of_week), got {len(fields)}"
+        )
+    minute, hour, day, month, day_of_week = fields
+    return minute, hour, day, month, _translate_day_of_week_field(day_of_week, cron)
+
+
+def build_cron_trigger(cron: str, *, timezone: str = "UTC"):
+    """The ONLY place a crawl target's `cron` string becomes an APScheduler
+    trigger. `validate_crontab` (write time) and `CrawlScheduleSync` (fire
+    time) both call this — never `CronTrigger.from_crontab` directly — so a
+    string that validates is guaranteed to fire on the days it validated
+    against."""
+    from apscheduler.triggers.cron import CronTrigger
+
+    minute, hour, day, month, day_of_week = _translate_cron(cron)
+    try:
+        return CronTrigger(
+            minute=minute, hour=hour, day=day, month=month,
+            day_of_week=day_of_week, timezone=timezone,
+        )
+    except InvalidCrawlTargetConfig:
+        raise
+    except Exception as e:
+        raise InvalidCrawlTargetConfig(f"invalid crontab {cron!r}: {e}") from e
 
 
 def validate_crontab(cron: str) -> None:
-    """Reject a malformed crontab string immediately, at write time — the
-    unit test plan's own requirement. Reuses APScheduler's own parser
-    (already a dependency, already what `main.py` registers every cron job
-    through) rather than a second hand-rolled validator; the trigger object
-    it builds is discarded, this call is for its side effect of raising on a
-    bad string."""
-    from apscheduler.triggers.cron import CronTrigger
-
-    try:
-        CronTrigger.from_crontab(cron)
-    except Exception as e:
-        raise InvalidCrawlTargetConfig(f"invalid crontab {cron!r}: {e}") from e
+    """Reject a malformed or ambiguous crontab string immediately, at write
+    time — the unit test plan's own requirement. The built trigger is
+    discarded; this call is for its side effect of raising on a bad or
+    ambiguous string. Timezone is irrelevant to whether a string PARSES, so
+    a placeholder is used here — `CrawlScheduleSync` supplies the target's
+    real timezone at fire time, through the same `build_cron_trigger`."""
+    build_cron_trigger(cron, timezone="UTC")
 
 
 def _as_utc_dt(value) -> Optional[datetime]:
@@ -251,10 +378,24 @@ def group_venue_ids_by_handle(instagram_handles: dict[str, str]) -> dict[str, li
     return out
 
 
+CLASSIFICATION_OUTCOME_CLASSIFIED = "classified"
+CLASSIFICATION_OUTCOME_FAILED = "classification_failed"
+CLASSIFICATION_OUTCOME_SKIPPED_TARGET_DISABLED = "skipped_target_disabled"
+CLASSIFICATION_OUTCOME_SKIPPED_NO_CLASSIFIER = "skipped_no_classifier"
+CLASSIFICATION_OUTCOME_SKIPPED_NO_PHOTOS = "skipped_no_photos"
+
+
 @dataclass
 class _ChainReport:
     archived: int = 0
     extracted: bool = False
+    # None for the promoter path (which never classifies — a separate,
+    # pre-existing design choice, not something this feature changed).
+    # Populated for the venue path so "we classified and found no flyer" is
+    # never confused with "classification never ran for this crawl" — see
+    # CRAWL_CHAIN_CLASSIFICATION_TOTAL, which is incremented from the same
+    # value.
+    classification_outcome: Optional[str] = None
 
 
 class InstagramCrawlChainer:
@@ -279,24 +420,35 @@ class InstagramCrawlChainer:
         downloader=None,
         event_extraction_service=None,
         promoter_crawl_service=None,
+        photo_classifier=None,
         archive_source: str = SOURCE_INSTAGRAM_POSTS,
     ):
         self.media_store = media_store
         self.downloader = downloader
         self.event_extraction_service = event_extraction_service
         self.promoter_crawl_service = promoter_crawl_service
+        # The SAME classifier VenuePhotoArchiveService uses
+        # (PhotoClassificationService.annotate) — reused, not reimplemented,
+        # so an image-only flyer (no caption event-marker) still reaches
+        # extraction the scheduled path replaces a manual archive run for.
+        self.photo_classifier = photo_classifier
         self.archive_source = archive_source
 
     async def chain_venue(
         self, *, handle: str, venue_ids: list[str], new_posts: list[dict], now: datetime,
+        classify_images: bool = True,
     ) -> _ChainReport:
         report = _ChainReport()
         if not venue_ids or not new_posts:
             return report
         if self.media_store is not None and self.downloader is not None:
             prefix = run_prefix(self.archive_source, now, new_run_id(now))
+            classification_outcome = CLASSIFICATION_OUTCOME_SKIPPED_NO_PHOTOS
             for venue_id in venue_ids:
-                manifest_entries = await self._archive_venue_posts(prefix, venue_id, handle, new_posts)
+                manifest_entries, outcome = await self._archive_venue_posts(
+                    prefix, venue_id, handle, new_posts, classify=classify_images,
+                )
+                classification_outcome = outcome
                 if manifest_entries:
                     try:
                         await self.media_store.put_manifest(
@@ -307,6 +459,19 @@ class InstagramCrawlChainer:
                         logger.error(
                             f"[InstagramCrawl] manifest write failed for venue {venue_id}: {e}"
                         )
+            report.classification_outcome = classification_outcome
+            CRAWL_CHAIN_CLASSIFICATION_TOTAL.labels(outcome=classification_outcome).inc()
+            if classification_outcome in (
+                CLASSIFICATION_OUTCOME_SKIPPED_NO_CLASSIFIER,
+                CLASSIFICATION_OUTCOME_FAILED,
+            ):
+                logger.warning(
+                    f"[InstagramCrawl] {handle}: archived without image "
+                    f"classification ({classification_outcome}) — extraction "
+                    "for this crawl can only qualify posts by caption; an "
+                    "image-only flyer with no event-marker caption text will "
+                    "be missed, not correctly judged not-an-event"
+                )
         if self.event_extraction_service is not None:
             try:
                 await self.event_extraction_service.run(
@@ -318,39 +483,106 @@ class InstagramCrawlChainer:
         return report
 
     async def _archive_venue_posts(
-        self, prefix: str, venue_id: str, handle: str, posts: list[dict],
-    ) -> list[dict]:
-        entries: list[dict] = []
+        self, prefix: str, venue_id: str, handle: str, posts: list[dict], *, classify: bool,
+    ) -> tuple[list[dict], str]:
+        """Downloads every post's images, classifies them (unless `classify`
+        is False or no classifier is wired), then stores them and returns
+        (manifest_entries, classification_outcome).
+
+        Mirrors `VenuePhotoArchiveService._attach_download_bytes` ->
+        `_classify_photos` -> `_store_photo`'s own sequence: bytes are
+        downloaded ONCE and reused for both classification and storage
+        (never fetched twice), and a classifier failure never costs a photo
+        its archive — it is stored with no category, exactly like the
+        manual path degrades.
+        """
+        photos: list[dict] = []
         for post in posts:
             shortcode = post.get("shortcode")
             urls = post.get("image_urls") or []
             for idx, url in enumerate(urls, start=1):
-                try:
-                    data, content_type = await self.downloader.download(url)
-                except Exception as e:
-                    logger.warning(
-                        f"[InstagramCrawl] image download failed for {handle}/{shortcode}: {e}"
-                    )
-                    continue
-                photo_id = f"{shortcode}_{idx}" if len(urls) > 1 else (shortcode or f"post_{idx}")
-                try:
-                    key = await self.media_store.put_image(
-                        prefix=prefix, venue_id=venue_id, photo_id=photo_id,
-                        data=data, content_type=content_type,
-                    )
-                except Exception as e:
-                    logger.warning(
-                        f"[InstagramCrawl] image archive failed for {handle}/{shortcode}: {e}"
-                    )
-                    continue
-                entries.append({
-                    "key": key, "instagram_photo_id": photo_id, "caption": post.get("caption"),
-                    "permalink": post.get("permalink"), "shortcode": shortcode,
+                photos.append({
+                    "url": url, "shortcode": shortcode, "caption": post.get("caption"),
+                    "permalink": post.get("permalink"),
                     "uploaded_at": post.get("timestamp") or None,
-                    "likes_count": post.get("likes_count"), "comments_count": post.get("comments_count"),
-                    "post_type": post.get("post_type"), "photo_name": None,
+                    "likes_count": post.get("likes_count"),
+                    "comments_count": post.get("comments_count"),
+                    "post_type": post.get("post_type"),
+                    "_photo_id": f"{shortcode}_{idx}" if len(urls) > 1 else (shortcode or f"post_{idx}"),
                 })
-        return entries
+        if not photos:
+            return [], CLASSIFICATION_OUTCOME_SKIPPED_NO_PHOTOS
+
+        for photo in photos:
+            try:
+                data, content_type = await self.downloader.download(photo["url"])
+            except Exception as e:
+                logger.warning(
+                    f"[InstagramCrawl] image download failed for {handle}/{photo['shortcode']}: {e}"
+                )
+                continue
+            photo["_bytes"] = data
+            photo["_content_type"] = content_type
+
+        downloaded = [p for p in photos if "_bytes" in p]
+        if not downloaded:
+            return [], CLASSIFICATION_OUTCOME_SKIPPED_NO_PHOTOS
+
+        classification_outcome = CLASSIFICATION_OUTCOME_SKIPPED_TARGET_DISABLED
+        if classify:
+            if self.photo_classifier is not None:
+                try:
+                    await self.photo_classifier.annotate(
+                        downloaded,
+                        # The attribute schema is a VENUE-profile concept
+                        # (vibe/interior attributes) this crawl has no use
+                        # for; only `category`/`classification_confidence`
+                        # (post_qualifies's flyer gate) are needed, so the
+                        # attribute pass — most of the token cost — is off.
+                        derive_attributes=False,
+                        venue_id=venue_id, require_bytes=True,
+                    )
+                    classification_outcome = CLASSIFICATION_OUTCOME_CLASSIFIED
+                except Exception as e:
+                    logger.error(
+                        f"[InstagramCrawl] classification failed for {handle}: {e}; "
+                        "photos archived without a category"
+                    )
+                    classification_outcome = CLASSIFICATION_OUTCOME_FAILED
+            else:
+                classification_outcome = CLASSIFICATION_OUTCOME_SKIPPED_NO_CLASSIFIER
+
+        entries: list[dict] = []
+        for photo in downloaded:
+            try:
+                key = await self.media_store.put_image(
+                    prefix=prefix, venue_id=venue_id, photo_id=photo["_photo_id"],
+                    data=photo["_bytes"], content_type=photo["_content_type"],
+                    category=photo.get("category"),
+                )
+            except Exception as e:
+                logger.warning(
+                    f"[InstagramCrawl] image archive failed for {handle}/{photo['shortcode']}: {e}"
+                )
+                continue
+            entries.append({
+                "key": key, "instagram_photo_id": photo["_photo_id"],
+                "caption": photo.get("caption"), "permalink": photo.get("permalink"),
+                "shortcode": photo.get("shortcode"), "uploaded_at": photo.get("uploaded_at"),
+                "likes_count": photo.get("likes_count"), "comments_count": photo.get("comments_count"),
+                "post_type": photo.get("post_type"), "photo_name": None,
+                # What EventPostSource/post_qualifies actually read to
+                # qualify an image-only flyer. `archive_sources._fetch_
+                # instagram` fetches raw photos with no category of its own
+                # (Instagram never provides one); `VenuePhotoArchiveService.
+                # run()`'s OUTER loop is what classifies them, right before
+                # storing — this method does the same two steps itself,
+                # since it does not call that outer loop (see the module
+                # docstring for why).
+                "category": photo.get("category"),
+                "classification_confidence": photo.get("classification_confidence"),
+            })
+        return entries, classification_outcome
 
     async def chain_promoter(
         self, *, handle: str, new_posts: list[dict], now: datetime,
@@ -560,6 +792,7 @@ class ScheduledInstagramCrawlService:
             return None
         return await self.chainer.chain_venue(
             handle=handle, venue_ids=venue_ids, new_posts=new_posts, now=now,
+            classify_images=bool(target.get("classify_images", True)),
         )
 
     def _record_cursor_age(self, handle: str, target: dict, updates: dict, now: datetime) -> None:

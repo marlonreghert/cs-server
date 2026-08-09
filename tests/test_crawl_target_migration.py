@@ -50,6 +50,14 @@ def test_kind_check_constraint_restricts_to_venue_or_promoter():
     assert "CONSTRAINT ck_crawl_target_kind CHECK (kind IN ('venue', 'promoter'))" in m.UPGRADE
 
 
+def test_classify_images_defaults_true_not_a_silent_cheap_mode():
+    """A scheduled crawl REPLACES a manual archive run that already
+    classifies photos — matching the weaker, caption-only default would be
+    a coverage regression. FALSE must be an explicit per-target opt-out."""
+    m = _load()
+    assert "classify_images     boolean NOT NULL DEFAULT true" in m.UPGRADE
+
+
 def test_enabled_defaults_true_and_is_indexed():
     m = _load()
     assert "enabled             boolean NOT NULL DEFAULT true" in m.UPGRADE

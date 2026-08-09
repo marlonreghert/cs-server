@@ -20,8 +20,10 @@ firing (`ScheduledInstagramCrawlService.run_target` handles both streams),
 never a second cron trigger; the plan's own words are "each target carries
 A crontab string" (singular).
 
-`CronTrigger.from_crontab(cron, timezone=target's own timezone)` is where
-§D's two-timezone rule actually takes effect: the TRIGGER fires in the
+`build_cron_trigger(cron, timezone=target's own timezone)` (app/services/
+instagram_crawl_service.py — NOT `CronTrigger.from_crontab`, whose own
+day-of-week field is a trap; see that function's module-level comment) is
+where §D's two-timezone rule actually takes effect: the TRIGGER fires in the
 target's local timezone (`America/Recife` by default — "Friday night" means
 Friday night in Recife), while everything the fired job computes
 (`onlyPostsNewerThan`, the stored cursor) is UTC, computed inside
@@ -32,8 +34,6 @@ from __future__ import annotations
 import logging
 import time
 
-from apscheduler.triggers.cron import CronTrigger
-
 from app.metrics import (
     BACKGROUND_JOB_DURATION_SECONDS,
     BACKGROUND_JOB_LAST_RUN_TIMESTAMP,
@@ -41,6 +41,7 @@ from app.metrics import (
     JOB_LOCK_REJECTED_TOTAL,
 )
 from app.services import job_lock
+from app.services.instagram_crawl_service import build_cron_trigger
 
 logger = logging.getLogger(__name__)
 
@@ -138,7 +139,7 @@ class CrawlScheduleSync:
             handle = target["handle"]
             tz_name = target.get("timezone") or DEFAULT_TIMEZONE
             try:
-                trigger = CronTrigger.from_crontab(target["cron"], timezone=tz_name)
+                trigger = build_cron_trigger(target["cron"], timezone=tz_name)
             except Exception as e:
                 logger.error(
                     f"[{SYNC_JOB_NAME}] {handle}: invalid cron "

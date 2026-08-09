@@ -394,6 +394,24 @@ def register_refresh_jobs(scheduler, settings: Settings):
     )
 
     # Job 3: Weekly forecast refresh (always scheduled)
+    # NOTE (found while building the crawl-target scheduler, plans/260809_
+    # scheduled-incremental-instagram-crawl.md): `CronTrigger.from_crontab`
+    # passes its day-of-week digit straight through to APScheduler's OWN
+    # 0=Monday..6=Sunday numbering, with NO translation to standard Unix
+    # cron's 0=Sunday..6=Saturday. `weekly_forecast_cron`'s default
+    # "0 0 * * 0" — commented "Sundays at 00:00" below — is very likely
+    # actually firing MONDAY 00:00 in production, despite its own comment.
+    # Deliberately left AS-IS here: this is a live, already-scheduled job,
+    # and changing which day it fires on is an operational decision for the
+    # operator to make, not a side effect of an unrelated feature branch.
+    # This site intentionally does NOT go through `app.services.
+    # instagram_crawl_service.build_cron_trigger` (the day-of-week-safe
+    # helper that feature introduces) — it keeps APScheduler-native
+    # semantics on purpose, so the divergence stays visible rather than
+    # being silently "fixed" into a different fire day out from under
+    # anyone relying on the current (buggy, but current) Monday behavior.
+    # See tests/test_scheduler.py::test_weekly_forecast_cron_currently_
+    # fires_monday_not_sunday_apscheduler_native_quirk, which pins this.
     schedule(
         scheduler,
         enabled=True,

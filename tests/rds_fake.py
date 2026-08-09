@@ -857,6 +857,10 @@ class InMemoryRdsVenueStore:
             row = {
                 "handle": handle, "kind": kind, "enabled": True, "cron": cron,
                 "timezone": "America/Recife", "crawl_reels": False,
+                # Defaults TRUE — a scheduled crawl replaces a manual archive
+                # run that already classifies; FALSE is an explicit per-target
+                # opt-out, never a silent inherited cheap mode.
+                "classify_images": True,
                 "initial_lookback": None, "results_limit": None,
                 "cursor_posts_at": None, "cursor_reels_at": None,
                 "last_run_at": None, "last_run_results": 0,

@@ -30,16 +30,28 @@ Every column beyond the key is scheduling/cursor state, never event content:
     operator WITH a schedule, never inserted schedule-less and left to invent
     one. `timezone` defaults to `America/Recife` — the cron fires in LOCAL
     time (an operator saying "Friday night" means Friday night in Recife).
-    `cron` is validated (app.services.instagram_crawl_service.
-    validate_crontab) and evaluated (app.services.crawl_schedule_sync) via
-    APScheduler's `CronTrigger.from_crontab`, whose `day_of_week` field is
-    APScheduler's OWN 0=Monday..6=Sunday numbering, not standard Unix cron's
-    0=Sunday..6=Saturday — see admin_crawl_router.py's `CrawlTargetCreate.
-    cron` for the full caveat; this column stores whatever string is given,
-    the interpretation caveat lives at the write boundary, not the schema.
+    `cron` is validated AND translated (app.services.instagram_crawl_service.
+    validate_crontab / build_cron_trigger) before it ever becomes an
+    APScheduler trigger — APScheduler's OWN day_of_week numbering
+    (0=Monday..6=Sunday) differs from standard Unix cron's (0=Sunday..
+    6=Saturday), and its `CronTrigger.from_crontab` does NOT translate
+    between them, so this column's value is interpreted as standard cron at
+    both the admin-router write boundary and `crawl_schedule_sync`'s fire
+    boundary, through the same shared function; this column itself just
+    stores whatever string is given, unmodified.
   - `crawl_reels` — whether this target also gets a second, independent
     reels run (§E of the plan): some venues announce events only as a reel,
     never a grid post.
+  - `classify_images` — whether the scheduled crawl's own archiving step
+    runs the SAME photo classifier `VenuePhotoArchiveService` already uses
+    (`app.services.instagram_crawl_service.InstagramCrawlChainer`), so an
+    image-only flyer (no event-marker caption at all — the flyer graphic
+    carries every word) still reaches extraction instead of being silently
+    skipped as `not_event_like`. Defaults TRUE: the scheduled crawl replaces
+    a manual archive run that already classified, so matching its WEAKER,
+    caption-only behavior by default would be a coverage regression, not
+    parity. FALSE is an explicit, operator-chosen cheap-mode opt-out per
+    target — never the default a target silently inherits.
   - `initial_lookback` / `results_limit` — the two bounds a brand-new target
     (null cursor) is seeded under (§C): a date bound (what the operator
     reasons about) AND a count cap (what stops a prolific account from
@@ -110,6 +122,7 @@ CREATE TABLE IF NOT EXISTS events.crawl_target (
   cron                text NOT NULL,
   timezone            text NOT NULL DEFAULT 'America/Recife',
   crawl_reels         boolean NOT NULL DEFAULT false,
+  classify_images     boolean NOT NULL DEFAULT true,
   initial_lookback    text,
   results_limit       integer,
   cursor_posts_at     timestamptz,

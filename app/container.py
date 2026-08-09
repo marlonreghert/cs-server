@@ -737,6 +737,13 @@ class Container:
                 downloader=HttpPhotoDownloader(),
                 event_extraction_service=self.event_extraction_service,
                 promoter_crawl_service=self.promoter_crawl_service,
+                # The SAME classifier VenuePhotoArchiveService uses — reused,
+                # not duplicated, so an image-only flyer archived by the
+                # scheduled crawl gets the SAME flyer detection a manual
+                # archive run already gives it. None (not configured/no
+                # OpenAI key) degrades to the pre-existing caption-only gate,
+                # recorded as such via CRAWL_CHAIN_CLASSIFICATION_TOTAL.
+                photo_classifier=self.photo_classification_service,
                 archive_source=SOURCE_INSTAGRAM_POSTS,
             )
             self.instagram_crawl_service = ScheduledInstagramCrawlService(

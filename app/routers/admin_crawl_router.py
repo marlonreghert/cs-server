@@ -12,13 +12,21 @@ app/services/instagram_crawl_service.py) — the unit test plan's own
 requirement: "Crontab parsing rejects a malformed string at write time, not
 at fire time." `CrawlScheduleSync` (app/services/crawl_schedule_sync.py)
 still guards defensively at sync time too, but this is the primary gate.
+
+`cron` means STANDARD Unix crontab(5) — day-of-week `0`/`7`=Sunday through
+`6`=Saturday. `validate_crontab`/`build_cron_trigger` translate that before
+building an APScheduler trigger (APScheduler's own day-of-week numbering is
+different — `0`=Monday — and its `CronTrigger.from_crontab` does NOT
+translate; see `instagram_crawl_service.py`'s module-level comment on
+`build_cron_trigger` for how this was found and fixed). `next_fire_at` below
+goes through the SAME translation, so it is always consistent with what a
+target will actually do, never a second, disagreeing interpretation.
 """
 from __future__ import annotations
 
 from datetime import datetime, timezone
 from typing import Optional
 
-from apscheduler.triggers.cron import CronTrigger
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
@@ -26,6 +34,7 @@ from app.services.instagram_crawl_service import (
     KIND_PROMOTER,
     KIND_VENUE,
     InvalidCrawlTargetConfig,
+    build_cron_trigger,
     validate_crontab,
 )
 from app.services.instagram_handle_sources import normalize_handle
@@ -85,6 +94,10 @@ class CrawlTargetOut(BaseModel):
     cron: str
     timezone: str
     crawl_reels: bool
+    # Whether scheduled archiving classifies images (flyer detection) the
+    # same way the manual VenuePhotoArchiveService run does. Defaults TRUE;
+    # an operator sets it FALSE per target for an explicit cheap mode.
+    classify_images: bool = True
     initial_lookback: Optional[str] = None
     results_limit: Optional[int] = None
     cursor_posts_at: Optional[datetime] = None
@@ -108,9 +121,7 @@ def _with_next_fire(row: dict) -> dict:
     breaking the whole list/get response."""
     out = dict(row)
     try:
-        trigger = CronTrigger.from_crontab(
-            row["cron"], timezone=row.get("timezone") or "America/Recife"
-        )
+        trigger = build_cron_trigger(row["cron"], timezone=row.get("timezone") or "America/Recife")
         out["next_fire_at"] = trigger.get_next_fire_time(None, datetime.now(timezone.utc))
     except Exception:
         out["next_fire_at"] = None
@@ -120,21 +131,21 @@ def _with_next_fire(row: dict) -> dict:
 class CrawlTargetCreate(BaseModel):
     handle: str
     kind: str = KIND_VENUE
-    # 5-field crontab (minute hour day month day_of_week), validated at
-    # write time via `validate_crontab` -> APScheduler's own CronTrigger.
-    # CAVEAT discovered while building this feature: APScheduler's
-    # `CronTrigger.from_crontab` does NOT remap the day_of_week field to
-    # standard Unix cron numbering — it passes the digit straight through to
-    # APScheduler's OWN convention, where 0=Monday...6=Sunday (standard cron
-    # is 0/7=Sunday...6=Saturday). A day_of_week digit here means what
-    # APScheduler's docs say it means, not what a Unix crontab(5) man page
-    # says — verify with `.../{handle}` (this router's read model surfaces
-    # `next_fire_at`, computed the same way, so a wrong digit is visible
-    # before the target's first real fire).
+    # Standard 5-field Unix crontab (minute hour day month day_of_week),
+    # validated AND translated at write time via `validate_crontab` ->
+    # `build_cron_trigger` (app/services/instagram_crawl_service.py).
+    # day_of_week here is `0`/`7`=Sunday..`6`=Saturday, exactly like every
+    # crontab(5) reference — the APScheduler-native numbering difference is
+    # translated away before a trigger is ever built, not merely documented.
     cron: str
     enabled: bool = True
     timezone: str = "America/Recife"
     crawl_reels: bool = False
+    # Default ON: a scheduled crawl REPLACES a manual archive run that
+    # already classifies images, so defaulting this off would silently lose
+    # coverage the operator already had (image-only flyers with no caption
+    # event-marker). An operator opts a target OUT explicitly for cheap mode.
+    classify_images: bool = True
     initial_lookback: Optional[str] = None
     results_limit: Optional[int] = None
     notes: Optional[str] = None
@@ -146,6 +157,7 @@ class CrawlTargetPatch(BaseModel):
     enabled: Optional[bool] = None
     timezone: Optional[str] = None
     crawl_reels: Optional[bool] = None
+    classify_images: Optional[bool] = None
     initial_lookback: Optional[str] = None
     results_limit: Optional[int] = None
     notes: Optional[str] = None

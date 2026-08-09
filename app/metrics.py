@@ -1370,6 +1370,22 @@ CRAWL_CURSOR_AGE_SECONDS = Gauge(
     ["handle", "result_type"],
 )
 
+# Whether a scheduled crawl's own archiving step actually ran the photo
+# classifier before writing its manifest — an image-only flyer (no caption
+# event-marker at all) only reaches extraction when this ran. Distinguishes
+# "we classified and there was no flyer" (a real `not_event_like` outcome,
+# tracked separately by EVENT_EXTRACTION_POSTS_TOTAL) from "classification
+# never ran for this crawl" (classifier not configured, or the target's own
+# `classify_images` toggle is off) — the second case is a coverage GAP, not
+# a verdict, and must never look identical to the first in a dashboard.
+CRAWL_CHAIN_CLASSIFICATION_TOTAL = Counter(
+    "crawl_chain_classification_total",
+    "Whether the scheduled crawl's archiving step classified images before chaining into extraction",
+    ["outcome"],
+    # outcome: classified, classification_failed, skipped_target_disabled,
+    #          skipped_no_classifier, skipped_no_photos
+)
+
 # =============================================================================
 # APPLICATION INFO
 # =============================================================================
