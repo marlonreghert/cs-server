@@ -15,7 +15,9 @@ from datetime import datetime, timezone
 import pytest
 
 from app.dao.venue_repository import VenueRepository
+from app.models.instagram import VenueInstagram
 from app.models.venue import Venue
+from app.services.event_venue_resolution import build_handle_index, build_venue_catalog
 from app.services.promoter_crawl_service import (
     DEFAULT_MAX_ACCOUNTS,
     InvalidPromoterCrawlConfig,
@@ -231,6 +233,117 @@ class TestManualLinkSurvivesReResolution:
         assert row["venue_id"] == "v_manual"
         assert row["location_resolution"] == "manual"
         assert row["linked_by"] == "operator_x"
+
+
+# ── plans/260810_post-kind-and-post-extraction-attribution.md §A/§B/§C ─────
+class TestNonEventProducesNoRow:
+    """Re-scoped mid-execution: a post classified as anything other than
+    `event` produces no events.event row — see event_extraction_service.py's
+    own TestNonEventProducesNoRow for the venue-post half of this; this is
+    the promoter-post half of the SAME rule, since both callers share
+    `resolve_event_datetime`'s inputs but each builds its own
+    `prepared_events` list."""
+
+    def test_a_menu_kind_post_persists_nothing(self, dao, caplog):
+        dao.upsert_promoter_account("promo", {"status": "active"})
+        post = {
+            "shortcode": "menu1", "caption": "Ingressos abertos! Prato do dia!",
+            "permalink": "https://instagram.com/p/menu1",
+            "timestamp": datetime(2026, 8, 1, tzinfo=timezone.utc).isoformat(),
+            "image_urls": [],
+        }
+        posts_client = _FakePostsClient()
+        posts_client.posts_by_handle["promo"] = [post]
+        openai_client = _FakeOpenAIClient()
+        openai_client.program(_extraction_json(kind="menu", title="Risoto"))
+
+        service = PromoterCrawlService(venue_dao=dao, posts_client=posts_client, openai_client=openai_client)
+        with caplog.at_level("INFO"):
+            _run(service.run({}))
+
+        assert dao.get_event_by_source("promo", "menu1") is None
+        assert dao.list_events() == []
+        assert any(
+            "promo" in r.message and "menu1" in r.message and "menu" in r.message
+            for r in caplog.records
+        ), caplog.records
+
+
+class TestLocationTextFallbackToCaption:
+    """plans/260810_post-kind-and-post-extraction-attribution.md §C: the
+    caption fallback is opt-in (default False), so a REAL promoter
+    account's resolution against its full servable catalog is unaffected —
+    only `InstagramCrawlChainer._chain_shared_handle` (a bounded, two-or-
+    three-venue candidate set) opts in. Called directly against
+    `_process_post` rather than through `run()`, since the flag itself is
+    the unit under test."""
+
+    def _venues(self, dao):
+        dao.upsert_venue(Venue(venue_id="v1", venue_name="Zetta Lounge", venue_lat=-8.05, venue_lng=-34.88))
+        return build_venue_catalog(dao), build_handle_index(dao)
+
+    def test_default_false_never_falls_back_to_the_caption(self, dao):
+        venues, handle_index = self._venues(dao)
+        post = {
+            "shortcode": "fb1", "caption": "Zetta Lounge, sexta 22h",
+            "permalink": "https://instagram.com/p/fb1",
+            "timestamp": datetime(2026, 8, 1, tzinfo=timezone.utc).isoformat(),
+            "image_urls": [],
+        }
+        openai_client = _FakeOpenAIClient()
+        openai_client.program(_extraction_json(location_text=None))
+        service = PromoterCrawlService(venue_dao=dao, posts_client=None, openai_client=openai_client)
+
+        _run(service._process_post(
+            handle="promo", post=post, venues=venues, handle_index=handle_index,
+            now=datetime.now(timezone.utc),
+        ))
+
+        row = dao.get_event_by_source("promo", "fb1")
+        assert row["venue_id"] is None, row
+
+    def test_true_falls_back_to_the_caption_when_location_text_is_absent(self, dao):
+        venues, handle_index = self._venues(dao)
+        post = {
+            "shortcode": "fb2", "caption": "Zetta Lounge, sexta 22h",
+            "permalink": "https://instagram.com/p/fb2",
+            "timestamp": datetime(2026, 8, 1, tzinfo=timezone.utc).isoformat(),
+            "image_urls": [],
+        }
+        openai_client = _FakeOpenAIClient()
+        openai_client.program(_extraction_json(location_text=None))
+        service = PromoterCrawlService(venue_dao=dao, posts_client=None, openai_client=openai_client)
+
+        _run(service._process_post(
+            handle="promo", post=post, venues=venues, handle_index=handle_index,
+            now=datetime.now(timezone.utc), location_text_fallback_to_caption=True,
+        ))
+
+        row = dao.get_event_by_source("promo", "fb2")
+        assert row["venue_id"] == "v1", row
+
+    def test_true_still_prefers_a_real_location_text_over_the_caption(self, dao):
+        dao.upsert_venue(Venue(venue_id="v1", venue_name="Zetta Lounge", venue_lat=-8.05, venue_lng=-34.88))
+        dao.upsert_venue(Venue(venue_id="v2", venue_name="Casa Rosa", venue_lat=-8.06, venue_lng=-34.90))
+        venues = build_venue_catalog(dao)
+        handle_index = build_handle_index(dao)
+        post = {
+            "shortcode": "fb3", "caption": "Zetta Lounge, sexta 22h",
+            "permalink": "https://instagram.com/p/fb3",
+            "timestamp": datetime(2026, 8, 1, tzinfo=timezone.utc).isoformat(),
+            "image_urls": [],
+        }
+        openai_client = _FakeOpenAIClient()
+        openai_client.program(_extraction_json(location_text="Casa Rosa"))
+        service = PromoterCrawlService(venue_dao=dao, posts_client=None, openai_client=openai_client)
+
+        _run(service._process_post(
+            handle="promo", post=post, venues=venues, handle_index=handle_index,
+            now=datetime.now(timezone.utc), location_text_fallback_to_caption=True,
+        ))
+
+        row = dao.get_event_by_source("promo", "fb3")
+        assert row["venue_id"] == "v2", row  # Casa Rosa, from location_text -- never the caption's Zetta
 
 
 class TestFakeOpenAIClientExhaustion:

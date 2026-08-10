@@ -301,6 +301,80 @@ class TestBothPromptsExtendedForAttractionsAndTicketInfo:
             assert style in prompt
 
 
+# ── plans/260810_post-kind-and-post-extraction-attribution.md §A ────────────
+class TestBothPromptsStateKindAndItsPrecedence:
+    """Extending only MULTI_EVENT_EXTRACTION_PROMPT with `kind` is the exact
+    same half-fix TestBothPromptsExtendedForAttractionsAndTicketInfo already
+    guards against above — asserted directly on BOTH prompt strings, since a
+    bug here is invisible to any test that only exercises the multi-event
+    path (both real runtime callers use it).
+
+    The precedence rule specifically (not just the word "kind") is asserted
+    verbatim in both, because that is the whole point: these categories
+    overlap in real captions, and an unstated order makes classification
+    vary run to run.
+    """
+
+    @pytest.mark.parametrize("prompt", [EXTRACTION_PROMPT, MULTI_EVENT_EXTRACTION_PROMPT])
+    def test_prompt_names_every_kind(self, prompt):
+        for kind in ("event", "promotion", "menu", "food", "other"):
+            assert kind in prompt
+
+    @pytest.mark.parametrize("prompt", [EXTRACTION_PROMPT, MULTI_EVENT_EXTRACTION_PROMPT])
+    def test_prompt_states_the_precedence_order_verbatim(self, prompt):
+        # Whitespace-normalized: the prompt hard-wraps this sentence across
+        # several lines, but the ORDER of the words is what must never drift.
+        normalized = " ".join(prompt.split())
+        precedence = (
+            'a happening with a date or recurring schedule -> "event"; else an '
+            'offer or price advantage -> "promotion"; else a named dish or menu '
+            '-> "menu"; else food or drink imagery -> "food"; else "other"'
+        )
+        assert precedence in normalized
+
+    @pytest.mark.parametrize("prompt", [EXTRACTION_PROMPT, MULTI_EVENT_EXTRACTION_PROMPT])
+    def test_prompt_puts_event_first_deliberately(self, prompt):
+        assert 'This puts "event" FIRST on' in prompt
+        assert "purpose" in prompt
+
+    @pytest.mark.parametrize("prompt", [EXTRACTION_PROMPT, MULTI_EVENT_EXTRACTION_PROMPT])
+    def test_prompt_marks_kind_required(self, prompt):
+        assert "This field is REQUIRED" in prompt
+
+
+class TestKindFieldParsing:
+    """`_parse_event_fields` (via parse_extraction_response / parse_multi_
+    event_extraction_response) stores the model's raw `kind` verbatim,
+    lowercased/stripped — never coerced into a known value. The fail-toward-
+    visible rule (a missing/unrecognised kind reads as an event) is enforced
+    by the CALLERS that decide whether to persist an event row
+    (EventExtractionService/PromoterCrawlService skip only a value in
+    app.models.event_kind.NON_EVENT_KINDS), not by this parsing step, which
+    is deliberately dumb: it records exactly what the model said."""
+
+    def test_kind_is_parsed_and_lowercased(self):
+        parsed = parse_extraction_response(json.dumps({"kind": "MENU"}))
+        assert parsed["kind"] == "menu"
+
+    def test_missing_kind_is_none(self):
+        parsed = parse_extraction_response(json.dumps({}))
+        assert parsed["kind"] is None
+
+    def test_blank_kind_is_none(self):
+        parsed = parse_extraction_response(json.dumps({"kind": "   "}))
+        assert parsed["kind"] is None
+
+    def test_an_unrecognised_kind_is_stored_verbatim_not_dropped(self):
+        parsed = parse_extraction_response(json.dumps({"kind": "giveaway"}))
+        assert parsed["kind"] == "giveaway"
+
+    def test_kind_survives_the_multi_event_shape_too(self):
+        events, _malformed, _malformed_attractions = parse_multi_event_extraction_response(
+            json.dumps({"events": [{"kind": "promotion"}, {"kind": "event"}]}),
+        )
+        assert [e["kind"] for e in events] == ["promotion", "event"]
+
+
 # ── truncation detection via finish_reason ────────────────────────────────────
 class TestExtractEventsTruncationDetection:
     def test_finish_reason_length_is_reported_as_truncated(self):

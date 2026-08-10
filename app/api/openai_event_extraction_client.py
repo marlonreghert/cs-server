@@ -37,6 +37,7 @@ from app.metrics import (
     OPENAI_API_CALL_DURATION_SECONDS,
     OPENAI_TOKENS_TOTAL,
 )
+from app.models.event_kind import normalize_kind
 from app.models.taxonomy import TAXONOMY, validate_category_labels
 
 logger = logging.getLogger(__name__)
@@ -51,7 +52,14 @@ DEFAULT_MODEL = "gpt-5.6-luna"
 # not scaled by event count, and turning each performer into a four-field
 # `attractions` object is a real per-entry token increase on TOP of the
 # reasoning overhead a classification/vocabulary-mapping task adds.
-DEFAULT_MAX_COMPLETION_TOKENS = 6144
+# plans/260810_post-kind-and-post-extraction-attribution.md §A adds a
+# required `kind` field. The field itself is one word, but the PRECEDENCE
+# rule it comes with (event/promotion/menu/food/other, in that order, over
+# captions that genuinely satisfy more than one) is new reasoning work for
+# gpt-5.6-luna, and invisible reasoning tokens count against this SAME
+# budget — bumped alongside the multi-event budgets below, same as every
+# other field this prompt has grown.
+DEFAULT_MAX_COMPLETION_TOKENS = 6400
 
 # plans/260808_event-ticket-info-and-attractions.md §C: `attractions[].styles`
 # is constrained to the SAME `taxonomy.musica` vocabulary the venue vibe
@@ -59,6 +67,32 @@ DEFAULT_MAX_COMPLETION_TOKENS = 6144
 # into both prompts below so the model is told the vocabulary up front
 # rather than only finding out a label was dropped after the fact.
 _MUSIC_STYLES = ", ".join(TAXONOMY["musica"])
+
+# Shared by both prompts below so neither can drift on the kind vocabulary
+# or, most importantly, the PRECEDENCE ORDER — plans/260810_post-kind-and-
+# post-extraction-attribution.md §A is explicit that the order must be
+# STATED, not left to the model's taste: these categories overlap
+# constantly in real captions (a risotto special at a stated price on
+# weekdays is simultaneously a dish, an offer and a recurring weekly thing —
+# see the plan's Evidence section), and an unstated order makes
+# classification vary run to run, which turns the review queue's contents
+# into a coin flip. Extending only MULTI_EVENT_EXTRACTION_PROMPT with this
+# is the exact half-fix the plan calls out; both prompts interpolate this
+# SAME constant so they can never disagree about the rule.
+_KIND_FIELD_DOC = """- kind: what this post actually IS — exactly one of:
+    - "event": a happening at a time — show, party, DJ night, live music
+    - "promotion": an offer or price advantage — happy hour, birthday freebie
+    - "menu": a dish or menu announcement, including a daily special
+    - "food": food or drink imagery with no offer and no event
+    - "other": anything else — staff, decor, hiring, closure notices
+  Decide with this PRECEDENCE, in order, and stop at the FIRST that applies:
+  a happening with a date or recurring schedule -> "event"; else an offer or
+  price advantage -> "promotion"; else a named dish or menu -> "menu"; else
+  food or drink imagery -> "food"; else "other". This puts "event" FIRST on
+  purpose: a genuine event advertised alongside a drinks offer is still an
+  event, never a promotion. A post with no photo attached still gets a
+  kind, judged from the caption alone. This field is REQUIRED — always
+  answer with one of the five values above, never omit it."""
 
 # Shared by both prompts below (single-line, embedded via an f-string) so the
 # two can never drift on what an `attractions` entry looks like — extending
@@ -100,6 +134,7 @@ If no date or time appears anywhere, leave the corresponding field null.
 Never invent one.
 
 ## Fields to extract
+""" + _KIND_FIELD_DOC + """
 - title: the event's name/headline
 - description: any additional descriptive text (optional)
 - date_text: the raw date expression exactly as printed/spoken, or null
@@ -119,8 +154,8 @@ Never invent one.
 
 ## Output
 Reply with ONLY a JSON object, no markdown fences:
-{"title": "...", "description": null, "date_text": "15/08", "time_text": "22h",
- "is_recurring": false, "recurrence_text": null,
+{"kind": "event", "title": "...", "description": null, "date_text": "15/08",
+ "time_text": "22h", "is_recurring": false, "recurrence_text": null,
  "attractions": [{"name": "DJ X", "type": "dj", "stage": null, "styles": ["House"]}],
  "ticket_url": null, "ticket_info": null, "price_text": "R$30", "location_text": null,
  "confidence": 0.85}
@@ -161,6 +196,7 @@ text into ITS OWN `location_text`. If an event names no venue, leave
 venue for it.
 
 ## Fields to extract, PER EVENT
+""" + _KIND_FIELD_DOC + """
 - title: the event's name/headline
 - description: any additional descriptive text (optional)
 - date_text: the raw date expression exactly as printed/spoken, or null
@@ -181,8 +217,8 @@ venue for it.
 Reply with ONLY a JSON object, no markdown fences, wrapping every event in an
 "events" array (a single-event post still returns a list of one):
 {"events": [
-  {"title": "...", "description": null, "date_text": "15/08", "time_text": "22h",
-   "is_recurring": false, "recurrence_text": null,
+  {"kind": "event", "title": "...", "description": null, "date_text": "15/08",
+   "time_text": "22h", "is_recurring": false, "recurrence_text": null,
    "attractions": [{"name": "DJ X", "type": "dj", "stage": null, "styles": ["House"]}],
    "ticket_url": null, "ticket_info": null, "price_text": "R$30", "location_text": "Venue A",
    "confidence": 0.85}
@@ -206,8 +242,13 @@ Reply with ONLY a JSON object, no markdown fences, wrapping every event in an
 # budget. MULTI_EVENT_PER_EVENT_COMPLETION_TOKENS carries the bulk of the
 # increase (it scales per event); MULTI_EVENT_BASE_COMPLETION_TOKENS only a
 # modest one (reasoning overhead does not scale purely per event).
-MULTI_EVENT_BASE_COMPLETION_TOKENS = 2048
-MULTI_EVENT_PER_EVENT_COMPLETION_TOKENS = 500
+#
+# Bumped again for plans/260810_post-kind-and-post-extraction-attribution.md
+# §A: `kind` is judged PER EVENT (each event in a roundup gets its own
+# precedence decision), so the per-event reasoning overhead — not just the
+# base call — grows a little too, on top of the one-word field itself.
+MULTI_EVENT_BASE_COMPLETION_TOKENS = 2304
+MULTI_EVENT_PER_EVENT_COMPLETION_TOKENS = 550
 
 
 def compute_multi_event_max_completion_tokens(max_events: int) -> int:
@@ -343,6 +384,13 @@ def _parse_event_fields(data: dict) -> tuple[dict, int]:
         lineup = [str(x) for x in lineup_raw] if isinstance(lineup_raw, list) else []
 
     fields = {
+        # plans/260810_post-kind-and-post-extraction-attribution.md §A:
+        # stored VERBATIM (lowercased/stripped, never coerced into a known
+        # value) — see app.models.event_kind.normalize_kind's own
+        # docstring for why "unknown reads as event" is enforced at READ
+        # time (the review-queue predicate), not by rewriting the model's
+        # answer here.
+        "kind": normalize_kind(data.get("kind")),
         "title": _text("title"),
         "description": _text("description"),
         "date_text": _text("date_text"),

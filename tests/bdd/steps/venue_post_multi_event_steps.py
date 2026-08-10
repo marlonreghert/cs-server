@@ -44,6 +44,7 @@ from behave import given, then, when  # type: ignore[import-untyped]
 from prometheus_client import REGISTRY
 
 from app.models.venue import Venue
+from app.services.event_extraction_service import KIND_LABEL_NOT_APPLICABLE
 from tests.bdd.steps.instagram_event_extraction_steps import (
     RECIFE_LAT,
     RECIFE_LNG,
@@ -391,8 +392,13 @@ def step_then_that_venue_event_keeps_its_manual_link(context):
 @given("a venue post whose extraction response is cut off mid-list")
 def step_given_a_venue_post_whose_extraction_response_is_cut_off(context):
     _add_post(context, "vpme_truncated", timestamp=_TS)
+    # plans/260810_post-kind-and-post-extraction-attribution.md §Error
+    # Handling: event_extraction_posts_total gained a required `kind` label
+    # — a truncated post never got far enough to read one, so its kind is
+    # KIND_LABEL_NOT_APPLICABLE (see event_extraction_service.py).
     context.vpme_truncated_snapshot = _snapshot_metric(
-        "event_extraction_posts_total", {"outcome": "truncated"},
+        "event_extraction_posts_total",
+        {"outcome": "truncated", "kind": KIND_LABEL_NOT_APPLICABLE},
     )
     context.ee_openai.program_truncated(
         '{"events": [{"title": "Festa Cortada Venue", "date_text": "01/07'
@@ -402,7 +408,10 @@ def step_given_a_venue_post_whose_extraction_response_is_cut_off(context):
 @then('the post is counted with the venue outcome "{outcome}"')
 def step_then_the_post_is_counted_with_the_venue_outcome(context, outcome):
     before = context.vpme_truncated_snapshot
-    after = _snapshot_metric("event_extraction_posts_total", {"outcome": outcome})
+    after = _snapshot_metric(
+        "event_extraction_posts_total",
+        {"outcome": outcome, "kind": KIND_LABEL_NOT_APPLICABLE},
+    )
     assert after - before == 1.0, (before, after)
 
 

@@ -1168,10 +1168,10 @@ EVENT_CANDIDATE_VENUES = Gauge(
 # docs/venue-retrieval-storage.md) — per-run narrative goes to Loki instead.
 EVENT_EXTRACTION_POSTS_TOTAL = Counter(
     "event_extraction_posts_total",
-    "Instagram posts examined by event extraction, by outcome",
-    ["outcome"],  # extracted, not_event_like, no_date, low_confidence,
-    # extraction_failed, skipped_seen, unread_time, truncated
-    # (a venue post's multi-event response cut off mid-list —
+    "Instagram posts examined by event extraction, by outcome and kind",
+    ["outcome", "kind"],  # outcome: extracted, not_event_like, no_date,
+    # low_confidence, extraction_failed, skipped_seen, unread_time,
+    # truncated (a venue post's multi-event response cut off mid-list —
     # plans/260806_venue-post-multi-event.md), weekday_mismatch
     # (the explicit date resolved but disagreed with a stated
     # weekday — plans/260807_date-resolution-correctness.md).
@@ -1179,6 +1179,16 @@ EVENT_EXTRACTION_POSTS_TOTAL = Counter(
     # resolver correctly refusing a guess it used to silently
     # make, not a regression — a stale outcome list here is how
     # the next reader misreads a dashboard.
+    #
+    # kind (plans/260810_post-kind-and-post-extraction-attribution.md
+    # §Error Handling): event, promotion, menu, food, other, "unknown"
+    # (the model left it missing/blank), "mixed" (a roundup post whose
+    # several events do not share one kind), or "not_applicable" (no event
+    # was even parsed for this post). WATCH THE EVENT SHARE: if nearly
+    # everything still classifies as event, the prompt's precedence is not
+    # landing; if almost nothing does, the classifier is eating real
+    # events — and that failure is silent everywhere else, since a
+    # misclassified event never reaches the review queue.
 )
 
 # Cumulative vision-model spend on event extraction, in USD, priced from the

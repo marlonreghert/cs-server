@@ -396,8 +396,15 @@ class TestSingleEventVenuePostIsByteIdenticalToTheOldPath:
         # attractions.md) now ride in raw_extraction too — this fixture's
         # raw model JSON states neither, so both take their genuinely-absent
         # values ([] / None), same as every OTHER field here that the model
-        # didn't state.
+        # didn't state. `kind` (plans/260810_post-kind-and-post-extraction-
+        # attribution.md §A) rides in raw_extraction the SAME way — it is
+        # never its own events.event column (see that plan's §B re-scope:
+        # events/promotions/menus are separate entities, so this feature
+        # persists no `kind` column at all, only the model's raw answer
+        # inside this JSONB blob).
+        assert "kind" not in stored
         assert stored["raw_extraction"] == {
+            "kind": None,
             "title": "Festa da Casa", "description": "Uma noite especial",
             "date_text": "15/08", "time_text": "22h", "is_recurring": False,
             "recurrence_text": None, "lineup": ["DJ A", "DJ B"],
@@ -491,6 +498,76 @@ class TestLowConfidenceQueuesForReview:
         stored = dao.get_event_by_source("v1_handle", "s1")
         assert stored["status"] == "pending_review"
         assert "low_confidence" in stored["review_reason"]
+
+
+# ── plans/260810_post-kind-and-post-extraction-attribution.md §A/§B ────────
+# (re-scoped mid-execution: a non-event post produces no events.event row at
+# all — counted and logged, never persisted with a discriminator column.)
+class TestNonEventProducesNoRow:
+    @pytest.mark.parametrize("kind", ["promotion", "menu", "food", "other"])
+    def test_each_non_event_kind_persists_nothing(self, kind, caplog):
+        dao = _dao()
+        _seed_venue(dao, "v1", "v1_handle")
+        posts = {"v1": [_post(
+            "s1", caption="Ingressos!", flyer_photo_key="s1.jpg", flyer_confidence=0.9,
+        )]}
+        cfg = {"eligibility": {"mode": "venue_ids", "venue_ids": "v1"}}
+        client = _FakeOpenAIClient([_extraction_json(kind=kind, title="Coisa")])
+        service = EventExtractionService(dao, _FakePostSource(posts), client)
+
+        with caplog.at_level("INFO"):
+            result = _run(service.run(cfg))
+
+        assert dao.get_event_by_source("v1_handle", "s1") is None
+        assert dao.list_events() == []
+        assert result["outcomes"].get("not_an_event") == 1
+        # Greppable: handle, shortcode and kind all appear in the log line an
+        # operator would search for.
+        assert any(
+            "v1_handle" in r.message and "s1" in r.message and kind in r.message
+            for r in caplog.records
+        ), caplog.records
+
+    def test_event_kind_is_unaffected(self):
+        """The control case: `kind="event"` goes through the ordinary flow,
+        proving the skip is specific to the four non-event kinds, not a
+        side effect of the field existing at all."""
+        dao = _dao()
+        _seed_venue(dao, "v1", "v1_handle")
+        posts = {"v1": [_post(
+            "s1", caption="Ingressos!", flyer_photo_key="s1.jpg", flyer_confidence=0.9,
+            timestamp=datetime(2026, 7, 1, 20, tzinfo=timezone.utc),
+        )]}
+        cfg = {"eligibility": {"mode": "venue_ids", "venue_ids": "v1"}}
+        client = _FakeOpenAIClient([_extraction_json(kind="event")])
+        service = EventExtractionService(dao, _FakePostSource(posts), client)
+
+        result = _run(service.run(cfg))
+
+        assert result["outcomes"].get(OUTCOME_ACCEPTED) == 1
+        assert dao.get_event_by_source("v1_handle", "s1") is not None
+
+    @pytest.mark.parametrize("kind", [None, "", "giveaway", "EVENT"])
+    def test_missing_unknown_or_differently_cased_kind_is_never_dropped(self, kind):
+        """Fail-toward-visible: only a value that EXACTLY matches a
+        recognised non-event kind is dropped. None, blank, an unrecognised
+        string, and a differently-cased "EVENT" (normalize_kind lowercases
+        it to "event", still not a member of NON_EVENT_KINDS) all proceed
+        through the ordinary event flow."""
+        dao = _dao()
+        _seed_venue(dao, "v1", "v1_handle")
+        posts = {"v1": [_post(
+            "s1", caption="Ingressos!", flyer_photo_key="s1.jpg", flyer_confidence=0.9,
+            timestamp=datetime(2026, 7, 1, 20, tzinfo=timezone.utc),
+        )]}
+        cfg = {"eligibility": {"mode": "venue_ids", "venue_ids": "v1"}}
+        overrides = {} if kind is None else {"kind": kind}
+        client = _FakeOpenAIClient([_extraction_json(**overrides)])
+        service = EventExtractionService(dao, _FakePostSource(posts), client)
+
+        _run(service.run(cfg))
+
+        assert dao.get_event_by_source("v1_handle", "s1") is not None
 
 
 class TestDryRunSpendsNothing:

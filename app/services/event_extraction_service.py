@@ -59,6 +59,7 @@ from app.metrics import (
     EVENT_EXTRACTION_POSTS_TOTAL,
     EVENTS_TOTAL,
 )
+from app.models.event_kind import NON_EVENT_KINDS
 from app.models.photo_taxonomy import CATEGORY_FLYER
 from app.services.event_caption_matcher import matches_event_marker
 from app.services.event_date_resolver import REASON_WEEKDAY_MISMATCH, resolve_event_datetime
@@ -105,6 +106,13 @@ OUTCOME_WEEKDAY_MISMATCH = "weekday_mismatch"
 # response means the output budget was too small, not a bad model answer).
 # See plans/260806_venue-post-multi-event.md.
 OUTCOME_TRUNCATED = "truncated"
+# plans/260810_post-kind-and-post-extraction-attribution.md §A/§B: the model
+# classified every event this post yielded as something other than `event`
+# (promotion/menu/food/other) — no events.event row was created for any of
+# them. Distinct from OUTCOME_NOT_EVENT_LIKE, which means the post never
+# even reached the model (the caption/flyer pre-filter rejected it); this
+# outcome means the model DID look and said "not an event".
+OUTCOME_NOT_AN_EVENT = "not_an_event"
 # A single-event post's extraction had nothing wrong AND cleared the
 # auto-accept predicate (app.services.event_reconciliation.
 # is_clean_extraction) — replaces OUTCOME_EXTRACTED for that exact case
@@ -124,6 +132,23 @@ ALL_STATUSES = (
     # strict predicate) depends on that distinction.
     "accepted",
 )
+
+# plans/260810_post-kind-and-post-extraction-attribution.md §Error Handling:
+# `EVENT_EXTRACTION_POSTS_TOTAL` gains a `kind` label so the event/non-event
+# split is visible from the first run — "watch the event share" is the
+# whole point, since a misclassified event is silent everywhere else. This
+# counter is per POST, but `kind` is a per-EVENT answer, so a value is
+# chosen per post outcome:
+#   - no event was even parsed (the pre-filter rejected it, or extraction
+#     failed/truncated before any kind could be read) -> "not_applicable".
+#   - exactly one event was parsed -> that event's own kind, or "unknown"
+#     when the model left it missing/blank.
+#   - several events were parsed (a roundup post) -> "mixed": no single
+#     kind describes the whole post, and attributing one would hide exactly
+#     the split this label exists to show.
+KIND_LABEL_NOT_APPLICABLE = "not_applicable"
+KIND_LABEL_UNKNOWN = "unknown"
+KIND_LABEL_MIXED = "mixed"
 
 DEFAULT_MAX_VENUES = 25
 DEFAULT_MAX_POSTS_PER_VENUE = 20
@@ -354,9 +379,9 @@ class EventExtractionService:
 
         outcome_counts: dict[str, int] = {}
 
-        def _bump(outcome: str) -> None:
+        def _bump(outcome: str, kind: str = KIND_LABEL_NOT_APPLICABLE) -> None:
             outcome_counts[outcome] = outcome_counts.get(outcome, 0) + 1
-            EVENT_EXTRACTION_POSTS_TOTAL.labels(outcome=outcome).inc()
+            EVENT_EXTRACTION_POSTS_TOTAL.labels(outcome=outcome, kind=kind).inc()
 
         qualifying_posts = 0
         for venue_id in venue_ids:
@@ -379,8 +404,8 @@ class EventExtractionService:
                 if cfg["dry_run"]:
                     continue
 
-                outcome = await self._extract_one(venue_id, handle, post, cfg)
-                _bump(outcome)
+                outcome, kind_label = await self._extract_one(venue_id, handle, post, cfg)
+                _bump(outcome, kind_label)
 
         if not cfg["dry_run"]:
             self._update_events_gauge()
@@ -393,7 +418,11 @@ class EventExtractionService:
             "estimated_cost_usd": None,
         }
 
-    async def _extract_one(self, venue_id: str, handle: str, post: ArchivedPost, cfg: dict) -> str:
+    async def _extract_one(
+        self, venue_id: str, handle: str, post: ArchivedPost, cfg: dict,
+    ) -> tuple[str, str]:
+        """Returns (outcome, kind_label) — see KIND_LABEL_* above for what
+        the second element means."""
         # ALL rows already extracted from this post, not just one — a post
         # can hold several events now, so get_event_by_source (at most one
         # row) is unsafe here. Mirrors PromoterCrawlService._process_post.
@@ -412,7 +441,7 @@ class EventExtractionService:
                 f"[EventExtraction] extraction failed for {handle}/{post.shortcode}: {e}"
             )
             self._record_failure(venue_id, handle, post, raw_text, str(e), existing_events)
-            return OUTCOME_EXTRACTION_FAILED
+            return OUTCOME_EXTRACTION_FAILED, KIND_LABEL_NOT_APPLICABLE
 
         if truncated:
             # A truncated response means the output budget is too small — a
@@ -425,7 +454,7 @@ class EventExtractionService:
                 f"budget too small for up to {self.max_events_per_post} events; "
                 f"persisting nothing"
             )
-            return OUTCOME_TRUNCATED
+            return OUTCOME_TRUNCATED, KIND_LABEL_NOT_APPLICABLE
 
         try:
             events_data, malformed_count, malformed_attractions_count = (
@@ -438,7 +467,17 @@ class EventExtractionService:
                 f"[EventExtraction] extraction failed for {handle}/{post.shortcode}: {e}"
             )
             self._record_failure(venue_id, handle, post, raw_text, str(e), existing_events)
-            return OUTCOME_EXTRACTION_FAILED
+            return OUTCOME_EXTRACTION_FAILED, KIND_LABEL_NOT_APPLICABLE
+
+        # See KIND_LABEL_* above: computed here, once, from the parsed
+        # events this post actually yielded — never from the outcome label,
+        # which does not carry kind information for every branch below.
+        if len(events_data) == 1:
+            kind_label = events_data[0].get("kind") or KIND_LABEL_UNKNOWN
+        elif len(events_data) > 1:
+            kind_label = KIND_LABEL_MIXED
+        else:
+            kind_label = KIND_LABEL_NOT_APPLICABLE
 
         if malformed_count:
             EVENT_EXTRACTION_MALFORMED_EVENTS_TOTAL.inc(malformed_count)
@@ -456,13 +495,34 @@ class EventExtractionService:
         # overall, like the promoter path already does: per-event nuance is
         # visible on each row's own review_reason instead.
         single_event_outcome: Optional[str] = None
+        # plans/260810_post-kind-and-post-extraction-attribution.md §B, re-
+        # scoped mid-execution: events, promotions and menus are separate
+        # entities (the operator's own correction) — this feature does not
+        # build promotion/menu entities, so a post classified as anything
+        # other than `event` produces NO events.event row at all, only a
+        # counted, logged outcome. The fail-toward-visible rule still
+        # applies: a MISSING or UNRECOGNISED kind is never in
+        # NON_EVENT_KINDS, so it falls through and is treated as an event,
+        # same as before.
+        skipped_non_event = 0
 
         for parsed in events_data:
+            kind = parsed.get("kind")
+            if kind in NON_EVENT_KINDS:
+                skipped_non_event += 1
+                logger.info(
+                    f"[EventExtraction] non-event post skipped for "
+                    f"{handle}/{post.shortcode}: kind={kind!r} "
+                    f"title={parsed.get('title')!r} -- no event row created"
+                )
+                continue
+
             # Each event resolves its OWN date, independently, against the
             # post's timestamp — never a sibling's.
             resolved = resolve_event_datetime(
                 date_text=parsed["date_text"], time_text=parsed["time_text"],
                 post_timestamp=post_timestamp,
+                is_recurring=parsed["is_recurring"], recurrence_text=parsed["recurrence_text"],
             )
 
             # A time is an extraction MISS (worth an operator's eye) only
@@ -567,7 +627,17 @@ class EventExtractionService:
         if touched_event_ids:
             merge_touched_events(self.venue_dao, touched_event_ids, now)
 
-        return single_event_outcome if single_event_outcome is not None else OUTCOME_EXTRACTED
+        if prepared_events:
+            outcome = single_event_outcome if single_event_outcome is not None else OUTCOME_EXTRACTED
+        elif skipped_non_event:
+            # Every parsed event was a recognised non-event kind — nothing
+            # persisted, by design (see the loop above).
+            outcome = OUTCOME_NOT_AN_EVENT
+        else:
+            # events_data itself was empty ({"events": []}) — unchanged,
+            # pre-existing behaviour for that edge case.
+            outcome = OUTCOME_EXTRACTED
+        return outcome, kind_label
 
     def _record_failure(
         self, venue_id: str, handle: str, post: ArchivedPost,
@@ -635,6 +705,7 @@ __all__ = [
     "OUTCOME_EXTRACTED", "OUTCOME_NOT_EVENT_LIKE", "OUTCOME_NO_DATE",
     "OUTCOME_LOW_CONFIDENCE", "OUTCOME_EXTRACTION_FAILED", "OUTCOME_SKIPPED_SEEN",
     "OUTCOME_UNREAD_TIME", "OUTCOME_TRUNCATED", "OUTCOME_WEEKDAY_MISMATCH",
-    "OUTCOME_ACCEPTED",
+    "OUTCOME_ACCEPTED", "OUTCOME_NOT_AN_EVENT",
     "REVIEW_REASON_UNREAD_TIME", "DEFAULT_MAX_EVENTS_PER_POST", "ALL_STATUSES",
+    "KIND_LABEL_NOT_APPLICABLE", "KIND_LABEL_UNKNOWN", "KIND_LABEL_MIXED",
 ]

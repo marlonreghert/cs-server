@@ -12,10 +12,15 @@ genuinely new to this feature.
 Two extra fakes this feature's scenarios need that the shared module does not
 wire by default: a photo classifier (to prove a duplicated post is not
 classified twice) and a real `PromoterCrawlService` instance (reused,
-unmodified, as `InstagramCrawlChainer`'s own `_chain_shared_handle` /
-`_archive_and_queue_unresolved` already call its `_archive_post_images` /
-`_process_post` for a shared handle's UNRESOLVED posts — see app/services/
-instagram_crawl_service.py).
+unmodified, as `InstagramCrawlChainer._chain_shared_handle` calls its
+`_archive_post_images`/`_process_post` for EVERY post of a shared handle —
+see app/services/instagram_crawl_service.py. As of
+plans/260810_post-kind-and-post-extraction-attribution.md §C, attribution
+itself now runs AFTER extraction inside `_process_post`, using the model's
+`location_text` with a caption fallback, rather than the raw-caption guess
+this feature originally built — this file's fixtures still exercise that
+outcome unchanged, since the fake OpenAI client's canned `location_text` is
+null here, which is exactly what the fallback covers).
 """
 from __future__ import annotations
 
