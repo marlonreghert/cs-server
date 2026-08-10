@@ -1474,13 +1474,19 @@ class RdsVenueStore:
         "reels_results_limit", "reels_seed_results_limit",
         "cursor_posts_at", "cursor_reels_at", "last_run_at", "last_run_results",
         "last_run_cost_usd", "consecutive_failures", "notes",
+        # plans/260810_stream-dedupe-and-venue-attribution.md §B (migration
+        # 0033): per-run reels-overlap counts, written only on a run whose
+        # reels stream actually executed — NULL means "not yet measured",
+        # never zero.
+        "last_run_reels_fetched", "last_run_reels_new",
     )
     _CRAWL_TARGET_SELECT = (
         "SELECT handle, kind, enabled, cron, timezone, crawl_reels, "
         "classify_images, initial_lookback, results_limit, seed_results_limit, "
         "reels_results_limit, reels_seed_results_limit, "
         "cursor_posts_at, cursor_reels_at, last_run_at, last_run_results, "
-        "last_run_cost_usd, consecutive_failures, notes, created_at, updated_at "
+        "last_run_cost_usd, consecutive_failures, notes, "
+        "last_run_reels_fetched, last_run_reels_new, created_at, updated_at "
         "FROM events.crawl_target"
     )
 

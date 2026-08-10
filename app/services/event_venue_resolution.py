@@ -151,6 +151,28 @@ def build_venue_catalog(venue_dao) -> list[VenueLite]:
     return out
 
 
+def candidate_venues_for_ids(venue_dao, venue_ids: list[str]) -> list[VenueLite]:
+    """The SAME `VenueLite` shape `build_venue_catalog` builds, bounded to a
+    caller-supplied `venue_ids` instead of the whole servable catalog —
+    plans/260810_stream-dedupe-and-venue-attribution.md §C: a handle shared
+    by several venues is the same resolution question as a promoter post,
+    just with a candidate set of two or three instead of the whole city.
+    Reuses `resolve_event_venue` unmodified against this narrower list
+    rather than forking a second matcher. A `venue_ids` entry with no
+    matching row (deleted between the handle lookup and this call) is
+    silently omitted, mirroring `build_venue_catalog`'s own None-skip."""
+    out = []
+    for venue_id in venue_ids:
+        venue = venue_dao.get_venue(venue_id)
+        if venue is None:
+            continue
+        out.append(VenueLite(
+            venue_id=venue_id, venue_name=venue.venue_name,
+            lat=venue.venue_lat, lng=venue.venue_lng,
+        ))
+    return out
+
+
 def build_handle_index(venue_dao) -> dict[str, str]:
     """Reverse `instagram.handle`: normalized handle -> venue_id. Free — this
     reads what the cascade already discovered, no new provider call."""
@@ -282,6 +304,6 @@ __all__ = [
     "RESOLUTION_AUTO", "RESOLUTION_MANUAL", "RESOLUTION_UNRESOLVED", "RESOLUTION_QUEUED",
     "DEFAULT_CONFIDENCE_FLOOR", "DEFAULT_MARGIN", "LOCATION_TAG_MATCH_FLOOR",
     "VenueLite", "LinkCandidate", "ResolutionResult",
-    "extract_mentions", "gate_auto_link", "build_venue_catalog", "build_handle_index",
-    "resolve_event_venue",
+    "extract_mentions", "gate_auto_link", "build_venue_catalog", "candidate_venues_for_ids",
+    "build_handle_index", "resolve_event_venue",
 ]

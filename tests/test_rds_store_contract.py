@@ -809,3 +809,25 @@ def test_crawl_target_update_with_no_fields_returns_the_row_unchanged(store):
 
     assert after["kind"] == before["kind"]
     assert after["cron"] == before["cron"]
+
+
+def test_crawl_target_reels_overlap_counts_round_trip(store):
+    """migration 0033_crawl_target_reels_overlap: a fresh target reads both
+    counts as NULL ("not yet measured"), and a bookkeeping write that sets
+    them (mirroring `run_target`'s own partial update — no `kind`/`cron`)
+    persists and round-trips through both the fake and a real Postgres."""
+    handle = _crawl_handle()
+    store.upsert_crawl_target(handle, {"kind": "venue", "cron": "0 22 * * 5,6"})
+    fresh = store.get_crawl_target(handle)
+    assert fresh.get("last_run_reels_fetched") is None
+    assert fresh.get("last_run_reels_new") is None
+
+    updated = store.update_crawl_target(handle, {
+        "last_run_reels_fetched": 16, "last_run_reels_new": 3,
+    })
+    assert updated["last_run_reels_fetched"] == 16
+    assert updated["last_run_reels_new"] == 3
+
+    reread = store.get_crawl_target(handle)
+    assert reread["last_run_reels_fetched"] == 16
+    assert reread["last_run_reels_new"] == 3

@@ -885,7 +885,13 @@ class InMemoryRdsVenueStore:
                 "cursor_posts_at": None, "cursor_reels_at": None,
                 "last_run_at": None, "last_run_results": 0,
                 "last_run_cost_usd": None, "consecutive_failures": 0,
-                "notes": None, "created_at": now, "updated_at": now,
+                "notes": None,
+                # plans/260810_stream-dedupe-and-venue-attribution.md §B
+                # (migration 0033): NULL until a run whose reels stream
+                # actually executed writes both, together, never zero by
+                # default.
+                "last_run_reels_fetched": None, "last_run_reels_new": None,
+                "created_at": now, "updated_at": now,
             }
             row.update({k: v for k, v in fields.items() if k != "handle"})
         else:
