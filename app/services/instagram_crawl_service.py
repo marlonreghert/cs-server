@@ -66,10 +66,20 @@ from app.metrics import (
     CRAWL_CURSOR_AGE_SECONDS,
     CRAWL_RESULTS_TOTAL,
     CRAWL_RUNS_TOTAL,
+    CRAWL_STREAM_OVERLAP_TOTAL,
+    CRAWL_VENUE_ATTRIBUTION_TOTAL,
 )
 from app.services import job_lock
 from app.services.archive_sources import SOURCE_INSTAGRAM_POSTS, _parse_post_timestamp
-from app.services.event_venue_resolution import build_handle_index, build_venue_catalog
+from app.services.event_venue_resolution import (
+    DEFAULT_CONFIDENCE_FLOOR,
+    DEFAULT_MARGIN,
+    RESOLUTION_AUTO,
+    build_handle_index,
+    build_venue_catalog,
+    candidate_venues_for_ids,
+    resolve_event_venue,
+)
 from app.services.instagram_handle_sources import normalize_handle
 from app.services.venue_photo_archive_service import new_run_id, run_prefix
 
@@ -408,6 +418,57 @@ def group_venue_ids_by_handle(instagram_handles: dict[str, str]) -> dict[str, li
     return out
 
 
+def _post_richness(post: dict) -> tuple:
+    """A crude, deterministic "how much does this copy of the post actually
+    carry" score, used only to break a tie between two DIFFERING copies of
+    the same shortcode returned by two streams. More images first, then a
+    longer caption. §Evidence found every duplicated shortcode resolves to
+    one IDENTICAL S3 key (byte-identical payload from both endpoints), so
+    this rarely has to decide anything in practice — the stream-priority
+    tie-break below is what actually resolves the common case."""
+    return (len(post.get("image_urls") or []), len(post.get("caption") or ""))
+
+
+def dedupe_posts_by_shortcode(posts_by_stream: dict[str, list[dict]]) -> list[dict]:
+    """§A: merge every stream's KEPT posts into one set keyed by `shortcode`,
+    preferring the richer payload when two copies differ, so the chain
+    archives/classifies/extracts each post exactly once no matter how many
+    streams returned it. §Evidence: a reel is also a grid post, so the posts
+    and reels streams are not disjoint — without this, the same image was
+    archived, classified, and extracted twice (a real, avoidable OpenAI
+    cost), even though `uq_event_source_post` already made the DB write
+    idempotent.
+
+    Deterministic regardless of `posts_by_stream`'s own key order: streams
+    are always considered in a FIXED priority (posts, then reels) — the
+    order `run_target` itself always runs them in — so a richness tie always
+    keeps the posts-stream copy, never an accident of dict iteration order.
+    Cursor advancement is computed separately, per stream, from each
+    stream's OWN kept list BEFORE this runs — deduping is about what gets
+    processed, never about what a stream has seen, so it must never affect
+    which timestamp a cursor moves to.
+
+    A post with no shortcode cannot be deduplicated (nothing to key it on)
+    and is always kept, from every stream — mirrors this codebase's existing
+    "a bad/missing value never disqualifies" convention.
+    """
+    best_by_shortcode: dict[str, dict] = {}
+    order: list[str] = []
+    unkeyable: list[dict] = []
+    for stream in (STREAM_POSTS, STREAM_REELS):
+        for post in posts_by_stream.get(stream, []):
+            shortcode = post.get("shortcode")
+            if not shortcode:
+                unkeyable.append(post)
+                continue
+            if shortcode not in best_by_shortcode:
+                best_by_shortcode[shortcode] = post
+                order.append(shortcode)
+            elif _post_richness(post) > _post_richness(best_by_shortcode[shortcode]):
+                best_by_shortcode[shortcode] = post
+    return [best_by_shortcode[sc] for sc in order] + unkeyable
+
+
 CLASSIFICATION_OUTCOME_CLASSIFIED = "classified"
 CLASSIFICATION_OUTCOME_FAILED = "classification_failed"
 CLASSIFICATION_OUTCOME_SKIPPED_TARGET_DISABLED = "skipped_target_disabled"
@@ -466,11 +527,39 @@ class InstagramCrawlChainer:
 
     async def chain_venue(
         self, *, handle: str, venue_ids: list[str], new_posts: list[dict], now: datetime,
-        classify_images: bool = True,
+        classify_images: bool = True, venue_dao=None,
     ) -> _ChainReport:
         report = _ChainReport()
         if not venue_ids or not new_posts:
             return report
+        # §C: a handle shared by several venues must have each post
+        # attributed to ONE of them, from its own content — never fanned out
+        # to every venue (the bug this branch replaces: every post archived
+        # under every venue, and `EventExtractionService` extracting it once
+        # per venue, with the LAST venue processed silently winning the
+        # `uq_event_source_post` upsert — see the plan's §Evidence and the
+        # PR for what was actually observed against real Postgres).
+        # `len(venue_ids) == 1` — the common case — falls through to the
+        # UNCHANGED code below untouched: this branch never runs for it, so
+        # that path stays byte-for-byte identical to before this feature.
+        if len(venue_ids) > 1:
+            if venue_dao is None:
+                logger.error(
+                    f"[InstagramCrawl] {handle}: shared handle across "
+                    f"{len(venue_ids)} venues but no venue_dao was supplied to "
+                    "chain_venue -- refusing to guess an attribution; nothing "
+                    "archived or extracted for this run"
+                )
+                return report
+            return await self._chain_shared_handle(
+                handle=handle, venue_ids=venue_ids, new_posts=new_posts, now=now,
+                classify_images=classify_images, venue_dao=venue_dao,
+            )
+        # The common case — a handle mapping to exactly one venue never
+        # resolves anything; §Error Handling still wants it counted, so the
+        # `resolved`/`ambiguous` outcomes above have a baseline to compare
+        # against. Observability only: no functional change to this branch.
+        CRAWL_VENUE_ATTRIBUTION_TOTAL.labels(outcome="single_venue").inc(len(new_posts))
         if self.media_store is not None and self.downloader is not None:
             prefix = run_prefix(self.archive_source, now, new_run_id(now))
             classification_outcome = CLASSIFICATION_OUTCOME_SKIPPED_NO_PHOTOS
@@ -613,6 +702,163 @@ class InstagramCrawlChainer:
                 "classification_confidence": photo.get("classification_confidence"),
             })
         return entries, classification_outcome
+
+    async def _chain_shared_handle(
+        self, *, handle: str, venue_ids: list[str], new_posts: list[dict], now: datetime,
+        classify_images: bool, venue_dao,
+    ) -> _ChainReport:
+        """§C: resolve EACH post's venue from its own caption before
+        archiving — there is no model-extracted `location_text` yet at
+        archive time, and the archive DESTINATION itself depends on the
+        answer, so resolution has to run before extraction, not after it.
+        Reuses the SAME resolver the promoter path already uses
+        (`app.services.event_venue_resolution.resolve_event_venue`), bounded
+        to THIS handle's own venues as the candidate set — never a second
+        matcher.
+
+          - RESOLUTION_AUTO: archived under that ONE venue, via the SAME
+            `_archive_venue_posts`/`put_manifest` this class already uses
+            for a single-venue handle, just scoped to that venue's own
+            resolved posts instead of every post. Each venue's manifest now
+            holds only the posts genuinely resolved to it, so the UNCHANGED
+            `EventExtractionService.run(venue_ids=...)` call below naturally
+            produces one correctly-attributed event per post — no code
+            change to `EventExtractionService` itself, and no more
+            last-venue-processed-wins overwrite (see `chain_venue`'s own
+            comment for what that produced against real Postgres).
+          - queued or unresolved: archived under the HANDLE instead of any
+            venue, reusing the promoter path's OWN per-post archiving and
+            persistence (`PromoterCrawlService._archive_post_images` /
+            `_process_post`, bounded to the SAME candidate list) rather than
+            a second review-queue write path. This is the "attribute to no
+            venue and queue it" posture the plan requires: never fall back
+            to "first venue" or "all venues" — a wrong venue is invisible
+            and propagates into the app; an unresolved one is visibly
+            waiting for a human, exactly like an unresolved promoter event
+            already is.
+        """
+        report = _ChainReport()
+        candidates = candidate_venues_for_ids(venue_dao, venue_ids)
+        handle_index = build_handle_index(venue_dao)
+
+        posts_by_venue: dict[str, list[dict]] = {}
+        unresolved_posts: list[dict] = []
+        for post in new_posts:
+            resolution = resolve_event_venue(
+                caption=post.get("caption"), location_text=post.get("caption"),
+                location_tag=post.get("location_tag"), promoter_handle=handle,
+                venues=candidates, handle_index=handle_index,
+                confidence_floor=DEFAULT_CONFIDENCE_FLOOR, margin=DEFAULT_MARGIN,
+            )
+            if resolution.resolution == RESOLUTION_AUTO:
+                posts_by_venue.setdefault(resolution.venue_id, []).append(post)
+                CRAWL_VENUE_ATTRIBUTION_TOTAL.labels(outcome="resolved").inc()
+            else:
+                # RESOLUTION_QUEUED or RESOLUTION_UNRESOLVED — this metric
+                # does not distinguish the two (§Error Handling names one
+                # outcome, "ambiguous", for both): either way nothing is
+                # guessed, and the plan's own watch item is the same for
+                # both ("a shared handle whose posts never resolve means the
+                # signals §C matches on are not present in that account's
+                # captions").
+                unresolved_posts.append(post)
+                CRAWL_VENUE_ATTRIBUTION_TOTAL.labels(outcome="ambiguous").inc()
+
+        if self.media_store is not None and self.downloader is not None and posts_by_venue:
+            prefix = run_prefix(self.archive_source, now, new_run_id(now))
+            classification_outcome = CLASSIFICATION_OUTCOME_SKIPPED_NO_PHOTOS
+            for venue_id, posts in posts_by_venue.items():
+                manifest_entries, outcome = await self._archive_venue_posts(
+                    prefix, venue_id, handle, posts, classify=classify_images,
+                )
+                classification_outcome = outcome
+                if manifest_entries:
+                    try:
+                        await self.media_store.put_manifest(
+                            prefix=prefix, venue_id=venue_id, manifest={"photos": manifest_entries},
+                        )
+                        report.archived += len(manifest_entries)
+                    except Exception as e:
+                        logger.error(
+                            f"[InstagramCrawl] manifest write failed for venue {venue_id}: {e}"
+                        )
+            report.classification_outcome = classification_outcome
+            CRAWL_CHAIN_CLASSIFICATION_TOTAL.labels(outcome=classification_outcome).inc()
+
+        if unresolved_posts:
+            await self._archive_and_queue_unresolved(
+                handle=handle, unresolved_posts=unresolved_posts, candidates=candidates,
+                handle_index=handle_index, now=now, report=report,
+            )
+
+        if self.event_extraction_service is not None and posts_by_venue:
+            try:
+                await self.event_extraction_service.run({
+                    "eligibility": {
+                        "mode": "venue_ids", "venue_ids": ",".join(posts_by_venue.keys()),
+                    }
+                })
+                report.extracted = True
+            except Exception as e:
+                logger.error(f"[InstagramCrawl] event extraction failed for {handle}: {e}")
+
+        return report
+
+    async def _archive_and_queue_unresolved(
+        self, *, handle: str, unresolved_posts: list[dict], candidates: list,
+        handle_index: dict, now: datetime, report: _ChainReport,
+    ) -> None:
+        """Archives every post whose venue could not be resolved under the
+        HANDLE (never duplicated across candidates — "the bytes exist for a
+        human to look at without inventing an attribution the pipeline could
+        not make"), then persists each through the SAME per-post pipeline
+        `chain_promoter` already calls (`PromoterCrawlService.
+        _archive_post_images` / `_process_post`) — extraction, the ladder
+        re-run against the SAME bounded candidate list (deterministic, so it
+        reaches the same queued/unresolved verdict), and a `pending_review`
+        row with `venue_id=None` that the existing review queue already
+        surfaces. Degrades to "not archived, not extracted" (logged, never
+        raised) when no promoter crawl service is wired — the same
+        dependency-aware posture every other optional collaborator on this
+        class already takes; a crawl never fails because chaining could not
+        run.
+        """
+        svc = self.promoter_crawl_service
+        if svc is None:
+            logger.warning(
+                f"[InstagramCrawl] {handle}: {len(unresolved_posts)} post(s) could "
+                "not be attributed to one of this handle's venues, but no "
+                "promoter crawl service is wired to archive/queue them -- "
+                "skipped rather than guessed"
+            )
+            return
+        prefix = (
+            run_prefix(svc.archive_source, now, new_run_id(now))
+            if svc.media_store is not None else None
+        )
+        manifest_entries: list[dict] = []
+        for post in unresolved_posts:
+            archived_images: list[dict] = []
+            if prefix is not None:
+                archived_images = await svc._archive_post_images(prefix, handle, post)
+                manifest_entries.extend(archived_images)
+                report.archived += len(archived_images)
+            persisted = await svc._process_post(
+                handle=handle, post=post, venues=candidates, handle_index=handle_index,
+                now=now, archived_images=archived_images,
+            )
+            if persisted:
+                report.extracted = True
+        if prefix is not None and manifest_entries:
+            try:
+                await svc.media_store.put_promoter_manifest(
+                    prefix=prefix, handle=handle,
+                    manifest={"handle": handle, "photos": manifest_entries},
+                )
+            except Exception as e:
+                logger.error(
+                    f"[InstagramCrawl] unresolved-post manifest write failed for {handle}: {e}"
+                )
 
     async def chain_promoter(
         self, *, handle: str, new_posts: list[dict], now: datetime,
@@ -888,6 +1134,30 @@ class ScheduledInstagramCrawlService:
             updates["consecutive_failures"] = (
                 int(target.get("consecutive_failures") or 0) + 1 if any_failed else 0
             )
+            reels_report = stream_reports.get(STREAM_REELS)
+            if reels_report is not None and reels_report["outcome"] in (OUTCOME_SUCCESS, OUTCOME_EMPTY):
+                # §B: make the reels stream's marginal contribution visible.
+                # "Fetched" is the billed count (what CRAWL_RESULTS_TOTAL
+                # also counts); "new" is how many of the KEPT reel results
+                # (post-pinned-drop) do not share a shortcode with a KEPT
+                # posts-stream result THIS run. Written only when reels
+                # actually ran and returned a trustworthy answer (success or
+                # a genuine empty result) — never on failed/credit-exhausted/
+                # skipped-budget, where there is nothing real to report and
+                # the previous run's numbers are left standing rather than
+                # overwritten with a guess.
+                posts_shortcodes = {
+                    p.get("shortcode") for p in new_posts_by_stream.get(STREAM_POSTS, [])
+                    if p.get("shortcode")
+                }
+                reel_posts = new_posts_by_stream.get(STREAM_REELS, [])
+                overlap_count = sum(
+                    1 for p in reel_posts if p.get("shortcode") in posts_shortcodes
+                )
+                if overlap_count:
+                    CRAWL_STREAM_OVERLAP_TOTAL.labels(result_type=STREAM_REELS).inc(overlap_count)
+                updates["last_run_reels_fetched"] = reels_report["results"]
+                updates["last_run_reels_new"] = len(reel_posts) - overlap_count
         if updates:
             try:
                 self.venue_dao.update_crawl_target(handle, updates)
@@ -927,7 +1197,11 @@ class ScheduledInstagramCrawlService:
 
         self._record_cursor_age(handle, target, updates, now)
 
-        all_new_posts = [p for posts in new_posts_by_stream.values() for p in posts]
+        # §A: merge every stream's kept posts into one set keyed by
+        # shortcode BEFORE chaining — deduping is about what gets
+        # PROCESSED; the per-stream cursor advances above already used each
+        # stream's OWN kept list, untouched by this.
+        all_new_posts = dedupe_posts_by_shortcode(new_posts_by_stream)
         chained = None
         if all_new_posts and not credit_exhausted and self.chainer is not None:
             chained = await self._chain(target, all_new_posts, now)
@@ -952,6 +1226,7 @@ class ScheduledInstagramCrawlService:
         return await self.chainer.chain_venue(
             handle=handle, venue_ids=venue_ids, new_posts=new_posts, now=now,
             classify_images=bool(target.get("classify_images", True)),
+            venue_dao=self.venue_dao,
         )
 
     def _record_cursor_age(self, handle: str, target: dict, updates: dict, now: datetime) -> None:

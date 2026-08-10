@@ -176,6 +176,13 @@ class CrawlTargetOut(BaseModel):
     last_run_at: Optional[datetime] = None
     last_run_results: int = 0
     last_run_cost_usd: Optional[float] = None
+    # plans/260810_stream-dedupe-and-venue-attribution.md §B: the reels
+    # stream's marginal contribution on its last run — "reels: 16 fetched,
+    # 3 new". Both null until a run whose reels stream actually executed
+    # writes them (migration 0033_crawl_target_reels_overlap); null means
+    # "not yet measured," never zero.
+    last_run_reels_fetched: Optional[int] = None
+    last_run_reels_new: Optional[int] = None
     consecutive_failures: int = 0
     notes: Optional[str] = None
     created_at: Optional[datetime] = None

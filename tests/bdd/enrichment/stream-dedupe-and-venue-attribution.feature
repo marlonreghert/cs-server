@@ -1,4 +1,3 @@
-@wip
 Feature: Process each crawled post once, and attribute it to one venue
   A reel is also a grid post, so the posts and reels streams return overlapping
   items and the same post must not be archived, classified and extracted twice.

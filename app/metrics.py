@@ -1386,6 +1386,34 @@ CRAWL_CHAIN_CLASSIFICATION_TOTAL = Counter(
     #          skipped_no_classifier, skipped_no_photos
 )
 
+# plans/260810_stream-dedupe-and-venue-attribution.md §Evidence: a reel is
+# also a grid post, so the posts and reels streams largely overlap — this
+# counts, per run, how many of a LATER stream's kept results duplicated a
+# shortcode an EARLIER stream in the same run already returned (posts always
+# runs first, so in practice this is reels items already carried by posts).
+# Makes the reels stream's marginal value visible ("reels: 16 fetched, 3
+# new") instead of assumed.
+CRAWL_STREAM_OVERLAP_TOTAL = Counter(
+    "crawl_stream_overlap_total",
+    "Instagram results a later stream returned that an earlier stream in the same run already supplied",
+    ["result_type"],
+)
+
+# plans/260810_stream-dedupe-and-venue-attribution.md §C: how a shared
+# handle's post was attributed once resolution ran. `single_venue` is the
+# common, unchanged case (the handle maps to exactly one venue, resolution
+# never runs); `resolved`/`ambiguous` only occur for a handle mapping to
+# several venues. Watch `ambiguous`: a shared handle whose posts never
+# resolve means the caption signals §C matches on are not present in that
+# account's captions — the fix is to change the matching, not loosen the
+# floor.
+CRAWL_VENUE_ATTRIBUTION_TOTAL = Counter(
+    "crawl_venue_attribution_total",
+    "How a scheduled crawl attributed a post to a venue",
+    ["outcome"],
+    # outcome: single_venue, resolved, ambiguous
+)
+
 # =============================================================================
 # APPLICATION INFO
 # =============================================================================

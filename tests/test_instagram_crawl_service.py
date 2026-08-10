@@ -32,6 +32,8 @@ from app.models.instagram import VenueInstagram
 from app.models.venue import Venue
 from app.services import job_lock
 from app.services.instagram_crawl_service import (
+    STREAM_POSTS,
+    STREAM_REELS,
     CrawlServiceConfig,
     InstagramCrawlChainer,
     InvalidCrawlTargetConfig,
@@ -40,6 +42,7 @@ from app.services.instagram_crawl_service import (
     _split_kept_and_dropped,
     build_cron_trigger,
     compute_bound,
+    dedupe_posts_by_shortcode,
     group_venue_ids_by_handle,
     lock_name_for,
     validate_crontab,
@@ -1383,3 +1386,129 @@ class TestBookkeepingWriteFailureCountsAsAFailure:
             _run(service.run_target("bookkeepfail4"))
 
         assert chainer.calls == 0, "archiving must never run past a failed bookkeeping write"
+
+
+# ── §A dedupe: plans/260810_stream-dedupe-and-venue-attribution.md ─────────
+# A reel is also a grid post, so the posts and reels streams overlap — the
+# same image was archived, classified, and extracted twice downstream.
+# `dedupe_posts_by_shortcode` is the pure function `run_target` now calls
+# instead of a bare concatenation of every stream's kept list.
+class TestDedupePostsByShortcode:
+    def test_a_shortcode_returned_by_both_streams_appears_once(self):
+        posts = [{"shortcode": "a", "caption": "x", "image_urls": ["u1"]}]
+        reels = [{"shortcode": "a", "caption": "x", "image_urls": ["u1"]}]
+        out = dedupe_posts_by_shortcode({STREAM_POSTS: posts, STREAM_REELS: reels})
+        assert [p["shortcode"] for p in out] == ["a"]
+
+    def test_a_shortcode_unique_to_one_stream_is_kept(self):
+        posts = [{"shortcode": "a", "caption": "x", "image_urls": ["u1"]}]
+        reels = [{"shortcode": "b", "caption": "y", "image_urls": ["u2"]}]
+        out = dedupe_posts_by_shortcode({STREAM_POSTS: posts, STREAM_REELS: reels})
+        assert {p["shortcode"] for p in out} == {"a", "b"}
+
+    def test_differing_copies_prefer_the_richer_payload_by_image_count(self):
+        thin = {"shortcode": "a", "caption": "x", "image_urls": ["u1"]}
+        rich = {"shortcode": "a", "caption": "x", "image_urls": ["u1", "u2", "u3"]}
+        out = dedupe_posts_by_shortcode({STREAM_POSTS: [thin], STREAM_REELS: [rich]})
+        assert out == [rich]
+        # Order-independent: swapping which stream carries the richer copy
+        # must not change the outcome.
+        out2 = dedupe_posts_by_shortcode({STREAM_POSTS: [rich], STREAM_REELS: [thin]})
+        assert out2 == [rich]
+
+    def test_differing_copies_prefer_the_richer_payload_by_caption_length(self):
+        thin = {"shortcode": "a", "caption": "hi", "image_urls": ["u1"]}
+        rich = {"shortcode": "a", "caption": "a much longer caption body", "image_urls": ["u1"]}
+        out = dedupe_posts_by_shortcode({STREAM_POSTS: [thin], STREAM_REELS: [rich]})
+        assert out == [rich]
+
+    def test_a_richness_tie_keeps_the_posts_stream_copy_regardless_of_dict_order(self):
+        posts_copy = {"shortcode": "a", "caption": "x", "image_urls": ["u1"], "_from": "posts"}
+        reels_copy = {"shortcode": "a", "caption": "x", "image_urls": ["u1"], "_from": "reels"}
+        out = dedupe_posts_by_shortcode({STREAM_REELS: [reels_copy], STREAM_POSTS: [posts_copy]})
+        assert out == [posts_copy]
+
+    def test_result_order_is_independent_of_posts_by_stream_dict_key_order(self):
+        posts = [{"shortcode": "a", "caption": "", "image_urls": []},
+                 {"shortcode": "b", "caption": "", "image_urls": []}]
+        reels = [{"shortcode": "c", "caption": "", "image_urls": []}]
+        out_a = dedupe_posts_by_shortcode({STREAM_POSTS: posts, STREAM_REELS: reels})
+        out_b = dedupe_posts_by_shortcode({STREAM_REELS: reels, STREAM_POSTS: posts})
+        assert [p["shortcode"] for p in out_a] == [p["shortcode"] for p in out_b] == ["a", "b", "c"]
+
+    def test_a_post_with_no_shortcode_is_never_dropped(self):
+        no_code = {"shortcode": None, "caption": "x", "image_urls": ["u1"]}
+        out = dedupe_posts_by_shortcode({STREAM_POSTS: [no_code]})
+        assert out == [no_code]
+
+    def test_empty_input_yields_empty_output(self):
+        assert dedupe_posts_by_shortcode({}) == []
+
+
+# ── §C single-venue path stays byte-for-byte identical ─────────────────────
+class TestSingleVenuePathUnchanged:
+    """The common case (a handle mapping to exactly one venue) must behave
+    EXACTLY as it did before §C's shared-handle attribution branch existed —
+    the likeliest casualty of that change. Proven directly against
+    `chain_venue`, the same entry point the pre-existing classification/
+    archiving tests above already exercise, now additionally passing the
+    NEW `venue_dao` kwarg (as the real caller, `ScheduledInstagramCrawlService.
+    _chain`, now always does) to prove it is inert for `len(venue_ids) == 1`."""
+
+    def test_a_single_venue_id_never_enters_the_shared_handle_branch(self):
+        dao = _venue_dao()
+        dao.upsert_venue(Venue(venue_id="v1", venue_name="V1", venue_lat=-8.0, venue_lng=-34.9))
+        dao.set_venue_instagram(VenueInstagram(venue_id="v1", instagram_handle="soloh", status="found"))
+
+        media_store = _FakeVenueMediaStore()
+        classifier = _FakePhotoClassifier(category="flyer", confidence=0.92)
+        openai_client = _FakePromoterOpenAIClient(
+            '{"title": "Solo Event", "description": null, "date_text": null, '
+            '"time_text": null, "is_recurring": false, "recurrence_text": null, '
+            '"lineup": [], "ticket_url": null, "price_text": null, '
+            '"location_text": null, "confidence": 0.9}'
+        )
+        extraction_service = _venue_extraction_service(dao, media_store, openai_client)
+        chainer = InstagramCrawlChainer(
+            media_store=media_store, downloader=_FakeVenueDownloader(),
+            event_extraction_service=extraction_service, photo_classifier=classifier,
+        )
+        post = {
+            "shortcode": "solopost1", "caption": "Festa hoje! Ingressos abertos.",
+            "permalink": "https://instagram.com/p/solopost1", "timestamp": "2026-08-05T20:00:00.000Z",
+            "image_urls": ["https://cdn.example.com/solopost1.jpg"], "is_pinned": False,
+        }
+
+        # venue_dao IS supplied (as the real caller always does now) but
+        # must never be consulted: with one venue_id, resolution never runs.
+        report = _run(chainer.chain_venue(
+            handle="soloh", venue_ids=["v1"], new_posts=[post], now=NOW,
+            classify_images=True, venue_dao=dao,
+        ))
+
+        assert report.archived == 1
+        assert classifier.calls == 1
+        assert openai_client.calls == 1
+        row = dao.get_event_by_source("soloh", "solopost1")
+        assert row is not None and row["venue_id"] == "v1" and row["title"] == "Solo Event"
+
+    def test_venue_dao_omitted_behaves_identically_for_a_single_venue(self):
+        """The pre-existing call shape (no `venue_dao` at all) — every test
+        above this class already proves this keeps working; this test
+        exists only to name the guarantee explicitly, per the plan's own
+        test-plan bullet."""
+        dao = _venue_dao()
+        dao.upsert_venue(Venue(venue_id="v1", venue_name="V1", venue_lat=-8.0, venue_lng=-34.9))
+        dao.set_venue_instagram(VenueInstagram(venue_id="v1", instagram_handle="soloh2", status="found"))
+        media_store = _FakeVenueMediaStore()
+        chainer = InstagramCrawlChainer(
+            media_store=media_store, downloader=_FakeVenueDownloader(),
+            event_extraction_service=None, photo_classifier=None,
+        )
+        post = {
+            "shortcode": "solopost2", "caption": "no marker here",
+            "permalink": "https://instagram.com/p/solopost2", "timestamp": "2026-08-05T20:00:00.000Z",
+            "image_urls": ["https://cdn.example.com/solopost2.jpg"], "is_pinned": False,
+        }
+        report = _run(chainer.chain_venue(handle="soloh2", venue_ids=["v1"], new_posts=[post], now=NOW))
+        assert report.archived == 1
