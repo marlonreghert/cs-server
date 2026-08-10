@@ -72,7 +72,7 @@ import logging
 from datetime import datetime
 from typing import Callable, Optional
 
-from app.metrics import EVENT_EXTRACTION_EVENTS_PER_POST
+from app.metrics import EVENT_EXTRACTION_EVENTS_PER_POST, EVENTS_TOTAL
 from app.services.event_identity import compute_source_event_key, normalize_title
 from app.services.event_venue_resolution import RESOLUTION_MANUAL
 from app.services.pipeline_run_registry import new_run_id
@@ -96,6 +96,37 @@ STATUS_SUPERSEDED = "superseded"
 # must stay true even once most events are accepted, or 0025/0026's
 # supersede behaviour quietly becomes dead code.
 STATUS_ACCEPTED = "accepted"
+
+# Every status events.event can hold — the EVENTS_TOTAL gauge's own label
+# set (see `update_events_gauge` below), listed explicitly rather than left
+# to that function's defensive zero-fill so `events_total{status="accepted"}`
+# reports an honest 0 from the very first run after deploy (plans/260807_
+# auto-accept-and-field-level-protection.md) rather than no data point at
+# all — a dashboard querying it must be able to tell "genuinely zero" from
+# "never observed".
+ALL_STATUSES = (
+    STATUS_PENDING_REVIEW, STATUS_CONFIRMED, "rejected", STATUS_SUPERSEDED,
+    "extraction_failed", STATUS_ACCEPTED,
+)
+
+# plans/260810_date-correctness-review-reasons-and-path-parity.md §C: an
+# event queued for want of a venue must SAY SO — "an unresolved venue is a
+# perfectly good reason and simply is not written down" was the operator's
+# standing complaint. Set at every attribution call site that ends without a
+# venue_id, on BOTH crawl paths (a venue's own resolution never fails, so in
+# practice this fires only for a promoter/shared-handle event) — and it is
+# also the fallback `_persist` below reaches for when nothing else queued
+# the event, since a review reason has been forgotten at least once at every
+# call site that could set one.
+REVIEW_REASON_UNRESOLVED_VENUE = "unresolved_venue"
+# The fallback reason for the residual case: a fresh row landed on
+# `pending_review` for some OTHER combination `is_clean_extraction` checks
+# (e.g. confidence recorded as None) with no venue_id gap and no reason any
+# call site set. Kept distinct from REVIEW_REASON_UNRESOLVED_VENUE so a
+# reader of the queue is never told "no venue" when a venue was in fact
+# linked — see `_persist`'s own invariant enforcement, below in
+# `reconcile_post_events`, for exactly when each of the two fires.
+REVIEW_REASON_NEEDS_REVIEW = "needs_review"
 
 # Flagged on a `confirmed` row whose title or resolved date no longer matches
 # the model's fresh answer — the operator's record is never reverted, but the
@@ -647,10 +678,22 @@ def reconcile_post_events(
             effective_venue_id = existing.get("venue_id")
         else:
             effective_venue_id = None
+
+        # plans/260810_date-correctness-review-reasons-and-path-parity.md
+        # §C: "an unresolved venue is a perfectly good reason and simply is
+        # not written down" — added unconditionally whenever this event has
+        # no venue, on TOP of whatever the caller's own date/confidence
+        # reasons already say (both can be true at once: a low-confidence
+        # extraction with no venue either), never in place of them.
+        reasons = [fields["review_reason"]] if fields.get("review_reason") else []
+        if effective_venue_id is None:
+            reasons.append(REVIEW_REASON_UNRESOLVED_VENUE)
+        fields["review_reason"] = "; ".join(reasons) if reasons else None
+
         fields["status"] = (
             STATUS_ACCEPTED
             if is_clean_extraction(
-                review_reason=fields.get("review_reason"),
+                review_reason=fields["review_reason"],
                 starts_at=fields.get("starts_at"),
                 venue_id=effective_venue_id,
                 confidence=fields.get("confidence"),
@@ -658,6 +701,17 @@ def reconcile_post_events(
             )
             else STATUS_PENDING_REVIEW
         )
+        # The invariant, enforced ONCE, here, rather than trusted to every
+        # call site that can queue an event — every one of them has now
+        # forgotten a reason at least once (plans/260810_date-correctness-
+        # review-reasons-and-path-parity.md §C's own evidence: 13 queued
+        # events, all with a null review_reason). Whatever residual
+        # not-clean condition reaches this point with STILL no reason at
+        # all (confidence recorded as None, say, with a venue already
+        # linked and a resolved date) gets a generic fallback instead of
+        # silence.
+        if fields["status"] == STATUS_PENDING_REVIEW and not fields["review_reason"]:
+            fields["review_reason"] = REVIEW_REASON_NEEDS_REVIEW
 
         if existing is None:
             # A fresh row has no prior value for the four link columns to
@@ -791,9 +845,32 @@ def reconcile_post_events(
     return persisted
 
 
+def update_events_gauge(venue_dao) -> None:
+    """Snapshot `events.event` into `EVENTS_TOTAL{status}` — plans/260810_
+    date-correctness-review-reasons-and-path-parity.md §D: previously
+    `EventExtractionService`'s own private method, called only at the end of
+    ITS `run()`. The shared-handle crawl path never calls that (it reuses
+    `PromoterCrawlService`'s per-post pipeline instead — see
+    `InstagramCrawlChainer._chain_shared_handle`), so a handle that only
+    ever goes through the shared-handle branch left this gauge permanently
+    at zero, indistinguishable from "no events exist". Moved here, the one
+    module BOTH crawl paths already depend on, and called from both, so
+    every run that persists events refreshes the same gauge regardless of
+    which path produced them.
+    """
+    counts = {status: 0 for status in ALL_STATUSES}
+    for row in venue_dao.list_events():
+        status = row.get("status")
+        counts[status] = counts.get(status, 0) + 1
+    for status, count in counts.items():
+        EVENTS_TOTAL.labels(status=status).set(count)
+
+
 __all__ = [
     "reconcile_post_events", "new_event_id", "is_clean_extraction",
     "STATUS_PENDING_REVIEW", "STATUS_CONFIRMED", "STATUS_SUPERSEDED", "STATUS_ACCEPTED",
+    "ALL_STATUSES", "update_events_gauge",
+    "REVIEW_REASON_UNRESOLVED_VENUE", "REVIEW_REASON_NEEDS_REVIEW",
     "REVIEW_REASON_DIVERGES_FROM_CONFIRMED", "REVIEW_REASON_ABSENT_FROM_LATEST_EXTRACTION",
     # Shared with app.services.event_merge's confirmed-canonical branch — see
     # the coordination note beside PROTECTABLE_EVENT_FIELDS above.

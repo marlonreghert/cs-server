@@ -20,6 +20,8 @@ from app.services.event_reconciliation import (
     PROTECTABLE_EVENT_FIELDS,
     REVIEW_REASON_ABSENT_FROM_LATEST_EXTRACTION,
     REVIEW_REASON_DIVERGES_FROM_CONFIRMED,
+    REVIEW_REASON_NEEDS_REVIEW,
+    REVIEW_REASON_UNRESOLVED_VENUE,
     STATUS_ACCEPTED,
     STATUS_CONFIRMED,
     STATUS_PENDING_REVIEW,
@@ -813,6 +815,9 @@ class TestAutoAcceptWiring:
         )
         row = _rows(dao, "h1", "s1")[0]
         assert row["status"] == STATUS_PENDING_REVIEW
+        # plans/260810_date-correctness-review-reasons-and-path-parity.md
+        # §C: an unresolved venue is now a stated reason, not silence.
+        assert row["review_reason"] == REVIEW_REASON_UNRESOLVED_VENUE, row
 
     def test_an_accepted_event_supersedes_normally(self):
         """LOAD-BEARING (plans/260807_auto-accept-and-field-level-
@@ -868,6 +873,118 @@ class TestAutoAcceptWiring:
         after = dao.get_event(row["event_id"])
         assert after["status"] == STATUS_ACCEPTED
         assert after["location_resolution"] == "manual"
+
+
+class TestNoQueuedEventWithoutAReason:
+    """plans/260810_date-correctness-review-reasons-and-path-parity.md §C:
+    an event may never persist as `pending_review` with a null
+    `review_reason` — enforced ONCE, centrally, in `reconcile_post_events`,
+    rather than trusted to every call site (every one of them has forgotten
+    at least once; the plan's own evidence is 13 production rows with
+    status=pending_review, review_reason=NULL, venue_id=NULL)."""
+
+    def test_unresolved_venue_alone_gets_the_specific_reason(self):
+        dao = _dao()
+        events = [_event("No Venue", datetime(2026, 8, 10, tzinfo=timezone.utc))]
+
+        def unresolved(fields, event_id):
+            return {"venue_id": None, "location_resolution": "unresolved"}, None
+
+        reconcile_post_events(
+            venue_dao=dao, source_kind="promoter_post", source_handle="h1",
+            source_shortcode="s1", source_permalink=None,
+            prepared_events=events, now=NOW, attribute=unresolved, min_confidence=0.5,
+        )
+        row = _rows(dao, "h1", "s1")[0]
+        assert row["status"] == STATUS_PENDING_REVIEW
+        assert row["review_reason"] == REVIEW_REASON_UNRESOLVED_VENUE, row
+
+    def test_unresolved_venue_plus_low_confidence_states_both_reasons(self):
+        """The venue reason is ADDED on top of whatever the caller's own
+        date/confidence reason already says, never in place of it -- both
+        problems must be visible to the operator at once."""
+        dao = _dao()
+        events = [_event(
+            "No Venue, Iffy", datetime(2026, 8, 10, tzinfo=timezone.utc),
+            confidence=0.1, review_reason="low_confidence",
+        )]
+
+        def unresolved(fields, event_id):
+            return {"venue_id": None, "location_resolution": "unresolved"}, None
+
+        reconcile_post_events(
+            venue_dao=dao, source_kind="promoter_post", source_handle="h1",
+            source_shortcode="s1", source_permalink=None,
+            prepared_events=events, now=NOW, attribute=unresolved, min_confidence=0.5,
+        )
+        row = _rows(dao, "h1", "s1")[0]
+        assert "low_confidence" in row["review_reason"], row
+        assert REVIEW_REASON_UNRESOLVED_VENUE in row["review_reason"], row
+
+    def test_a_resolved_venue_never_gets_the_unresolved_reason(self):
+        """The other direction: a clean, fully-resolved event must never be
+        told its venue is unresolved just because the invariant is now
+        enforced centrally."""
+        dao = _dao()
+        events = [_event("Clean Event", datetime(2026, 8, 10, tzinfo=timezone.utc))]
+        reconcile_post_events(
+            venue_dao=dao, source_kind="venue_post", source_handle="h1",
+            source_shortcode="s1", source_permalink=None,
+            prepared_events=events, now=NOW, attribute=_venue_attribute("v1"),
+            min_confidence=0.5,
+        )
+        row = _rows(dao, "h1", "s1")[0]
+        assert row["status"] == STATUS_ACCEPTED
+        assert row["review_reason"] is None, row
+
+    def test_a_residual_not_clean_case_with_no_other_reason_gets_the_generic_fallback(self):
+        """The invariant's true backstop: some OTHER combination
+        `is_clean_extraction` rejects (here, confidence recorded as None,
+        with a venue already linked and a resolved date) that no call site
+        ever named a reason for. Nothing may reach `pending_review` with
+        `review_reason` still null."""
+        dao = _dao()
+        events = [_event(
+            "No Confidence Recorded", datetime(2026, 8, 10, tzinfo=timezone.utc),
+            confidence=None, review_reason=None,
+        )]
+        reconcile_post_events(
+            venue_dao=dao, source_kind="venue_post", source_handle="h1",
+            source_shortcode="s1", source_permalink=None,
+            prepared_events=events, now=NOW, attribute=_venue_attribute("v1"),
+            min_confidence=0.5,
+        )
+        row = _rows(dao, "h1", "s1")[0]
+        assert row["status"] == STATUS_PENDING_REVIEW
+        assert row["review_reason"] == REVIEW_REASON_NEEDS_REVIEW, row
+
+    def test_every_pending_review_row_this_module_ever_persists_has_a_reason(self):
+        """Sweeps every existing fixture-driven scenario in THIS file that
+        ends up pending_review and asserts the invariant holds -- a cross-
+        cutting regression guard so a future edit anywhere in
+        reconcile_post_events cannot reopen the gap even for a case no
+        single test above enumerates."""
+        dao = _dao()
+        scenarios = [
+            # (attribute fn, confidence, extra overrides)
+            (_venue_attribute("v1"), 0.1, {}),  # low confidence only
+            (lambda f, e: ({"venue_id": None, "location_resolution": "unresolved"}, None), 0.9, {}),
+            (lambda f, e: ({}, None), 0.9, {}),  # RESOLUTION_QUEUED shape: no venue_id key at all
+        ]
+        for i, (attribute, confidence, overrides) in enumerate(scenarios):
+            shortcode = f"sweep_{i}"
+            events = [_event(
+                f"Sweep {i}", datetime(2026, 8, 10, tzinfo=timezone.utc),
+                confidence=confidence, review_reason=None, **overrides,
+            )]
+            reconcile_post_events(
+                venue_dao=dao, source_kind="promoter_post", source_handle="h1",
+                source_shortcode=shortcode, source_permalink=None,
+                prepared_events=events, now=NOW, attribute=attribute, min_confidence=0.5,
+            )
+            row = _rows(dao, "h1", shortcode)[0]
+            if row["status"] == STATUS_PENDING_REVIEW:
+                assert row["review_reason"], (i, row)
 
 
 class TestFieldLevelProtectionPerFieldTable:

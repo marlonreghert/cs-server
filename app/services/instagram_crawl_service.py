@@ -71,7 +71,10 @@ from app.metrics import (
 )
 from app.services import job_lock
 from app.services.archive_sources import SOURCE_INSTAGRAM_POSTS, _parse_post_timestamp
+from app.services.event_extraction_service import SOURCE_KIND_VENUE_POST
+from app.services.event_reconciliation import update_events_gauge
 from app.services.event_venue_resolution import (
+    RESOLUTION_AUTO,
     build_handle_index,
     build_venue_catalog,
     candidate_venues_for_ids,
@@ -761,13 +764,35 @@ class InstagramCrawlChainer:
                 archived_images = await svc._archive_post_images(prefix, handle, post)
                 manifest_entries.extend(archived_images)
                 report.archived += len(archived_images)
+            # plans/260810_date-correctness-review-reasons-and-path-parity.md
+            # §D: `source_kind=SOURCE_KIND_VENUE_POST` — these posts come
+            # from a VENUE's own handle, never a promoter's, and stamping
+            # them `promoter_post` (the pre-existing default) is the
+            # provenance bug this plan fixes. `attribution_outcomes`
+            # collects every event this POST's resolution ladder ran for, so
+            # CRAWL_VENUE_ATTRIBUTION_TOTAL can be bumped once per post
+            # below — `resolved` when any of them auto-linked, `ambiguous`
+            # otherwise (queued or unresolved); a post that never reached
+            # attribution at all (filtered out, or extraction failed/
+            # truncated) contributes nothing, exactly like `_process_post`'s
+            # own docstring describes. `report_kind_metric=True` makes the
+            # event/non-event kind split visible on this path too, matching
+            # what `EventExtractionService.run()` already reports for the
+            # single-venue path.
+            attribution_outcomes: list[str] = []
             persisted = await svc._process_post(
                 handle=handle, post=post, venues=candidates, handle_index=handle_index,
                 now=now, archived_images=archived_images,
                 location_text_fallback_to_caption=True,
+                source_kind=SOURCE_KIND_VENUE_POST,
+                attribution_outcomes=attribution_outcomes,
+                report_kind_metric=True,
             )
             if persisted:
                 report.extracted = True
+            if attribution_outcomes:
+                outcome = "resolved" if RESOLUTION_AUTO in attribution_outcomes else "ambiguous"
+                CRAWL_VENUE_ATTRIBUTION_TOTAL.labels(outcome=outcome).inc()
         if prefix is not None and manifest_entries:
             try:
                 await svc.media_store.put_promoter_manifest(
@@ -778,6 +803,12 @@ class InstagramCrawlChainer:
                 logger.error(
                     f"[InstagramCrawl] shared-handle manifest write failed for {handle}: {e}"
                 )
+        # plans/260810_date-correctness-review-reasons-and-path-parity.md
+        # §D: this path never calls EventExtractionService.run() (that is
+        # the whole reason it needs its own metrics parity), so it must
+        # refresh EVENTS_TOTAL itself — otherwise a handle that only ever
+        # goes through this branch leaves the gauge permanently at zero.
+        update_events_gauge(venue_dao)
         return report
 
     async def chain_promoter(

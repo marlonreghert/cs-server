@@ -719,23 +719,27 @@ class InMemoryRdsVenueStore:
 
         Union of:
           - `status == "pending_review"` (nobody has confirmed the data), or
-          - `source_kind == "promoter_post" and location_resolution is None
-            and status not in ("rejected", "superseded")` (nobody has decided
-            where it happens, and this isn't an event an operator already
-            finished with — see the real DAO's docstring for why that guard
-            is needed: /reject and the supersede path both leave
-            location_resolution untouched), or
+          - `venue_id is None and status not in ("rejected", "superseded")`
+            (nobody has decided where it happens, and this isn't an event an
+            operator already finished with). plans/260810_date-correctness-
+            review-reasons-and-path-parity.md §D widened this from
+            `source_kind == "promoter_post" and location_resolution is
+            None` — see the real DAO's docstring for the full rationale:
+            `venue_id` is the real "unresolved" signal regardless of source
+            kind, and the old `source_kind`-gated condition was the ONLY
+            reason a shared-handle venue post mislabelled `promoter_post`
+            ever reached this queue at all, or
           - `status == "extraction_failed"` (plans/260807_date-resolution-
-            correctness.md, defect 3) — explicit for BOTH source kinds. A
-            venue-post event in this status matched neither clause above (it
-            never sets `location_resolution` at all) and used to vanish from
-            the queue entirely; a promoter-post one surfaced only by
-            accident, via the second clause, whenever nobody had linked it
-            yet. See the real DAO's docstring for the full rationale.
+            correctness.md, defect 3) — explicit for BOTH source kinds. An
+            extraction-failure placeholder for a venue post always carries a
+            real `venue_id` (the venue being crawled), so it never matches
+            the second clause on its own.
 
-        `source_kind` is read off the MERGED view (the primary source's
-        kind, plans/260807_one-event-many-posts.md) rather than the raw
-        event row, which no longer stores it at all.
+        `venue_id`/`source_kind` are read off the MERGED view (the primary
+        source's kind, plans/260807_one-event-many-posts.md) rather than the
+        raw event row for `source_kind`, which no longer stores it at all;
+        `venue_id` itself lives on the event row directly, same as the real
+        table.
         """
         out = []
         for row in self.events.values():
@@ -747,11 +751,7 @@ class InMemoryRdsVenueStore:
             if status == "extraction_failed":
                 out.append(view)
                 continue
-            if (
-                view.get("source_kind") == "promoter_post"
-                and view.get("location_resolution") is None
-                and status not in ("rejected", "superseded")
-            ):
+            if view.get("venue_id") is None and status not in ("rejected", "superseded"):
                 out.append(view)
         out.sort(key=lambda r: (r.get("first_seen_at"), r["event_id"]))
         return out

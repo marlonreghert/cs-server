@@ -40,7 +40,7 @@ post's timestamp; that is the only clock this code is allowed to read.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta
 from typing import Optional
 from zoneinfo import ZoneInfo
@@ -54,6 +54,24 @@ REASON_MISSING_DATE = "missing_date"
 # surfaced rather than silently resolved either way — a flyer typo somewhere,
 # and which half is wrong is an operator's call, not this module's.
 REASON_WEEKDAY_MISMATCH = "weekday_mismatch"
+# `_roll_forward` moved a date without a stated year across a year boundary —
+# plans/260810_date-correctness-review-reasons-and-path-parity.md §A. A guess
+# wearing `confidence=0.98` is the exact silent-wrong-date class
+# plans/260807_date-resolution-correctness.md already fixed once for
+# "Sábado • 05/SET"; this is the same failure through a different door. The
+# roll itself is NOT stopped (a genuinely future-dated flyer usually rolls
+# correctly) — only presented as an inference rather than a certainty, and
+# kept out of auto-accept. `vote_on_sibling_years` below may still ADJUST the
+# rolled date (when its siblings from the same post disagree with it), but
+# never clears this flag: even a majority-corrected roll is still an
+# inference, not a stated year.
+REASON_YEAR_INFERRED = "year_inferred"
+# The model returned several dates for one event ("01, 02 e 03 de julho")
+# and only the FIRST is kept as `starts_at` — plans/260810_date-correctness-
+# review-reasons-and-path-parity.md §B. Deliberately not `ends_at`: adding a
+# column is a data-model change this plan defers; recording the right start
+# and admitting a range existed is the honest minimum.
+REASON_DATE_RANGE = "date_range"
 
 # Monday=0 .. Sunday=6, matching `date.weekday()`.
 _WEEKDAYS: dict[str, int] = {
@@ -117,6 +135,20 @@ _MONTHS: dict[str, int] = {
 # of every _MONTHS key.
 _MONTH_ABBREVIATIONS = (
     "jan", "fev", "mar", "abr", "mai", "jun", "jul", "ago", "set", "out", "nov", "dez",
+)
+
+# "01, 02 e 03 de julho", "05 e 06/09" — a comma/"e"-joined list of BARE day
+# numerals immediately followed by one fully-dated day (day+month, either
+# accepted single-date shape below). Group 1 captures every day EXCEPT the
+# last (the last is re-parsed by `_final_day_month` from the tail, using the
+# SAME two single-date patterns this module already trusts — never a new,
+# looser date grammar). The lookahead never consumes the final date itself,
+# so `_final_day_month` sees it fresh, anchored at the tail's start.
+# plans/260810_date-correctness-review-reasons-and-path-parity.md §B.
+_DATE_RANGE_PREFIX_RE = re.compile(
+    r"\b(\d{1,2}(?:\s*(?:,|e)\s*\d{1,2})*)\s*(?:,|e)\s*"
+    r"(?=\d{1,2}\s*(?:de\s*|[/.\-]\s*|\s+))",
+    re.IGNORECASE,
 )
 
 _NUMERIC_DATE_RE = re.compile(r"\b(\d{1,2})[/.\-](\d{1,2})(?:[/.\-](\d{2,4}))?\b")
@@ -249,21 +281,28 @@ class _NoMatch:
 _NO_MATCH = _NoMatch()
 
 
-def _roll_forward(candidate: date, anchor: date, year: int, month: int, day: int) -> Optional[date]:
-    """`candidate` if it is at/after `anchor`, else the same month/day one
-    year later — the shared "no year stated" forward-fill rule."""
+def _roll_forward(candidate: date, anchor: date, year: int, month: int, day: int) -> tuple[Optional[date], bool]:
+    """`(candidate, False)` when it is at/after `anchor` (no guess needed);
+    else `(the same month/day one year later, True)` — the shared "no year
+    stated" forward-fill rule. The second element is `year_inferred`
+    (plans/260810_date-correctness-review-reasons-and-path-parity.md §A):
+    True exactly when a year had to be GUESSED by rolling, never merely
+    because the year itself was absent from the text (a same-year candidate
+    that never needed to roll is not a guess and must stay unflagged)."""
     if candidate >= anchor:
-        return candidate
+        return candidate, False
     try:
-        return date(year + 1, month, day)
+        return date(year + 1, month, day), True
     except ValueError:
-        return None  # e.g. 29/02 rolling into a non-leap year
+        return None, True  # e.g. 29/02 rolling into a non-leap year
 
 
 def _numeric_date(text: str, anchor: date):
     """Day/month(/year), ALWAYS day-first — never month-first. Returns
-    `_NO_MATCH` when the pattern never fired, `None` when it fired on an
-    invalid combination (e.g. "31/02"), else a resolved `date`."""
+    `_NO_MATCH` when the pattern never fired, else `(date_or_None,
+    year_inferred)` — `date_or_None` is `None` when the pattern fired on an
+    invalid combination (e.g. "31/02"), in which case `year_inferred` is
+    always False (nothing was inferred; the numeral was simply invalid)."""
     m = _NUMERIC_DATE_RE.search(text)
     if not m:
         return _NO_MATCH
@@ -273,17 +312,17 @@ def _numeric_date(text: str, anchor: date):
             year = int(year_raw)
             if year < 100:
                 year += 2000
-            return date(year, month, day)
+            return date(year, month, day), False
         candidate = date(anchor.year, month, day)
     except ValueError:
-        return None  # e.g. "31/02" — not a real date; never guess one
+        return None, False  # e.g. "31/02" — not a real date; never guess one
     return _roll_forward(candidate, anchor, anchor.year, month, day)
 
 
 def _textual_date(text: str, anchor: date):
     """"25 de dezembro", "3 agosto", "05/set", "SET 05" — day-first (any
-    month form) or the abbreviated month-first order. Same `_NO_MATCH`/`None`
-    contract as `_numeric_date`."""
+    month form) or the abbreviated month-first order. Same `_NO_MATCH`/
+    `(date_or_None, year_inferred)` contract as `_numeric_date`."""
     m = _TEXTUAL_DATE_RE.search(text)
     if m:
         day, month = int(m.group(1)), _MONTHS[m.group(2).lower()]
@@ -295,8 +334,56 @@ def _textual_date(text: str, anchor: date):
     try:
         candidate = date(anchor.year, month, day)
     except ValueError:
-        return None
+        return None, False
     return _roll_forward(candidate, anchor, anchor.year, month, day)
+
+
+def _final_day_month(tail: str) -> Optional[tuple[int, int, Optional[str]]]:
+    """`(day, month, year_raw_or_None)` from the IMMEDIATE start of `tail` —
+    the text right after a date-range prefix ("03 de julho", "06/09") — or
+    `None`. Anchored with `.match` (never `.search`), so only the date
+    PHYSICALLY ADJACENT to the day list counts, never one appearing later in
+    unrelated prose. Reuses the exact two single-date shapes `_numeric_date`/
+    `_textual_date` already accept — never a new, looser date grammar."""
+    m = _NUMERIC_DATE_RE.match(tail)
+    if m:
+        return int(m.group(1)), int(m.group(2)), m.group(3)
+    m = _TEXTUAL_DATE_RE.match(tail)
+    if m:
+        return int(m.group(1)), _MONTHS[m.group(2).lower()], None
+    return None
+
+
+def _date_range_candidate(text: str, anchor: date):
+    """`_NO_MATCH` when no "day list + final date" shape is present at all —
+    the overwhelmingly common case, falling through unchanged to the
+    ordinary single-date finders. Otherwise `(date_or_None, year_inferred,
+    date_range=True)`, resolved from the FIRST day of the range against
+    `anchor` exactly like a single date would be (plans/260810_date-
+    correctness-review-reasons-and-path-parity.md §B: "an event starts on
+    the day it starts", never its last day)."""
+    m = _DATE_RANGE_PREFIX_RE.search(text)
+    if not m:
+        return _NO_MATCH
+    final = _final_day_month(text[m.end():])
+    if final is None:
+        return _NO_MATCH  # a bare number list with nothing dated after it
+    _, month, year_raw = final
+    days = [int(d) for d in re.findall(r"\d{1,2}", m.group(1))]
+    if not days:
+        return _NO_MATCH  # unreachable: the prefix regex always captures >=1 digit
+    first_day = days[0]
+    try:
+        if year_raw:
+            year = int(year_raw)
+            if year < 100:
+                year += 2000
+            return date(year, month, first_day), False, True
+        candidate = date(anchor.year, month, first_day)
+    except ValueError:
+        return None, False, True  # matched but invalid — consumed, never guess
+    resolved, rolled = _roll_forward(candidate, anchor, anchor.year, month, first_day)
+    return resolved, rolled, True
 
 
 def _corroborate_with_weekday(text: str, explicit_date: date) -> tuple[date, Optional[str]]:
@@ -314,27 +401,53 @@ def _corroborate_with_weekday(text: str, explicit_date: date) -> tuple[date, Opt
     return explicit_date, REASON_WEEKDAY_MISMATCH
 
 
-def _resolve_explicit_date(date_text: str, anchor: date) -> tuple[Optional[date], Optional[str]]:
+def _resolve_explicit_date(
+    date_text: str, anchor: date,
+) -> tuple[Optional[date], Optional[str], bool, bool]:
     """A calendar date out of free text, resolved against `anchor` (the
-    post's own date), plus a review reason when the resolution needs an
-    operator's eye despite producing a date. Returns `(None, None)` when
-    nothing recognisable is present at all — the caller treats that as
-    "never invent a date", not as an error to raise.
+    post's own date). Returns `(date_or_None, review_reason, year_inferred,
+    date_range)`:
+      - `review_reason`: an operator's eye is needed despite producing a
+        date (currently only `REASON_WEEKDAY_MISMATCH`);
+      - `year_inferred`: the year was GUESSED by rolling forward across a
+        year boundary (plans/260810_date-correctness-review-reasons-and-
+        path-parity.md §A) — independent of `review_reason`, since a rolled
+        date is never itself a mismatch;
+      - `date_range`: several dates were stated for one event and only the
+        FIRST was kept (§B).
+    `(None, None, False, False)` when nothing recognisable is present at
+    all — the caller treats that as "never invent a date", not as an error
+    to raise.
     """
     text = date_text.strip().lower()
 
     if text in ("hoje", "hoje à noite", "hoje a noite"):
-        return anchor, None
+        return anchor, None, False, False
     if text in ("amanhã", "amanha"):
-        return anchor + timedelta(days=1), None
+        return anchor + timedelta(days=1), None, False, False
+
+    # A day-list-plus-final-date shape ("01, 02 e 03 de julho") is checked
+    # BEFORE the ordinary single-date finders below: those would still match
+    # the trailing "03 de julho" alone and silently lose the range. Only
+    # ever fires on the two day-first shapes those finders already accept —
+    # see `_date_range_candidate`'s own docstring.
+    range_result = _date_range_candidate(text, anchor)
+    if range_result is not _NO_MATCH:
+        resolved_date, rolled, is_range = range_result
+        if resolved_date is None:
+            return None, None, False, is_range  # matched but invalid — consumed, never guess
+        date_val, reason = _corroborate_with_weekday(text, resolved_date)
+        return date_val, reason, rolled, is_range
 
     for finder in (_numeric_date, _textual_date):
         result = finder(text, anchor)
         if result is _NO_MATCH:
             continue
-        if result is None:
-            return None, None  # matched but invalid — consumed, never guess
-        return _corroborate_with_weekday(text, result)
+        resolved_date, rolled = result
+        if resolved_date is None:
+            return None, None, False, False  # matched but invalid — consumed, never guess
+        date_val, reason = _corroborate_with_weekday(text, resolved_date)
+        return date_val, reason, rolled, False
 
     # No explicit date pattern matched at all. A bare or qualified weekday
     # ("sábado", "este sábado", "esse domingo") not marked recurring resolves
@@ -349,11 +462,11 @@ def _resolve_explicit_date(date_text: str, anchor: date) -> tuple[Optional[date]
     m = _WEEKDAY_RE.search(text)
     if m:
         if _BARE_DAY_NUMERAL_RE.search(text):
-            return None, None
+            return None, None, False, False
         weekday = _WEEKDAYS[m.group(0).lower()]
-        return _next_weekday_on_or_after(anchor, weekday), None
+        return _next_weekday_on_or_after(anchor, weekday), None, False, False
 
-    return None, None
+    return None, None, False, False
 
 
 def _detect_recurrence(
@@ -425,6 +538,19 @@ class ResolvedDate:
     # a real stated midnight as unknown, the same class of bug already fixed
     # once in this repo for a temperature of 0.
     time_known: bool
+    # plans/260810_date-correctness-review-reasons-and-path-parity.md §A: the
+    # year was GUESSED by rolling a date without a stated year across a year
+    # boundary — never merely because the year was absent (a same-year
+    # candidate that never rolled is not a guess). Independent of
+    # `review_reason`/`needs_review`'s OWN value: a rolled date sets
+    # `needs_review=True` even when `review_reason` is otherwise None (no
+    # weekday mismatch, a real starts_at). `vote_on_sibling_years` may adjust
+    # `starts_at`'s year using this post's other events, but never clears
+    # this flag — a majority-corrected roll is still an inference.
+    year_inferred: bool = False
+    # §B: several dates were stated for one event ("01, 02 e 03 de julho")
+    # and only the FIRST was kept as `starts_at`.
+    date_range: bool = False
 
 
 def _as_recife(post_timestamp: datetime) -> datetime:
@@ -472,13 +598,19 @@ def resolve_event_datetime(
             result_recurrence_text = date_text.strip()
 
     review_reason: Optional[str] = None
+    year_inferred = False
+    date_range = False
     if recurring:
         # The recurrence path never reaches _resolve_explicit_date, so it can
         # never trip the weekday-corroboration guard above — there is no
-        # explicit date here to corroborate; the weekday IS the content.
+        # explicit date here to corroborate; the weekday IS the content. It
+        # can never roll a year or collapse a range either — those are both
+        # `_resolve_explicit_date`-only concepts.
         resolved_date = _next_matching_weekday_on_or_after(anchor_date, recurring_weekdays)
     elif date_text and date_text.strip():
-        resolved_date, review_reason = _resolve_explicit_date(date_text, anchor_date)
+        resolved_date, review_reason, year_inferred, date_range = _resolve_explicit_date(
+            date_text, anchor_date,
+        )
     else:
         resolved_date = None
 
@@ -487,6 +619,11 @@ def resolve_event_datetime(
             starts_at=None, ends_at=None, is_recurring=recurring,
             recurrence_text=result_recurrence_text, needs_review=True,
             review_reason=review_reason or REASON_MISSING_DATE, time_known=False,
+            # Moot once there is no date at all — a review reason already
+            # covers it, and "the year was inferred"/"a range was collapsed"
+            # mean nothing without a resolved date to have inferred or
+            # collapsed.
+            year_inferred=False, date_range=date_range,
         )
 
     start_time, end_time = _parse_time_text(time_text)
@@ -516,12 +653,126 @@ def resolve_event_datetime(
 
     return ResolvedDate(
         starts_at=starts_at, ends_at=ends_at, is_recurring=recurring,
-        recurrence_text=result_recurrence_text, needs_review=review_reason is not None,
+        recurrence_text=result_recurrence_text,
+        # A rolled year needs an operator's eye every bit as much as a
+        # weekday mismatch does, even though `review_reason` itself may be
+        # None (no OTHER problem) — see `year_inferred`'s own docstring.
+        needs_review=review_reason is not None or year_inferred,
         review_reason=review_reason, time_known=time_known,
+        year_inferred=year_inferred, date_range=date_range,
     )
+
+
+def _correct_group_to(
+    out: list[ResolvedDate], indexes: list[int], target_year: int,
+) -> None:
+    """Mutates `out` in place: every `year_inferred` member of `indexes`
+    whose year disagrees with `target_year` is moved onto it. Never touches
+    an explicitly-stated (non-inferred) date, and never clears
+    `year_inferred`/`needs_review` — a corrected roll is still an inference."""
+    for i in indexes:
+        r = out[i]
+        if not r.year_inferred or r.starts_at.year == target_year:
+            continue
+        try:
+            new_starts_at = r.starts_at.replace(year=target_year)
+        except ValueError:
+            continue  # e.g. the sibling landed on a leap day; leave it be
+        new_ends_at = r.ends_at
+        if new_ends_at is not None:
+            try:
+                new_ends_at = new_ends_at.replace(
+                    year=target_year + (r.ends_at.year - r.starts_at.year),
+                )
+            except ValueError:
+                continue
+        out[i] = replace(r, starts_at=new_starts_at, ends_at=new_ends_at)
+
+
+def vote_on_sibling_years(resolved: list[ResolvedDate]) -> list[ResolvedDate]:
+    """plans/260810_date-correctness-review-reasons-and-path-parity.md §A:
+    let dates from the SAME post agree on a year. `resolved` must already be
+    every date `resolve_event_datetime` produced for ONE post's events, in
+    order — never mixed across posts (an unrelated event dragging its year
+    onto another would be a worse bug than the one this fixes) and never
+    called with anything but a single post's own list.
+
+    Only a date whose year was ITSELF inferred (`year_inferred=True`) is
+    ever adjusted — an explicitly stated year is trusted regardless of what
+    its siblings say. The correction never clears `year_inferred`/
+    `needs_review`: a corrected roll is still an inference, not a stated
+    year, and must stay out of auto-accept exactly like an uncorrected one.
+
+    Voting is scoped to siblings sharing the same CALENDAR MONTH. This is
+    load-bearing, not cosmetic: a post can legitimately span a year
+    boundary ("27, 28, 29 de dezembro e 02, 03 de janeiro" — a New Year's
+    programme) where the December dates correctly stay in the post's own
+    year and the January dates correctly roll into the next one. Without
+    the month gate, those two genuinely-different-year groups would vote
+    against each other and drag the January dates back — a worse bug than
+    the one this function exists to fix. December and January never share
+    a group, so they never vote on each other.
+
+    Within one month's group of >=2 dated siblings:
+      - a UNIQUE plurality year wins outright, and every inferred sibling
+        disagreeing with it is corrected onto it (the common case: three
+        siblings already agree, one rolled outlier does not);
+      - an exact TIE prefers whichever tied year belongs to a NON-inferred
+        (explicitly stated, or simply never rolled) sibling — a year
+        nobody had to guess outranks one that was guessed, even when raw
+        counts agree. `_roll_forward` always rolls every inferred sibling
+        in a post to the SAME target year (anchor.year + 1), so two
+        inferred siblings can never disagree with each other; the only way
+        a tie is genuinely ambiguous is when two (or more) DIFFERENT
+        non-inferred years are both present — two disagreeing trusted
+        answers refuse to guess, exactly like the plan requires;
+      - a group with no unique plurality and no single trusted tied year
+        is left completely alone.
+
+    A post with fewer than two dated events in ANY month (a genuine
+    single-date post, or every event still dateless) is returned unchanged.
+    """
+    dated_indexes = [i for i, r in enumerate(resolved) if r.starts_at is not None]
+    if len(dated_indexes) < 2:
+        return resolved
+
+    by_month: dict[int, list[int]] = {}
+    for i in dated_indexes:
+        by_month.setdefault(resolved[i].starts_at.month, []).append(i)
+
+    out = list(resolved)
+    for indexes in by_month.values():
+        if len(indexes) < 2:
+            continue  # nothing in this month to vote against
+
+        year_counts: dict[int, int] = {}
+        for i in indexes:
+            year = out[i].starts_at.year
+            year_counts[year] = year_counts.get(year, 0) + 1
+        top_count = max(year_counts.values())
+        leaders = [year for year, count in year_counts.items() if count == top_count]
+
+        if len(leaders) == 1:
+            target_year = leaders[0]
+        else:
+            # A tie: defer to whichever tied year a NON-inferred sibling
+            # actually holds. Ambiguous (refuse to guess) when zero or more
+            # than one tied year has a non-inferred holder.
+            native_tied = {
+                year for year in leaders
+                if any(not out[i].year_inferred and out[i].starts_at.year == year for i in indexes)
+            }
+            if len(native_tied) != 1:
+                continue
+            target_year = next(iter(native_tied))
+
+        _correct_group_to(out, indexes, target_year)
+
+    return out
 
 
 __all__ = [
     "RECIFE_TZ", "REASON_MISSING_DATE", "REASON_WEEKDAY_MISMATCH",
-    "ResolvedDate", "resolve_event_datetime",
+    "REASON_YEAR_INFERRED", "REASON_DATE_RANGE",
+    "ResolvedDate", "resolve_event_datetime", "vote_on_sibling_years",
 ]

@@ -1,4 +1,3 @@
-@wip
 Feature: Say when a date was guessed, say why an event is queued, and report both paths alike
   A date earlier than the post that announced it is rolled forward a year. That
   is a guess, and a guess must not arrive wearing high confidence — least of all
@@ -19,7 +18,7 @@ Feature: Say when a date was guessed, say why an event is queued, and report bot
   Scenario: Keep an inferred year out of auto-accept
     Given a post announcing a date earlier in the year than the post itself
     When the post is extracted
-    Then the event awaits a human decision
+    Then the event is not auto-accepted
 
   Scenario: Leave a future-dated event alone
     Given a post announcing a date later than the post itself
@@ -80,7 +79,7 @@ Feature: Say when a date was guessed, say why an event is queued, and report bot
     Given a crawl target whose handle belongs to two venues
     And a post naming neither venue
     When its scheduled crawl runs
-    And the review queue is listed
+    And the shared-handle review queue is listed
     Then that event is present in the queue
 
   Scenario: Label a venue's own post as a venue post

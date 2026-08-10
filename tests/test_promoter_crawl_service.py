@@ -346,6 +346,171 @@ class TestLocationTextFallbackToCaption:
         assert row["venue_id"] == "v2", row  # Casa Rosa, from location_text -- never the caption's Zetta
 
 
+class TestSourceKindAndMetricsParity:
+    """plans/260810_date-correctness-review-reasons-and-path-parity.md §D:
+    `_process_post` is the machinery `InstagramCrawlChainer._chain_shared_
+    handle` reuses wholesale for a VENUE's own post -- these three new,
+    optional parameters are what let that caller report the truth (venue_
+    post, not promoter_post) and the same metrics the single-venue path
+    already reports, without changing a byte of the real promoter path's
+    default behaviour. Called directly against `_process_post`, since the
+    parameters themselves are the unit under test (same pattern as
+    TestLocationTextFallbackToCaption above)."""
+
+    def _venues(self, dao):
+        dao.upsert_venue(Venue(venue_id="v1", venue_name="Zetta Lounge", venue_lat=-8.05, venue_lng=-34.88))
+        return build_venue_catalog(dao), build_handle_index(dao)
+
+    def _post(self, shortcode: str, caption: str) -> dict:
+        return {
+            "shortcode": shortcode, "caption": caption,
+            "permalink": f"https://instagram.com/p/{shortcode}",
+            "timestamp": datetime(2026, 8, 1, tzinfo=timezone.utc).isoformat(),
+            "image_urls": [],
+        }
+
+    def test_default_source_kind_is_still_promoter_post(self, dao):
+        venues, handle_index = self._venues(dao)
+        openai_client = _FakeOpenAIClient()
+        openai_client.program(_extraction_json(date_text="15/08", time_text="20h"))
+        service = PromoterCrawlService(venue_dao=dao, posts_client=None, openai_client=openai_client)
+
+        _run(service._process_post(
+            handle="promo", post=self._post("sk1", "Zetta Lounge, sexta 22h"),
+            venues=venues, handle_index=handle_index, now=datetime.now(timezone.utc),
+        ))
+        row = dao.get_event_by_source("promo", "sk1")
+        assert row["source_kind"] == "promoter_post", row
+
+    def test_source_kind_venue_post_is_stamped_when_passed(self, dao):
+        venues, handle_index = self._venues(dao)
+        openai_client = _FakeOpenAIClient()
+        openai_client.program(_extraction_json(date_text="15/08", time_text="20h"))
+        service = PromoterCrawlService(venue_dao=dao, posts_client=None, openai_client=openai_client)
+
+        _run(service._process_post(
+            handle="sharedhandle", post=self._post("sk2", "Zetta Lounge, sexta 22h"),
+            venues=venues, handle_index=handle_index, now=datetime.now(timezone.utc),
+            source_kind="venue_post",
+        ))
+        row = dao.get_event_by_source("sharedhandle", "sk2")
+        assert row["source_kind"] == "venue_post", row
+
+    def test_source_kind_venue_post_also_stamps_an_extraction_failure_placeholder(self, dao):
+        """The provenance fix must hold on the FAILURE path too -- a shared-
+        handle post whose extraction blew up must not fall back to the
+        default `promoter_post` label."""
+        venues, handle_index = self._venues(dao)
+        openai_client = _FakeOpenAIClient()
+        openai_client.program(RuntimeError("boom"))
+        service = PromoterCrawlService(venue_dao=dao, posts_client=None, openai_client=openai_client)
+
+        _run(service._process_post(
+            handle="sharedhandle", post=self._post("sk3", "Zetta Lounge, sexta 22h"),
+            venues=venues, handle_index=handle_index, now=datetime.now(timezone.utc),
+            source_kind="venue_post",
+        ))
+        row = dao.get_event_by_source("sharedhandle", "sk3")
+        assert row is not None, "expected an extraction_failed placeholder row"
+        assert row["source_kind"] == "venue_post", row
+        assert row["status"] == "extraction_failed", row
+
+    def test_attribution_outcomes_collects_the_resolution_ladders_answer(self, dao):
+        venues, handle_index = self._venues(dao)
+        openai_client = _FakeOpenAIClient()
+        openai_client.program(_extraction_json(date_text="15/08", time_text="20h", location_text=None))
+        service = PromoterCrawlService(venue_dao=dao, posts_client=None, openai_client=openai_client)
+
+        outcomes: list[str] = []
+        _run(service._process_post(
+            handle="promo", post=self._post("ao1", "Zetta Lounge, sexta 22h"),
+            venues=venues, handle_index=handle_index, now=datetime.now(timezone.utc),
+            location_text_fallback_to_caption=True, attribution_outcomes=outcomes,
+        ))
+        assert outcomes == ["auto"], outcomes
+
+    def test_attribution_outcomes_is_untouched_when_not_supplied(self, dao):
+        """None (the default) costs nothing extra -- a real promoter
+        account never has to pay for a list it does not use."""
+        venues, handle_index = self._venues(dao)
+        openai_client = _FakeOpenAIClient()
+        openai_client.program(_extraction_json(date_text="15/08", time_text="20h"))
+        service = PromoterCrawlService(venue_dao=dao, posts_client=None, openai_client=openai_client)
+
+        # No AttributeError/TypeError -- attribution_outcomes defaults to
+        # None and is simply never appended to.
+        _run(service._process_post(
+            handle="promo", post=self._post("ao2", "Zetta Lounge, sexta 22h"),
+            venues=venues, handle_index=handle_index, now=datetime.now(timezone.utc),
+        ))
+
+    def test_report_kind_metric_false_by_default_never_bumps_event_extraction_posts_total(self, dao):
+        from prometheus_client import REGISTRY
+
+        venues, handle_index = self._venues(dao)
+        openai_client = _FakeOpenAIClient()
+        openai_client.program(_extraction_json(date_text="15/08", time_text="20h"))
+        service = PromoterCrawlService(venue_dao=dao, posts_client=None, openai_client=openai_client)
+        before = REGISTRY.get_sample_value(
+            "event_extraction_posts_total", {"outcome": "extracted", "kind": "event"},
+        ) or 0.0
+
+        _run(service._process_post(
+            handle="promo", post=self._post("km1", "Zetta Lounge, sexta 22h"),
+            venues=venues, handle_index=handle_index, now=datetime.now(timezone.utc),
+        ))
+        after = REGISTRY.get_sample_value(
+            "event_extraction_posts_total", {"outcome": "extracted", "kind": "event"},
+        ) or 0.0
+        assert after == before, (before, after)
+
+    def test_report_kind_metric_true_bumps_event_extraction_posts_total_with_the_event_kind(self, dao):
+        from prometheus_client import REGISTRY
+
+        venues, handle_index = self._venues(dao)
+        openai_client = _FakeOpenAIClient()
+        openai_client.program(_extraction_json(kind="event", date_text="15/08", time_text="20h"))
+        service = PromoterCrawlService(venue_dao=dao, posts_client=None, openai_client=openai_client)
+        before = REGISTRY.get_sample_value(
+            "event_extraction_posts_total", {"outcome": "extracted", "kind": "event"},
+        ) or 0.0
+
+        _run(service._process_post(
+            handle="sharedhandle", post=self._post("km2", "Zetta Lounge, sexta 22h"),
+            venues=venues, handle_index=handle_index, now=datetime.now(timezone.utc),
+            report_kind_metric=True,
+        ))
+        after = REGISTRY.get_sample_value(
+            "event_extraction_posts_total", {"outcome": "extracted", "kind": "event"},
+        ) or 0.0
+        assert after - before == 1.0, (before, after)
+
+    def test_report_kind_metric_true_counts_a_non_event_kind_as_not_an_event(self, dao):
+        from prometheus_client import REGISTRY
+
+        venues, handle_index = self._venues(dao)
+        openai_client = _FakeOpenAIClient()
+        openai_client.program(_extraction_json(kind="menu", date_text=None, time_text=None))
+        service = PromoterCrawlService(venue_dao=dao, posts_client=None, openai_client=openai_client)
+        before = REGISTRY.get_sample_value(
+            "event_extraction_posts_total", {"outcome": "not_an_event", "kind": "menu"},
+        ) or 0.0
+
+        _run(service._process_post(
+            # A caption naming a ticketing term so the pre-filter still
+            # qualifies the post -- the MODEL's own kind answer, not the
+            # caption, is what "menu" tests here.
+            handle="sharedhandle", post=self._post("km3", "Ingressos e cardapio, confira"),
+            venues=venues, handle_index=handle_index, now=datetime.now(timezone.utc),
+            report_kind_metric=True,
+        ))
+        after = REGISTRY.get_sample_value(
+            "event_extraction_posts_total", {"outcome": "not_an_event", "kind": "menu"},
+        ) or 0.0
+        assert after - before == 1.0, (before, after)
+        assert dao.get_event_by_source("sharedhandle", "km3") is None
+
+
 class TestFakeOpenAIClientExhaustion:
     """The fake's own contract, proven in isolation: exhaustion must RAISE,
     never silently return a default that could pass a test by accident."""

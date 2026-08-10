@@ -15,10 +15,13 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from app.services.event_date_resolver import (
+    REASON_DATE_RANGE,
     REASON_MISSING_DATE,
     REASON_WEEKDAY_MISMATCH,
+    REASON_YEAR_INFERRED,
     RECIFE_TZ,
     resolve_event_datetime,
+    vote_on_sibling_years,
 )
 
 RECIFE = ZoneInfo("America/Recife")
@@ -535,3 +538,320 @@ class TestWeekdayMismatchIsFlaggedNotTrusted:
         assert resolved.starts_at.date().isoformat() == "2026-12-20", resolved.starts_at
         assert resolved.needs_review is False, resolved
         assert resolved.review_reason is None, resolved
+
+
+# plans/260810_date-correctness-review-reasons-and-path-parity.md §A: a
+# rolled-forward year is a guess and must be flagged, never presented with
+# the resolver's usual silent confidence.
+class TestYearInferredFlag:
+    def test_a_roll_across_the_year_boundary_is_flagged(self):
+        post_ts = _post_at(2026, 12, 1)
+        resolved = resolve_event_datetime(
+            date_text="15/08", time_text=None, post_timestamp=post_ts,
+        )
+        assert resolved.starts_at.date().isoformat() == "2027-08-15", resolved
+        assert resolved.year_inferred is True, resolved
+        assert resolved.needs_review is True, resolved
+
+    def test_a_date_within_the_same_year_is_not_flagged(self):
+        # No roll happens here -- the year was never inferred by GUESSING,
+        # only defaulted to the anchor's own year, which is not a guess.
+        post_ts = _post_at(2026, 7, 1)
+        resolved = resolve_event_datetime(
+            date_text="15/08", time_text=None, post_timestamp=post_ts,
+        )
+        assert resolved.starts_at.date().isoformat() == "2026-08-15", resolved
+        assert resolved.year_inferred is False, resolved
+        assert resolved.needs_review is False, resolved
+
+    def test_an_explicit_year_is_never_flagged_even_if_it_looks_like_a_typo(self):
+        # An explicit year is trusted outright -- _roll_forward never even
+        # runs for it (app.services.event_date_resolver._numeric_date).
+        post_ts = _post_at(2026, 12, 1)
+        resolved = resolve_event_datetime(
+            date_text="15/08/2025", time_text=None, post_timestamp=post_ts,
+        )
+        assert resolved.starts_at.date().isoformat() == "2025-08-15", resolved
+        assert resolved.year_inferred is False, resolved
+
+    def test_recurrence_never_sets_year_inferred(self):
+        # Trap: the recurrence path never reaches _resolve_explicit_date, so
+        # it can never trip this flag either -- there is no year to guess,
+        # only a weekday to find the next occurrence of.
+        post_ts = _post_at(2026, 7, 13)  # Monday
+        resolved = resolve_event_datetime(
+            date_text="toda quinta", time_text=None, post_timestamp=post_ts,
+        )
+        assert resolved.is_recurring is True, resolved
+        assert resolved.year_inferred is False, resolved
+
+    def test_a_bare_weekday_fallback_never_sets_year_inferred(self):
+        # Trap: the one-off weekday path (plans/260807_date-resolution-
+        # correctness.md) must survive this change untouched -- it resolves
+        # via _next_weekday_on_or_after, never _roll_forward, so it can
+        # never be flagged as a year guess.
+        post_ts = _post_at(2026, 8, 3)  # Monday
+        resolved = resolve_event_datetime(
+            date_text="este sábado", time_text=None, post_timestamp=post_ts,
+        )
+        assert resolved.starts_at is not None, resolved
+        assert resolved.year_inferred is False, resolved
+        assert resolved.needs_review is False, resolved
+
+    def test_weekday_mismatch_and_year_inference_are_independent_flags(self):
+        # A rolled date whose stated weekday also disagrees: both signals
+        # must survive side by side -- review_reason keeps carrying the
+        # resolver's OWN weekday_mismatch reason (never overwritten by the
+        # roll), while year_inferred is reported separately.
+        # 15 August 2027 is a Sunday, not a Saturday -- a genuine mismatch.
+        post_ts = _post_at(2026, 12, 1)
+        resolved = resolve_event_datetime(
+            date_text="Sábado • 15/08", time_text=None, post_timestamp=post_ts,
+        )
+        assert resolved.starts_at.date().isoformat() == "2027-08-15", resolved
+        assert resolved.year_inferred is True, resolved
+        assert resolved.review_reason == REASON_WEEKDAY_MISMATCH, resolved
+        assert resolved.needs_review is True, resolved
+
+
+# §B: a range keeps only its first day, and says a range existed.
+class TestDateRangeYieldsFirstDay:
+    def test_a_three_day_range_resolves_to_the_first_day(self):
+        post_ts = _post_at(2026, 6, 1)
+        resolved = resolve_event_datetime(
+            date_text="01, 02 e 03 de julho", time_text=None, post_timestamp=post_ts,
+        )
+        assert resolved.starts_at is not None, resolved
+        assert resolved.starts_at.date().isoformat() == "2026-07-01", resolved
+        assert resolved.date_range is True, resolved
+
+    def test_the_theoretical_05_e_06_09_gap_now_resolves_to_the_first_day(self):
+        # plans/260807_date-resolution-correctness.md §D named this gap and
+        # deliberately deferred it; this plan closes it.
+        post_ts = _post_at(2026, 1, 1)
+        resolved = resolve_event_datetime(
+            date_text="05 e 06/09", time_text=None, post_timestamp=post_ts,
+        )
+        assert resolved.starts_at is not None, resolved
+        assert resolved.starts_at.date().isoformat() == "2026-09-05", resolved
+        assert resolved.date_range is True, resolved
+
+    def test_a_single_date_is_never_flagged_as_a_range(self):
+        post_ts = _post_at(2026, 1, 1)
+        resolved = resolve_event_datetime(
+            date_text="15/08", time_text=None, post_timestamp=post_ts,
+        )
+        assert resolved.date_range is False, resolved
+
+    def test_a_range_that_also_needs_to_roll_flags_both(self):
+        # The real production case (plan Evidence §A/§B combined): a range
+        # whose first day is still before the anchor rolls AND is a range.
+        post_ts = _post_at(2026, 12, 1)
+        resolved = resolve_event_datetime(
+            date_text="01, 02 e 03 de julho", time_text=None, post_timestamp=post_ts,
+        )
+        assert resolved.starts_at.date().isoformat() == "2027-07-01", resolved
+        assert resolved.year_inferred is True, resolved
+        assert resolved.date_range is True, resolved
+
+    def test_a_bare_number_list_with_nothing_dated_after_it_is_not_a_range(self):
+        # "3, 4 e 5 amigos chegam" -- a list of numbers with no month
+        # attached at all must never be swept into range detection; it falls
+        # through to the ordinary unparseable-date path instead.
+        post_ts = _post_at(2026, 1, 1)
+        resolved = resolve_event_datetime(
+            date_text="3, 4 e 5 amigos chegam pra festa", time_text=None, post_timestamp=post_ts,
+        )
+        assert resolved.date_range is False, resolved
+
+
+# §A: siblings from the SAME post vote on a rolled year.
+class TestSiblingYearVoting:
+    def test_ferias_amigos_park_the_real_production_case(self):
+        """The real bug, with the anchor that actually matches the plan's
+        Evidence section: "weeks 1 and 2 had already happened" (both, not
+        just one) means the anchor sits strictly between week 2's last day
+        (10 July) and week 3's first day (15 July) -- 13 July, say. That is
+        a genuine 2-2 split by year (2027, 2027, 2026, 2026), a TIE by raw
+        count, not a 3-1 majority. The fix must resolve it anyway: within
+        July, the tie prefers the year the two NATIVE (never-rolled)
+        siblings already hold."""
+        post_ts = _post_at(2026, 7, 13)
+        texts = [
+            "01, 02 e 03 de julho",
+            "08, 09 e 10 de julho",
+            "15, 16 e 17 de julho",
+            "22, 23 e 24 de julho",
+        ]
+        resolved = [
+            resolve_event_datetime(date_text=t, time_text=None, post_timestamp=post_ts)
+            for t in texts
+        ]
+        # Pre-vote: weeks 1-2 individually roll to 2027 (both before the 13
+        # July anchor); weeks 3-4 resolve natively within 2026. A tie, 2-2.
+        assert [r.starts_at.year for r in resolved] == [2027, 2027, 2026, 2026], resolved
+        assert [r.year_inferred for r in resolved] == [True, True, False, False], resolved
+
+        voted = vote_on_sibling_years(resolved)
+        assert [r.starts_at.date().isoformat() for r in voted] == [
+            "2026-07-01", "2026-07-08", "2026-07-15", "2026-07-22",
+        ], voted
+        # The two corrected weeks are still an inference, even corrected --
+        # never auto-acceptable.
+        assert voted[0].year_inferred is True and voted[0].needs_review is True, voted[0]
+        assert voted[1].year_inferred is True and voted[1].needs_review is True, voted[1]
+        # The two that were already correct are untouched, and never
+        # flagged -- they were never a guess.
+        assert voted[2].year_inferred is False, voted[2]
+        assert voted[3].year_inferred is False, voted[3]
+
+    def test_a_unique_majority_pulls_a_rolled_outlier_back(self):
+        """A synthetic (non-evidence) fixture isolating the OTHER branch:
+        a real, non-tied plurality -- three siblings already agree, one
+        rolled outlier does not."""
+        post_ts = _post_at(2026, 7, 5)
+        texts = ["01/07", "08/07", "15/07", "22/07"]
+        resolved = [
+            resolve_event_datetime(date_text=t, time_text=None, post_timestamp=post_ts)
+            for t in texts
+        ]
+        assert [r.starts_at.year for r in resolved] == [2027, 2026, 2026, 2026], resolved
+
+        voted = vote_on_sibling_years(resolved)
+        assert [r.starts_at.year for r in voted] == [2026, 2026, 2026, 2026], voted
+        assert voted[0].year_inferred is True, voted[0]
+
+    def test_a_genuine_single_date_post_is_completely_unaffected(self):
+        post_ts = _post_at(2026, 12, 1)
+        resolved = [resolve_event_datetime(
+            date_text="15/08", time_text=None, post_timestamp=post_ts,
+        )]
+        voted = vote_on_sibling_years(resolved)
+        assert voted == resolved, (voted, resolved)
+        assert voted[0].starts_at.date().isoformat() == "2027-08-15", voted
+
+    def test_different_months_within_one_post_never_vote_on_each_other(self):
+        """The month gate's own boundary case, isolated from the New Year's
+        scenario below: two dates in the SAME post but different months
+        must never influence each other, even though (pre-fix) they would
+        have looked like a 1-1 "tie" by raw count."""
+        post_ts = _post_at(2026, 12, 1)
+        rolled = resolve_event_datetime(
+            date_text="15/08", time_text=None, post_timestamp=post_ts,
+        )
+        native = resolve_event_datetime(
+            date_text="20/12", time_text=None, post_timestamp=post_ts,
+        )
+        assert rolled.starts_at.year == 2027 and native.starts_at.year == 2026
+        voted = vote_on_sibling_years([rolled, native])
+        assert voted[0].starts_at.year == 2027, voted
+        assert voted[1].starts_at.year == 2026, voted
+        assert voted[0].year_inferred is True, voted[0]
+
+    def test_new_years_programme_december_and_january_never_vote_on_each_other(self):
+        """The counter-example that keeps the month gate honest (raised
+        directly against an earlier, ungated version of this rule): a
+        programme spanning "27, 28, 29 de dezembro e 02, 03 de janeiro".
+        The December dates resolve natively within the post's own year; the
+        January dates CORRECTLY roll into the next one. A rule that let
+        December's non-inferred majority "win" across the whole post would
+        wrongly drag January back a year and break a case that already
+        works today."""
+        post_ts = _post_at(2026, 12, 20)
+        december = ["27/12", "28/12", "29/12"]
+        january = ["02/01", "03/01"]
+        resolved = [
+            resolve_event_datetime(date_text=t, time_text=None, post_timestamp=post_ts)
+            for t in december + january
+        ]
+        assert [r.starts_at.year for r in resolved] == [2026, 2026, 2026, 2027, 2027], resolved
+        assert [r.year_inferred for r in resolved] == [False, False, False, True, True], resolved
+
+        voted = vote_on_sibling_years(resolved)
+        # December: untouched (already agrees, nothing inferred there).
+        assert [r.starts_at.year for r in voted[:3]] == [2026, 2026, 2026], voted
+        # January: STILL rolls into 2027 -- December's majority never
+        # reaches across the month boundary to correct it.
+        assert [r.starts_at.year for r in voted[3:]] == [2027, 2027], voted
+        assert voted[3].year_inferred is True and voted[4].year_inferred is True, voted
+
+    def test_a_same_month_tie_between_two_trusted_answers_refuses_to_guess(self):
+        """The genuinely ambiguous case within ONE month: two explicitly
+        stated (non-inferred) years disagree with each other, and a third,
+        bare date rolls to a THIRD year -- a 1-1-1 tie with no unique
+        trusted answer to defer to. `_roll_forward` always rolls every
+        inferred sibling in a post to the SAME target year, so the only way
+        a same-month tie is genuinely unresolvable is exactly this: two (or
+        more) DIFFERENT non-inferred years both present at once."""
+        post_ts = _post_at(2026, 12, 1)
+        explicit_2025 = resolve_event_datetime(
+            date_text="20/08/2025", time_text=None, post_timestamp=post_ts,
+        )
+        explicit_2028 = resolve_event_datetime(
+            date_text="22/08/2028", time_text=None, post_timestamp=post_ts,
+        )
+        bare_rolls_to_2027 = resolve_event_datetime(
+            date_text="25/08", time_text=None, post_timestamp=post_ts,
+        )
+        assert [
+            explicit_2025.starts_at.year, explicit_2028.starts_at.year,
+            bare_rolls_to_2027.starts_at.year,
+        ] == [2025, 2028, 2027]
+
+        voted = vote_on_sibling_years([explicit_2025, explicit_2028, bare_rolls_to_2027])
+        # Refused to guess: all three keep their own individually-resolved
+        # year, including the one genuine guess among them.
+        assert voted[0].starts_at.year == 2025, voted
+        assert voted[1].starts_at.year == 2028, voted
+        assert voted[2].starts_at.year == 2027, voted
+        assert voted[2].year_inferred is True, voted[2]
+
+    def test_voting_never_touches_a_non_inferred_outlier(self):
+        # An explicitly-stated year that happens to disagree with its
+        # siblings must NEVER be pulled into line -- only a GUESS is ever
+        # eligible for correction. This is the boundary that keeps voting
+        # from turning into "cross-post" behaviour smuggled into one post.
+        post_ts = _post_at(2026, 12, 1)
+        explicit_outlier = resolve_event_datetime(
+            date_text="15/08/2030", time_text=None, post_timestamp=post_ts,
+        )
+        rolled_a = resolve_event_datetime(
+            date_text="16/08", time_text=None, post_timestamp=post_ts,
+        )
+        rolled_b = resolve_event_datetime(
+            date_text="17/08", time_text=None, post_timestamp=post_ts,
+        )
+        voted = vote_on_sibling_years([explicit_outlier, rolled_a, rolled_b])
+        # The explicit 2030 date is untouched regardless of what its
+        # siblings (both 2027) agree on.
+        assert voted[0].starts_at.year == 2030, voted
+        assert voted[0].year_inferred is False, voted[0]
+        # The two genuine guesses agree with each other already -- nothing
+        # to correct, both stay flagged.
+        assert voted[1].starts_at.year == 2027, voted
+        assert voted[2].starts_at.year == 2027, voted
+
+    def test_voting_never_crosses_posts(self):
+        # The hard boundary the plan calls out explicitly: an unrelated
+        # event from a DIFFERENT post must never drag its year onto this
+        # one, even if this function were (incorrectly) called across two
+        # posts' lists concatenated together. This test proves the function
+        # itself has no notion of "post" at all -- scoping to one post's own
+        # events is the CALLER's responsibility (event_extraction_service.py
+        # / promoter_crawl_service.py each call this once per post, never
+        # once for the whole run) -- so the real regression this guards is a
+        # future caller accidentally pooling multiple posts' lists together.
+        post_a_ts = _post_at(2026, 12, 1)
+        post_b_ts = _post_at(2026, 3, 1)
+        rolled_alone = resolve_event_datetime(
+            date_text="15/08", time_text=None, post_timestamp=post_a_ts,
+        )
+        unrelated_native = resolve_event_datetime(
+            date_text="20/06", time_text=None, post_timestamp=post_b_ts,
+        )
+        # Called SEPARATELY, per post (the correct usage): neither list has
+        # more than one dated event, so voting is a no-op for both.
+        voted_a = vote_on_sibling_years([rolled_alone])
+        voted_b = vote_on_sibling_years([unrelated_native])
+        assert voted_a[0].starts_at.year == 2027, voted_a
+        assert voted_b[0].starts_at.year == 2026, voted_b

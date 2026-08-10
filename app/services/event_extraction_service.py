@@ -57,17 +57,24 @@ from app.metrics import (
     EVENT_EXTRACTION_MALFORMED_ATTRACTIONS_TOTAL,
     EVENT_EXTRACTION_MALFORMED_EVENTS_TOTAL,
     EVENT_EXTRACTION_POSTS_TOTAL,
-    EVENTS_TOTAL,
 )
 from app.models.event_kind import NON_EVENT_KINDS
 from app.models.photo_taxonomy import CATEGORY_FLYER
 from app.services.event_caption_matcher import matches_event_marker
-from app.services.event_date_resolver import REASON_WEEKDAY_MISMATCH, resolve_event_datetime
+from app.services.event_date_resolver import (
+    REASON_DATE_RANGE,
+    REASON_WEEKDAY_MISMATCH,
+    REASON_YEAR_INFERRED,
+    resolve_event_datetime,
+    vote_on_sibling_years,
+)
 from app.services.event_merge import merge_touched_events
 from app.services.event_reconciliation import (
+    ALL_STATUSES,
     STATUS_CONFIRMED,
     new_event_id,
     reconcile_post_events,
+    update_events_gauge,
 )
 from app.services.event_venue_targeting import (
     _parse_timestamp,
@@ -101,6 +108,15 @@ OUTCOME_UNREAD_TIME = "unread_time"
 # distinct outcome from OUTCOME_NO_DATE: `starts_at` is set (from the
 # explicit date, the more precise claim), only the disagreement is flagged.
 OUTCOME_WEEKDAY_MISMATCH = "weekday_mismatch"
+# The year was inferred by rolling a date without a stated year across a
+# year boundary (plans/260810_date-correctness-review-reasons-and-path-
+# parity.md §A) — checked before the generic `no_date` branch below for the
+# same reason weekday_mismatch is: `starts_at` IS set here (from the rolled
+# or sibling-corrected date), so this is not a blank the way `no_date` is.
+OUTCOME_YEAR_INFERRED = "year_inferred"
+# Several dates were stated for one event and only the FIRST was kept as
+# `starts_at` (§B) — also not a blank.
+OUTCOME_DATE_RANGE = "date_range"
 # A multi-event response cut off mid-list (finish_reason == "length"):
 # persists nothing partial, distinct from extraction_failed (a truncated
 # response means the output budget was too small, not a bad model answer).
@@ -121,17 +137,11 @@ OUTCOME_NOT_AN_EVENT = "not_an_event"
 # outcomes, no single label applies) — this outcome is strictly the
 # single-event success case that used to report "extracted".
 OUTCOME_ACCEPTED = "accepted"
-ALL_STATUSES = (
-    "pending_review", "confirmed", "rejected", "superseded", "extraction_failed",
-    # plans/260807_auto-accept-and-field-level-protection.md: listed
-    # explicitly (rather than left to the gauge's own defensive fallback)
-    # so `events_total{status="accepted"}` reports an honest 0 from the
-    # very first run after deploy — a dashboard querying it must be able to
-    # tell "genuinely zero" from "no data point yet", and the plan's own
-    # watch item ("accepted staying at zero after deploy" signals a too-
-    # strict predicate) depends on that distinction.
-    "accepted",
-)
+# ALL_STATUSES/update_events_gauge now live in event_reconciliation.py (see
+# the import above) — plans/260810_date-correctness-review-reasons-and-
+# path-parity.md §D: the EVENTS_TOTAL gauge must be refreshed from BOTH
+# crawl paths, so this service can no longer be the sole owner of a helper
+# the shared-handle path also needs.
 
 # plans/260810_post-kind-and-post-extraction-attribution.md §Error Handling:
 # `EVENT_EXTRACTION_POSTS_TOTAL` gains a `kind` label so the event/non-event
@@ -408,7 +418,7 @@ class EventExtractionService:
                 _bump(outcome, kind_label)
 
         if not cfg["dry_run"]:
-            self._update_events_gauge()
+            update_events_gauge(self.venue_dao)
 
         return {
             "qualifying_posts": qualifying_posts,
@@ -506,6 +516,7 @@ class EventExtractionService:
         # same as before.
         skipped_non_event = 0
 
+        kept_events: list[dict] = []
         for parsed in events_data:
             kind = parsed.get("kind")
             if kind in NON_EVENT_KINDS:
@@ -516,15 +527,27 @@ class EventExtractionService:
                     f"title={parsed.get('title')!r} -- no event row created"
                 )
                 continue
+            kept_events.append(parsed)
 
-            # Each event resolves its OWN date, independently, against the
-            # post's timestamp — never a sibling's.
-            resolved = resolve_event_datetime(
+        # Each event resolves its OWN date independently, against the post's
+        # timestamp — never a sibling's raw text. `vote_on_sibling_years`
+        # (plans/260810_date-correctness-review-reasons-and-path-parity.md
+        # §A) then looks across THIS post's own events only — one flyer
+        # describes one programme — and pulls a lone rolled-forward outlier
+        # back onto the year the rest of the post already agrees on, still
+        # flagged as an inference either way. Scoped to this post's
+        # `kept_events` alone; never called across posts.
+        resolved_dates = [
+            resolve_event_datetime(
                 date_text=parsed["date_text"], time_text=parsed["time_text"],
                 post_timestamp=post_timestamp,
                 is_recurring=parsed["is_recurring"], recurrence_text=parsed["recurrence_text"],
             )
+            for parsed in kept_events
+        ]
+        resolved_dates = vote_on_sibling_years(resolved_dates)
 
+        for parsed, resolved in zip(kept_events, resolved_dates):
             # A time is an extraction MISS (worth an operator's eye) only
             # when the flyer itself said one was there and none was read; a
             # flyer that names no time, or a caption-only post with no flyer
@@ -541,8 +564,12 @@ class EventExtractionService:
             )
 
             reasons: list[str] = []
-            if resolved.needs_review:
+            if resolved.review_reason:
                 reasons.append(resolved.review_reason)
+            if resolved.year_inferred:
+                reasons.append(REASON_YEAR_INFERRED)
+            if resolved.date_range:
+                reasons.append(REASON_DATE_RANGE)
             if unread_time:
                 reasons.append(REVIEW_REASON_UNREAD_TIME)
             low_confidence = parsed["confidence"] < cfg["min_confidence"]
@@ -585,6 +612,10 @@ class EventExtractionService:
                 # surface (plans/260807_date-resolution-correctness.md).
                 if resolved.review_reason == REASON_WEEKDAY_MISMATCH:
                     single_event_outcome = OUTCOME_WEEKDAY_MISMATCH
+                elif resolved.year_inferred:
+                    single_event_outcome = OUTCOME_YEAR_INFERRED
+                elif resolved.date_range:
+                    single_event_outcome = OUTCOME_DATE_RANGE
                 elif resolved.needs_review:
                     single_event_outcome = OUTCOME_NO_DATE
                 elif unread_time:
@@ -689,14 +720,6 @@ class EventExtractionService:
                     "source_handle": handle, "source_shortcode": post.shortcode,
                 })
 
-    def _update_events_gauge(self) -> None:
-        counts = {status: 0 for status in ALL_STATUSES}
-        for row in self.venue_dao.list_events():
-            status = row.get("status")
-            counts[status] = counts.get(status, 0) + 1
-        for status, count in counts.items():
-            EVENTS_TOTAL.labels(status=status).set(count)
-
 
 __all__ = [
     "ArchivedPost", "EventPostSource", "EventExtractionService",
@@ -705,6 +728,7 @@ __all__ = [
     "OUTCOME_EXTRACTED", "OUTCOME_NOT_EVENT_LIKE", "OUTCOME_NO_DATE",
     "OUTCOME_LOW_CONFIDENCE", "OUTCOME_EXTRACTION_FAILED", "OUTCOME_SKIPPED_SEEN",
     "OUTCOME_UNREAD_TIME", "OUTCOME_TRUNCATED", "OUTCOME_WEEKDAY_MISMATCH",
+    "OUTCOME_YEAR_INFERRED", "OUTCOME_DATE_RANGE",
     "OUTCOME_ACCEPTED", "OUTCOME_NOT_AN_EVENT",
     "REVIEW_REASON_UNREAD_TIME", "DEFAULT_MAX_EVENTS_PER_POST", "ALL_STATUSES",
     "KIND_LABEL_NOT_APPLICABLE", "KIND_LABEL_UNKNOWN", "KIND_LABEL_MIXED",
