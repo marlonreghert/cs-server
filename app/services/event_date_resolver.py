@@ -71,6 +71,28 @@ _WEEKDAY_PATTERN = "|".join(sorted(_WEEKDAYS, key=len, reverse=True))
 _WEEKDAY_RE = re.compile(_WEEKDAY_PATTERN, re.IGNORECASE)
 _RECURRING_MARKER_RE = re.compile(r"\b(?:toda|todo)s?\b", re.IGNORECASE)
 
+# plans/260810_post-kind-and-post-extraction-attribution.md §D: the forms
+# Brazilian venues actually use for a recurring WEEKLY schedule beyond a
+# bare "toda"/"todo" + single weekday.
+#
+# A RANGE ("de segunda a sexta", "de sexta a sábado") — word-boundary
+# anchored (`\b`) on purpose, unlike the loose, substring-matching
+# `_WEEKDAY_RE` above: this pattern decides whether a whole PHRASE reads as
+# a range, so it must never fire on a weekday name that merely appears
+# somewhere inside unrelated prose.
+_WEEKDAY_RANGE_RE = re.compile(
+    r"\bde\s+(" + _WEEKDAY_PATTERN + r")\s+a\s+(" + _WEEKDAY_PATTERN + r")\b",
+    re.IGNORECASE,
+)
+# A weekday named as a plural or bare word, with NO "toda"/"todo" marker and
+# no "de X a Y" range shape — "sextas e sábados" (a LIST), or a single bare
+# "sextas" (plans/260810 desired behaviour explicitly names both forms).
+# `s?` optional so a singular canonical form still matches when scanning for
+# more than one weekday in the same phrase; `\b` on both ends (unlike
+# `_WEEKDAY_RE`) so this never fires on a word that merely CONTAINS a
+# weekday name as a prefix.
+_WEEKDAY_WORD_RE = re.compile(r"\b(" + _WEEKDAY_PATTERN + r")s?\b", re.IGNORECASE)
+
 # Full names plus the twelve 3-letter pt-BR abbreviations Brazilian flyers
 # actually use ("05/SET", "08/Ago") — plans/260807_date-resolution-
 # correctness.md defect 1. Mapping several keys onto the same month number is
@@ -171,6 +193,48 @@ def _next_weekday_on_or_after(anchor: date, weekday: int) -> date:
     of `anchor` itself when it already falls on that weekday."""
     delta = (weekday - anchor.weekday()) % 7
     return anchor + timedelta(days=delta)
+
+
+def _next_matching_weekday_on_or_after(anchor: date, weekdays: set) -> date:
+    """The generalisation of `_next_weekday_on_or_after` for a SET of target
+    weekdays (a range or a list) — the next date at/after `anchor` whose
+    weekday is any member of `weekdays`, inclusive of `anchor` itself. Never
+    called with an empty set (every caller only ever builds a non-empty
+    one), but falls back to `anchor` rather than looping forever if that
+    ever changed."""
+    for offset in range(7):
+        candidate = anchor + timedelta(days=offset)
+        if candidate.weekday() in weekdays:
+            return candidate
+    return anchor  # pragma: no cover - unreachable: weekdays always non-empty
+
+
+def _weekday_range(start: int, end: int) -> set:
+    """Every weekday from `start` to `end` inclusive, wrapping across the
+    week boundary when `end` < `start` (e.g. "de sexta a domingo" ->
+    {4, 5, 6})."""
+    if end >= start:
+        return set(range(start, end + 1))
+    return set(range(start, 7)) | set(range(0, end + 1))
+
+
+def _weekdays_from_recurrence_forms(text: str):
+    """Every weekday `text` names as a RANGE ("de segunda a sexta") or as a
+    bare/plural LIST with no "toda"/"todo" marker at all ("sextas e
+    sábados", or a single bare "sextas") — the forms plans/260810_post-
+    kind-and-post-extraction-attribution.md §D adds beyond the classic
+    toda/todo + single-weekday marker (which `_detect_recurrence` below
+    still handles on its own, unconditionally). None when nothing
+    recognisable is present."""
+    range_match = _WEEKDAY_RANGE_RE.search(text)
+    if range_match:
+        start = _WEEKDAYS[range_match.group(1).lower()]
+        end = _WEEKDAYS[range_match.group(2).lower()]
+        return _weekday_range(start, end)
+
+    matches = [m.group(1).lower() for m in _WEEKDAY_WORD_RE.finditer(text)]
+    weekdays = {_WEEKDAYS[w] for w in matches if w in _WEEKDAYS}
+    return weekdays or None
 
 
 # Sentinel distinguishing "this pattern did not fire at all" (try the next
@@ -292,18 +356,50 @@ def _resolve_explicit_date(date_text: str, anchor: date) -> tuple[Optional[date]
     return None, None
 
 
-def _detect_recurrence(date_text: Optional[str]) -> Optional[int]:
-    """The target weekday (0=Monday..6=Sunday) when `date_text` names a
-    recurring announcement ("toda quinta", "todo sábado"), else None."""
-    if not date_text:
-        return None
-    text = date_text.strip().lower()
-    if not _RECURRING_MARKER_RE.search(text):
-        return None
-    m = _WEEKDAY_RE.search(text)
-    if not m:
-        return None
-    return _WEEKDAYS[m.group(0).lower()]
+def _detect_recurrence(
+    date_text: Optional[str], *, is_recurring: Optional[bool] = None,
+    recurrence_text: Optional[str] = None,
+) -> Optional[set]:
+    """The set of target weekdays (0=Monday..6=Sunday) when the post is a
+    recurring announcement, else None. Two independent ways to reach a
+    positive answer, checked in order:
+
+      1. The classic toda/todo(s) + single-weekday marker in `date_text`
+         ALONE — UNCONDITIONAL on `is_recurring`. This branch predates that
+         parameter; every existing caller (and unit test) calls this with
+         `date_text` only, so it must keep working exactly as it always has
+         with `is_recurring`/`recurrence_text` never supplied at all. A
+         marker present with no weekday found beside it falls through to
+         (2) rather than giving up outright — the model may have written
+         the actual weekday phrase in `recurrence_text` instead.
+      2. plans/260810_post-kind-and-post-extraction-attribution.md §D: a
+         weekday RANGE ("de segunda a sexta"), a LIST ("sextas e
+         sábados"), or a bare plural weekday ("sextas"), found in EITHER
+         `recurrence_text` or `date_text` — but ONLY when the model itself
+         claimed `is_recurring=True`. These forms carry no "toda"/"todo"
+         marker of their own, so trusting them unconditionally would
+         re-open exactly the one-off-weekday-overriding-an-explicit-date
+         hole plans/260807_date-resolution-correctness.md closed on
+         purpose (a caption naming a weekday with no recurring cadence
+         stated must resolve through the ONE-OFF path below, never this
+         one) — the model's own claim is the gate that keeps this narrow.
+    """
+    if date_text:
+        text = date_text.strip().lower()
+        if _RECURRING_MARKER_RE.search(text):
+            m = _WEEKDAY_RE.search(text)
+            if m:
+                return {_WEEKDAYS[m.group(0).lower()]}
+
+    if is_recurring:
+        for text in (recurrence_text, date_text):
+            if not text:
+                continue
+            weekdays = _weekdays_from_recurrence_forms(text.strip().lower())
+            if weekdays:
+                return weekdays
+
+    return None
 
 
 @dataclass(frozen=True)
@@ -343,23 +439,44 @@ def _as_recife(post_timestamp: datetime) -> datetime:
 
 def resolve_event_datetime(
     *, date_text: Optional[str], time_text: Optional[str], post_timestamp: datetime,
+    is_recurring: Optional[bool] = None, recurrence_text: Optional[str] = None,
 ) -> ResolvedDate:
     """Resolve a flyer/caption's raw date+time text against the post's own
     timestamp. Never reads the wall clock — the run time is not an input.
+
+    `is_recurring`/`recurrence_text` are the MODEL's own answers (plans/
+    260810_post-kind-and-post-extraction-attribution.md §D) — optional,
+    keyword-only, defaulting to None so every pre-existing caller (which
+    only ever passed `date_text`) keeps working unchanged. See
+    `_detect_recurrence` for exactly how they extend recurrence detection
+    beyond the toda/todo marker without widening the one-off weekday path.
     """
     anchor_dt = _as_recife(post_timestamp)
     anchor_date = anchor_dt.date()
 
-    recurring_weekday = _detect_recurrence(date_text)
-    is_recurring = recurring_weekday is not None
-    recurrence_text = date_text.strip() if is_recurring else None
+    recurring_weekdays = _detect_recurrence(
+        date_text, is_recurring=is_recurring, recurrence_text=recurrence_text,
+    )
+    recurring = recurring_weekdays is not None
+    # The raw phrase to report back: prefer the model's own `recurrence_text`
+    # (more descriptive — e.g. "de segunda a sexta" rather than a bare
+    # "toda quinta" duplicated from date_text) when it was actually
+    # supplied and non-empty, else fall back to `date_text` itself — the
+    # exact value every pre-existing caller/test already expects when only
+    # `date_text` carries the marker.
+    result_recurrence_text: Optional[str] = None
+    if recurring:
+        if recurrence_text and recurrence_text.strip():
+            result_recurrence_text = recurrence_text.strip()
+        elif date_text:
+            result_recurrence_text = date_text.strip()
 
     review_reason: Optional[str] = None
-    if is_recurring:
+    if recurring:
         # The recurrence path never reaches _resolve_explicit_date, so it can
         # never trip the weekday-corroboration guard above — there is no
         # explicit date here to corroborate; the weekday IS the content.
-        resolved_date = _next_weekday_on_or_after(anchor_date, recurring_weekday)
+        resolved_date = _next_matching_weekday_on_or_after(anchor_date, recurring_weekdays)
     elif date_text and date_text.strip():
         resolved_date, review_reason = _resolve_explicit_date(date_text, anchor_date)
     else:
@@ -367,8 +484,8 @@ def resolve_event_datetime(
 
     if resolved_date is None:
         return ResolvedDate(
-            starts_at=None, ends_at=None, is_recurring=is_recurring,
-            recurrence_text=recurrence_text, needs_review=True,
+            starts_at=None, ends_at=None, is_recurring=recurring,
+            recurrence_text=result_recurrence_text, needs_review=True,
             review_reason=review_reason or REASON_MISSING_DATE, time_known=False,
         )
 
@@ -398,8 +515,8 @@ def resolve_event_datetime(
         )
 
     return ResolvedDate(
-        starts_at=starts_at, ends_at=ends_at, is_recurring=is_recurring,
-        recurrence_text=recurrence_text, needs_review=review_reason is not None,
+        starts_at=starts_at, ends_at=ends_at, is_recurring=recurring,
+        recurrence_text=result_recurrence_text, needs_review=review_reason is not None,
         review_reason=review_reason, time_known=time_known,
     )
 

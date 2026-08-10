@@ -160,6 +160,114 @@ class TestRecurrence:
         assert resolved.starts_at.date().isoformat() == "2026-07-16"
 
 
+# plans/260810_post-kind-and-post-extraction-attribution.md §D: recurrence
+# read from the MODEL's own is_recurring/recurrence_text, extended beyond
+# toda/todo to a weekday range, a list, and a bare plural — all gated on
+# is_recurring=True so the narrowed one-off weekday path
+# (260807_date-resolution-correctness.md) is never re-widened.
+class TestRecurrenceReadFromTheModel:
+    _MONDAY = _post_at(2026, 7, 13)  # 2026-07-13 IS a Monday
+
+    def test_weekday_range_recurs_from_the_anchor_itself(self):
+        # The post's own Monday anchor already falls inside "segunda a
+        # sexta" -> the next occurrence is TODAY, not a week out.
+        resolved = resolve_event_datetime(
+            date_text=None, time_text="22h", post_timestamp=self._MONDAY,
+            is_recurring=True, recurrence_text="de segunda a sexta",
+        )
+        assert resolved.is_recurring is True
+        assert resolved.needs_review is False
+        assert resolved.starts_at.date().isoformat() == "2026-07-13"
+        assert resolved.recurrence_text == "de segunda a sexta"
+
+    def test_weekday_range_from_a_weekend_anchor_rolls_to_monday(self):
+        saturday = _post_at(2026, 7, 18)
+        resolved = resolve_event_datetime(
+            date_text=None, time_text="22h", post_timestamp=saturday,
+            is_recurring=True, recurrence_text="de sexta a sábado",
+        )
+        # "de sexta a sábado" -> {Friday, Saturday}; anchor IS Saturday, so
+        # the next matching day is the anchor itself.
+        assert resolved.starts_at.date().isoformat() == "2026-07-18"
+        assert resolved.needs_review is False
+
+    def test_weekday_list_resolves_to_the_next_named_day(self):
+        resolved = resolve_event_datetime(
+            date_text=None, time_text="22h", post_timestamp=self._MONDAY,
+            is_recurring=True, recurrence_text="sextas e sábados",
+        )
+        assert resolved.is_recurring is True
+        assert resolved.needs_review is False
+        assert resolved.starts_at.date().isoformat() == "2026-07-17"  # next Friday
+
+    def test_todas_as_sextas_resolves_like_the_classic_marker_form(self):
+        resolved = resolve_event_datetime(
+            date_text=None, time_text="22h", post_timestamp=self._MONDAY,
+            is_recurring=True, recurrence_text="todas as sextas",
+        )
+        assert resolved.starts_at.date().isoformat() == "2026-07-17"
+        assert resolved.needs_review is False
+
+    def test_bare_plural_sextas_resolves_when_is_recurring_true(self):
+        resolved = resolve_event_datetime(
+            date_text=None, time_text="22h", post_timestamp=self._MONDAY,
+            is_recurring=True, recurrence_text="sextas",
+        )
+        assert resolved.starts_at.date().isoformat() == "2026-07-17"
+        assert resolved.needs_review is False
+
+    def test_unparseable_recurrence_phrase_keeps_todays_behaviour(self):
+        resolved = resolve_event_datetime(
+            date_text=None, time_text="22h", post_timestamp=self._MONDAY,
+            is_recurring=True, recurrence_text="semanalmente",
+        )
+        assert resolved.starts_at is None
+        assert resolved.needs_review is True
+        assert resolved.review_reason == REASON_MISSING_DATE
+
+    def test_prose_with_no_recurrence_is_not_detected(self):
+        resolved = resolve_event_datetime(
+            date_text=None, time_text="22h", post_timestamp=self._MONDAY,
+            is_recurring=True, recurrence_text="Ingressos abertos, venha conferir!",
+        )
+        assert resolved.is_recurring is False
+        assert resolved.starts_at is None
+        assert resolved.needs_review is True
+
+    def test_a_one_off_saturday_with_is_recurring_false_is_never_treated_as_recurring(self):
+        """The load-bearing guard: a bare weekday with is_recurring=False
+        must resolve through the OLD one-off path unchanged, never through
+        any new recurrence form — 260807_date-resolution-correctness.md
+        narrowed this on purpose and this must not re-open it."""
+        resolved = resolve_event_datetime(
+            date_text="sábado", time_text="22h", post_timestamp=self._MONDAY,
+            is_recurring=False, recurrence_text=None,
+        )
+        assert resolved.is_recurring is False
+        assert resolved.starts_at is not None
+        assert resolved.starts_at.date().weekday() == 5  # Saturday
+        assert resolved.needs_review is False
+
+    def test_new_forms_are_never_applied_when_is_recurring_is_not_supplied(self):
+        """Every pre-existing caller/test in this file calls with only
+        date_text (is_recurring defaulting to None) — a range/list phrase
+        sitting in date_text itself must NOT be picked up unless is_recurring
+        is explicitly True, or the byte-for-byte-unchanged guarantee for
+        legacy callers would be broken."""
+        resolved = resolve_event_datetime(
+            date_text="de segunda a sexta", time_text="22h", post_timestamp=self._MONDAY,
+        )
+        assert resolved.is_recurring is False
+
+    def test_a_recurring_event_with_a_resolvable_schedule_is_never_flagged_missing_date(self):
+        resolved = resolve_event_datetime(
+            date_text=None, time_text="22h", post_timestamp=self._MONDAY,
+            is_recurring=True, recurrence_text="de segunda a sexta",
+        )
+        assert resolved.review_reason is None
+        assert resolved.needs_review is False
+
+
 # ── never invent a date ──────────────────────────────────────────────────────
 class TestNeverInventADate:
     @pytest.mark.parametrize(

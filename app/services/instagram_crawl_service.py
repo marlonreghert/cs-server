@@ -72,13 +72,9 @@ from app.metrics import (
 from app.services import job_lock
 from app.services.archive_sources import SOURCE_INSTAGRAM_POSTS, _parse_post_timestamp
 from app.services.event_venue_resolution import (
-    DEFAULT_CONFIDENCE_FLOOR,
-    DEFAULT_MARGIN,
-    RESOLUTION_AUTO,
     build_handle_index,
     build_venue_catalog,
     candidate_venues_for_ids,
-    resolve_event_venue,
 )
 from app.services.instagram_handle_sources import normalize_handle
 from app.services.venue_photo_archive_service import new_run_id, run_prefix
@@ -707,137 +703,59 @@ class InstagramCrawlChainer:
         self, *, handle: str, venue_ids: list[str], new_posts: list[dict], now: datetime,
         classify_images: bool, venue_dao,
     ) -> _ChainReport:
-        """§C: resolve EACH post's venue from its own caption before
-        archiving — there is no model-extracted `location_text` yet at
-        archive time, and the archive DESTINATION itself depends on the
-        answer, so resolution has to run before extraction, not after it.
-        Reuses the SAME resolver the promoter path already uses
-        (`app.services.event_venue_resolution.resolve_event_venue`), bounded
-        to THIS handle's own venues as the candidate set — never a second
-        matcher.
+        """plans/260810_post-kind-and-post-extraction-attribution.md §C:
+        attribution now runs AFTER extraction, using the model's own
+        `location_text` — falling back to the post's own caption when the
+        model reported none — rather than guessing from the raw caption
+        BEFORE the model has read the post. `260810_stream-dedupe-and-
+        venue-attribution.md`'s own executing agent measured the old
+        approach's weakness: a caption must closely echo a venue's own name
+        to clear the confidence floor, so a post that merely mentions a
+        branch in passing queued as unresolved even though the model, one
+        step later, reads the location plainly.
 
-          - RESOLUTION_AUTO: archived under that ONE venue, via the SAME
-            `_archive_venue_posts`/`put_manifest` this class already uses
-            for a single-venue handle, just scoped to that venue's own
-            resolved posts instead of every post. Each venue's manifest now
-            holds only the posts genuinely resolved to it, so the UNCHANGED
-            `EventExtractionService.run(venue_ids=...)` call below naturally
-            produces one correctly-attributed event per post — no code
-            change to `EventExtractionService` itself, and no more
-            last-venue-processed-wins overwrite (see `chain_venue`'s own
-            comment for what that produced against real Postgres).
-          - queued or unresolved: archived under the HANDLE instead of any
-            venue, reusing the promoter path's OWN per-post archiving and
-            persistence (`PromoterCrawlService._archive_post_images` /
-            `_process_post`, bounded to the SAME candidate list) rather than
-            a second review-queue write path. This is the "attribute to no
-            venue and queue it" posture the plan requires: never fall back
-            to "first venue" or "all venues" — a wrong venue is invisible
-            and propagates into the app; an unresolved one is visibly
-            waiting for a human, exactly like an unresolved promoter event
-            already is.
+        Every post is archived under the HANDLE — never per-venue, resolved
+        or not, and never moved afterward: the promoter path already stores
+        under a handle prefix and the console already renders those covers
+        correctly, so a handle-prefixed key is a supported shape, not a
+        compromise (moving objects would cost a copy per image and
+        invalidate `cover_photo_key`s already handed out).
+
+        Reuses `PromoterCrawlService`'s own per-post pipeline
+        (`_archive_post_images`/`_process_post`) wholesale — the SAME
+        machinery `chain_promoter` already calls for a real promoter
+        account — bounded to THIS handle's own venues as the candidate set
+        (`candidate_venues_for_ids`, the resolver
+        `260810_stream-dedupe-and-venue-attribution.md` §C introduced;
+        never a second matcher), with `location_text_fallback_to_caption=
+        True` so a post whose `location_text` the model left null still
+        resolves off its own caption. `EVENT_VENUE_LINK_TOTAL` (emitted by
+        `_process_post` itself, per post) is now the sole attribution-
+        outcome metric for this path — recording the same decision a step
+        earlier, in a second counter, would be exactly the kind of drift
+        this repo has already been bitten by (CLAUDE.md).
+
+        `len(venue_ids) == 1` — the common case — never reaches this method
+        at all (see `chain_venue`): that path stays byte-for-byte identical.
         """
         report = _ChainReport()
-        candidates = candidate_venues_for_ids(venue_dao, venue_ids)
-        handle_index = build_handle_index(venue_dao)
-
-        posts_by_venue: dict[str, list[dict]] = {}
-        unresolved_posts: list[dict] = []
-        for post in new_posts:
-            resolution = resolve_event_venue(
-                caption=post.get("caption"), location_text=post.get("caption"),
-                location_tag=post.get("location_tag"), promoter_handle=handle,
-                venues=candidates, handle_index=handle_index,
-                confidence_floor=DEFAULT_CONFIDENCE_FLOOR, margin=DEFAULT_MARGIN,
-            )
-            if resolution.resolution == RESOLUTION_AUTO:
-                posts_by_venue.setdefault(resolution.venue_id, []).append(post)
-                CRAWL_VENUE_ATTRIBUTION_TOTAL.labels(outcome="resolved").inc()
-            else:
-                # RESOLUTION_QUEUED or RESOLUTION_UNRESOLVED — this metric
-                # does not distinguish the two (§Error Handling names one
-                # outcome, "ambiguous", for both): either way nothing is
-                # guessed, and the plan's own watch item is the same for
-                # both ("a shared handle whose posts never resolve means the
-                # signals §C matches on are not present in that account's
-                # captions").
-                unresolved_posts.append(post)
-                CRAWL_VENUE_ATTRIBUTION_TOTAL.labels(outcome="ambiguous").inc()
-
-        if self.media_store is not None and self.downloader is not None and posts_by_venue:
-            prefix = run_prefix(self.archive_source, now, new_run_id(now))
-            classification_outcome = CLASSIFICATION_OUTCOME_SKIPPED_NO_PHOTOS
-            for venue_id, posts in posts_by_venue.items():
-                manifest_entries, outcome = await self._archive_venue_posts(
-                    prefix, venue_id, handle, posts, classify=classify_images,
-                )
-                classification_outcome = outcome
-                if manifest_entries:
-                    try:
-                        await self.media_store.put_manifest(
-                            prefix=prefix, venue_id=venue_id, manifest={"photos": manifest_entries},
-                        )
-                        report.archived += len(manifest_entries)
-                    except Exception as e:
-                        logger.error(
-                            f"[InstagramCrawl] manifest write failed for venue {venue_id}: {e}"
-                        )
-            report.classification_outcome = classification_outcome
-            CRAWL_CHAIN_CLASSIFICATION_TOTAL.labels(outcome=classification_outcome).inc()
-
-        if unresolved_posts:
-            await self._archive_and_queue_unresolved(
-                handle=handle, unresolved_posts=unresolved_posts, candidates=candidates,
-                handle_index=handle_index, now=now, report=report,
-            )
-
-        if self.event_extraction_service is not None and posts_by_venue:
-            try:
-                await self.event_extraction_service.run({
-                    "eligibility": {
-                        "mode": "venue_ids", "venue_ids": ",".join(posts_by_venue.keys()),
-                    }
-                })
-                report.extracted = True
-            except Exception as e:
-                logger.error(f"[InstagramCrawl] event extraction failed for {handle}: {e}")
-
-        return report
-
-    async def _archive_and_queue_unresolved(
-        self, *, handle: str, unresolved_posts: list[dict], candidates: list,
-        handle_index: dict, now: datetime, report: _ChainReport,
-    ) -> None:
-        """Archives every post whose venue could not be resolved under the
-        HANDLE (never duplicated across candidates — "the bytes exist for a
-        human to look at without inventing an attribution the pipeline could
-        not make"), then persists each through the SAME per-post pipeline
-        `chain_promoter` already calls (`PromoterCrawlService.
-        _archive_post_images` / `_process_post`) — extraction, the ladder
-        re-run against the SAME bounded candidate list (deterministic, so it
-        reaches the same queued/unresolved verdict), and a `pending_review`
-        row with `venue_id=None` that the existing review queue already
-        surfaces. Degrades to "not archived, not extracted" (logged, never
-        raised) when no promoter crawl service is wired — the same
-        dependency-aware posture every other optional collaborator on this
-        class already takes; a crawl never fails because chaining could not
-        run.
-        """
         svc = self.promoter_crawl_service
         if svc is None:
             logger.warning(
-                f"[InstagramCrawl] {handle}: {len(unresolved_posts)} post(s) could "
-                "not be attributed to one of this handle's venues, but no "
-                "promoter crawl service is wired to archive/queue them -- "
-                "skipped rather than guessed"
+                f"[InstagramCrawl] {handle}: shared across {len(venue_ids)} venues "
+                "but no promoter crawl service is wired -- refusing to guess an "
+                "attribution; nothing archived or extracted for this run"
             )
-            return
+            return report
+
+        candidates = candidate_venues_for_ids(venue_dao, venue_ids)
+        handle_index = build_handle_index(venue_dao)
         prefix = (
             run_prefix(svc.archive_source, now, new_run_id(now))
             if svc.media_store is not None else None
         )
         manifest_entries: list[dict] = []
-        for post in unresolved_posts:
+        for post in new_posts:
             archived_images: list[dict] = []
             if prefix is not None:
                 archived_images = await svc._archive_post_images(prefix, handle, post)
@@ -846,6 +764,7 @@ class InstagramCrawlChainer:
             persisted = await svc._process_post(
                 handle=handle, post=post, venues=candidates, handle_index=handle_index,
                 now=now, archived_images=archived_images,
+                location_text_fallback_to_caption=True,
             )
             if persisted:
                 report.extracted = True
@@ -857,8 +776,9 @@ class InstagramCrawlChainer:
                 )
             except Exception as e:
                 logger.error(
-                    f"[InstagramCrawl] unresolved-post manifest write failed for {handle}: {e}"
+                    f"[InstagramCrawl] shared-handle manifest write failed for {handle}: {e}"
                 )
+        return report
 
     async def chain_promoter(
         self, *, handle: str, new_posts: list[dict], now: datetime,

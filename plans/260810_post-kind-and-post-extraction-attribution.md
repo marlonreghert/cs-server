@@ -10,12 +10,39 @@ keep the non-events out of the event flow. And move venue attribution to *after*
 extraction, so it can use the model's own reading of where the event is instead
 of guessing from a raw caption.
 
+## Re-scoped mid-execution (post-approval correction)
+**§B originally modeled `kind` as a discriminator column on `events.event`**
+(persist every kind, exclude non-events from `list_events_awaiting_decision`
+via a predicate). The operator corrected this during execution: *"event,
+promotion and menus are expected to be different entities. And they both
+comes from posts. Promotions can be related to events, but its not
+mandatory. Can also be related to venue directly."* Events, promotions and
+menus are separate entities with their own relationships — a promotion may
+point at an event, at a venue directly, or at neither yet. One table with a
+flag is the wrong shape for that, and building the promotion/menu entities
+themselves is explicitly a separate, later effort the operator is planning
+with more information than this plan has.
+
+§B below reflects the corrected scope: **a post classified as anything other
+than `event` produces no `events.event` row at all** — counted on the
+`event_extraction_posts_total` metric's `kind` label and logged at a level
+an operator can grep, then dropped. **No migration, no `events.event.kind`
+column, no queue predicate change.** §A, §C and §D are unaffected by this
+correction — see each section below.
+
+Re-extraction reads archived posts back out of S3, never re-calls Apify, so
+nothing is unrecoverable: once the promotion/menu entities exist, the posts
+this plan drops today can be re-extracted into them without re-crawling or
+re-paying for the crawl.
+
 ## Non-goals
 - **Changing the caption pre-filter.** `event_caption_matcher` stays as it is —
   see §A for why tightening it is the wrong lever.
 - **Serving any of this to the app.** Admin-only, as with every event field.
-- **A menu or promotions product.** This separates and records them; it builds
-  nothing on top.
+- **A menu or promotions product.** This tells a non-event apart from an event
+  and stops it from becoming one; it builds no promotion/menu entity, no
+  relationship to an event or a venue, and no operator workflow for either —
+  all of that is separate, deliberately, and not decided here.
 - **Re-extracting history.** No back-fill; see §Data.
 - **Changing the crawl, the cursors, the caps or the streams.** All settled in
   `260810_stream-dedupe-and-venue-attribution.md`.
@@ -134,21 +161,40 @@ a human already looks; an unknown value must fail toward being seen, never
 toward being filtered out of sight.
 
 ### B. Only an event enters the event flow
-Persist `kind` on `events.event` for every extracted post, including non-events.
+**Re-scoped mid-execution — see above.** A post whose classified `kind` is
+`promotion`, `menu`, `food`, or `other` produces **no `events.event` row**.
+Nothing is persisted for it in this table: no discriminator column, no
+placeholder row, no queue-predicate exclusion to write, because there is no
+row to exclude. `events.event` stays exactly what it already is — events
+only.
 
-**Persist rather than discard.** Discarding is cheaper and wrong: the operator
-asked to *separate* these, which implies seeing them, and a misclassification
-that is thrown away is one nobody can find or correct. The row also records what
-the pipeline decided, which is the only way to judge whether the classifier is
-any good.
+**Counted and logged, not silently dropped.** `event_extraction_posts_total`
+carries the outcome (a new `not_an_event` value, distinct from
+`not_event_like` — that one means the post never reached the model at all;
+this one means the model looked and said "not an event") and the `kind`
+label (§Error Handling). A line logged at a level an operator can grep
+records the handle, shortcode, kind and title, so a specific post's
+classification is traceable without a database row to point at.
 
-Non-`event` rows are excluded from `list_events_awaiting_decision`, and their
-status is set so they never read as awaiting a person. `kind` joins the
-operator-editable fields, so correcting one to `event` puts it back in the flow
-through machinery that already exists (`operator_edited_fields`).
+**An unrecognised or missing `kind` is treated as `event` — this still
+matters, more than before.** Before, a wrongly-excluded event was still a
+row sitting quietly out of the queue, findable by a query. Now, a
+wrongly-classified non-event produces *nothing at all* — no row, anywhere,
+for anyone to find. The fail-toward-visible rule is what stands between a
+model glitch and a genuinely lost event: only a value the model actually
+said, that literally matches `promotion`/`menu`/`food`/`other`, drops the
+row. Anything else — `event`, `null`, a typo, a value this pipeline has
+never seen — proceeds through the ordinary event flow and reaches the queue
+exactly as it always has.
 
-**The queue predicate is the only filter.** Do not also filter in the console —
-that is how the review queue and the Events tab drifted apart before.
+**No operator correction path today.** Because no row is created for a
+non-event, there is nothing for `EventPatch`/`operator_edited_fields` to
+act on — an operator cannot promote a misclassified post back into an event
+through the admin API the way this plan originally intended. Recovery is
+re-extraction, once the promotion/menu entities exist to re-extract into
+(see the re-scope note above): the archived post is still in S3, and
+re-extraction never re-calls Apify. This is a real, accepted gap in this
+phase, not an oversight — flagged explicitly rather than worked around.
 
 ### C. Attribution moves after extraction
 Archive under the handle. Once extraction has produced `location_text`, resolve
@@ -188,42 +234,69 @@ explicit date. This adds a *recurrence* reading of weekday text, gated on the
 model having said `is_recurring`; it must not re-open the one-off path.
 
 ## Data, Config, And API Impact
-- **Migration `0034_event_kind`** from head `0033_crawl_target_reels_overlap`:
-  add `kind text` to `events.event`, nullable, no default.
-- **No back-fill.** Existing rows predate the question; NULL is historically
-  accurate. NULL is read as `event`, per §A's fail-toward-visible rule, so no
-  existing row silently vanishes from the queue.
+- **No migration.** `events.event` gains no column — re-scoped mid-execution,
+  see above. `kind` still rides inside each event's `raw_extraction` JSONB
+  blob (the model's parsed answer, copied verbatim, exactly like every other
+  extracted field) for a genuine `event`-kind row, purely as an audit trail —
+  never a queryable column, never relied on by any predicate.
+- **No back-fill, nothing to back-fill.** No column exists to backfill.
 - **The risotto row stays an event** until an operator rejects it or its post is
   re-extracted — and it will not be, since its stream's cursor has moved past it.
   Worth stating so it is not mistaken for the fix failing.
-- **API:** `EventOut` gains `kind`; `EventPatch` gains `kind`. Additive.
-- **Queue:** `list_events_awaiting_decision` gains a kind predicate.
+- **API:** `EventOut`/`EventPatch` unchanged — no `kind` field, since no
+  events.event column exists to expose or correct.
+- **Queue:** `list_events_awaiting_decision` unchanged. A non-event post
+  never produces a row for it to have a predicate over.
 - **Serving:** none.
-- **Rollback:** revert and drop the column. Non-events return to the queue,
-  which is noisy but not lossy.
+- **Rollback:** revert. No column to drop; a non-event post that was being
+  dropped starts producing an event row again, which is noisy (the risotto
+  problem returns) but not lossy — nothing this feature added was ever the
+  only copy of anything.
 
 ## Error Handling And Observability
-Metrics: `event_extraction_posts_total` gains a `kind` label, so the split
-between events and everything else is visible from the first run.
+Metrics: `event_extraction_posts_total` gains a `kind` label and a new
+`not_an_event` outcome value (distinct from `not_event_like`, which means
+the post never reached the model at all), so the split between events and
+everything else — and how many posts a `kind` decision actually dropped — is
+visible from the first run. A dropped post's handle/shortcode/kind/title is
+also logged at a level an operator can grep, so a specific decision is
+traceable without a database row to point at.
 
 **Watch the `event` share.** If nearly everything still classifies as `event`,
 the prompt's precedence is not landing; if almost nothing does, the classifier is
-eating real events — and that failure is silent, because a misclassified event
-never reaches the queue where someone would notice.
+eating real events — and that failure is now silent in a stronger sense than
+before the re-scope: a misclassified event produces no row anywhere, not
+merely one excluded from the queue.
 
 ## Test Plan
 Feature file: `tests/bdd/enrichment/post-kind-and-post-extraction-attribution.feature`
 
-Scenarios:
-- Classify a daily lunch special as a menu item, not an event.
-- Classify a happy-hour offer as a promotion.
+Scenarios (rewritten post-approval to match the §B re-scope — see the note
+at the top of this plan; two scenarios whose premise depended on a persisted
+`kind` column no longer make sense as originally written and are replaced,
+one is dropped as genuinely unconstructible, both explained below):
+- Classify a daily lunch special as a menu item, not an event — no event is
+  recorded for it.
+- Classify a happy-hour offer as a promotion — no event is recorded for it.
 - Classify a DJ night as an event.
-- Classify a plain food photo as food.
+- Classify a plain food photo as food — no event is recorded for it.
 - Classify an event advertised alongside a drinks offer as an event.
-- Keep a non-event out of the review queue.
-- Show a non-event in the events list with its kind.
-- Treat a missing or unrecognised kind as an event.
-- Let an operator correct a menu item to an event and see it queue.
+- A non-event never reaches the review queue (replaces "Keep a non-event out
+  of the review queue" — same intent, now trivially true once no row exists,
+  kept as an explicit regression guard rather than dropped).
+- A non-event never appears in the events list either (replaces "Show a
+  non-event in the events list with its kind" — the original scenario's
+  premise, that a non-event is visible in `/admin/events` with a `kind`
+  field, is now the OPPOSITE of the real behaviour; rewritten to assert the
+  row's absence from the general listing too, not just the queue).
+- Treat a missing kind as an event.
+- Treat an unrecognised kind as an event.
+- ~~Let an operator correct a menu item to an event and see it queue~~ —
+  **dropped, genuinely unconstructible under the re-scoped design.** No
+  `events.event` row exists for a non-event post, so there is nothing for
+  `EventPatch` to act on and no way for an operator to "correct" it into an
+  event through the admin API today. See §B's "No operator correction path
+  today" for the accepted gap and the re-extraction recovery route.
 - Attribute a venue from the model's location text after extraction.
 - Fall back to the caption when the model reported no location text.
 - Attribute directly when the handle maps to one venue.
@@ -237,8 +310,10 @@ Pytest unit tests:
 - The precedence rule across captions that satisfy two kinds at once.
 - Both prompts contain `kind` and its precedence — asserted directly, since
   extending only the multi-event prompt is the likely half-fix.
-- NULL and unknown `kind` both read as `event`.
-- The queue predicate excludes each non-event kind and includes NULL.
+- A missing or unrecognised `kind` produces a normal event row (fail-toward-
+  visible); each of the four recognised non-event kinds produces none.
+- A non-event outcome is counted (`event_extraction_posts_total{outcome=
+  "not_an_event"}`) and logged.
 - Attribution: model location text present, absent, single-venue handle, and a
   case just below the confidence floor.
 - The single-venue path is unchanged — asserted against pre-change behaviour.
@@ -246,25 +321,24 @@ Pytest unit tests:
   `de sexta a sábado`, `sextas e sábados`, `todas as sextas`, prose with no
   recurrence, and a one-off `sábado` with `is_recurring` false.
 - A recurring event with a resolvable schedule is not flagged `missing_date`.
-- The migration adds the column nullable and its downgrade drops exactly it.
 
 Manual or integration checks:
 - Crawl `@entreamigosobode` and confirm its jazz and samba nights classify as
   events with resolved recurrences, while food posts classify as food or menu
-  and stay out of the queue.
+  and produce no event row.
 
 ## Acceptance Criteria
-- Every extracted post carries a kind, and the precedence rule is in both
+- Every extracted post is classified, and the precedence rule is in both
   prompts.
-- Non-events are persisted, excluded from the queue, and correctable.
+- A non-event post produces no `events.event` row; the outcome and kind are
+  counted and logged.
 - A missing or unknown kind is treated as an event.
 - Venue attribution uses the model's location text, after extraction.
 - A single-venue handle behaves exactly as before.
 - A weekday-range or weekday-list recurrence resolves and is not flagged
   dateless.
 - The narrowed one-off weekday path is not re-widened.
-- `make test-feature`, `make test-unit`, `make test-bdd` pass, and CI's
-  scratch-Postgres migrate step is green.
+- `make test-feature`, `make test-unit`, `make test-bdd` pass.
 
 ## Open Questions
 None.

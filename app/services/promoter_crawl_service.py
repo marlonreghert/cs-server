@@ -50,6 +50,7 @@ from app.metrics import (
     EVENT_VENUE_LINK_TOTAL,
     PROMOTER_CRAWL_POSTS_TOTAL,
 )
+from app.models.event_kind import NON_EVENT_KINDS
 from app.services.archive_sources import SOURCE_INSTAGRAM_POSTS
 from app.services.event_caption_matcher import matches_event_marker
 from app.services.event_date_resolver import resolve_event_datetime
@@ -359,6 +360,7 @@ class PromoterCrawlService:
     async def _process_post(
         self, *, handle: str, post: dict, venues: list, handle_index: dict, now: datetime,
         archived_images: list[dict] = (),
+        location_text_fallback_to_caption: bool = False,
     ) -> int:
         """Returns the number of events persisted (0 on any early exit) —
         the caller sums this into `events_extracted`, which is now an
@@ -373,6 +375,19 @@ class PromoterCrawlService:
         than a perishable permalink alone, and honest about what it is. A
         post that stored no image (or whose only image failed to archive)
         leaves every one of its events with `cover_photo_key = None`.
+
+        `location_text_fallback_to_caption` — plans/260810_post-kind-and-
+        post-extraction-attribution.md §C: default False, so a REAL
+        promoter account's own resolution (run against its full servable
+        catalog, `venues=build_venue_catalog(...)`) is byte-for-byte
+        unchanged — a caption is much longer and noisier free text than a
+        promoter's own `location_text`, and name-matching it against the
+        WHOLE catalog risks a false match the bounded, few-candidate
+        shared-handle case does not. `InstagramCrawlChainer._chain_shared_
+        handle` passes True: there, `venues` is already bounded to one
+        handle's own two or three venues (`candidate_venues_for_ids`), so
+        a caption naming a branch in passing is exactly the signal §C asks
+        this path to use when the model itself reported no location_text.
         """
         cover_photo_key = archived_images[0]["key"] if archived_images else None
         shortcode = post.get("shortcode")
@@ -445,11 +460,28 @@ class PromoterCrawlService:
 
         prepared_events: list[dict] = []
         for parsed in events_data:
+            # plans/260810_post-kind-and-post-extraction-attribution.md §B,
+            # re-scoped mid-execution: events, promotions and menus are
+            # separate entities — this feature builds no promotion/menu
+            # entity, so a post classified as anything other than `event`
+            # produces NO events.event row. A missing/unrecognised kind is
+            # never in NON_EVENT_KINDS (the fail-toward-visible rule), so it
+            # falls through to the normal event flow below.
+            kind = parsed.get("kind")
+            if kind in NON_EVENT_KINDS:
+                logger.info(
+                    f"[PromoterCrawl] non-event post skipped for "
+                    f"{handle}/{shortcode}: kind={kind!r} "
+                    f"title={parsed.get('title')!r} -- no event row created"
+                )
+                continue
+
             # Each event resolves its OWN date, independently, against the
             # post's timestamp — never a sibling's.
             resolved_date = resolve_event_datetime(
                 date_text=parsed["date_text"], time_text=parsed["time_text"],
                 post_timestamp=post_ts,
+                is_recurring=parsed["is_recurring"], recurrence_text=parsed["recurrence_text"],
             )
             review_reason = None
             if resolved_date.needs_review:
@@ -494,8 +526,15 @@ class PromoterCrawlService:
         # `on_persisted` rather than called here directly. The reconciler
         # calls it after insert_event/update_event.
         def _attribute(fields: dict, event_id: str) -> tuple[dict, Optional[Callable[[], None]]]:
+            # plans/260810_post-kind-and-post-extraction-attribution.md §C:
+            # fall back to the post's own caption ONLY when the model
+            # reported no location_text AND the caller opted in (see this
+            # method's own docstring for why that is never the default).
+            location_text = fields["location_text"]
+            if not location_text and location_text_fallback_to_caption:
+                location_text = caption
             resolution = resolve_event_venue(
-                caption=caption, location_text=fields["location_text"],
+                caption=caption, location_text=location_text,
                 location_tag=post.get("location_tag"), promoter_handle=handle,
                 venues=venues, handle_index=handle_index,
                 confidence_floor=self.confidence_floor, margin=self.margin,
