@@ -22,16 +22,23 @@ KIND_OTHER = "other"
 # menu, food, other.
 EVENT_KINDS = (KIND_EVENT, KIND_PROMOTION, KIND_MENU, KIND_FOOD, KIND_OTHER)
 
-# Every kind that is NOT an event — the set the review queue predicate
-# excludes (app.dao.rds_venue_store.RdsVenueStore.list_events_awaiting_
-# decision / tests.rds_fake.InMemoryRdsVenueStore's mirror). A missing or
-# unrecognised kind is deliberately NOT a member of this tuple: the plan's
-# fail-toward-visible rule requires an unknown value to read as `event`, so
-# the queue predicate must exclude only a RECOGNISED non-event kind, never
-# "anything that is not literally the string 'event'". A misclassified
-# event is silent (it never reaches a human) in a way no other failure in
-# this pipeline is — the asymmetry is why this tuple, not its complement,
-# is what the predicate checks against.
+# Every kind that is NOT an event — the set whose posts produce NO
+# events.event row at all (app.services.event_extraction_service, which
+# counts and logs them instead). There is deliberately no queue predicate
+# and no persisted `kind` column: events, promotions and menus are separate
+# entities, so a non-event is dropped from the event flow rather than
+# stored as an event wearing a flag. See the plan's "Re-scoped
+# mid-execution" section.
+#
+# A missing or unrecognised kind is deliberately NOT a member of this
+# tuple: the fail-toward-visible rule requires an unknown value to read as
+# `event`, so the drop test must match only a RECOGNISED non-event kind,
+# never "anything that is not literally the string 'event'". A
+# misclassified event is silent — it never reaches a human — in a way no
+# other failure in this pipeline is, and now that a non-event leaves no row
+# behind, an over-eager drop is recoverable only by re-extracting the
+# archived post. That asymmetry is why this tuple, not its complement, is
+# what the drop checks against.
 NON_EVENT_KINDS = (KIND_PROMOTION, KIND_MENU, KIND_FOOD, KIND_OTHER)
 
 
