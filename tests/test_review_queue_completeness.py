@@ -1,13 +1,23 @@
-"""Unit tests for plans/260807_review-queue-completeness-and-venue-names.md.
+"""Unit tests for plans/260807_review-queue-completeness-and-venue-names.md
+and plans/260810_date-correctness-review-reasons-and-path-parity.md §D.
 
 Two defects, two things to prove:
 
 1. `VenueRepository.list_events_awaiting_decision` (renamed from
    `list_events_pending_location`) must return the union of
-   `status='pending_review'` and `source_kind='promoter_post' AND
-   location_resolution IS NULL AND status NOT IN ('rejected', 'superseded')`
-   — proven here across the full (source_kind, status, location_resolution)
-   matrix so a future narrowing (like the one this plan fixes) fails loudly.
+   `status='pending_review'` and `venue_id IS NULL AND status NOT IN
+   ('rejected', 'superseded')` — proven here across the full (source_kind,
+   status, location_resolution) matrix so a future narrowing fails loudly.
+   The second clause was originally gated on `source_kind='promoter_post'`;
+   plans/260810_date-correctness-review-reasons-and-path-parity.md §D
+   widened it to `venue_id IS NULL` (dropping the source_kind gate AND
+   switching the underlying signal from `location_resolution` to
+   `venue_id`) once a shared-handle crawl's mislabelling of a venue's own
+   post as `promoter_post` turned out to be the ONLY reason those posts'
+   unresolved-venue events reached the queue at all — see that plan's §D and
+   its trap warning for the full story. Several rows below flip their
+   expectation as a DIRECT, intended consequence of that widening; each says
+   so.
 
 2. `_EVENT_SELECT`'s venue-name join must be LEFT, not INNER — proven both
    textually (the SQL RdsVenueStore actually sends) and behaviourally (the
@@ -36,6 +46,17 @@ def _dao() -> VenueRepository:
 
 def _event(event_id: str, *, source_kind: str, status: str, location_resolution=None,
            venue_id=None) -> dict:
+    # plans/260810_date-correctness-review-reasons-and-path-parity.md §D:
+    # the widened queue predicate keys on `venue_id`, not
+    # `location_resolution` — a real "auto"/"manual" resolution ALWAYS
+    # carries a linked venue_id (that is what those resolutions mean), so a
+    # caller that varies only `location_resolution` and leaves `venue_id`
+    # unset would otherwise build an impossible row (a settled venue
+    # question with no venue on it) that the real pipeline can never
+    # produce. Defaulted here, once, rather than at each of the matrix's
+    # "auto"/"manual" rows below.
+    if venue_id is None and location_resolution in ("auto", "manual"):
+        venue_id = "ven_resolved"
     return {
         "event_id": event_id, "venue_id": venue_id, "source_kind": source_kind,
         "source_handle": "h", "source_shortcode": event_id, "status": status,
@@ -49,9 +70,20 @@ def _event(event_id: str, *, source_kind: str, status: str, location_resolution=
 # the predicate has to argue with a specific case, not just a diff.
 MATRIX = [
     # venue-post events never touch location_resolution (constant
-    # attribution) — only `status` can ever put one in the queue.
+    # attribution), and ALMOST always carry a venue_id — the one exception
+    # is exactly the bug plans/260810_date-correctness-review-reasons-and-
+    # path-parity.md §D fixes: a shared-handle post that could not be
+    # attributed to either of its handle's venues. venue_id=None here models
+    # THAT case, not a hypothetical.
     ("venue_post", "pending_review", None, True, "pending_review is the whole queue's main clause"),
-    ("venue_post", "confirmed", None, False, "confirmed and no promoter-link clause applies"),
+    # Flipped by §D's widening (was False under the old source_kind-gated
+    # clause 2, which a venue_post could never match regardless of
+    # venue_id): a confirmed event with NO venue is exactly "confirmed data,
+    # venue still undecided" — the same situation clause 2 exists for on the
+    # promoter side, below — and must queue regardless of source_kind, or a
+    # shared-handle venue post loses this protection the moment its
+    # provenance label is fixed. This IS the trap §D's own plan text names.
+    ("venue_post", "confirmed", None, True, "confirmed data, venue still undecided -- now true for ANY source_kind (260810 §D)"),
     ("venue_post", "rejected", None, False, "operator finished with it"),
     ("venue_post", "superseded", None, False, "reconciliation finished with it"),
     # promoter-post events: status='pending_review' alone is already
@@ -64,9 +96,19 @@ MATRIX = [
     ("promoter_post", "pending_review", "unresolved", True, "no venue found, but still unconfirmed"),
     # The second clause's reason to exist: confirmed data, unresolved venue.
     ("promoter_post", "confirmed", None, True, "confirmed data, venue still undecided (clause 2, non-redundant)"),
-    ("promoter_post", "confirmed", "auto", False, "confirmed AND the venue is settled"),
-    ("promoter_post", "confirmed", "manual", False, "confirmed AND the venue is settled"),
-    ("promoter_post", "confirmed", "unresolved", False, "confirmed AND the venue question is settled (no match)"),
+    ("promoter_post", "confirmed", "auto", False, "confirmed AND the venue is settled (venue_id is set)"),
+    ("promoter_post", "confirmed", "manual", False, "confirmed AND the venue is settled (venue_id is set)"),
+    # Flipped by §D's widening. Under the OLD `location_resolution IS NULL`
+    # clause this read False ("the venue question is settled -- no match"),
+    # but `resolve_event_venue`'s RESOLUTION_UNRESOLVED writes the LITERAL
+    # STRING 'unresolved' to location_resolution (never NULL) and leaves
+    # venue_id NULL — so this row was never actually reachable via clause 2
+    # even before the widening; a confirmed-but-unresolved promoter event
+    # silently fell out of the queue entirely, a real pre-existing gap this
+    # plan's venue_id-based rewrite closes as a natural consequence, not a
+    # scope-creep fix: "an unresolved venue" is exactly the condition §D
+    # asks the predicate to queue, independent of HOW it became unresolved.
+    ("promoter_post", "confirmed", "unresolved", True, "confirmed data, no venue was ever found -- now caught by venue_id IS NULL (260810 §D)"),
     # The clause-2 guard: rejected/superseded must not resurrect via the
     # "location still NULL" branch just because nobody ever linked it.
     ("promoter_post", "rejected", None, False, "operator rejected it even though it was never linked"),

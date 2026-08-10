@@ -46,6 +46,7 @@ from app.api.openai_event_extraction_client import (
 from app.metrics import (
     EVENT_EXTRACTION_MALFORMED_ATTRACTIONS_TOTAL,
     EVENT_EXTRACTION_MALFORMED_EVENTS_TOTAL,
+    EVENT_EXTRACTION_POSTS_TOTAL,
     EVENT_REVIEW_QUEUE_DEPTH,
     EVENT_VENUE_LINK_TOTAL,
     PROMOTER_CRAWL_POSTS_TOTAL,
@@ -53,7 +54,18 @@ from app.metrics import (
 from app.models.event_kind import NON_EVENT_KINDS
 from app.services.archive_sources import SOURCE_INSTAGRAM_POSTS
 from app.services.event_caption_matcher import matches_event_marker
-from app.services.event_date_resolver import resolve_event_datetime
+from app.services.event_date_resolver import (
+    REASON_DATE_RANGE,
+    REASON_YEAR_INFERRED,
+    resolve_event_datetime,
+    vote_on_sibling_years,
+)
+from app.services.event_extraction_service import (
+    KIND_LABEL_MIXED,
+    KIND_LABEL_NOT_APPLICABLE,
+    KIND_LABEL_UNKNOWN,
+    OUTCOME_NOT_AN_EVENT as EES_OUTCOME_NOT_AN_EVENT,
+)
 from app.services.event_merge import merge_touched_events
 from app.services.event_reconciliation import (
     STATUS_CONFIRMED,
@@ -361,10 +373,41 @@ class PromoterCrawlService:
         self, *, handle: str, post: dict, venues: list, handle_index: dict, now: datetime,
         archived_images: list[dict] = (),
         location_text_fallback_to_caption: bool = False,
+        source_kind: str = SOURCE_KIND_PROMOTER_POST,
+        attribution_outcomes: Optional[list] = None,
+        report_kind_metric: bool = False,
     ) -> int:
         """Returns the number of events persisted (0 on any early exit) —
         the caller sums this into `events_extracted`, which is now an
         accurate per-event tally rather than a per-post flag.
+
+        `source_kind` — plans/260810_date-correctness-review-reasons-and-
+        path-parity.md §D: defaults to `SOURCE_KIND_PROMOTER_POST` so a REAL
+        promoter account (`chain_promoter`/`run()`) is byte-for-byte
+        unchanged. `InstagramCrawlChainer._chain_shared_handle` passes
+        `SOURCE_KIND_VENUE_POST` — the posts this method handles there come
+        from a VENUE's own account, and stamping them `promoter_post` was
+        the provenance bug this plan fixes (it is also how those events used
+        to reach the review queue at all, via the queue predicate's now-
+        widened unresolved branch — see `list_events_awaiting_decision`).
+
+        `attribution_outcomes`, when given a list, gets this post's own
+        venue-resolution outcome (`RESOLUTION_AUTO`/`RESOLUTION_QUEUED`/
+        `RESOLUTION_UNRESOLVED`) appended for every event this post's
+        resolution ladder actually ran for — `_chain_shared_handle` reads it
+        back to bump `CRAWL_VENUE_ATTRIBUTION_TOTAL{outcome="resolved"|
+        "ambiguous"}` once per post. `None` (the default) costs nothing extra
+        for a real promoter account, which already reports through
+        `EVENT_VENUE_LINK_TOTAL` instead.
+
+        `report_kind_metric` — plans/260810_date-correctness-review-reasons-
+        and-path-parity.md §D: also bump `EVENT_EXTRACTION_POSTS_TOTAL`
+        (kind-labelled, the SAME counter `EventExtractionService.run()`
+        already emits for the single-venue path) so the event/non-event
+        split is visible on the shared-handle path too. Default False: a
+        real promoter account is a genuinely different content source (many
+        venues, not one), and folding it into the same counter would mix two
+        populations a dashboard has no way to tell apart again.
 
         `archived_images` is this SAME post's already-archived objects (see
         `_archive_post_images`, called just before this in `run()`). One
@@ -400,8 +443,16 @@ class PromoterCrawlService:
         # get_event_by_source (at most one row) is unsafe here.
         existing_events = self.venue_dao.list_events_by_source(handle, shortcode)
 
+        # plans/260810_date-correctness-review-reasons-and-path-parity.md §D:
+        # also bump the venue-path's own kind-labelled counter when opted in
+        # (`_chain_shared_handle` only) — see this method's own docstring.
+        def _bump_kind_metric(outcome: str, kind: str = KIND_LABEL_NOT_APPLICABLE) -> None:
+            if report_kind_metric:
+                EVENT_EXTRACTION_POSTS_TOTAL.labels(outcome=outcome, kind=kind).inc()
+
         if not matches_event_marker(caption):
             PROMOTER_CRAWL_POSTS_TOTAL.labels(outcome=OUTCOME_NOT_EVENT_LIKE).inc()
+            _bump_kind_metric(OUTCOME_NOT_EVENT_LIKE)
             return 0
 
         if self.openai_client is None:
@@ -416,8 +467,12 @@ class PromoterCrawlService:
             )
         except Exception as e:
             logger.warning(f"[PromoterCrawl] extraction failed for {handle}/{shortcode}: {e}")
-            self._record_failure(handle, shortcode, post, raw_text, str(e), existing_events, now)
+            self._record_failure(
+                handle, shortcode, post, raw_text, str(e), existing_events, now,
+                source_kind=source_kind,
+            )
             PROMOTER_CRAWL_POSTS_TOTAL.labels(outcome=OUTCOME_EXTRACTION_FAILED).inc()
+            _bump_kind_metric(OUTCOME_EXTRACTION_FAILED)
             return 0
 
         if truncated:
@@ -437,6 +492,7 @@ class PromoterCrawlService:
                 "handle": handle, "shortcode": shortcode, "raw_response": raw_text,
             })
             PROMOTER_CRAWL_POSTS_TOTAL.labels(outcome=OUTCOME_TRUNCATED).inc()
+            _bump_kind_metric(OUTCOME_TRUNCATED)
             return 0
 
         try:
@@ -447,8 +503,12 @@ class PromoterCrawlService:
             )
         except EventExtractionParseError as e:
             logger.warning(f"[PromoterCrawl] extraction failed for {handle}/{shortcode}: {e}")
-            self._record_failure(handle, shortcode, post, raw_text, str(e), existing_events, now)
+            self._record_failure(
+                handle, shortcode, post, raw_text, str(e), existing_events, now,
+                source_kind=source_kind,
+            )
             PROMOTER_CRAWL_POSTS_TOTAL.labels(outcome=OUTCOME_EXTRACTION_FAILED).inc()
+            _bump_kind_metric(OUTCOME_EXTRACTION_FAILED)
             return 0
 
         if malformed_count:
@@ -458,7 +518,7 @@ class PromoterCrawlService:
 
         post_ts = _parse_timestamp(post.get("timestamp")) or now
 
-        prepared_events: list[dict] = []
+        kept_events: list[dict] = []
         for parsed in events_data:
             # plans/260810_post-kind-and-post-extraction-attribution.md §B,
             # re-scoped mid-execution: events, promotions and menus are
@@ -475,25 +535,44 @@ class PromoterCrawlService:
                     f"title={parsed.get('title')!r} -- no event row created"
                 )
                 continue
+            kept_events.append(parsed)
 
-            # Each event resolves its OWN date, independently, against the
-            # post's timestamp — never a sibling's.
-            resolved_date = resolve_event_datetime(
+        # Each event resolves its OWN date independently, against the post's
+        # timestamp — never a sibling's raw text — then
+        # `vote_on_sibling_years` (plans/260810_date-correctness-review-
+        # reasons-and-path-parity.md §A) looks across THIS post's own events
+        # only (one flyer, one programme) and pulls a lone rolled-forward
+        # outlier back onto the year the rest of the post agrees on. Mirrors
+        # `EventExtractionService._extract_one` exactly — the two paths must
+        # not drift on how a post's dates are resolved.
+        resolved_dates = [
+            resolve_event_datetime(
                 date_text=parsed["date_text"], time_text=parsed["time_text"],
                 post_timestamp=post_ts,
                 is_recurring=parsed["is_recurring"], recurrence_text=parsed["recurrence_text"],
             )
-            review_reason = None
-            if resolved_date.needs_review:
+            for parsed in kept_events
+        ]
+        resolved_dates = vote_on_sibling_years(resolved_dates)
+
+        prepared_events: list[dict] = []
+        for parsed, resolved_date in zip(kept_events, resolved_dates):
+            reasons: list[str] = []
+            if resolved_date.review_reason:
                 # Use the resolver's OWN reason rather than assuming
                 # REASON_MISSING_DATE: plans/260807_date-resolution-
                 # correctness.md's weekday_mismatch also sets needs_review
                 # True while still resolving a real starts_at — hardcoding
                 # "missing_date" here would mislabel a resolved-but-flagged
                 # date as a blank one.
-                review_reason = resolved_date.review_reason
-            elif parsed["confidence"] < self.min_confidence:
-                review_reason = REVIEW_REASON_LOW_CONFIDENCE
+                reasons.append(resolved_date.review_reason)
+            if resolved_date.year_inferred:
+                reasons.append(REASON_YEAR_INFERRED)
+            if resolved_date.date_range:
+                reasons.append(REASON_DATE_RANGE)
+            if parsed["confidence"] < self.min_confidence:
+                reasons.append(REVIEW_REASON_LOW_CONFIDENCE)
+            review_reason = "; ".join(reasons) if reasons else None
 
             prepared_events.append({
                 "starts_at": resolved_date.starts_at, "ends_at": resolved_date.ends_at,
@@ -508,6 +587,21 @@ class PromoterCrawlService:
                 "review_reason": review_reason,
                 "raw_extraction": parsed,
             })
+
+        # plans/260810_date-correctness-review-reasons-and-path-parity.md
+        # §D: the SAME per-post kind label EventExtractionService computes —
+        # one event's own kind, "mixed" for a roundup, "not_applicable" for
+        # none — never duplicated ad hoc. Computed from `events_data` (every
+        # parsed event, BEFORE the non-event-kind filter above), exactly
+        # like EventExtractionService._extract_one: a post whose one event
+        # is a menu item must still be counted "menu", not "not_applicable"
+        # just because no events.event row was created for it.
+        if len(events_data) == 1:
+            kind_label = events_data[0].get("kind") or KIND_LABEL_UNKNOWN
+        elif len(events_data) > 1:
+            kind_label = KIND_LABEL_MIXED
+        else:
+            kind_label = KIND_LABEL_NOT_APPLICABLE
 
         # The ONE thing parameterised (plans/260806_venue-post-multi-event.md
         # §B): each event runs the resolution ladder on its OWN
@@ -554,6 +648,9 @@ class PromoterCrawlService:
                     result=_RESULT_LABEL[resolution.resolution],
                 ).inc()
 
+            if attribution_outcomes is not None:
+                attribution_outcomes.append(resolution.resolution)
+
             if resolution.resolution == RESOLUTION_AUTO:
                 result_fields = {
                     "venue_id": resolution.venue_id,
@@ -580,7 +677,7 @@ class PromoterCrawlService:
         touched_event_ids: list[str] = []
         persisted = reconcile_post_events(
             venue_dao=self.venue_dao,
-            source_kind=SOURCE_KIND_PROMOTER_POST,
+            source_kind=source_kind,
             source_handle=handle,
             source_shortcode=shortcode,
             source_permalink=post.get("permalink"),
@@ -599,6 +696,18 @@ class PromoterCrawlService:
             merge_touched_events(self.venue_dao, touched_event_ids, now)
 
         PROMOTER_CRAWL_POSTS_TOTAL.labels(outcome=OUTCOME_EXTRACTED).inc()
+        if prepared_events:
+            kind_outcome = OUTCOME_EXTRACTED
+        elif events_data:
+            # Every parsed event was a recognised non-event kind — nothing
+            # persisted, by design. Mirrors
+            # EventExtractionService._extract_one's OUTCOME_NOT_AN_EVENT.
+            kind_outcome = EES_OUTCOME_NOT_AN_EVENT
+        else:
+            # events_data itself was empty ({"events": []}) — same edge case
+            # EventExtractionService._extract_one leaves as OUTCOME_EXTRACTED.
+            kind_outcome = OUTCOME_EXTRACTED
+        _bump_kind_metric(kind_outcome, kind_label)
         return persisted
 
     async def _first_image_data_uri(self, post: dict) -> Optional[str]:
@@ -617,6 +726,7 @@ class PromoterCrawlService:
     def _record_failure(
         self, handle: str, shortcode: str, post: dict,
         raw_text: Optional[str], error_text: str, existing_events: list[dict], now: datetime,
+        *, source_kind: str = SOURCE_KIND_PROMOTER_POST,
     ) -> None:
         """A total extraction failure (API error, or a response so malformed
         even the top-level 'events' list cannot be read) — never even a
@@ -625,13 +735,18 @@ class PromoterCrawlService:
         (not even a failed re-extraction reverts it); every other existing
         row for this post is marked extraction_failed so the failure is
         visible without losing the post. A post with NO prior rows gets one
-        placeholder row recording the failure."""
+        placeholder row recording the failure.
+
+        `source_kind` — plans/260810_date-correctness-review-reasons-and-
+        path-parity.md §D: `_process_post`'s own `source_kind` param,
+        threaded through so a shared-handle venue post that fails extraction
+        is ALSO stamped `venue_post`, not `promoter_post`."""
         raw_extraction = (
             {"raw_response": raw_text} if raw_text is not None else {"error": error_text}
         )
         if not existing_events:
             fields = {
-                "source_kind": SOURCE_KIND_PROMOTER_POST, "source_handle": handle,
+                "source_kind": source_kind, "source_handle": handle,
                 "source_shortcode": shortcode, "source_permalink": post.get("permalink"),
                 "status": STATUS_EXTRACTION_FAILED, "review_reason": REVIEW_REASON_EXTRACTION_FAILED,
                 "raw_extraction": raw_extraction, "last_seen_at": now,

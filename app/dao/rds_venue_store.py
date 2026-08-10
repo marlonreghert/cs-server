@@ -755,47 +755,55 @@ class RdsVenueStore:
         which excluded every venue-post event BY CONSTRUCTION regardless of
         status).
 
-        The union of the two genuine decision states:
+        The union of three genuine decision states:
           - `status = 'pending_review'`: nobody has confirmed this event's
             data yet. `event_reconciliation.py` sets this on EVERY persisted
             event, so this is the queue's main, wide population — an inbox,
             not an error flag.
-          - `ps.source_kind = 'promoter_post' AND location_resolution IS
-            NULL`: nobody has decided where it happens. `ps.source_kind` —
-            the PRIMARY (most recently seen) source's kind
-            (plans/260807_one-event-many-posts.md) — replaces the old
-            `e.source_kind` column, which no longer exists on events.event.
-            NOT redundant with the first clause — an operator can `/confirm`
-            a promoter event's fields while its venue is still unresolved,
-            which moves status off `pending_review` but leaves
-            `location_resolution` NULL; that event still needs a decision
-            and must not silently drop out.
+          - `e.venue_id IS NULL`: nobody has decided where it happens.
+            plans/260810_date-correctness-review-reasons-and-path-parity.md
+            §D widened this from `ps.source_kind = 'promoter_post' AND
+            location_resolution IS NULL` — the OLD condition keyed on
+            `source_kind`, which is exactly what made the shared-handle
+            crawl path's provenance bug (`_chain_shared_handle` stamping a
+            venue's own post `promoter_post`) the ONLY reason those events
+            reached the queue at all. `venue_id` is the real signal
+            regardless of source kind: a venue-post event's `venue_id` is
+            constant attribution (always the posting venue) and can only be
+            NULL when a shared-handle post could not be attributed to
+            either of its handle's venues, and a promoter event's `venue_id`
+            is NULL for both `RESOLUTION_QUEUED` (candidates awaiting a
+            pick) and `RESOLUTION_UNRESOLVED` (none found) alike — a
+            strictly more complete signal than `location_resolution IS
+            NULL`, which missed the `unresolved` case (that resolution
+            writes the literal string `'unresolved'`, not NULL). NOT
+            redundant with the first clause — an operator can `/confirm` an
+            event's fields while its venue is still unresolved, which moves
+            status off `pending_review` but leaves `venue_id` NULL; that
+            event still needs a decision and must not silently drop out,
+            whichever crawl path produced it.
 
         The second clause is guarded with `status NOT IN ('rejected',
         'superseded')`: `/reject` and the reconciliation supersede path both
-        leave `location_resolution` untouched, so an event that was queued
-        for a venue decision and never got one before an operator rejected
-        it (or a later crawl superseded it) would otherwise resurrect here
-        forever — exactly the "finished with" case the plan requires this
-        queue to keep excluding.
+        leave `venue_id` untouched, so an event that was queued for a venue
+        decision and never got one before an operator rejected it (or a
+        later crawl superseded it) would otherwise resurrect here forever —
+        exactly the "finished with" case the plan requires this queue to
+        keep excluding.
 
         A third clause, `status = 'extraction_failed'`, is explicit for BOTH
         source kinds (plans/260807_date-resolution-correctness.md, defect 3):
-        a VENUE-post event in that status matches neither of the two clauses
-        above (its `location_resolution` is never set at all — venue posts
-        carry constant attribution) and used to never reach the queue at
-        all. A PROMOTER-post event in that status happened to surface only
-        incidentally, via clause 2, whenever `location_resolution` was still
-        NULL — true as long as nobody had linked it yet, but an accident of
-        that column's state, not a deliberate design. A total extraction
-        failure is lost signal on a post already paid for (archived,
-        classified); it deserves an operator's attention at least as much as
-        a clean unconfirmed event, never less.
+        an extraction-failure placeholder ALWAYS carries a non-NULL
+        `venue_id` for a venue post (the venue currently being crawled) —
+        it never matches the second clause on its own — and even a
+        promoter-post one is explicit rather than incidental. A total
+        extraction failure is lost signal on a post already paid for
+        (archived, classified); it deserves an operator's attention at
+        least as much as a clean unconfirmed event, never less.
         """
         sql = (
             f"{self._EVENT_SELECT} WHERE e.status = 'pending_review' "
-            "OR (ps.source_kind = 'promoter_post' AND e.location_resolution IS NULL "
-            "AND e.status NOT IN ('rejected', 'superseded')) "
+            "OR (e.venue_id IS NULL AND e.status NOT IN ('rejected', 'superseded')) "
             "OR e.status = 'extraction_failed' "
             "ORDER BY agg.first_seen_at, e.event_id"
         )

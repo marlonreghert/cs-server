@@ -733,6 +733,50 @@ def test_list_events_filters_by_venue_and_status(store):
     assert confirmed == {f"la_{vid_a}", f"lc_{vid_b}"}
 
 
+# ── review queue predicate widening (plans/260810_date-correctness-review-
+# reasons-and-path-parity.md §D) ─────────────────────────────────────────────
+# `list_events_awaiting_decision`'s unresolved-venue clause used to key on
+# `source_kind = 'promoter_post'`, which is exactly what made the shared-
+# handle crawl path's provenance bug (stamping a venue's own post
+# `promoter_post`) the ONLY reason those events ever reached the queue.
+# Widened to `venue_id IS NULL` — proven here against BOTH the fake and real
+# Postgres (tests/test_review_queue_completeness.py already covers the full
+# (source_kind, status, location_resolution) matrix against the fake alone;
+# this is the "only place real SQL runs" case CLAUDE.md requires for any DAO
+# predicate this plan touches).
+def test_confirmed_event_with_no_venue_is_queued_regardless_of_source_kind(store):
+    """The trap plans/260810_date-correctness-review-reasons-and-path-
+    parity.md §D names explicitly: correcting `source_kind` to `venue_post`
+    for a shared-handle post must NOT silently empty the queue. A confirmed
+    event with venue_id=None — a shared-handle post that could not be
+    attributed to either of its handle's venues, `/confirm`ed anyway — must
+    still surface for a venue decision, whether it is labelled `venue_post`
+    OR `promoter_post`."""
+    for source_kind in ("venue_post", "promoter_post"):
+        shortcode = f"unresolved_{source_kind}_{uuid.uuid4().hex[:8]}"
+        fields = _event_fields(
+            None, shortcode, source_kind=source_kind, status="confirmed", venue_id=None,
+        )
+        inserted = store.insert_event(fields)
+        ids = {r["event_id"] for r in store.list_events_awaiting_decision()}
+        assert inserted["event_id"] in ids, (
+            f"a confirmed, venue-less {source_kind} event must still be queued"
+        )
+
+
+def test_confirmed_event_with_a_venue_is_not_queued(store):
+    """The other direction of the same widening, so the predicate is proven
+    both ways (plans/260810's own "enumerated assertions create a false
+    green" lesson): a confirmed event that HAS a venue must not be swept
+    into the queue just because it is confirmed."""
+    vid = _vid()
+    store.upsert_venue(_venue(vid))
+    shortcode = f"resolved_{uuid.uuid4().hex[:8]}"
+    inserted = store.insert_event(_event_fields(vid, shortcode, status="confirmed"))
+    ids = {r["event_id"] for r in store.list_events_awaiting_decision()}
+    assert inserted["event_id"] not in ids
+
+
 # ── events.crawl_target write shape (production incident, 2026-08-09) ────────
 # `upsert_crawl_target(handle, updates)` used to be the ONLY write for both
 # create AND the post-run bookkeeping update. That bookkeeping call passes a

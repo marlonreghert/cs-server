@@ -1512,3 +1512,147 @@ class TestSingleVenuePathUnchanged:
         }
         report = _run(chainer.chain_venue(handle="soloh2", venue_ids=["v1"], new_posts=[post], now=NOW))
         assert report.archived == 1
+
+
+class TestSharedHandleMetricsParity:
+    """plans/260810_date-correctness-review-reasons-and-path-parity.md §D:
+    `_chain_shared_handle` must (1) stamp a venue's own post `venue_post`,
+    never `promoter_post`, (2) bump `crawl_venue_attribution_total` per
+    post, and (3) refresh `EVENTS_TOTAL` itself, since it never calls
+    `EventExtractionService.run()` (the only other place that gauge used to
+    be set). Called directly against `_chain_shared_handle`, the real entry
+    point `chain_venue` reaches for `len(venue_ids) > 1` — the same pattern
+    TestSingleVenuePathUnchanged above uses for the single-venue branch."""
+
+    def _two_venue_dao(self):
+        dao = _venue_dao()
+        dao.upsert_venue(Venue(venue_id="va", venue_name="Venue A", venue_lat=-8.05, venue_lng=-34.88))
+        dao.upsert_venue(Venue(venue_id="vb", venue_name="Venue B", venue_lat=-8.06, venue_lng=-34.90))
+        dao.set_venue_instagram(VenueInstagram(venue_id="va", instagram_handle="shared1", status="found"))
+        dao.set_venue_instagram(VenueInstagram(venue_id="vb", instagram_handle="shared1", status="found"))
+        return dao
+
+    def _chainer(self, dao, openai_client):
+        from app.services.promoter_crawl_service import PromoterCrawlService
+
+        promoter_service = PromoterCrawlService(
+            venue_dao=dao, posts_client=None, media_store=_FakePromoterMediaStore(),
+            downloader=_FakePromoterDownloader(), openai_client=openai_client, min_confidence=0.0,
+        )
+        return InstagramCrawlChainer(
+            media_store=None, downloader=None, event_extraction_service=None,
+            promoter_crawl_service=promoter_service,
+        )
+
+    def test_source_kind_is_stamped_venue_post_not_promoter_post(self):
+        dao = self._two_venue_dao()
+        openai_client = _FakePromoterOpenAIClient(
+            '{"title": "Shared Post Event", "description": null, "date_text": null, '
+            '"time_text": null, "is_recurring": false, "recurrence_text": null, '
+            '"lineup": [], "ticket_url": null, "price_text": null, '
+            '"location_text": null, "confidence": 0.9}'
+        )
+        chainer = self._chainer(dao, openai_client)
+        post = {
+            "shortcode": "sharedpost1", "caption": "Ingressos abertos! Vem pro role.",
+            "permalink": "https://instagram.com/p/sharedpost1", "timestamp": "2026-08-05T20:00:00.000Z",
+            "image_urls": ["https://cdn.example.com/sharedpost1.jpg"], "is_pinned": False,
+        }
+
+        _run(chainer._chain_shared_handle(
+            handle="shared1", venue_ids=["va", "vb"], new_posts=[post], now=NOW,
+            classify_images=False, venue_dao=dao,
+        ))
+
+        row = dao.get_event_by_source("shared1", "sharedpost1")
+        assert row is not None
+        assert row["source_kind"] == "venue_post", row
+
+    def test_events_total_gauge_is_refreshed_without_calling_event_extraction_service(self):
+        """This path never calls EventExtractionService.run() -- the only
+        other code that used to refresh EVENTS_TOTAL. A handle that only
+        ever goes through this branch must not leave the gauge permanently
+        at zero (plan §D: "a permanently empty gauge is worse than no
+        gauge")."""
+        from prometheus_client import REGISTRY
+
+        dao = self._two_venue_dao()
+        openai_client = _FakePromoterOpenAIClient(
+            '{"title": "Gauge Event", "description": null, "date_text": null, '
+            '"time_text": null, "is_recurring": false, "recurrence_text": null, '
+            '"lineup": [], "ticket_url": null, "price_text": null, '
+            '"location_text": null, "confidence": 0.9}'
+        )
+        chainer = self._chainer(dao, openai_client)
+        assert chainer.event_extraction_service is None  # proves the gauge cannot come from there
+        post = {
+            "shortcode": "gaugepost1", "caption": "Ingressos abertos! Vem pro role.",
+            "permalink": "https://instagram.com/p/gaugepost1", "timestamp": "2026-08-05T20:00:00.000Z",
+            "image_urls": ["https://cdn.example.com/gaugepost1.jpg"], "is_pinned": False,
+        }
+
+        _run(chainer._chain_shared_handle(
+            handle="shared1", venue_ids=["va", "vb"], new_posts=[post], now=NOW,
+            classify_images=False, venue_dao=dao,
+        ))
+
+        row = dao.get_event_by_source("shared1", "gaugepost1")
+        gauge_value = REGISTRY.get_sample_value("events_total", {"status": row["status"]})
+        assert gauge_value is not None and gauge_value >= 1, gauge_value
+
+    def test_a_resolved_post_counts_one_resolved_attribution(self):
+        from prometheus_client import REGISTRY
+
+        dao = self._two_venue_dao()
+        openai_client = _FakePromoterOpenAIClient(
+            '{"title": "Venue A Event", "description": null, "date_text": null, '
+            '"time_text": null, "is_recurring": false, "recurrence_text": null, '
+            '"lineup": [], "ticket_url": null, "price_text": null, '
+            '"location_text": "Venue A", "confidence": 0.9}'
+        )
+        chainer = self._chainer(dao, openai_client)
+        post = {
+            "shortcode": "resolvedpost1", "caption": "Ingressos abertos! Vem pro role.",
+            "permalink": "https://instagram.com/p/resolvedpost1", "timestamp": "2026-08-05T20:00:00.000Z",
+            "image_urls": ["https://cdn.example.com/resolvedpost1.jpg"], "is_pinned": False,
+        }
+        before = REGISTRY.get_sample_value("crawl_venue_attribution_total", {"outcome": "resolved"}) or 0.0
+
+        _run(chainer._chain_shared_handle(
+            handle="shared1", venue_ids=["va", "vb"], new_posts=[post], now=NOW,
+            classify_images=False, venue_dao=dao,
+        ))
+
+        after = REGISTRY.get_sample_value("crawl_venue_attribution_total", {"outcome": "resolved"}) or 0.0
+        assert after - before == 1.0, (before, after)
+        row = dao.get_event_by_source("shared1", "resolvedpost1")
+        assert row["venue_id"] == "va", row
+
+    def test_an_unresolved_post_counts_one_ambiguous_attribution(self):
+        from prometheus_client import REGISTRY
+
+        dao = self._two_venue_dao()
+        openai_client = _FakePromoterOpenAIClient(
+            '{"title": "Neither Venue Event", "description": null, "date_text": null, '
+            '"time_text": null, "is_recurring": false, "recurrence_text": null, '
+            '"lineup": [], "ticket_url": null, "price_text": null, '
+            '"location_text": null, "confidence": 0.9}'
+        )
+        chainer = self._chainer(dao, openai_client)
+        post = {
+            "shortcode": "ambiguouspost1", "caption": "Ingressos abertos! Vem pro role.",
+            "permalink": "https://instagram.com/p/ambiguouspost1", "timestamp": "2026-08-05T20:00:00.000Z",
+            "image_urls": ["https://cdn.example.com/ambiguouspost1.jpg"], "is_pinned": False,
+        }
+        before = REGISTRY.get_sample_value("crawl_venue_attribution_total", {"outcome": "ambiguous"}) or 0.0
+
+        _run(chainer._chain_shared_handle(
+            handle="shared1", venue_ids=["va", "vb"], new_posts=[post], now=NOW,
+            classify_images=False, venue_dao=dao,
+        ))
+
+        after = REGISTRY.get_sample_value("crawl_venue_attribution_total", {"outcome": "ambiguous"}) or 0.0
+        assert after - before == 1.0, (before, after)
+        row = dao.get_event_by_source("shared1", "ambiguouspost1")
+        assert row["venue_id"] is None, row
+        assert "unresolved_venue" in (row["review_reason"] or ""), row
