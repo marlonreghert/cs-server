@@ -1,4 +1,3 @@
-@wip
 Feature: One dish, one row, one year
   A dish has no end signal — no post ever says the kitchen stopped serving the
   risotto — and no date, so it never merges the way a dated event does. Left

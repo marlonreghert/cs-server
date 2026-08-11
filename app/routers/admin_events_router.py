@@ -18,6 +18,8 @@ from pydantic import BaseModel, Field
 
 from app.config import settings
 from app.metrics import EVENT_COVER_PRESIGN_TOTAL, EVENT_VENUE_LINK_TOTAL
+from app.models.event_kind import KIND_MENU
+from app.models.menu_lifecycle import is_menu_item_current, load_menu_expiry_days
 from app.services.promoter_registry_service import InvalidPromoterAccount, PromoterRegistryService
 
 router = APIRouter(prefix="/admin/events", tags=["admin", "events"])
@@ -48,6 +50,28 @@ def _media_store():
     if store is None:
         raise HTTPException(status_code=503, detail="Media archive store not configured")
     return store
+
+
+def _admin_config_redis():
+    """A `.get(key)`-capable client for `load_menu_expiry_days` (and every
+    sibling admin-config reader — app.models.post_category's own loader is
+    the precedent this mirrors). `_container.redis_client` is normally a
+    `GeoRedisClient` wrapper, whose own `.get(key)` proxies straight to the
+    underlying raw client with an IDENTICAL single-key signature (see
+    app/db/geo_redis_client.py) — so it is used AS-IS, never unwrapped via
+    `.client` (a real trap: `redis.Redis` — and so `GeoRedisClient`'s own
+    wrapped client — exposes a `.client` attribute of its OWN, the bound
+    `CLIENT ...` command method, not a nested client; naively falling back
+    to `getattr(x, "client", x)` silently picks that up instead). A test
+    harness may set `redis_client` directly to a raw `fakeredis.FakeRedis`
+    instead, which satisfies the same `.get(key)` shape. `None` (no
+    container, or no redis_client configured at all) is a legitimate,
+    handled input to `load_menu_expiry_days`, never raised here — an
+    admin-config read degrading to the shipped default must never fail an
+    otherwise-successful event read."""
+    if _container is None:
+        return None
+    return getattr(_container, "redis_client", None)
 
 
 def _require_admin(
@@ -168,6 +192,14 @@ class EventOut(BaseModel):
     # (app.models.post_category) and case-insensitively canonicalised on
     # write. NULL when the model gave no basis for one — never invented.
     category: Optional[str] = None
+    # plans/260811_menu-item-lifecycle.md: whether a MENU item is still
+    # within its configured expiry window, derived at READ TIME from
+    # `last_seen_at` (app.models.menu_lifecycle.is_menu_item_current) —
+    # never written back to the row, and never a reason a dish is queued
+    # (see `review_queue` below, which populates this identically and adds
+    # no filtering of its own). `None` for every non-menu post_type — an
+    # event or a promotion has no expiry concept at all. Additive.
+    is_current: Optional[bool] = None
 
 
 class EventSourceOut(BaseModel):
@@ -183,11 +215,27 @@ class EventSourceOut(BaseModel):
 EventOut.model_rebuild()
 
 
+def _menu_is_current(row: dict) -> Optional[bool]:
+    """`EventOut.is_current`'s value for one row — `None` for every
+    non-menu `post_type` (no expiry concept applies), otherwise derived at
+    READ TIME from the row's own (already source-aggregated) `last_seen_at`
+    against the live admin-configured window. Never mutates the row, and
+    never touches `status`/`review_reason` — an expired dish going quiet is
+    the absence of a decision, not one (see `review_queue` below)."""
+    if row.get("post_type") != KIND_MENU:
+        return None
+    expiry_days, _fallback_reason = load_menu_expiry_days(_admin_config_redis())
+    return is_menu_item_current(
+        row.get("last_seen_at"), expiry_days=expiry_days, now=datetime.now(timezone.utc),
+    )
+
+
 def _to_out(dao, row: dict) -> EventOut:
     sources = [EventSourceOut(**s) for s in dao.list_event_sources(row["event_id"])]
     return EventOut(**{
         **row, "lineup": row.get("lineup") or [],
         "attractions": row.get("attractions") or [], "sources": sources,
+        "is_current": _menu_is_current(row),
     })
 
 
@@ -348,6 +396,7 @@ def review_queue():
             **{
                 **row, "lineup": row.get("lineup") or [],
                 "attractions": row.get("attractions") or [],
+                "is_current": _menu_is_current(row),
             },
             candidates=candidates, sources=sources,
         ))

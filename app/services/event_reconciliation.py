@@ -69,10 +69,12 @@ plans/260806_venue-post-multi-event.md's review.
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Callable, Optional
 
-from app.metrics import EVENT_EXTRACTION_EVENTS_PER_POST, EVENTS_TOTAL
+from app.metrics import EVENT_EXTRACTION_EVENTS_PER_POST, EVENTS_TOTAL, MENU_ITEM_FRESHNESS_TOTAL
+from app.models.event_kind import KIND_MENU
+from app.models.menu_lifecycle import DEFAULT_MENU_EXPIRY_DAYS, is_menu_item_current
 from app.services.event_identity import compute_source_event_key, normalize_title
 from app.services.event_venue_resolution import RESOLUTION_MANUAL
 from app.services.pipeline_run_registry import new_run_id
@@ -880,7 +882,7 @@ def reconcile_post_events(
     return persisted
 
 
-def update_events_gauge(venue_dao) -> None:
+def update_events_gauge(venue_dao, now: Optional[datetime] = None) -> None:
     """Snapshot `events.event` into `EVENTS_TOTAL{status}` — plans/260810_
     date-correctness-review-reasons-and-path-parity.md §D: previously
     `EventExtractionService`'s own private method, called only at the end of
@@ -892,13 +894,33 @@ def update_events_gauge(venue_dao) -> None:
     module BOTH crawl paths already depend on, and called from both, so
     every run that persists events refreshes the same gauge regardless of
     which path produced them.
+
+    Also snapshots `MENU_ITEM_FRESHNESS_TOTAL{state}` (plans/260811_menu-
+    item-lifecycle.md's "watch the expired share" ask) for every
+    `post_type == "menu"` row, from the SAME `list_events()` pass — no
+    second DAO scan. Uses `app.models.menu_lifecycle.DEFAULT_MENU_EXPIRY_
+    DAYS` rather than a live admin-config read: this function is called
+    from both extraction paths with no Redis client available here, and a
+    trend-watching gauge staying "roughly right" against the shipped
+    default is the correct trade against adding a hard Redis dependency to
+    a function that otherwise needs none. `now` defaults to the real wall
+    clock; overridable for deterministic tests.
     """
+    effective_now = now or datetime.now(timezone.utc)
     counts = {status: 0 for status in ALL_STATUSES}
+    menu_freshness = {"current": 0, "expired": 0}
     for row in venue_dao.list_events():
         status = row.get("status")
         counts[status] = counts.get(status, 0) + 1
+        if row.get("post_type") == KIND_MENU:
+            state = "current" if is_menu_item_current(
+                row.get("last_seen_at"), expiry_days=DEFAULT_MENU_EXPIRY_DAYS, now=effective_now,
+            ) else "expired"
+            menu_freshness[state] += 1
     for status, count in counts.items():
         EVENTS_TOTAL.labels(status=status).set(count)
+    for state, count in menu_freshness.items():
+        MENU_ITEM_FRESHNESS_TOTAL.labels(state=state).set(count)
 
 
 __all__ = [

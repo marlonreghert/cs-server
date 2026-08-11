@@ -124,6 +124,7 @@ test-unit:
 		tests/test_scheduler.py \
 		tests/test_time_known_migration.py \
 		tests/test_expose_time_known.py \
+		tests/test_menu_item_lifecycle.py \
 		-v
 
 test-integration:
