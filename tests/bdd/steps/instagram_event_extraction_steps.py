@@ -55,13 +55,32 @@ def _run(coro):
 
 # ── fakes at the true boundary (no live S3/OpenAI) ───────────────────────────
 class _FakePostSource:
-    """Posts injected directly by the scenario (no S3 manifest walking)."""
+    """Posts injected directly by the scenario (no S3 manifest walking).
+
+    `posts_by_handle_archive` — plans/260811_extract-by-handle.md §A — is the
+    ADDITIVE `promoter=<handle>` half of the archive, kept separate from
+    `posts_by_venue` (the `venue_id=<v>` half); `posts_for_handle` merges the
+    two exactly like the real `EventPostSource` does, reusing the SAME
+    `post_dedupe.dedupe_by_shortcode` mechanism rather than a second one."""
 
     def __init__(self):
         self.posts_by_venue: dict[str, list[ArchivedPost]] = {}
+        self.posts_by_handle_archive: dict[str, list[ArchivedPost]] = {}
 
     async def posts_for_venue(self, venue_id, since):
         return self.posts_by_venue.get(venue_id, [])
+
+    async def posts_for_handle(self, handle, venue_ids, since):
+        from app.services.post_dedupe import dedupe_by_shortcode
+
+        def _wrap(posts: list[ArchivedPost]) -> list[dict]:
+            return [{"shortcode": p.shortcode, "_post": p} for p in posts]
+
+        groups = [_wrap(self.posts_by_handle_archive.get(handle, []))]
+        for venue_id in (venue_ids or []):
+            groups.append(_wrap(self.posts_by_venue.get(venue_id, [])))
+        merged = dedupe_by_shortcode(groups)
+        return [entry["_post"] for entry in merged]
 
     async def image_data_uri(self, key):
         return f"data:image/jpeg;base64,FAKE_{key}" if key else None
@@ -171,6 +190,25 @@ def _add_post(context, shortcode: str, **overrides) -> ArchivedPost:
     base.update(overrides)
     post = ArchivedPost(**base)
     context.ee_post_source.posts_by_venue.setdefault(context.ee_venue_id, []).append(post)
+    context.ee_last_shortcode = shortcode
+    context.ee_last_post_ts = post.timestamp
+    return post
+
+
+def _add_handle_post(context, shortcode: str, **overrides) -> ArchivedPost:
+    """The `promoter=<handle>` half — plans/260811_extract-by-handle.md §A —
+    a post that was archived under the handle itself, never under the
+    venue's own `venue_id=` prefix. Mirrors `_add_post` exactly, one bucket
+    over."""
+    base = dict(
+        shortcode=shortcode, permalink=f"https://instagram.com/p/{shortcode}",
+        caption="Ingressos abertos! Vem pro role.", timestamp=None,
+        flyer_photo_key=f"{shortcode}.jpg", flyer_confidence=0.9,
+        any_photo_key=f"{shortcode}.jpg",
+    )
+    base.update(overrides)
+    post = ArchivedPost(**base)
+    context.ee_post_source.posts_by_handle_archive.setdefault(context.ee_handle, []).append(post)
     context.ee_last_shortcode = shortcode
     context.ee_last_post_ts = post.timestamp
     return post

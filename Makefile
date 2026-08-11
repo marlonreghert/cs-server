@@ -115,6 +115,7 @@ test-unit:
 		tests/test_crawl_target_reels_overlap_migration.py \
 		tests/test_crawl_target_dao.py \
 		tests/test_instagram_crawl_service.py \
+		tests/test_extract_by_handle.py \
 		tests/test_crawl_schedule_sync.py \
 		tests/test_admin_crawl_router.py \
 		tests/test_scheduler.py \

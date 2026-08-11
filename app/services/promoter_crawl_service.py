@@ -37,7 +37,7 @@ from __future__ import annotations
 import base64
 import logging
 from datetime import datetime, timedelta, timezone
-from typing import Callable, Optional
+from typing import Optional
 
 from app.api.openai_event_extraction_client import (
     EventExtractionParseError,
@@ -48,7 +48,6 @@ from app.metrics import (
     EVENT_EXTRACTION_MALFORMED_EVENTS_TOTAL,
     EVENT_EXTRACTION_POSTS_TOTAL,
     EVENT_REVIEW_QUEUE_DEPTH,
-    EVENT_VENUE_LINK_TOTAL,
     PROMOTER_CRAWL_POSTS_TOTAL,
 )
 from app.models.event_kind import NON_EVENT_KINDS
@@ -76,12 +75,9 @@ from app.services.event_reconciliation import (
 from app.services.event_venue_resolution import (
     DEFAULT_CONFIDENCE_FLOOR,
     DEFAULT_MARGIN,
-    RESOLUTION_AUTO,
-    RESOLUTION_QUEUED,
-    RESOLUTION_UNRESOLVED,
     build_handle_index,
+    build_location_text_attribute_fn,
     build_venue_catalog,
-    resolve_event_venue,
 )
 from app.services.event_venue_targeting import _parse_timestamp
 from app.services.instagram_handle_sources import normalize_handle
@@ -115,12 +111,6 @@ DEFAULT_LOOKBACK_DAYS = 60
 # app.config.settings.event_extraction_max_events_per_post, which the output
 # token budget also scales from.
 DEFAULT_MAX_EVENTS_PER_POST = 20
-
-_RESULT_LABEL = {
-    RESOLUTION_AUTO: "auto",
-    RESOLUTION_QUEUED: "queued",
-    RESOLUTION_UNRESOLVED: "unresolved",
-}
 
 
 class InvalidPromoterCrawlConfig(ValueError):
@@ -619,60 +609,24 @@ class PromoterCrawlService:
         # until the event row itself is committed, so it is deferred into
         # `on_persisted` rather than called here directly. The reconciler
         # calls it after insert_event/update_event.
-        def _attribute(fields: dict, event_id: str) -> tuple[dict, Optional[Callable[[], None]]]:
-            # plans/260810_post-kind-and-post-extraction-attribution.md §C:
-            # fall back to the post's own caption ONLY when the model
-            # reported no location_text AND the caller opted in (see this
-            # method's own docstring for why that is never the default).
-            location_text = fields["location_text"]
-            if not location_text and location_text_fallback_to_caption:
-                location_text = caption
-            resolution = resolve_event_venue(
-                caption=caption, location_text=location_text,
-                location_tag=post.get("location_tag"), promoter_handle=handle,
-                venues=venues, handle_index=handle_index,
-                confidence_floor=self.confidence_floor, margin=self.margin,
-            )
-
-            def _on_persisted() -> None:
-                if resolution.candidates:
-                    self.venue_dao.replace_event_venue_link_candidates(event_id, [
-                        {
-                            "venue_id": c.venue_id, "rank": rank, "score": c.score,
-                            "method": c.method, "evidence": c.evidence,
-                        }
-                        for rank, c in enumerate(resolution.candidates, start=1)
-                    ])
-                EVENT_VENUE_LINK_TOTAL.labels(
-                    method=resolution.method or "none",
-                    result=_RESULT_LABEL[resolution.resolution],
-                ).inc()
-
-            if attribution_outcomes is not None:
-                attribution_outcomes.append(resolution.resolution)
-
-            if resolution.resolution == RESOLUTION_AUTO:
-                result_fields = {
-                    "venue_id": resolution.venue_id,
-                    "location_resolution": RESOLUTION_AUTO,
-                    "location_confidence": resolution.confidence,
-                    "linked_by": resolution.method,
-                    "linked_at": now,
-                }
-            elif resolution.resolution == RESOLUTION_UNRESOLVED:
-                result_fields = {
-                    "venue_id": None,
-                    "location_resolution": RESOLUTION_UNRESOLVED,
-                    "location_confidence": None,
-                    "linked_by": None,
-                    "linked_at": None,
-                }
-            else:
-                # RESOLUTION_QUEUED: leave the four link columns out of the
-                # returned dict entirely — the reconciler's partial-update
-                # path means they stay NULL, the "awaiting review" state.
-                result_fields = {}
-            return result_fields, _on_persisted
+        #
+        # plans/260811_extract-by-handle.md: this closure USED to be built
+        # inline here. Extracted to `event_venue_resolution.
+        # build_location_text_attribute_fn` so `EventExtractionService._run_
+        # handles` (re-extracting a MULTI-VENUE handle's already-archived
+        # posts, no re-crawl) resolves venues through the exact SAME ladder
+        # call, not a second one. This call is behaviour-preserving —
+        # `tests/test_promoter_crawl_service.py`'s
+        # `TestAttributionBehaviourPinnedAcrossExtraction` pins the real
+        # promoter path's outcomes/metrics across this refactor.
+        _attribute = build_location_text_attribute_fn(
+            caption=caption, location_tag=post.get("location_tag"),
+            promoter_handle=handle, venues=venues, handle_index=handle_index,
+            venue_dao=self.venue_dao, now=now,
+            confidence_floor=self.confidence_floor, margin=self.margin,
+            location_text_fallback_to_caption=location_text_fallback_to_caption,
+            attribution_outcomes=attribution_outcomes,
+        )
 
         touched_event_ids: list[str] = []
         persisted = reconcile_post_events(

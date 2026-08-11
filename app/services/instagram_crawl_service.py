@@ -79,7 +79,11 @@ from app.services.event_venue_resolution import (
     build_venue_catalog,
     candidate_venues_for_ids,
 )
-from app.services.instagram_handle_sources import normalize_handle
+from app.services.instagram_handle_sources import (
+    group_venue_ids_by_handle,  # noqa: F401 -- re-exported for existing importers
+    normalize_handle,
+)
+from app.services.post_dedupe import dedupe_by_shortcode
 from app.services.venue_photo_archive_service import new_run_id, run_prefix
 
 logger = logging.getLogger(__name__)
@@ -394,40 +398,6 @@ def _newest_timestamp(posts: list[dict]) -> Optional[datetime]:
     return best
 
 
-def group_venue_ids_by_handle(instagram_handles: dict[str, str]) -> dict[str, list[str]]:
-    """Reverses `venue_id -> instagram_handle` (RdsVenueStore.
-    list_instagram_handles) into `normalized_handle -> [venue_id, ...]`.
-
-    Deliberately NOT `event_venue_resolution.build_handle_index`, which
-    collapses to ONE winning venue_id per handle (fine for its own job: the
-    promoter resolution ladder picks a single best venue). This feature's
-    whole reason to key `crawl_target` on the handle rather than the
-    venue_id is the 1,114-handle-rows/1,066-distinct-handles gap — 48
-    handles are shared by two venue rows — so archiving/extraction chaining
-    for a `kind='venue'` target must reach EVERY venue currently pointing at
-    that handle, not just one."""
-    out: dict[str, list[str]] = {}
-    for venue_id, raw_handle in (instagram_handles or {}).items():
-        handle = normalize_handle(raw_handle)
-        if not handle:
-            continue
-        out.setdefault(handle, []).append(venue_id)
-    for ids in out.values():
-        ids.sort()
-    return out
-
-
-def _post_richness(post: dict) -> tuple:
-    """A crude, deterministic "how much does this copy of the post actually
-    carry" score, used only to break a tie between two DIFFERING copies of
-    the same shortcode returned by two streams. More images first, then a
-    longer caption. §Evidence found every duplicated shortcode resolves to
-    one IDENTICAL S3 key (byte-identical payload from both endpoints), so
-    this rarely has to decide anything in practice — the stream-priority
-    tie-break below is what actually resolves the common case."""
-    return (len(post.get("image_urls") or []), len(post.get("caption") or ""))
-
-
 def dedupe_posts_by_shortcode(posts_by_stream: dict[str, list[dict]]) -> list[dict]:
     """§A: merge every stream's KEPT posts into one set keyed by `shortcode`,
     preferring the richer payload when two copies differ, so the chain
@@ -450,22 +420,14 @@ def dedupe_posts_by_shortcode(posts_by_stream: dict[str, list[dict]]) -> list[di
     A post with no shortcode cannot be deduplicated (nothing to key it on)
     and is always kept, from every stream — mirrors this codebase's existing
     "a bad/missing value never disqualifies" convention.
-    """
-    best_by_shortcode: dict[str, dict] = {}
-    order: list[str] = []
-    unkeyable: list[dict] = []
-    for stream in (STREAM_POSTS, STREAM_REELS):
-        for post in posts_by_stream.get(stream, []):
-            shortcode = post.get("shortcode")
-            if not shortcode:
-                unkeyable.append(post)
-                continue
-            if shortcode not in best_by_shortcode:
-                best_by_shortcode[shortcode] = post
-                order.append(shortcode)
-            elif _post_richness(post) > _post_richness(best_by_shortcode[shortcode]):
-                best_by_shortcode[shortcode] = post
-    return [best_by_shortcode[sc] for sc in order] + unkeyable
+
+    A thin, fixed-priority wrapper over `post_dedupe.dedupe_by_shortcode` —
+    see that module for why the mechanism itself was extracted (plans/
+    260811_extract-by-handle.md §A reuses it for a different overlap: the
+    same archived post found under two S3 prefixes)."""
+    return dedupe_by_shortcode([
+        posts_by_stream.get(STREAM_POSTS, []), posts_by_stream.get(STREAM_REELS, []),
+    ])
 
 
 CLASSIFICATION_OUTCOME_CLASSIFIED = "classified"
