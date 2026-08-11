@@ -32,6 +32,8 @@ from app.models.instagram import VenueInstagram
 from app.models.venue import Venue
 from app.services import job_lock
 from app.services.instagram_crawl_service import (
+    OUTCOME_SKIPPED_DISABLED,
+    OUTCOME_SKIPPED_SEEDED,
     STREAM_POSTS,
     STREAM_REELS,
     CrawlServiceConfig,
@@ -45,6 +47,9 @@ from app.services.instagram_crawl_service import (
     dedupe_posts_by_shortcode,
     group_venue_ids_by_handle,
     lock_name_for,
+    reels_already_seeded,
+    reels_skip_reason,
+    resolve_results_limit,
     validate_crontab,
 )
 from tests.rds_fake import InMemoryRdsVenueStore
@@ -535,7 +540,25 @@ class TestReelsSpecificCaps:
         assert calls_by_type["posts"] == 77   # posts untouched by the reels override
         assert calls_by_type["reels"] == 5    # reels' own override wins
 
-    def test_reels_steady_state_falls_back_to_the_posts_cap_when_unset(self):
+    def test_reels_steady_state_cap_resolution_is_unchanged_but_no_longer_reachable(self):
+        """Pre-plans/260811_reels-on-seed-only.md, this asserted a REAL
+        Apify call: reels ran on every steady-state run (cursor already
+        set) and its cap fell back to the posts steady-state cap. That
+        call can no longer happen at all -- reels-on-seed-only's whole
+        point is that once `cursor_reels_at` is set, the reels stream
+        never runs again (Desired Behavior #2 / Acceptance Criteria). What
+        is genuinely unchanged (§Non-goals: "changing... the caps... or
+        the cursors' meaning") is `resolve_results_limit`'s own fallback
+        chain -- proven directly against the pure function below, since
+        `run_target` will never again exercise this branch for reels. The
+        full run is still asserted, but for the NEW behavior: reels is
+        skipped outright, regardless of what its resolved cap would have
+        been.
+        """
+        config = CrawlServiceConfig(default_results_limit=10, default_seed_results_limit=200)
+        target = {"handle": "h", "kind": "venue", "results_limit": 8}
+        assert resolve_results_limit(target, STREAM_REELS, is_seed=False, config=config) == 8
+
         dao = _venue_dao()
         dao.upsert_venue(Venue(venue_id="v1", venue_name="V1", venue_lat=-8.0, venue_lng=-34.9))
         dao.set_venue_instagram(VenueInstagram(venue_id="v1", instagram_handle="reelsfallback2", status="found"))
@@ -549,10 +572,16 @@ class TestReelsSpecificCaps:
 
         _run(service.run_target("reelsfallback2"))
 
-        calls_by_type = {c["results_type"]: c["results_limit"] for c in apify.calls}
-        assert calls_by_type["reels"] == 8  # the POSTS steady-state cap, not the settings default (10)
+        types = {c["results_type"] for c in apify.calls}
+        assert types == {"posts"}, types
 
-    def test_reels_steady_state_uses_its_own_override_over_the_posts_cap(self):
+    def test_reels_steady_state_own_override_cap_resolution_is_unchanged_but_no_longer_reachable(self):
+        """Same update as the sibling test above, for the reels-specific-
+        override case."""
+        config = CrawlServiceConfig(default_results_limit=10, default_seed_results_limit=200)
+        target = {"handle": "h", "kind": "venue", "results_limit": 8, "reels_results_limit": 3}
+        assert resolve_results_limit(target, STREAM_REELS, is_seed=False, config=config) == 3
+
         dao = _venue_dao()
         dao.upsert_venue(Venue(venue_id="v1", venue_name="V1", venue_lat=-8.0, venue_lng=-34.9))
         dao.set_venue_instagram(VenueInstagram(venue_id="v1", instagram_handle="reelsoverride2", status="found"))
@@ -568,8 +597,7 @@ class TestReelsSpecificCaps:
         _run(service.run_target("reelsoverride2"))
 
         calls_by_type = {c["results_type"]: c["results_limit"] for c in apify.calls}
-        assert calls_by_type["posts"] == 8
-        assert calls_by_type["reels"] == 3
+        assert calls_by_type == {"posts": 8}, calls_by_type
 
     def test_reels_falls_all_the_way_through_to_the_settings_default(self):
         """Neither the reels column NOR the posts column is set — reels
@@ -648,6 +676,91 @@ class TestPostsPathUnchangedByReelsCaps:
             == resolve_results_limit(with_reels_steady, "posts", is_seed=False, config=config)
             == 15
         )
+
+
+# ── plans/260811_reels-on-seed-only.md: the reels gate ─────────────────────
+class TestReelsOnSeedOnlyGate:
+    """`reels_skip_reason`/`reels_already_seeded` are pure functions over a
+    target dict — the ONE place this gate is computed, shared by
+    `run_target` (what actually runs) and the admin read model's cost
+    estimate. Covers the plan's own unit test plan: "The gate: reels
+    cursor null, set, and set-with-posts-cursor-null."."""
+
+    def test_runs_when_the_reels_cursor_is_null(self):
+        target = {"crawl_reels": True, "cursor_reels_at": None}
+        assert reels_skip_reason(target) is None
+        assert reels_already_seeded(target) is False
+
+    def test_skips_once_the_reels_cursor_is_set(self):
+        target = {
+            "crawl_reels": True,
+            "cursor_reels_at": datetime(2026, 8, 1, tzinfo=timezone.utc),
+        }
+        assert reels_skip_reason(target) == OUTCOME_SKIPPED_SEEDED
+        assert reels_already_seeded(target) is True
+
+    def test_the_posts_cursor_never_suppresses_a_reels_seed(self):
+        """The two streams keep fully independent gates, matching their
+        independent cursors — the posts cursor advancing must never
+        suppress a reels seed, and this is the case that would prove it
+        wrong: posts already has a cursor, reels does not."""
+        target = {
+            "crawl_reels": True, "cursor_reels_at": None,
+            "cursor_posts_at": datetime(2026, 8, 1, tzinfo=timezone.utc),
+        }
+        assert reels_skip_reason(target) is None
+
+    def test_disabled_is_reported_distinctly_from_already_seeded(self):
+        assert reels_skip_reason({"crawl_reels": False}) == OUTCOME_SKIPPED_DISABLED
+        assert reels_skip_reason({"crawl_reels": False, "cursor_reels_at": None}) == (
+            OUTCOME_SKIPPED_DISABLED
+        )
+
+    def test_an_unparseable_cursor_string_is_treated_as_unset(self):
+        """Mirrors `_as_utc_dt`'s own "a corrupt cursor must not crash the
+        crawl, only be treated as absent" convention — a target read back
+        through a JSON boundary (e.g. the admin API) with a garbled
+        `cursor_reels_at` must still be seedable, not stuck skipped
+        forever."""
+        target = {"crawl_reels": True, "cursor_reels_at": "not-a-date"}
+        assert reels_skip_reason(target) is None
+
+
+def test_a_failed_seeds_bookkeeping_write_leaves_the_reels_cursor_null_and_the_retry_seeds_reels_again():
+    """§4 of the plan's Desired Behavior: "A seed that fails still crawls
+    reels when it is retried." Simulates the exact production shape
+    (`_BookkeepingFailsOnceDao`, the same fake `TestBookkeepingWriteFailure
+    CountsAsAFailure` uses): the scrape succeeds and is billed, but the
+    bookkeeping write that would have recorded `cursor_reels_at` fails, so
+    the cursor -- the ONLY thing the gate reads -- stays null. The retry
+    must therefore seed reels again, not skip it as "already seeded"."""
+    inner = _venue_dao()
+    inner.upsert_venue(Venue(venue_id="v1", venue_name="V1", venue_lat=-8.0, venue_lng=-34.9))
+    inner.set_venue_instagram(VenueInstagram(venue_id="v1", instagram_handle="reelsretry", status="found"))
+    inner.upsert_crawl_target("reelsretry", {"kind": "venue", "cron": "0 22 * * *", "crawl_reels": True})
+    dao = _BookkeepingFailsOnceDao(inner)
+    apify = _FakeApifyClient()
+    apify.program("reelsretry", "posts", [
+        {"shortcode": "p1", "timestamp": "2026-08-08T10:00:00.000Z"},
+    ])
+    apify.program("reelsretry", "reels", [
+        {"shortcode": "r1", "timestamp": "2026-08-08T09:00:00.000Z"},
+    ])
+    service = _service(dao, apify, _FakeBudgetDao())
+
+    with pytest.raises(RuntimeError):
+        _run(service.run_target("reelsretry"))
+
+    row = inner.get_crawl_target("reelsretry")
+    assert row["cursor_reels_at"] is None
+    assert row["cursor_posts_at"] is None
+
+    # The retry: the same wrapper's failure is a one-shot (it is now
+    # disarmed), so this second call's bookkeeping write lands for real.
+    _run(service.run_target("reelsretry"))
+
+    retry_calls = apify.calls[2:]  # after the two calls the first attempt made
+    assert {c["results_type"] for c in retry_calls} == {"posts", "reels"}, retry_calls
 
 
 # ── the budget IS re-read between streams within one run ────────────────────

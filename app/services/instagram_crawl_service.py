@@ -114,6 +114,13 @@ OUTCOME_CREDIT_EXHAUSTED = "credit_exhausted"
 OUTCOME_SKIPPED_DISABLED = "skipped_disabled"
 OUTCOME_SKIPPED_FAILURES = "skipped_failures"
 OUTCOME_SKIPPED_BUDGET = "skipped_budget"
+# plans/260811_reels-on-seed-only.md: the reels stream's `crawl_reels` is on,
+# but its cursor is already set — it already ran its one-time seed, so this
+# run does not pay for it again. Distinct from OUTCOME_SKIPPED_DISABLED
+# (reused for reels below when `crawl_reels` itself is off) so a zero-reels
+# run's `stream_reports["reels"]["outcome"]` always says WHY, without
+# reading code — the plan's own "Error Handling And Observability" ask.
+OUTCOME_SKIPPED_SEEDED = "skipped_seeded"
 OUTCOME_NOT_FOUND = "not_found"
 # The post-run bookkeeping write itself failed (see `run_target`) — results
 # were already scraped and BILLED by the time this can happen, so it is
@@ -873,6 +880,42 @@ def resolve_results_limit(
     return int(value)
 
 
+def reels_already_seeded(target: dict) -> bool:
+    """Whether this target's reels stream has already produced its one-time
+    seed cursor (`cursor_reels_at` set). plans/260811_reels-on-seed-only.md:
+    a reel is also a grid post, so once the posts stream has run once, it
+    already carries almost every reel Apify would return again — measured
+    on a real target at 32 reels results for 1 genuinely new post. Reels are
+    worth paying for only on the seed, when their own cap can reach history
+    the posts seed cap cannot.
+
+    Gated on the CURSOR itself — never a separate "has run" flag — because
+    the cursor stays null until a run's bookkeeping write actually succeeds
+    (see `run_target`'s `OUTCOME_BOOKKEEPING_FAILED` handling below). A
+    flag would have to be unset by hand on every failure path to keep a
+    failed seed retryable; this project has already shipped a bookkeeping
+    write that failed and left a target looking permanently healthy
+    (2026-08-09, entreamigos.praia). Deliberately reads ONLY the reels
+    cursor — the posts cursor advancing must never suppress a reels seed,
+    and the two streams' cursors stay fully independent."""
+    return _as_utc_dt(target.get("cursor_reels_at")) is not None
+
+
+def reels_skip_reason(target: dict) -> Optional[str]:
+    """None when the reels stream should run this call. Otherwise the
+    `OUTCOME_*` this call's reels stream was skipped for — `crawl_reels`
+    off, or the reels seed already ran (`reels_already_seeded`). The ONE
+    place this gate is computed, so `run_target` (what actually runs) and
+    the admin read model's cost estimate (`admin_crawl_router._to_out`,
+    which must not quote an operator for a reels spend that will never
+    happen once already seeded) can never disagree about it."""
+    if not target.get("crawl_reels"):
+        return OUTCOME_SKIPPED_DISABLED
+    if reels_already_seeded(target):
+        return OUTCOME_SKIPPED_SEEDED
+    return None
+
+
 class ScheduledInstagramCrawlService:
     """Orchestrates one crawl target end to end: gate -> bound -> fetch ->
     pinned-post filtering -> cursor advance (success only) -> chaining. See
@@ -1015,7 +1058,12 @@ class ScheduledInstagramCrawlService:
             return {"handle": handle, "outcome": OUTCOME_SKIPPED_FAILURES, "streams": {}}
 
         now = self._now()
-        streams = [STREAM_POSTS] + ([STREAM_REELS] if target.get("crawl_reels") else [])
+        # §Reels-on-seed-only: the gate is the SAME `reels_skip_reason`
+        # pure function the admin read model resolves for its cost
+        # estimate — never re-derived here, so the two can never disagree
+        # about whether a reels spend is coming.
+        skip_reels = reels_skip_reason(target)
+        streams = [STREAM_POSTS] + ([STREAM_REELS] if skip_reels is None else [])
 
         stream_reports: dict[str, dict] = {}
         credit_exhausted = False
@@ -1037,6 +1085,20 @@ class ScheduledInstagramCrawlService:
                 field_name = "cursor_posts_at" if stream == STREAM_POSTS else "cursor_reels_at"
                 cursor_updates[field_name] = stream_report["new_cursor"]
                 new_posts_by_stream[stream] = stream_report["kept"]
+
+        # §Reels-on-seed-only §Error Handling: a zero-reels run must be
+        # legible without reading code — record WHY reels never ran
+        # (disabled vs. already seeded) exactly like every other skip
+        # reason in this module, rather than simply omitting the "reels"
+        # key. `results`/`dropped_pinned`/`kept` are the same zero-valued
+        # shape `_run_stream` itself uses for a refused call
+        # (OUTCOME_SKIPPED_BUDGET above), so callers never have to special-
+        # case this entry's shape.
+        if skip_reels is not None:
+            stream_reports[STREAM_REELS] = {
+                "outcome": skip_reels, "results": 0, "dropped_pinned": 0, "kept": [],
+            }
+            CRAWL_RUNS_TOTAL.labels(handle_kind=kind, result_type=STREAM_REELS, outcome=skip_reels).inc()
 
         total_results = sum(r.get("results", 0) for r in stream_reports.values())
         updates: dict = dict(cursor_updates)

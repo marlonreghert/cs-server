@@ -73,6 +73,7 @@ from app.services.instagram_crawl_service import (
     InvalidCrawlTargetConfig,
     build_cron_trigger,
     group_venue_ids_by_handle,
+    reels_already_seeded,
     resolve_results_limit,
     validate_crontab,
 )
@@ -274,10 +275,22 @@ def _to_out(dao, row: dict) -> dict:
     config = _resolved_config()
     out["effective_results_limit"] = resolve_results_limit(row, STREAM_POSTS, is_seed=False, config=config)
     out["effective_seed_results_limit"] = resolve_results_limit(row, STREAM_POSTS, is_seed=True, config=config)
-    out["effective_reels_results_limit"] = resolve_results_limit(row, STREAM_REELS, is_seed=False, config=config)
-    out["effective_reels_seed_results_limit"] = resolve_results_limit(
-        row, STREAM_REELS, is_seed=True, config=config,
-    )
+    # plans/260811_reels-on-seed-only.md: reels crawl exactly once, on the
+    # target's seed run, and never again once `cursor_reels_at` is set —
+    # `reels_already_seeded` is the SAME gate `run_target` itself resolves
+    # (app/services/instagram_crawl_service.py), so an operator sizing a
+    # NEXT run is quoted 0, not a resolved-but-now-unreachable cap for a
+    # stream that will not run.
+    if reels_already_seeded(row):
+        out["effective_reels_results_limit"] = 0
+        out["effective_reels_seed_results_limit"] = 0
+    else:
+        out["effective_reels_results_limit"] = resolve_results_limit(
+            row, STREAM_REELS, is_seed=False, config=config,
+        )
+        out["effective_reels_seed_results_limit"] = resolve_results_limit(
+            row, STREAM_REELS, is_seed=True, config=config,
+        )
     return out
 
 

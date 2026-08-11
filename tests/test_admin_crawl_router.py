@@ -11,6 +11,8 @@ tests/test_instagram_crawl_service.py (genuinely concurrent, using the REAL
 scheduled-vs-run-now cross-mechanism lock)."""
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -173,6 +175,36 @@ def test_effective_caps_resolve_the_fallback_chain_the_console_can_use_for_a_wor
 
     worst_case_first_run = body["effective_seed_results_limit"] + body["effective_reels_seed_results_limit"]
     assert worst_case_first_run == 300
+
+
+def test_effective_reels_caps_are_zero_once_reels_have_already_seeded():
+    """plans/260811_reels-on-seed-only.md: reels crawl exactly once, on the
+    seed run, and never again once `cursor_reels_at` is set — an operator
+    sizing the NEXT run must be quoted 0 for reels, not a resolved-but-
+    now-unreachable cap for a stream that will not run. Posts' own caps
+    are untouched — the two streams' cost estimates stay independent, same
+    as their cursors."""
+    client, dao = _client()
+    resp = client.post("/admin/crawl-targets", json={
+        "handle": "alreadyseededreels", "kind": "venue", "cron": "0 22 * * *",
+        "crawl_reels": True, "seed_results_limit": 90, "reels_seed_results_limit": 150,
+    })
+    assert resp.status_code == 201, resp.text
+    body = resp.json()
+    # Before any cursor is set, the estimate resolves normally.
+    assert body["effective_reels_seed_results_limit"] == 150
+    assert body["effective_reels_results_limit"] == 10
+
+    dao.update_crawl_target("alreadyseededreels", {
+        "cursor_reels_at": datetime(2026, 8, 1, tzinfo=timezone.utc),
+    })
+    resp2 = client.get("/admin/crawl-targets/alreadyseededreels")
+    assert resp2.status_code == 200, resp2.text
+    body2 = resp2.json()
+    assert body2["effective_reels_seed_results_limit"] == 0
+    assert body2["effective_reels_results_limit"] == 0
+    # Posts' own caps are unaffected by the reels-side cursor.
+    assert body2["effective_seed_results_limit"] == 90
 
 
 def test_patch_missing_target_is_404():
