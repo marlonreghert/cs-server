@@ -287,6 +287,7 @@ def _build_rds_layer(context) -> None:
     from app.services.venue_eligibility import EligibilityConfig
     from app.services.vibe_modes_config import validate_vibe_modes_config
     from app.models.venue_category import validate_category_map_config
+    from app.services.config_validation import validate_instagram_discovery_config
 
     def _validate_eligibility(value):
         # Validate (raise on invalid) but persist the RAW body, byte-compatible
@@ -302,6 +303,7 @@ def _build_rds_layer(context) -> None:
             "force_update": validate_force_update_config,
             "vibe_modes": validate_vibe_modes_config,
             "venue_category_map": validate_category_map_config,
+            "instagram_discovery": validate_instagram_discovery_config,
         },
     )
     # The generic PUT/GET /admin/config/{key} routes read the service off the

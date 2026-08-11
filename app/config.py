@@ -305,6 +305,17 @@ class Settings(BaseSettings):
     # ambiguous band.
     # The judge settles candidates the cheap signals cannot. Opt-in: it is the
     # only part of the cascade that costs money per venue beyond the paid search.
+    # FALLBACK/BOOTSTRAP ONLY for the add-time path (plans/260811_instagram-
+    # discovery-admin-flags.md): AddVenueHandler resolves the live value from
+    # admin config (key "instagram_discovery", field "judge_enabled") fresh on
+    # every add and falls back to THIS setting only when that key is absent or
+    # the field is unset. This flag no longer gates whether Container builds the
+    # judge collaborator at all — see Container._build_instagram_judge, which
+    # now constructs on OPENAI_API_KEY presence alone, because a runtime
+    # admin-panel enable needs something to enable. The whole-catalogue
+    # operator run does NOT read this setting; it takes its own judge_enabled
+    # from the trigger dialog's per-run config (admin_trigger_router.py
+    # JOB_REGISTRY["instagram"]["default_config"]).
     instagram_judge_enabled: bool = False
     # Worth a fraction of a cent to settle. Deliberately BELOW instagram_min_confidence:
     # a paid-search candidate tops out at 0.60 while the probe is blocked, and the
@@ -313,6 +324,15 @@ class Settings(BaseSettings):
     # Google-search tier: the only source that reaches a venue with no web
     # presence. Paid per venue, so opt-in, and it can never accept a handle on
     # its own — the judge must confirm it (see PROVENANCE_WEIGHT).
+    # FALLBACK/BOOTSTRAP ONLY for the add-time path (plans/260811_instagram-
+    # discovery-admin-flags.md): AddVenueHandler resolves the live value from
+    # admin config (key "instagram_discovery", field "google_search_enabled")
+    # fresh on every add and falls back to THIS setting only when that key is
+    # absent or the field is unset. This flag no longer gates whether Container
+    # builds the google-search collaborator at all — see
+    # Container._build_google_search_source, which now constructs on
+    # APIFY_API_TOKEN presence alone, because a runtime admin-panel enable
+    # needs something to enable.
     instagram_google_search_enabled: bool = False
     instagram_google_search_actor: str = "apify~google-search-scraper"
     instagram_google_search_results: int = 10
@@ -325,9 +345,12 @@ class Settings(BaseSettings):
     # inline right after a venue is created/newly geo-linked so a handle
     # reaches serving without waiting on the full cascade run, which nothing
     # schedules. Kill switch for the whole hook — default on; the cascade
-    # itself still needs instagram_google_search_enabled=true (+ an Apify
-    # token) and instagram_judge_enabled=true to reach beyond the three free
-    # sources — see AddVenueHandler.ADD_VENUE_INSTAGRAM_CASCADE_CONFIG.
+    # itself still needs the Google-search tier and the judge resolved enabled
+    # (admin config "instagram_discovery", falling back to
+    # instagram_google_search_enabled / instagram_judge_enabled above) plus
+    # their credentials to reach beyond the three free sources — see
+    # AddVenueHandler._resolve_instagram_discovery_flags and
+    # plans/260811_instagram-discovery-admin-flags.md.
     add_venue_instagram_enabled: bool = True
     # Inline budget for the add path. vibes_bot's admin-add proxy
     # (ADD_VENUE_PROXY_TIMEOUT_SECONDS) gives the whole add 90s and the

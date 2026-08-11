@@ -111,6 +111,16 @@ def step_discovery_enabled(context):
     "Google-search tier, and the judge"
 )
 def step_cascade_configured(context):
+    # plans/260811_instagram-discovery-admin-flags.md: the add-time cascade
+    # config is now RESOLVED per add (admin config, falling back to these two
+    # Settings) rather than hardcoded True. This feature's scenarios write no
+    # "instagram_discovery" admin config, so — to keep meaning "the
+    # Google-search tier and the judge are available and attempted", exactly
+    # as it did before that plan — this fixture must also enable the Settings
+    # fallback, not just wire the fake collaborators.
+    _override_setting(context, "instagram_google_search_enabled", True)
+    _override_setting(context, "instagram_judge_enabled", True)
+
     context.ig_google_listing = _FakeWebsiteSource()
     context.ig_archive = _FakeWebsiteSource()
     context.ig_venue_website = _FakeWebsiteSource()

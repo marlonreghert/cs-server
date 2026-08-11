@@ -42,6 +42,7 @@ test-unit:
 		tests/test_admin_config.py \
 		tests/test_force_update_validator.py \
 		tests/test_vibe_modes_config.py \
+		tests/test_config_validation.py \
 		tests/test_redis_projection.py \
 		tests/test_eligibility_serving_view_parity.py \
 		tests/test_reactivation_migration.py \

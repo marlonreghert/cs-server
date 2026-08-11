@@ -1,4 +1,3 @@
-@wip
 Feature: Control add-time Instagram discovery tiers from admin config
 
   As the operator who owns the budget
