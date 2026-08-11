@@ -45,6 +45,15 @@ from app.services.venue_eligibility import haversine_km
 METHOD_HANDLE_MENTION = "handle_mention"
 METHOD_LOCATION_TAG = "location_tag"
 METHOD_NAME_MATCH = "name_match"
+# plans/260811_merge-unresolved-into-resolved-sibling.md §D: NOT one of this
+# ladder's four rungs — this event's OWN post never resolved a venue at all.
+# Recorded on a resolved event's `linked_by` when it absorbs a venue-less
+# handle-identity sibling (app.services.event_merge), so an operator auditing
+# the link can tell "the post said so" (a rung above) from "a sibling post
+# said so" (this one) — the SAME `linked_by` column, per migration 0024's own
+# docstring ("a resolution method name for an automatic one"), never a
+# parallel field.
+METHOD_SIBLING_MERGE = "sibling_merge"
 
 # Stored in events.event.location_resolution (migration 0024) — exactly the
 # three values the column's docstring names.

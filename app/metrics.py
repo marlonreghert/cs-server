@@ -1351,16 +1351,34 @@ EVENT_SOURCES_PER_EVENT = Histogram(
     buckets=(1, 2, 3, 5, 8, 13, 20),
 )
 
-# Every cross-post merge attempt, by outcome — the runtime half of
-# 0026_event_sources's one-time historical collapse. `no_identity` covers both
-# a missing venue and a missing date (never merged, by design — see
-# app.services.event_merge.compute_event_identity); `two_confirmed` is the
-# guard that leaves an ambiguous group alone for an operator to resolve
-# instead of guessing which of two confirmed rows is "the" event.
+# Every cross-post merge attempt, by WHICH identity found the group and by
+# outcome — plans/260811_merge-unresolved-into-resolved-sibling.md's own
+# observability ask: the new handle-identity path's volume must be visible
+# from the first run, separate from the pre-existing venue-identity path.
+#
+# `identity="venue"` (the original path, app.services.event_merge.
+# compute_event_identity — runtime half of 0026_event_sources's one-time
+# historical collapse): `no_identity` covers both a missing venue and a
+# missing date; `two_confirmed` is the guard that leaves an ambiguous group
+# alone for an operator to resolve instead of guessing which of two
+# confirmed rows is "the" event.
+#
+# `identity="handle"` (compute_handle_identity — attaches a venue-less event
+# to a resolved sibling from the SAME account): `no_identity` is a missing
+# handle/date; `no_match` is no resolved-or-unresolved counterpart sharing
+# the identity; `ambiguous_venue` is the refusal a shared handle mapping to
+# more than one venue requires (WATCH this one — a rising count means the
+# attribution upstream is unstable, not that this merge is broken);
+# `confirmed_member`/`operator_edited` are the SAME per-candidate group
+# protections a venue-identity merge already honours, extended rather than
+# bypassed, each counted by which reason refused that one candidate.
 EVENT_MERGE_TOTAL = Counter(
     "event_merge_total",
-    "Cross-post event identity merge attempts, by outcome",
-    ["outcome"],  # merged, no_identity, no_match, two_confirmed
+    "Cross-post event identity merge attempts, by identity kind and outcome",
+    ["identity", "outcome"],
+    # identity=venue: merged, no_identity, no_match, two_confirmed
+    # identity=handle: merged, no_identity, no_match, ambiguous_venue,
+    #                  confirmed_member, operator_edited
 )
 
 # =============================================================================

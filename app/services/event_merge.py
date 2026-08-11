@@ -46,6 +46,49 @@ Metrópole" will not merge — there is no stronger signal available without
 fuzzy matching, and fuzzy matching would also merge genuinely different
 same-night events at the same venue, which is the worse error.
 
+## Handle identity (plans/260811_merge-unresolved-into-resolved-sibling.md)
+
+`compute_event_identity` returning `None` for a venue-less event is correct
+and stays exactly as it is — but it is not the only signal available. Two
+posts from the SAME Instagram account, same calendar date, same normalized
+title are the same announcement whether or not both posts named a venue: a
+holiday-programme flyer lists the weeks AND the activities, a second post
+lists the activities alone, and only one of the two happens to name the
+venue. `compute_handle_identity` is that second key —
+`(source_handle, starts_at::date, normalize_title(title))`, reusing the
+IDENTICAL `normalize_title` and date-truncation `compute_event_identity`
+already uses (one normalisation, never two) — used ONLY to attach an event
+with no `venue_id` to a resolved sibling that already shares it. `starts_at`
+is still required: a title alone is not an announcement, and the date is
+what makes two posts about the same night recognisable at all.
+
+**Direction is structural, never incidental.** The resolved member is
+ALWAYS the canonical, the unresolved member is ALWAYS the duplicate —
+`_merge_handle_group` picks the canonical via `choose_canonical` over the
+RESOLVED subgroup only (never a mix of resolved and unresolved event ids),
+so a venue-less event can never win regardless of which of a pair happens to
+be processed first, which ULID happens to sort first, or which arrived at
+the DAO last. This project has shipped exactly this ordering bug twice
+before — an event attributed to whichever venue was processed last, and a
+cursor advanced before the work it guarded — so `_merge_handle_group` is
+called from BOTH `_merge_one` branches (a touched event with no venue_id
+searches outward for a resolved sibling; a touched, already venue-identified
+event ALSO searches for a waiting unresolved sibling), and re-derives its
+whole candidate set fresh every call rather than trusting anything cached
+from an earlier call — the same final set of facts must produce the same
+outcome no matter which fact was touched last.
+
+**Refuses to guess.** A handle can legitimately map to more than one venue
+(`@entreamigosobode` does) — when the matching resolved siblings disagree on
+`venue_id`, or a matching resolved subgroup itself has more than one
+protected (confirmed/manually-linked) member, `_merge_handle_group` merges
+NOTHING and leaves every member — resolved and unresolved alike — exactly as
+it was. Per unresolved candidate, the SAME group protections a resolved-to-
+resolved merge already honours are extended, never bypassed: `_is_protected`
+(confirmed or manually-linked) and an `operator_edited_fields` that names
+`venue_id` (an operator who cleared or set it made a decision) both refuse
+that one candidate without touching the rest of the group.
+
 ## Canonical selection
 
 The SOLE confirmed-or-manually-linked event in the group, when there is
@@ -109,11 +152,13 @@ from app.services.event_identity import normalize_title
 from app.services.event_reconciliation import (
     PROTECTABLE_EVENT_FIELDS as _SCALAR_MERGE_FIELDS,
     REVIEW_REASON_DIVERGES_FROM_CONFIRMED,
+    REVIEW_REASON_UNRESOLVED_VENUE,
     apply_operator_field_protection,
     event_field_is_absent as _is_empty,
     union_attractions as _union_attractions,
     union_lineup as _union_lineup,
 )
+from app.services.event_venue_resolution import METHOD_SIBLING_MERGE, RESOLUTION_AUTO
 
 # Flagged on a (non-confirmed) canonical event when the fold hit a genuine,
 # unresolvable scalar disagreement between two sources — never silently
@@ -153,6 +198,25 @@ def compute_event_identity(
     if not venue_id or starts_at is None:
         return None
     return (venue_id, starts_at.date(), normalize_title(title))
+
+
+def compute_handle_identity(event: dict) -> Optional[tuple]:
+    """`(source_handle, calendar date, normalized title)` — see the module
+    docstring's "Handle identity" section. Used ONLY to attach an event with
+    no `venue_id` to a resolved sibling from the SAME account; never a
+    replacement for `compute_event_identity`, which stays the identity for
+    every resolved-to-resolved merge.
+
+    Reuses `normalize_title` and the `starts_at.date()` truncation
+    `compute_event_identity` already uses — one normalisation, never two.
+    `None` when `source_handle` or `starts_at` is missing: a title alone is
+    not an announcement, and an item with no date has no handle identity
+    either, exactly as it has no venue identity."""
+    handle = event.get("source_handle")
+    starts_at = event.get("starts_at")
+    if not handle or starts_at is None:
+        return None
+    return (handle, starts_at.date(), normalize_title(event.get("title")))
 
 
 def _is_protected(event: dict) -> bool:
@@ -290,6 +354,149 @@ def merge_event_fields(canonical: dict, duplicate: dict) -> tuple[dict, Optional
     return changed, review_reason
 
 
+def _fold_review_reason(canonical_reason: Optional[str], duplicate_reason: Optional[str]) -> Optional[str]:
+    """The handle-merge path's OWN review_reason rule (plans/260811_merge-
+    unresolved-into-resolved-sibling.md §"Say where the venue came from" —
+    the venue-identity path never needs this: two events reaching THAT merge
+    already both have a venue, so `unresolved_venue` never appears on either
+    side). Unions both sides' `"; "`-separated reasons (the exact join
+    `event_reconciliation.reconcile_post_events` writes), dropping
+    `REVIEW_REASON_UNRESOLVED_VENUE` — the ONE reason a successful handle
+    merge always resolves, since the duplicate's venue gap is exactly what
+    adopting the canonical's venue just filled. Any OTHER reason the
+    duplicate carried (e.g. a collapsed date range) survives, in first-seen
+    order, never repeated when both sides already stated it."""
+    reasons: list[str] = []
+    for value in (canonical_reason, duplicate_reason):
+        for reason in (value or "").split("; "):
+            if reason and reason != REVIEW_REASON_UNRESOLVED_VENUE and reason not in reasons:
+                reasons.append(reason)
+    return "; ".join(reasons) if reasons else None
+
+
+def _finish_absorption(venue_dao, duplicate_id: str, canonical_id: str, absorbed: set[str]) -> None:
+    """Step 3+4 of any merge, venue-identity or handle-identity alike: re-
+    point the duplicate's sources at the canonical event, drop its now-stale
+    link candidates (ephemeral scoring evidence, recomputed on the next
+    crawl — never provenance, so clearing rather than reattaching is
+    correct, not lossy), and hard-delete the now-sourceless duplicate row.
+    Factored out so the two merge directions can never drift on what
+    "absorbed" means."""
+    venue_dao.reattach_event_sources(duplicate_id, canonical_id)
+    venue_dao.replace_event_venue_link_candidates(duplicate_id, [])
+    venue_dao.delete_event(duplicate_id)
+    absorbed.add(duplicate_id)
+
+
+def _absorb_unresolved_sibling(
+    venue_dao, canonical: dict, duplicate: dict, absorbed: set[str], now: datetime,
+) -> dict:
+    """Fold `duplicate` (an eligible, venue-less handle-identity match) into
+    `canonical` (the resolved sibling it adopts) — the SAME field merge
+    (`merge_event_fields`) and reattach/delete bookkeeping
+    (`_finish_absorption`) a venue-identity merge already uses, so the two
+    directions can never drift on what a merge does. Two things ONLY a
+    handle merge needs on top:
+      - `duplicate`'s own review reasons fold in via `_fold_review_reason`
+        (dropping `unresolved_venue`, keeping the rest) — UNLESS canonical
+        is confirmed, in which case `merge_event_fields`'s own confirmed
+        branch already owns review_reason (an operator's word, or a
+        genuine divergence from it) and nothing here should override that;
+      - the adopted venue is recorded as such (module docstring's "Handle
+        identity" section, plan §D) via `location_resolution`/`linked_by`
+        — UNLESS canonical is already manually linked, which must never be
+        overwritten by an automatic path (the SAME "manual outranks the
+        model" rule `_is_protected`/`reconcile_post_events` already apply
+        everywhere else a link can be touched).
+
+    Returns the refreshed canonical row.
+    """
+    changed_fields, review_reason = merge_event_fields(canonical, duplicate)
+    update: dict = dict(changed_fields)
+    if canonical.get("status") != STATUS_CONFIRMED:
+        review_reason = _fold_review_reason(review_reason, duplicate.get("review_reason"))
+    if review_reason != canonical.get("review_reason"):
+        update["review_reason"] = review_reason
+    if canonical.get("location_resolution") != RESOLUTION_MANUAL:
+        update["location_resolution"] = RESOLUTION_AUTO
+        update["linked_by"] = METHOD_SIBLING_MERGE
+        update["linked_at"] = now
+    if update:
+        venue_dao.update_event(canonical["event_id"], update)
+        canonical = venue_dao.get_event(canonical["event_id"])
+    _finish_absorption(venue_dao, duplicate["event_id"], canonical["event_id"], absorbed)
+    return canonical
+
+
+def _merge_handle_group(venue_dao, event: dict, absorbed: set[str], now: datetime) -> None:
+    """Look for a handle-identity match for `event` — called from BOTH
+    `_merge_one` branches (see the module docstring's "Direction is
+    structural" note), so the outcome never depends on whether the
+    resolved or the unresolved half of a pair happens to be touched, or
+    which of them was processed first.
+
+    Re-derives the WHOLE candidate group fresh every call — `event` plus
+    every OTHER not-yet-absorbed event sharing its handle identity — rather
+    than trusting anything about which side triggered this call, so the
+    ambiguity check below sees every resolved sibling that exists at this
+    moment regardless of arrival order.
+    """
+    identity = compute_handle_identity(event)
+    if identity is None:
+        EVENT_MERGE_TOTAL.labels(identity="handle", outcome="no_identity").inc()
+        return
+    handle, calendar_date, normalized_title = identity
+
+    group = [event] + [
+        candidate for candidate in venue_dao.list_events_by_handle(handle)
+        if candidate["event_id"] != event["event_id"]
+        and candidate["event_id"] not in absorbed
+        and candidate.get("starts_at") is not None
+        and candidate["starts_at"].date() == calendar_date
+        and normalize_title(candidate.get("title")) == normalized_title
+    ]
+
+    resolved = [member for member in group if member.get("venue_id")]
+    unresolved = [member for member in group if not member.get("venue_id")]
+    if not resolved or not unresolved:
+        EVENT_MERGE_TOTAL.labels(identity="handle", outcome="no_match").inc()
+        return
+
+    # A handle can legitimately map to more than one venue — refuse rather
+    # than guess which resolved sibling is "the" venue. `choose_canonical`
+    # is reused (not reimplemented) over the resolved subgroup ONLY: every
+    # member of `resolved` already agrees on venue_id when there is exactly
+    # one distinct value, exactly the precondition `choose_canonical` is
+    # built for.
+    if len({member["venue_id"] for member in resolved}) > 1:
+        EVENT_MERGE_TOTAL.labels(identity="handle", outcome="ambiguous_venue").inc()
+        return
+    canonical = choose_canonical(resolved)
+    if canonical is None:
+        EVENT_MERGE_TOTAL.labels(identity="handle", outcome="ambiguous_venue").inc()
+        return
+
+    merged_any = False
+    for duplicate in unresolved:
+        # The SAME group protections a resolved-to-resolved merge already
+        # honours, extended here rather than bypassed: an operator's
+        # confirmation/manual link, or an operator_edited_fields entry for
+        # venue_id (cleared or set — either way a decision), refuses THIS
+        # candidate without touching the rest of the group.
+        if _is_protected(duplicate):
+            EVENT_MERGE_TOTAL.labels(identity="handle", outcome="confirmed_member").inc()
+            continue
+        if "venue_id" in (duplicate.get("operator_edited_fields") or []):
+            EVENT_MERGE_TOTAL.labels(identity="handle", outcome="operator_edited").inc()
+            continue
+        canonical = _absorb_unresolved_sibling(venue_dao, canonical, duplicate, absorbed, now)
+        merged_any = True
+
+    if merged_any:
+        EVENT_MERGE_TOTAL.labels(identity="handle", outcome="merged").inc()
+        EVENT_SOURCES_PER_EVENT.observe(len(venue_dao.list_event_sources(canonical["event_id"])))
+
+
 def merge_touched_events(venue_dao, event_ids: list[str], now: datetime) -> None:
     """Called once per post, immediately after
     `event_reconciliation.reconcile_post_events` persists it, with every
@@ -299,20 +506,20 @@ def merge_touched_events(venue_dao, event_ids: list[str], now: datetime) -> None
     historically, so a post extracted after this feature ships never
     re-fragments an identity a previous post already established.
 
-    `now` is accepted for signature symmetry with the rest of the
-    reconciliation pipeline (and to leave room for a future
-    last-merged-at bookkeeping column); the merge itself is driven entirely
-    by each event's own already-stored `last_seen_at`.
+    `now` feeds `_absorb_unresolved_sibling`'s `linked_at` bookkeeping
+    (plans/260811_merge-unresolved-into-resolved-sibling.md §D) when a
+    handle merge adopts a venue — the merge decision itself is still driven
+    entirely by each event's own already-stored `last_seen_at`
+    (`_recency`), never by `now`.
     """
-    del now
     absorbed: set[str] = set()
     for event_id in event_ids:
         if event_id in absorbed:
             continue
-        _merge_one(venue_dao, event_id, absorbed)
+        _merge_one(venue_dao, event_id, absorbed, now)
 
 
-def _merge_one(venue_dao, event_id: str, absorbed: set[str]) -> None:
+def _merge_one(venue_dao, event_id: str, absorbed: set[str], now: datetime) -> None:
     event = venue_dao.get_event(event_id)
     if event is None:
         return  # already absorbed by an earlier event_id in this same call
@@ -321,7 +528,13 @@ def _merge_one(venue_dao, event_id: str, absorbed: set[str]) -> None:
         event.get("venue_id"), event.get("starts_at"), event.get("title"),
     )
     if identity is None:
-        EVENT_MERGE_TOTAL.labels(outcome="no_identity").inc()
+        # No venue_id (with a real starts_at) is the ONE case a handle
+        # identity can still apply — see the module docstring. No starts_at
+        # at all has no identity of either kind.
+        if event.get("venue_id") is None and event.get("starts_at") is not None:
+            _merge_handle_group(venue_dao, event, absorbed, now)
+        else:
+            EVENT_MERGE_TOTAL.labels(identity="venue", outcome="no_identity").inc()
         return
 
     siblings = [
@@ -333,13 +546,17 @@ def _merge_one(venue_dao, event_id: str, absorbed: set[str]) -> None:
         ) == identity
     ]
     if not siblings:
-        EVENT_MERGE_TOTAL.labels(outcome="no_match").inc()
+        EVENT_MERGE_TOTAL.labels(identity="venue", outcome="no_match").inc()
+        # This event is still a solo resolved event — it may itself be the
+        # resolved sibling a handle-identity match is waiting for (see the
+        # module docstring's "Direction is structural" note).
+        _merge_handle_group(venue_dao, event, absorbed, now)
         return
 
     group = [event] + siblings
     canonical = choose_canonical(group)
     if canonical is None:
-        EVENT_MERGE_TOTAL.labels(outcome="two_confirmed").inc()
+        EVENT_MERGE_TOTAL.labels(identity="venue", outcome="two_confirmed").inc()
         return
 
     canonical_id = canonical["event_id"]
@@ -353,20 +570,17 @@ def _merge_one(venue_dao, event_id: str, absorbed: set[str]) -> None:
         if update:
             venue_dao.update_event(canonical_id, update)
             canonical = venue_dao.get_event(canonical_id)
-        venue_dao.reattach_event_sources(other["event_id"], canonical_id)
-        # Candidate rows are ephemeral scoring evidence, recomputed on the
-        # next crawl — never provenance, so clearing them (rather than
-        # reattaching) before the hard delete below is correct, not lossy.
-        venue_dao.replace_event_venue_link_candidates(other["event_id"], [])
-        venue_dao.delete_event(other["event_id"])
-        absorbed.add(other["event_id"])
+        _finish_absorption(venue_dao, other["event_id"], canonical_id, absorbed)
 
     absorbed.add(canonical_id)
-    EVENT_MERGE_TOTAL.labels(outcome="merged").inc()
+    EVENT_MERGE_TOTAL.labels(identity="venue", outcome="merged").inc()
     EVENT_SOURCES_PER_EVENT.observe(len(venue_dao.list_event_sources(canonical_id)))
+
+    canonical = venue_dao.get_event(canonical_id)
+    _merge_handle_group(venue_dao, canonical, absorbed, now)
 
 
 __all__ = [
-    "compute_event_identity", "choose_canonical", "merge_event_fields",
-    "merge_touched_events", "REVIEW_REASON_SOURCES_DISAGREE",
+    "compute_event_identity", "compute_handle_identity", "choose_canonical",
+    "merge_event_fields", "merge_touched_events", "REVIEW_REASON_SOURCES_DISAGREE",
 ]

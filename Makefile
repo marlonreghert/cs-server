@@ -99,6 +99,7 @@ test-unit:
 		tests/test_event_cover_presign.py \
 		tests/test_event_reconciliation.py \
 		tests/test_event_merge.py \
+		tests/test_event_merge_handle_identity.py \
 		tests/test_event_sources_migration.py \
 		tests/test_post_items_migration.py \
 		tests/test_post_category.py \
