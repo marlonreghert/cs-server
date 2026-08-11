@@ -568,6 +568,7 @@ class Container:
         from app.services.venue_eligibility import EligibilityConfig
         from app.services.vibe_modes_config import validate_vibe_modes_config
         from app.models.venue_category import validate_category_map_config
+        from app.models.post_category import validate_post_category_vocabulary_config
         from app.services.event_venue_targeting import (
             validate_event_candidate_categories_config,
         )
@@ -585,6 +586,12 @@ class Container:
                 "vibe_modes": validate_vibe_modes_config,
                 "venue_category_map": validate_category_map_config,
                 "event_candidate_categories": validate_event_candidate_categories_config,
+                # plans/260811_post-items-and-categories.md §C: the post-
+                # item category vocabulary — editable through the SAME
+                # generic admin-config CRUD route every other key here uses,
+                # no dedicated endpoint (see event_targeting_summary's own
+                # comment on admin_trigger_router.py for the precedent).
+                "post_category_vocabulary": validate_post_category_vocabulary_config,
             },
         )
 
@@ -634,6 +641,12 @@ class Container:
                 api_key=settings.openai_api_key,
                 model=settings.event_extraction_model,
                 max_completion_tokens=settings.event_extraction_max_tokens,
+                # plans/260811_post-items-and-categories.md §C: steers the
+                # model with the LIVE admin-configured category vocabulary
+                # (app.models.post_category), same Redis mirror
+                # AdminConfigService/event_venue_targeting_service already
+                # read from.
+                redis_client=self.redis_client.client,
             )
             self.event_extraction_service = EventExtractionService(
                 venue_dao=self.pipeline_repository,
@@ -645,6 +658,9 @@ class Container:
                 min_confidence=settings.event_extraction_min_confidence,
                 flyer_confidence_floor=settings.photo_classification_confidence,
                 max_events_per_post=settings.event_extraction_max_events_per_post,
+                # plans/260811_post-items-and-categories.md §C: canonicalizes
+                # each stored `category` against the SAME live vocabulary.
+                redis_client=self.redis_client.client,
             )
             logger.info(
                 f"[Container] Event extraction service initialized "
@@ -703,6 +719,9 @@ class Container:
                 margin=settings.promoter_link_margin,
                 min_confidence=settings.event_extraction_min_confidence,
                 max_events_per_post=settings.event_extraction_max_events_per_post,
+                # plans/260811_post-items-and-categories.md §C: canonicalizes
+                # each stored `category` against the SAME live vocabulary.
+                redis_client=self.redis_client.client,
             )
             logger.info("[Container] Promoter crawl service initialized")
         else:

@@ -1,75 +1,51 @@
 Feature: Say what a post actually is, and attribute it once the model has read it
   Not every post that mentions a weekday and a time announces an event — a
-  lunch special reads the same way. The model must say what a post is, only
-  events may enter the event flow, and a shared handle's venue must be chosen
-  from the model's own reading of the post rather than guessed beforehand.
+  lunch special reads the same way. The model must say what a post is, and a
+  shared handle's venue must be chosen from the model's own reading of the
+  post rather than guessed beforehand.
 
-  A post classified as anything other than an event produces no event row at
-  all: events, promotions and menus are separate entities (only events are
-  built here), so a non-event is counted and logged, never persisted as a
-  half-built event.
+  The model's `kind` answer is what a post's `post_type` is stored as.
+  plans/260811_post-items-and-categories.md retires this feature's original
+  "a non-event produces no row at all" behaviour: what a post classifies as
+  now determines its TYPE, never whether it is persisted at all — see
+  tests/bdd/enrichment/post-items-and-categories.feature for the type/
+  persistence/queue coverage that replaced the "Classify ... as ..." and
+  "A non-event never reaches ..." scenarios this file used to carry. What
+  remains here is attribution (§C) and recurrence (§D), which that plan does
+  not touch, plus the two classification edge cases (missing/unrecognised
+  kind) that are specific to how THIS extraction path reads the model's
+  answer.
 
   Background:
     Given the event extraction pipeline is configured for a known venue
 
   # --- What a post is ------------------------------------------------------
 
-  Scenario: Classify a weekday lunch special as a menu item
-    Given a post announcing a dish available on weekdays between set hours
-    When the post is extracted
-    Then the extraction is counted as a menu item
-    And no event is recorded for the post
-
-  Scenario: Classify an offer as a promotion
-    Given a post announcing a discount for a group of customers
-    When the post is extracted
-    Then the extraction is counted as a promotion
-    And no event is recorded for the post
-
   Scenario: Classify a DJ night as an event
     Given a post announcing a DJ night on a stated date
     When the post is extracted
     Then the post is recorded as an event
-
-  Scenario: Classify a plain food photograph as food
-    Given a post showing a dish with no offer and no date
-    When the post is extracted
-    Then the extraction is counted as food
-    And no event is recorded for the post
 
   Scenario: Prefer event when a post is both an event and an offer
     Given a post announcing a show on a stated date with a drinks offer
     When the post is extracted
     Then the post is recorded as an event
 
-  # --- What reaches a human ------------------------------------------------
-
-  Scenario: A non-event never reaches the review queue
-    Given a post announcing a discount for a group of customers
-    When the post is extracted
-    And the review queue is listed
-    Then no event for that post is in the queue
-
-  Scenario: A non-event never appears in the events list either
-    Given a post announcing a discount for a group of customers
-    When the post is extracted
-    And every event is listed
-    Then no event for that post is in the list
-
   Scenario: Treat a missing kind as an event
     Given a post whose extraction response omits a kind
     When the post is extracted
     Then that post's event is present in the review queue
 
-  Scenario: Treat an unrecognised kind as an event
+  Scenario: Treat an unrecognised kind as still needing review like any other
     Given a post whose extraction response names a kind this pipeline does not know
     When the post is extracted
     Then that post's event is present in the review queue
 
-  # Note: "let an operator correct a misclassified post" is not covered here.
-  # No events.event row exists for a non-event post, so there is nothing for
-  # an operator to correct through the admin API today — see the plan's §B
-  # for the accepted gap and the re-extraction recovery route.
+  # Note: "let an operator correct a misclassified post" is now covered by
+  # tests/bdd/enrichment/post-items-and-categories.feature's "Let an
+  # operator correct a misclassified item" — every post_type is persisted
+  # and PATCHable now, so the gap this note used to document no longer
+  # exists.
 
   # --- Attributing a venue after extraction --------------------------------
 

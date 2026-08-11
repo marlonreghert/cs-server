@@ -50,7 +50,13 @@ from app.metrics import (
     EVENT_REVIEW_QUEUE_DEPTH,
     PROMOTER_CRAWL_POSTS_TOTAL,
 )
-from app.models.event_kind import NON_EVENT_KINDS
+from app.models.event_kind import resolve_post_type
+from app.models.post_category import (
+    canonicalize_category,
+    is_in_vocabulary,
+    load_post_category_vocabulary,
+    record_off_vocabulary_category,
+)
 from app.services.archive_sources import SOURCE_INSTAGRAM_POSTS
 from app.services.event_caption_matcher import matches_event_marker
 from app.services.event_date_resolver import (
@@ -63,7 +69,6 @@ from app.services.event_extraction_service import (
     KIND_LABEL_MIXED,
     KIND_LABEL_NOT_APPLICABLE,
     KIND_LABEL_UNKNOWN,
-    OUTCOME_NOT_AN_EVENT as EES_OUTCOME_NOT_AN_EVENT,
 )
 from app.services.event_merge import merge_touched_events
 from app.services.event_reconciliation import (
@@ -205,6 +210,12 @@ class PromoterCrawlService:
         min_confidence: float = 0.5,
         max_events_per_post: int = DEFAULT_MAX_EVENTS_PER_POST,
         now_provider=None,
+        # plans/260811_post-items-and-categories.md §C: optional so every
+        # existing caller/test keeps working unchanged — falls back to
+        # DEFAULT_CATEGORY_VOCABULARY (app.models.post_category) when None.
+        # Read fresh per post, never cached, so an admin-config edit reaches
+        # the very next run with no redeploy.
+        redis_client=None,
     ):
         self.venue_dao = venue_dao
         self.posts_client = posts_client
@@ -218,6 +229,7 @@ class PromoterCrawlService:
         self.min_confidence = min_confidence
         self.max_events_per_post = max_events_per_post
         self._now = now_provider or (lambda: datetime.now(timezone.utc))
+        self.redis_client = redis_client
         # In-memory diagnostic record of truncated responses this instance
         # has seen — nothing is persisted to events.event for a truncated
         # post (plan requirement: no partial event), but the raw text must
@@ -508,24 +520,19 @@ class PromoterCrawlService:
 
         post_ts = _parse_timestamp(post.get("timestamp")) or now
 
-        kept_events: list[dict] = []
-        for parsed in events_data:
-            # plans/260810_post-kind-and-post-extraction-attribution.md §B,
-            # re-scoped mid-execution: events, promotions and menus are
-            # separate entities — this feature builds no promotion/menu
-            # entity, so a post classified as anything other than `event`
-            # produces NO events.event row. A missing/unrecognised kind is
-            # never in NON_EVENT_KINDS (the fail-toward-visible rule), so it
-            # falls through to the normal event flow below.
-            kind = parsed.get("kind")
-            if kind in NON_EVENT_KINDS:
-                logger.info(
-                    f"[PromoterCrawl] non-event post skipped for "
-                    f"{handle}/{shortcode}: kind={kind!r} "
-                    f"title={parsed.get('title')!r} -- no event row created"
-                )
-                continue
-            kept_events.append(parsed)
+        # plans/260811_post-items-and-categories.md §B: every extracted item
+        # is now persisted, typed — `260810_post-kind-and-post-extraction-
+        # attribution.md`'s interim ("drop every non-event, count and log
+        # it") is retired. `kept_events` is just `events_data`; the name
+        # survives because the date-resolution block below zips it against
+        # `resolved_dates` one-to-one.
+        kept_events: list[dict] = events_data
+
+        # ONE vocabulary read per post: every item this post yields is
+        # canonicalized against the SAME snapshot (app.models.post_category).
+        category_vocabulary, _fallback_reason = load_post_category_vocabulary(
+            self.redis_client,
+        )
 
         # Each event resolves its OWN date independently, against the post's
         # timestamp — never a sibling's raw text — then
@@ -564,6 +571,14 @@ class PromoterCrawlService:
                 reasons.append(REVIEW_REASON_LOW_CONFIDENCE)
             review_reason = "; ".join(reasons) if reasons else None
 
+            # plans/260811_post-items-and-categories.md §B/§C: `post_type`
+            # is the model's own `kind`, stored VERBATIM when recognised or
+            # not; `category` is canonicalized against the vocabulary read
+            # once above, with a miss counted (never rejected).
+            category = canonicalize_category(parsed.get("category"), category_vocabulary)
+            if category is not None and not is_in_vocabulary(category, category_vocabulary):
+                record_off_vocabulary_category(category)
+
             prepared_events.append({
                 "starts_at": resolved_date.starts_at, "ends_at": resolved_date.ends_at,
                 "is_recurring": resolved_date.is_recurring or bool(parsed["is_recurring"]),
@@ -572,6 +587,8 @@ class PromoterCrawlService:
                 "lineup": parsed["lineup"], "attractions": parsed["attractions"],
                 "ticket_url": parsed["ticket_url"], "ticket_info": parsed["ticket_info"],
                 "price_text": parsed["price_text"], "location_text": parsed["location_text"],
+                "post_type": resolve_post_type(parsed.get("kind")),
+                "category": category,
                 "cover_photo_key": cover_photo_key,
                 "confidence": parsed["confidence"],
                 "review_reason": review_reason,
@@ -650,17 +667,14 @@ class PromoterCrawlService:
             merge_touched_events(self.venue_dao, touched_event_ids, now)
 
         PROMOTER_CRAWL_POSTS_TOTAL.labels(outcome=OUTCOME_EXTRACTED).inc()
-        if prepared_events:
-            kind_outcome = OUTCOME_EXTRACTED
-        elif events_data:
-            # Every parsed event was a recognised non-event kind — nothing
-            # persisted, by design. Mirrors
-            # EventExtractionService._extract_one's OUTCOME_NOT_AN_EVENT.
-            kind_outcome = EES_OUTCOME_NOT_AN_EVENT
-        else:
-            # events_data itself was empty ({"events": []}) — same edge case
-            # EventExtractionService._extract_one leaves as OUTCOME_EXTRACTED.
-            kind_outcome = OUTCOME_EXTRACTED
+        # plans/260811_post-items-and-categories.md §B: every parsed event is
+        # now kept (`kept_events is events_data`, above) and persisted —
+        # `prepared_events` can only be empty when `events_data` itself was
+        # ({"events": []}), the one edge case that was already
+        # OUTCOME_EXTRACTED. There is no longer a "recognised non-event kind,
+        # nothing persisted" case (EventExtractionService's retired
+        # OUTCOME_NOT_AN_EVENT), so this is unconditional now.
+        kind_outcome = OUTCOME_EXTRACTED
         _bump_kind_metric(kind_outcome, kind_label)
         return persisted
 

@@ -3,19 +3,24 @@ tests/bdd/enrichment/post-kind-and-post-extraction-attribution.feature.
 
 See plans/260810_post-kind-and-post-extraction-attribution.md. Three
 independent things this file drives, mirrored by the feature file's own
-three sections:
+sections:
 
-  - §A/§B (what a post is, what reaches a human): the REAL
-    `EventExtractionService`, over the SAME `context.ee_*` harness
+  - §A (what a post is — the missing/unrecognised-kind edge cases only): the
+    REAL `EventExtractionService`, over the SAME `context.ee_*` harness
     `instagram_event_extraction_steps.py` already built — its Background
     step ("the event extraction pipeline is configured for a known venue",
     defined in event_ticket_info_and_attractions_steps.py) and its
     `_add_post`/`_run_extraction`/`_stored_event` helpers are reused
     verbatim, the same pattern every sibling extraction feature file in this
-    suite already follows. Re-scoped mid-execution (see the plan's own
-    note): a non-event post produces NO `events.event` row at all — this
-    file asserts absence, a metric counter, and a log line, never a
-    persisted `kind` column (there isn't one).
+    suite already follows. plans/260811_post-items-and-categories.md
+    retired the "a non-event produces NO row" behaviour this file used to
+    assert (§A/§B originally) — that coverage moved to
+    tests/bdd/enrichment/post-items-and-categories.feature. `_kind_label_
+    total` below (outcome-agnostic: a menu item is persisted now, not
+    dropped as "not_an_event") is imported by `date_correctness_and_path_
+    parity_steps.py`'s "Count the kind split on the shared-handle path"
+    scenario, which reuses the SAME "the extraction is counted as a menu
+    item" Then step defined here.
 
   - §C (attribution after extraction): the REAL `ScheduledInstagramCrawl-
     Service`/`InstagramCrawlChainer`/`PromoterCrawlService`, over the SAME
@@ -75,49 +80,38 @@ def _counter_total(name: str) -> float:
     return total
 
 
-def _kind_metric(outcome: str, kind: str) -> float:
-    return REGISTRY.get_sample_value(
-        "event_extraction_posts_total", {"outcome": outcome, "kind": kind},
-    ) or 0.0
+def _kind_label_total(kind: str) -> float:
+    """Sum of `event_extraction_posts_total{kind=<kind>}` across EVERY
+    outcome. plans/260811_post-items-and-categories.md: an item's `kind` no
+    longer determines a single fixed outcome (a menu item can now be
+    "accepted", queued for a missing date, etc., exactly like an event can)
+    — so a scenario that only cares "was this kind reported at all" must sum
+    across outcomes rather than pin one."""
+    total = 0.0
+    for metric in REGISTRY.collect():
+        # prometheus_client strips a declared name's trailing "_total" for
+        # `metric.name` and re-appends it on the individual `sample.name` —
+        # verified directly against a live Counter rather than assumed (see
+        # `_counter_total` above, which gets this wrong for a "_total"-
+        # suffixed declared name; not touched here, out of this plan's
+        # scope).
+        if metric.name != "event_extraction_posts":
+            continue
+        for sample in metric.samples:
+            if sample.name == "event_extraction_posts_total" and (
+                sample.labels.get("kind") == kind
+            ):
+                total += sample.value
+    return total
 
 
-# ── §A/§B: what a post is, what reaches a human ──────────────────────────
-@given("a post announcing a dish available on weekdays between set hours")
-def step_given_weekday_lunch_special(context):
-    _ee_ensure_context(context)
-    _add_post(context, "pk_menu_post")
-    context.pk_kind_before = _kind_metric("not_an_event", "menu")
-    context.ee_openai.program(_extraction_json(
-        kind="menu", title="Especial do dia", date_text=None, time_text=None,
-    ))
-
-
-@given("a post announcing a discount for a group of customers")
-def step_given_group_discount_offer(context):
-    _ee_ensure_context(context)
-    _add_post(context, "pk_promo_post")
-    context.pk_kind_before = _kind_metric("not_an_event", "promotion")
-    context.ee_openai.program(_extraction_json(
-        kind="promotion", title="Happy hour em grupo", date_text=None, time_text=None,
-    ))
-
-
+# ── §A: the missing/unrecognised-kind edge cases ─────────────────────────
 @given("a post announcing a DJ night on a stated date")
 def step_given_dj_night(context):
     _ee_ensure_context(context)
     _add_post(context, "pk_event_post")
     context.ee_openai.program(_extraction_json(
         kind="event", title="Noite do DJ", date_text="15/08", time_text="22h",
-    ))
-
-
-@given("a post showing a dish with no offer and no date")
-def step_given_plain_food_photo(context):
-    _ee_ensure_context(context)
-    _add_post(context, "pk_food_post")
-    context.pk_kind_before = _kind_metric("not_an_event", "food")
-    context.ee_openai.program(_extraction_json(
-        kind="food", title=None, date_text=None, time_text=None,
     ))
 
 
@@ -155,56 +149,14 @@ def step_then_post_recorded_as_event(context):
 
 @then("the extraction is counted as a menu item")
 def step_then_counted_as_menu(context):
-    after = _kind_metric("not_an_event", "menu")
+    # plans/260811_post-items-and-categories.md: a menu-kind post is now
+    # persisted (accepted, or queued for its own reasons) rather than
+    # dropped as "not_an_event" — this only asserts the `kind` LABEL landed,
+    # regardless of which outcome the item resolved to. Reused by
+    # date_correctness_and_path_parity_steps.py's "Count the kind split on
+    # the shared-handle path" scenario (see this module's docstring).
+    after = _kind_label_total("menu")
     assert after - context.pk_kind_before == 1.0, (context.pk_kind_before, after)
-
-
-@then("the extraction is counted as a promotion")
-def step_then_counted_as_promotion(context):
-    after = _kind_metric("not_an_event", "promotion")
-    assert after - context.pk_kind_before == 1.0, (context.pk_kind_before, after)
-
-
-@then("the extraction is counted as food")
-def step_then_counted_as_food(context):
-    after = _kind_metric("not_an_event", "food")
-    assert after - context.pk_kind_before == 1.0, (context.pk_kind_before, after)
-
-
-@then("no event is recorded for the post")
-def step_then_no_event_recorded(context):
-    row = context.ee_dao.get_event_by_source(context.ee_handle, context.ee_last_shortcode)
-    assert row is None, row
-
-
-@when("the review queue is listed")
-def step_when_review_queue_listed(context):
-    context.pk_queue = context.ee_dao.list_events_awaiting_decision() or []
-
-
-@then("no event for that post is in the queue")
-def step_then_no_event_for_post_in_queue(context):
-    matches = [
-        r for r in context.pk_queue
-        if r.get("source_handle") == context.ee_handle
-        and r.get("source_shortcode") == context.ee_last_shortcode
-    ]
-    assert matches == [], matches
-
-
-@when("every event is listed")
-def step_when_every_event_listed(context):
-    context.pk_all_events = context.ee_dao.list_events() or []
-
-
-@then("no event for that post is in the list")
-def step_then_no_event_for_post_in_list(context):
-    matches = [
-        r for r in context.pk_all_events
-        if r.get("source_handle") == context.ee_handle
-        and r.get("source_shortcode") == context.ee_last_shortcode
-    ]
-    assert matches == [], matches
 
 
 @then("that post's event is present in the review queue")

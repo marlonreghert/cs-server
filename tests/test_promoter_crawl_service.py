@@ -236,15 +236,16 @@ class TestManualLinkSurvivesReResolution:
 
 
 # ── plans/260810_post-kind-and-post-extraction-attribution.md §A/§B/§C ─────
-class TestNonEventProducesNoRow:
-    """Re-scoped mid-execution: a post classified as anything other than
-    `event` produces no events.event row — see event_extraction_service.py's
-    own TestNonEventProducesNoRow for the venue-post half of this; this is
-    the promoter-post half of the SAME rule, since both callers share
-    `resolve_event_datetime`'s inputs but each builds its own
-    `prepared_events` list."""
+class TestNonEventPersistsWithItsOwnType:
+    """plans/260811_post-items-and-categories.md §B retires the drop
+    `260810_post-kind-and-post-extraction-attribution.md` introduced (a post
+    classified as anything other than `event` produced no row at all) — see
+    event_extraction_service.py's own TestNonEventPersistsWithItsOwnType for
+    the venue-post half of this; this is the promoter-post half of the SAME
+    rule, since both callers share `resolve_event_datetime`'s inputs but
+    each builds its own `prepared_events` list."""
 
-    def test_a_menu_kind_post_persists_nothing(self, dao, caplog):
+    def test_a_menu_kind_post_is_persisted_with_that_post_type(self, dao):
         dao.upsert_promoter_account("promo", {"status": "active"})
         post = {
             "shortcode": "menu1", "caption": "Ingressos abertos! Prato do dia!",
@@ -258,15 +259,13 @@ class TestNonEventProducesNoRow:
         openai_client.program(_extraction_json(kind="menu", title="Risoto"))
 
         service = PromoterCrawlService(venue_dao=dao, posts_client=posts_client, openai_client=openai_client)
-        with caplog.at_level("INFO"):
-            _run(service.run({}))
+        _run(service.run({}))
 
-        assert dao.get_event_by_source("promo", "menu1") is None
-        assert dao.list_events() == []
-        assert any(
-            "promo" in r.message and "menu1" in r.message and "menu" in r.message
-            for r in caplog.records
-        ), caplog.records
+        row = dao.get_event_by_source("promo", "menu1")
+        assert row is not None
+        assert row["post_type"] == "menu"
+        assert row["title"] == "Risoto"
+        assert dao.list_events() != []
 
 
 class TestLocationTextFallbackToCaption:
@@ -485,7 +484,12 @@ class TestSourceKindAndMetricsParity:
         ) or 0.0
         assert after - before == 1.0, (before, after)
 
-    def test_report_kind_metric_true_counts_a_non_event_kind_as_not_an_event(self, dao):
+    def test_report_kind_metric_true_persists_a_non_event_kind_as_extracted(self, dao):
+        """plans/260811_post-items-and-categories.md §B: a menu-kind post is
+        persisted now (with `post_type="menu"`), not dropped — so it reports
+        the SAME "extracted" outcome an event-kind post would, still labeled
+        `kind="menu"` (the retired "not_an_event" outcome could only ever
+        fire for a post that produced no row)."""
         from prometheus_client import REGISTRY
 
         venues, handle_index = self._venues(dao)
@@ -493,7 +497,7 @@ class TestSourceKindAndMetricsParity:
         openai_client.program(_extraction_json(kind="menu", date_text=None, time_text=None))
         service = PromoterCrawlService(venue_dao=dao, posts_client=None, openai_client=openai_client)
         before = REGISTRY.get_sample_value(
-            "event_extraction_posts_total", {"outcome": "not_an_event", "kind": "menu"},
+            "event_extraction_posts_total", {"outcome": "extracted", "kind": "menu"},
         ) or 0.0
 
         _run(service._process_post(
@@ -505,10 +509,12 @@ class TestSourceKindAndMetricsParity:
             report_kind_metric=True,
         ))
         after = REGISTRY.get_sample_value(
-            "event_extraction_posts_total", {"outcome": "not_an_event", "kind": "menu"},
+            "event_extraction_posts_total", {"outcome": "extracted", "kind": "menu"},
         ) or 0.0
         assert after - before == 1.0, (before, after)
-        assert dao.get_event_by_source("sharedhandle", "km3") is None
+        row = dao.get_event_by_source("sharedhandle", "km3")
+        assert row is not None
+        assert row["post_type"] == "menu"
 
 
 # ── plans/260811_extract-by-handle.md: the attribution closure moved ────────

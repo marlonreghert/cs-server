@@ -38,6 +38,7 @@ from app.metrics import (
     OPENAI_TOKENS_TOTAL,
 )
 from app.models.event_kind import normalize_kind
+from app.models.post_category import DEFAULT_CATEGORY_VOCABULARY, load_post_category_vocabulary
 from app.models.taxonomy import TAXONOMY, validate_category_labels
 
 logger = logging.getLogger(__name__)
@@ -116,7 +117,27 @@ _ATTRACTIONS_FIELD_DOC = f"""- attractions: array of every DJ, live act or perfo
   neither suppresses the other. Null when nothing about buying or entry is
   stated."""
 
-EXTRACTION_PROMPT = """## Role
+
+# plans/260811_post-items-and-categories.md §C: `category` is free text
+# STEERED toward a known vocabulary, never CONFINED to it — a function, not
+# a module-level string, because the vocabulary is admin config
+# (app.models.post_category), re-read at call time so an operator's edit
+# reaches the model without a redeploy. Both prompt builders below call this
+# with the SAME vocabulary argument so neither can drift — extending only
+# one is the exact half-fix `_KIND_FIELD_DOC`'s own docstring already warns
+# about for `kind`.
+def _category_field_doc(category_vocabulary) -> str:
+    vocab_text = ", ".join(category_vocabulary)
+    return f"""- category: a short label for what this is — a music style, a theme, a
+  kind of offer, in a few words. PREFER one of these when it genuinely
+  fits: {vocab_text}. If nothing on that list fits, answer freely with your
+  own short label rather than forcing a bad match — do not stretch a
+  listed word to cover something it does not really describe. Null only
+  when the post gives no basis for a category at all."""
+
+
+def _build_extraction_prompt(category_vocabulary=DEFAULT_CATEGORY_VOCABULARY) -> str:
+    return """## Role
 You read a single Instagram post (caption + one flyer/event photo, when a
 photo is attached) from a Brazilian bar/club/event venue and extract the
 event it announces.
@@ -149,6 +170,7 @@ Never invent one.
   else null
 - location_text: any venue/address text named in the post (do not resolve
   it, just copy it), else null
+""" + _category_field_doc(category_vocabulary) + """
 - confidence: your own 0.0-1.0 confidence that this post announces a real,
   identifiable event
 
@@ -158,8 +180,12 @@ Reply with ONLY a JSON object, no markdown fences:
  "time_text": "22h", "is_recurring": false, "recurrence_text": null,
  "attractions": [{"name": "DJ X", "type": "dj", "stage": null, "styles": ["House"]}],
  "ticket_url": null, "ticket_info": null, "price_text": "R$30", "location_text": null,
- "confidence": 0.85}
+ "category": "rock", "confidence": 0.85}
 """
+
+
+EXTRACTION_PROMPT = _build_extraction_prompt()
+
 
 # See plans/260806_multi-event-posts.md: a city-listings account packs
 # several events at several different venues into ONE caption/carousel
@@ -169,7 +195,8 @@ Reply with ONLY a JSON object, no markdown fences:
 # asks for EVERY distinct event and wraps them in a list — a single-event
 # post still yields a list of one, so no account needs to be flagged as a
 # special archetype.
-MULTI_EVENT_EXTRACTION_PROMPT = """## Role
+def _build_multi_event_extraction_prompt(category_vocabulary=DEFAULT_CATEGORY_VOCABULARY) -> str:
+    return """## Role
 You read a single Instagram post (caption + one flyer/event photo, when a
 photo is attached) from a Brazilian bar/club/event venue or city-listings
 account. The post may announce ONE event or SEVERAL — a daily roundup
@@ -210,6 +237,7 @@ venue for it.
 - price_text: price/cover text exactly as stated (e.g. "R$30 antecipado"),
   else null
 - location_text: THIS event's own venue/address text, or null if none stated
+""" + _category_field_doc(category_vocabulary) + """
 - confidence: your own 0.0-1.0 confidence that this is a real, identifiable
   event
 
@@ -221,9 +249,13 @@ Reply with ONLY a JSON object, no markdown fences, wrapping every event in an
    "time_text": "22h", "is_recurring": false, "recurrence_text": null,
    "attractions": [{"name": "DJ X", "type": "dj", "stage": null, "styles": ["House"]}],
    "ticket_url": null, "ticket_info": null, "price_text": "R$30", "location_text": "Venue A",
-   "confidence": 0.85}
+   "category": "rock", "confidence": 0.85}
 ]}
 """
+
+
+MULTI_EVENT_EXTRACTION_PROMPT = _build_multi_event_extraction_prompt()
+
 
 # Reasoning tokens (gpt-5.6 is a reasoning model) count against
 # max_completion_tokens on TOP of the visible per-event JSON, and a
@@ -403,6 +435,15 @@ def _parse_event_fields(data: dict) -> tuple[dict, int]:
         "ticket_info": _text("ticket_info"),
         "price_text": _text("price_text"),
         "location_text": _text("location_text"),
+        # plans/260811_post-items-and-categories.md §C: the model's own text,
+        # trimmed but otherwise UNCHANGED — matching against the admin-
+        # configured vocabulary and canonicalizing the stored spelling is the
+        # SERVICE layer's job (app.services.event_extraction_service /
+        # promoter_crawl_service, via app.models.post_category), exactly the
+        # same split `kind` already uses (parsed verbatim here, checked
+        # against a vocabulary downstream) — this parser stays dumb: it
+        # records exactly what the model said.
+        "category": _text("category"),
         "confidence": confidence,
     }
     return fields, malformed_attractions
@@ -501,10 +542,25 @@ class OpenAIEventExtractionClient:
     def __init__(
         self, api_key: str, model: str = DEFAULT_MODEL,
         max_completion_tokens: int = DEFAULT_MAX_COMPLETION_TOKENS,
+        # plans/260811_post-items-and-categories.md §C: optional so every
+        # existing caller/test that never cared about the category
+        # vocabulary keeps working unchanged — falls back to
+        # DEFAULT_CATEGORY_VOCABULARY (the same list EXTRACTION_PROMPT/
+        # MULTI_EVENT_EXTRACTION_PROMPT are built from at import time) when
+        # None or when the read fails. Read fresh on EVERY call (see
+        # `_category_vocabulary` below), not cached at construction, so an
+        # operator's admin-config edit reaches the very next call with no
+        # redeploy and no client restart.
+        redis_client=None,
     ):
         self.model = model
         self.max_completion_tokens = max_completion_tokens
         self.client = AsyncOpenAI(api_key=api_key)
+        self.redis_client = redis_client
+
+    def _category_vocabulary(self) -> list:
+        vocabulary, _fallback_reason = load_post_category_vocabulary(self.redis_client)
+        return vocabulary
 
     async def close(self):
         await self.client.close()
@@ -515,9 +571,10 @@ class OpenAIEventExtractionClient:
         """Returns the RAW response text. Parsing is a separate, pure step
         (parse_extraction_response) so a malformed reply can be recorded
         verbatim without losing the post."""
+        prompt = _build_extraction_prompt(self._category_vocabulary())
         content: list[dict] = [{
             "type": "text",
-            "text": EXTRACTION_PROMPT + f"\n\nCaption:\n{caption or '(no caption)'}",
+            "text": prompt + f"\n\nCaption:\n{caption or '(no caption)'}",
         }]
         if image_data_uri:
             content.append({
@@ -570,9 +627,10 @@ class OpenAIEventExtractionClient:
         bound), not a runtime event count — the count is unknown before the
         call completes.
         """
+        prompt = _build_multi_event_extraction_prompt(self._category_vocabulary())
         content: list[dict] = [{
             "type": "text",
-            "text": MULTI_EVENT_EXTRACTION_PROMPT + f"\n\nCaption:\n{caption or '(no caption)'}",
+            "text": prompt + f"\n\nCaption:\n{caption or '(no caption)'}",
         }]
         if image_data_uri:
             content.append({
@@ -618,4 +676,5 @@ __all__ = [
     "DEFAULT_MODEL", "DEFAULT_MAX_COMPLETION_TOKENS",
     "MULTI_EVENT_BASE_COMPLETION_TOKENS", "MULTI_EVENT_PER_EVENT_COMPLETION_TOKENS",
     "ATTRACTION_TYPES", "EXTRACTION_PROMPT", "MULTI_EVENT_EXTRACTION_PROMPT",
+    "_build_extraction_prompt", "_build_multi_event_extraction_prompt",
 ]

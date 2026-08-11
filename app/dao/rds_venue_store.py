@@ -429,13 +429,27 @@ class RdsVenueStore:
         with self.engine.connect() as conn:
             return [dict(r) for r in conn.execute(text(_VENUE_SELECT)).mappings()]
 
-    # ── events.event / events.event_source (plans/260804_instagram-event-
-    # extraction.md, restructured by plans/260807_one-event-many-posts.md) ──
-    # `events.event` holds MERGED fields only; per-post provenance
+    # ── events.post_item / events.post_item_source (plans/260804_instagram-
+    # event-extraction.md, restructured by plans/260807_one-event-many-
+    # posts.md, renamed by plans/260811_post-items-and-categories.md — the
+    # tables were `events.event`/`events.event_source` before that plan;
+    # see migration 0034_post_items for the ALTER TABLE RENAME and its
+    # verified-against-real-Postgres constraint/index renames) ──────────────
+    # `events.post_item` holds MERGED fields only; per-post provenance
     # (source_kind/handle/shortcode/permalink/source_event_key/
     # source_event_index/cover_photo_key/raw_extraction/first_seen_at/
-    # last_seen_at) lives in `events.event_source`, one row per announcing
-    # post, several of which can now share one `event_id` (migration 0026).
+    # last_seen_at) lives in `events.post_item_source`, one row per
+    # announcing post, several of which can now share one `post_item_id`
+    # (migration 0026).
+    #
+    # The PYTHON-FACING dict key stays "event_id" (never "post_item_id")
+    # deliberately — plans/260811_post-items-and-categories.md keeps every
+    # response field name stable in this PR even where the table renamed
+    # (the console is updated separately), and this DAO is the ONE seam
+    # that translates: every SELECT below aliases the real
+    # `post_item_id` column back to `event_id`, and `_EVENT_SQL_COLUMN`
+    # translates it the other way for INSERT/UPDATE/DELETE. No caller above
+    # this module (services, router, tests) ever sees `post_item_id`.
     _EVENT_COLUMNS = (
         "event_id", "venue_id", "starts_at", "ends_at", "is_recurring",
         "recurrence_text", "title", "description", "lineup", "ticket_url",
@@ -452,11 +466,30 @@ class RdsVenueStore:
         # — ticket_info is an ordinary scalar (merged like price_text);
         # attractions is a jsonb list, additive across posts like lineup.
         "ticket_info", "attractions",
+        # plans/260811_post-items-and-categories.md (migration 0034) —
+        # post_type is what a post yielded (event/promotion/menu/food/other,
+        # or an unrecognised value stored verbatim); category is free text
+        # steered by an admin-configurable vocabulary. Both operator-
+        # protectable via operator_edited_fields, like every other scalar
+        # here.
+        "post_type", "category",
     )
     _EVENT_JSONB_COLUMNS = ("lineup", "operator_edited_fields", "attractions")
+    # Python dict key -> real SQL column name, for the one column whose
+    # physical name (`post_item_id`, migration 0034) differs from the
+    # Python-facing key this module and every caller above it still use
+    # (`event_id` — see the module comment above). Every other column name
+    # is identical on both sides.
+    _EVENT_SQL_COLUMN = {"event_id": "post_item_id"}
+
+    @classmethod
+    def _event_sql_col(cls, python_key: str) -> str:
+        return cls._EVENT_SQL_COLUMN.get(python_key, python_key)
+
     # The per-source columns `insert_event`/`update_event` route to
-    # events.event_source instead of events.event — see the module-level
-    # split in tests.rds_fake.InMemoryRdsVenueStore, which this mirrors.
+    # events.post_item_source instead of events.post_item — see the
+    # module-level split in tests.rds_fake.InMemoryRdsVenueStore, which
+    # this mirrors.
     _EVENT_SOURCE_FIELDS = (
         "source_kind", "source_handle", "source_shortcode", "source_permalink",
         "source_event_key", "source_event_index", "cover_photo_key",
@@ -468,8 +501,8 @@ class RdsVenueStore:
     # never INNER — an unresolved promoter event has `venue_id IS NULL` (or a
     # venue_id with no matching row) and must still be selected; an INNER
     # join would silently drop exactly the rows the review queue exists for.
-    # Every `events.event` column is qualified `e.` because the join makes
-    # `venue_id` ambiguous otherwise; `v.venue_name` is the only column
+    # Every `events.post_item` column is qualified `e.` because the join
+    # makes `venue_id` ambiguous otherwise; `v.venue_name` is the only column
     # pulled from venues.venue. `ps` (primary source) is a LATERAL picking
     # the MOST RECENTLY SEEN source per event — the four legacy scalars
     # (source_kind/handle/shortcode/permalink/cover_photo_key... the first
@@ -477,29 +510,34 @@ class RdsVenueStore:
     # the console keeps working unchanged across a merge
     # (plans/260807_one-event-many-posts.md's compatibility guarantee). `agg`
     # aggregates first_seen_at/last_seen_at across EVERY source (earliest
-    # first-seen, latest last-seen) — the columns leave events.event, the
+    # first-seen, latest last-seen) — the columns leave events.post_item, the
     # response shape does not.
+    #
+    # `e.post_item_id AS event_id` is the one seam that keeps the Python-
+    # facing dict key `event_id` stable across migration 0034's physical
+    # rename — see the `_EVENT_SQL_COLUMN` comment above.
     _EVENT_SELECT = (
-        "SELECT e.event_id, e.venue_id, e.starts_at, e.ends_at, e.is_recurring, "
+        "SELECT e.post_item_id AS event_id, e.venue_id, e.starts_at, e.ends_at, e.is_recurring, "
         "e.recurrence_text, e.title, e.description, e.lineup, e.ticket_url, "
         "e.price_text, e.location_text, e.confidence, e.status, e.review_reason, "
         "e.location_resolution, e.location_confidence, e.linked_by, e.linked_at, "
         "e.operator_edited_fields, e.ticket_info, e.attractions, "
+        "e.post_type, e.category, "
         "e.updated_at, v.venue_name, "
         "ps.source_kind, ps.source_handle, ps.source_shortcode, ps.source_permalink, "
         "ps.source_event_key, ps.source_event_index, ps.cover_photo_key, ps.raw_extraction, "
         "agg.first_seen_at, agg.last_seen_at "
-        "FROM events.event e "
+        "FROM events.post_item e "
         "LEFT JOIN venues.venue v ON v.venue_id = e.venue_id "
         "LEFT JOIN LATERAL ("
         "  SELECT source_kind, source_handle, source_shortcode, source_permalink, "
         "         source_event_key, source_event_index, cover_photo_key, raw_extraction "
-        "  FROM events.event_source es WHERE es.event_id = e.event_id "
+        "  FROM events.post_item_source es WHERE es.post_item_id = e.post_item_id "
         "  ORDER BY es.last_seen_at DESC, es.id DESC LIMIT 1"
         ") ps ON true "
         "LEFT JOIN LATERAL ("
         "  SELECT min(first_seen_at) AS first_seen_at, max(last_seen_at) AS last_seen_at "
-        "  FROM events.event_source es2 WHERE es2.event_id = e.event_id"
+        "  FROM events.post_item_source es2 WHERE es2.post_item_id = e.post_item_id"
         ") agg ON true"
     )
 
@@ -508,24 +546,25 @@ class RdsVenueStore:
     # merged event's primary/aggregate values (which could belong to a
     # DIFFERENT source once several posts share one event).
     _EVENT_SOURCE_SELECT = (
-        "SELECT e.event_id, e.venue_id, e.starts_at, e.ends_at, e.is_recurring, "
+        "SELECT e.post_item_id AS event_id, e.venue_id, e.starts_at, e.ends_at, e.is_recurring, "
         "e.recurrence_text, e.title, e.description, e.lineup, e.ticket_url, "
         "e.price_text, e.location_text, e.confidence, e.status, e.review_reason, "
         "e.location_resolution, e.location_confidence, e.linked_by, e.linked_at, "
         "e.operator_edited_fields, e.ticket_info, e.attractions, "
+        "e.post_type, e.category, "
         "e.updated_at, v.venue_name, "
         "es.source_kind, es.source_handle, es.source_shortcode, es.source_permalink, "
         "es.source_event_key, es.source_event_index, es.cover_photo_key, "
         "es.raw_extraction, es.first_seen_at, es.last_seen_at "
-        "FROM events.event_source es "
-        "JOIN events.event e ON e.event_id = es.event_id "
+        "FROM events.post_item_source es "
+        "JOIN events.post_item e ON e.post_item_id = es.post_item_id "
         "LEFT JOIN venues.venue v ON v.venue_id = e.venue_id"
     )
 
     def get_event(self, event_id: str) -> Optional[dict]:
         with self.engine.connect() as conn:
             row = conn.execute(
-                text(f"{self._EVENT_SELECT} WHERE e.event_id=:id"), {"id": event_id},
+                text(f"{self._EVENT_SELECT} WHERE e.post_item_id=:id"), {"id": event_id},
             ).mappings().first()
             return dict(row) if row else None
 
@@ -545,7 +584,7 @@ class RdsVenueStore:
                 text(
                     f"{self._EVENT_SOURCE_SELECT} "
                     "WHERE es.source_handle=:h AND es.source_shortcode=:s "
-                    "ORDER BY es.source_event_index NULLS LAST, e.event_id"
+                    "ORDER BY es.source_event_index NULLS LAST, e.post_item_id"
                 ),
                 {"h": source_handle, "s": source_shortcode},
             ).mappings()
@@ -557,10 +596,10 @@ class RdsVenueStore:
         with self.engine.connect() as conn:
             rows = conn.execute(
                 text(
-                    "SELECT id, event_id, source_kind, source_handle, source_shortcode, "
-                    "source_permalink, source_event_key, source_event_index, cover_photo_key, "
-                    "raw_extraction, first_seen_at, last_seen_at "
-                    "FROM events.event_source WHERE event_id=:e ORDER BY first_seen_at, id"
+                    "SELECT id, post_item_id AS event_id, source_kind, source_handle, "
+                    "source_shortcode, source_permalink, source_event_key, source_event_index, "
+                    "cover_photo_key, raw_extraction, first_seen_at, last_seen_at "
+                    "FROM events.post_item_source WHERE post_item_id=:e ORDER BY first_seen_at, id"
                 ),
                 {"e": event_id},
             ).mappings()
@@ -574,7 +613,7 @@ class RdsVenueStore:
         with self.engine.begin() as conn:
             conn.execute(
                 text(
-                    "UPDATE events.event_source SET event_id=:to_id WHERE event_id=:from_id"
+                    "UPDATE events.post_item_source SET post_item_id=:to_id WHERE post_item_id=:from_id"
                 ),
                 {"to_id": to_event_id, "from_id": from_event_id},
             )
@@ -582,25 +621,28 @@ class RdsVenueStore:
     def delete_event(self, event_id: str) -> None:
         """Hard delete — only ever correct for a now-sourceless duplicate a
         merge has already reattached every source away from.
-        `event_source.event_id` is a real, non-deferrable FK, so this raises
-        (rather than silently orphaning provenance) if any source still
-        references it."""
+        `post_item_source.post_item_id` is a real, non-deferrable FK, so this
+        raises (rather than silently orphaning provenance) if any source
+        still references it."""
         with self.engine.begin() as conn:
-            conn.execute(text("DELETE FROM events.event WHERE event_id=:e"), {"e": event_id})
+            conn.execute(
+                text("DELETE FROM events.post_item WHERE post_item_id=:e"), {"e": event_id},
+            )
 
     def insert_event(self, fields: dict) -> dict:
-        """INSERTs the merged events.event row and its first
-        events.event_source row in one transaction. Relies on the UNIQUE
+        """INSERTs the merged events.post_item row and its first
+        events.post_item_source row in one transaction. Relies on the UNIQUE
         (source_handle, source_shortcode, source_event_key) constraint
-        (migration 0026, moved from events.event by 0025) to reject a
-        duplicate — the service is expected to check list_events_by_source
-        first; this is the backstop, not the primary idempotency mechanism."""
+        (migration 0026, moved from events.event by 0025; renamed
+        uq_post_item_source_post by migration 0034) to reject a duplicate —
+        the service is expected to check list_events_by_source first; this
+        is the backstop, not the primary idempotency mechanism."""
         event_cols = [c for c in self._EVENT_COLUMNS if c in fields]
         event_assign = {c: fields[c] for c in event_cols}
         for c in self._EVENT_JSONB_COLUMNS:
             if c in event_assign and event_assign[c] is not None:
                 event_assign[c] = json.dumps(event_assign[c])
-        event_col_list = ", ".join(event_cols)
+        event_col_list = ", ".join(self._event_sql_col(c) for c in event_cols)
         event_val_list = ", ".join(
             f"CAST(:{c} AS jsonb)" if c in self._EVENT_JSONB_COLUMNS else f":{c}"
             for c in event_cols
@@ -612,12 +654,13 @@ class RdsVenueStore:
             if c in source_assign and source_assign[c] is not None:
                 source_assign[c] = json.dumps(source_assign[c])
         source_assign["event_id"] = fields["event_id"]
-        # events.event_source.id is a NOT NULL primary key with no column
-        # default (app-generated, like events.event.event_id itself —
-        # app.services.event_reconciliation.new_event_id) — never left for
-        # Postgres to fill in.
+        # events.post_item_source.id is a NOT NULL primary key with no
+        # column default (app-generated, like events.post_item.post_item_id
+        # itself — app.services.event_reconciliation.new_event_id) — never
+        # left for Postgres to fill in.
         source_assign["id"] = f"evsrc_{new_run_id()}"
         source_insert_cols = ["id", "event_id"] + source_cols
+        source_col_list = ", ".join(self._event_sql_col(c) for c in source_insert_cols)
         source_val_list = ", ".join(
             f"CAST(:{c} AS jsonb)" if c in self._EVENT_SOURCE_JSONB_COLUMNS else f":{c}"
             for c in source_insert_cols
@@ -625,12 +668,12 @@ class RdsVenueStore:
 
         with self.engine.begin() as conn:
             conn.execute(
-                text(f"INSERT INTO events.event ({event_col_list}) VALUES ({event_val_list})"),
+                text(f"INSERT INTO events.post_item ({event_col_list}) VALUES ({event_val_list})"),
                 event_assign,
             )
             conn.execute(
                 text(
-                    f"INSERT INTO events.event_source ({', '.join(source_insert_cols)}) "
+                    f"INSERT INTO events.post_item_source ({source_col_list}) "
                     f"VALUES ({source_val_list})"
                 ),
                 source_assign,
@@ -639,12 +682,12 @@ class RdsVenueStore:
 
     def update_event(self, event_id: str, fields: dict) -> Optional[dict]:
         """Partial update: only the keys present in `fields` change. Event-
-        level keys update `events.event`; source-level keys (see
-        `_EVENT_SOURCE_FIELDS`) update the ONE `events.event_source` row
+        level keys update `events.post_item`; source-level keys (see
+        `_EVENT_SOURCE_FIELDS`) update the ONE `events.post_item_source` row
         identified by `source_handle`+`source_shortcode` when both are
         given, or the event's single source when it has exactly one —
         raising when that is ambiguous, never guessing. Always bumps
-        `events.event.updated_at`, matching the fake's contract."""
+        `events.post_item.updated_at`, matching the fake's contract."""
         if not fields:
             fields = {}
         event_cols = [c for c in self._EVENT_COLUMNS if c in fields and c != "event_id"]
@@ -664,14 +707,14 @@ class RdsVenueStore:
                 event_assign["event_id"] = event_id
                 result = conn.execute(
                     text(
-                        f"UPDATE events.event SET {', '.join(set_clauses)} "
-                        "WHERE event_id=:event_id"
+                        f"UPDATE events.post_item SET {', '.join(set_clauses)} "
+                        "WHERE post_item_id=:event_id"
                     ),
                     event_assign,
                 )
             else:
                 result = conn.execute(
-                    text("UPDATE events.event SET updated_at=now() WHERE event_id=:event_id"),
+                    text("UPDATE events.post_item SET updated_at=now() WHERE post_item_id=:event_id"),
                     {"event_id": event_id},
                 )
             if result.rowcount == 0:
@@ -683,8 +726,8 @@ class RdsVenueStore:
                 if handle is not None and shortcode is not None:
                     target = conn.execute(
                         text(
-                            "SELECT id FROM events.event_source "
-                            "WHERE event_id=:e AND source_handle=:h AND source_shortcode=:s"
+                            "SELECT id FROM events.post_item_source "
+                            "WHERE post_item_id=:e AND source_handle=:h AND source_shortcode=:s"
                         ),
                         {"e": event_id, "h": handle, "s": shortcode},
                     ).mappings().first()
@@ -695,7 +738,7 @@ class RdsVenueStore:
                         )
                 else:
                     candidates = conn.execute(
-                        text("SELECT id FROM events.event_source WHERE event_id=:e"),
+                        text("SELECT id FROM events.post_item_source WHERE post_item_id=:e"),
                         {"e": event_id},
                     ).mappings().all()
                     if len(candidates) != 1:
@@ -717,7 +760,7 @@ class RdsVenueStore:
                 source_assign["id"] = target["id"]
                 conn.execute(
                     text(
-                        f"UPDATE events.event_source SET {', '.join(set_clauses)} WHERE id=:id"
+                        f"UPDATE events.post_item_source SET {', '.join(set_clauses)} WHERE id=:id"
                     ),
                     source_assign,
                 )
@@ -744,7 +787,7 @@ class RdsVenueStore:
             params["until"] = until
         if clauses:
             sql += " WHERE " + " AND ".join(clauses)
-        sql += " ORDER BY e.starts_at NULLS LAST, e.event_id"
+        sql += " ORDER BY e.starts_at NULLS LAST, e.post_item_id"
         with self.engine.connect() as conn:
             return [dict(r) for r in conn.execute(text(sql), params).mappings()]
 
@@ -800,12 +843,19 @@ class RdsVenueStore:
         extraction failure is lost signal on a post already paid for
         (archived, classified); it deserves an operator's attention at
         least as much as a clean unconfirmed event, never less.
+
+        plans/260811_post-items-and-categories.md: `post_type` is
+        DELIBERATELY absent from this predicate. What needs a decision is a
+        property of the row's STATE (confirmed? venue linked? extraction
+        clean?), never of its type — a clean menu item auto-accepts and
+        never queues, exactly as a clean event does, and a flagged item of
+        ANY type comes back here. Do not add a `post_type` filter.
         """
         sql = (
             f"{self._EVENT_SELECT} WHERE e.status = 'pending_review' "
             "OR (e.venue_id IS NULL AND e.status NOT IN ('rejected', 'superseded')) "
             "OR e.status = 'extraction_failed' "
-            "ORDER BY agg.first_seen_at, e.event_id"
+            "ORDER BY agg.first_seen_at, e.post_item_id"
         )
         with self.engine.connect() as conn:
             return [dict(r) for r in conn.execute(text(sql)).mappings()]

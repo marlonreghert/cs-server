@@ -145,6 +145,18 @@ class EventOut(BaseModel):
     # event_reconciliation.union_attractions), never operator-editable
     # (EventPatch below omits it, matching `lineup`).
     attractions: list = Field(default_factory=list)
+    # plans/260811_post-items-and-categories.md: what a post yielded — an
+    # event, a promotion, a menu item, or an unrecognised value stored
+    # VERBATIM (never coerced). Operator-editable (EventPatch below) and
+    # protected via `operator_edited_fields` like every other scalar here.
+    # Response FIELD NAME is unaffected by the table rename (events.event ->
+    # events.post_item) — the plan keeps this PR's API surface stable; the
+    # console is updated separately.
+    post_type: str = "event"
+    # Free text, steered by an admin-configurable vocabulary
+    # (app.models.post_category) and case-insensitively canonicalised on
+    # write. NULL when the model gave no basis for one — never invented.
+    category: Optional[str] = None
 
 
 class EventSourceOut(BaseModel):
@@ -185,6 +197,10 @@ class EventPatch(BaseModel):
     ticket_info: Optional[str] = None
     price_text: Optional[str] = None
     location_text: Optional[str] = None
+    # plans/260811_post-items-and-categories.md: lets an operator correct a
+    # misclassified item's type. `category` is deliberately NOT here — the
+    # plan tests operator correction of `post_type` only.
+    post_type: Optional[str] = None
 
 
 @router.get("", response_model=list[EventOut])

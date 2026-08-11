@@ -606,6 +606,14 @@ class InMemoryRdsVenueStore:
         now = _now()
         event_row = {k: v for k, v in fields.items() if k not in self._EVENT_SOURCE_FIELDS}
         event_row["updated_at"] = now
+        # plans/260811_post-items-and-categories.md (migration 0034): the
+        # real `events.post_item.post_type` column is `NOT NULL DEFAULT
+        # 'event'` — mirrored here for a caller that omits it entirely
+        # (every REAL extraction call site sets it explicitly; this default
+        # only matters for a pre-existing fixture/test that inserts a bare
+        # event dict, which is EXACTLY what the migration's own back-fill
+        # does for every row that existed before this column did).
+        event_row.setdefault("post_type", "event")
         self.events[event_id] = event_row
 
         source_fields = {k: v for k, v in fields.items() if k in self._EVENT_SOURCE_FIELDS}

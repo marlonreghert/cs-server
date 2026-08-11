@@ -59,8 +59,14 @@ from app.metrics import (
     EVENT_EXTRACTION_POSTS_TOTAL,
     EVENT_EXTRACTION_SUPERSEDED_TOTAL,
 )
-from app.models.event_kind import NON_EVENT_KINDS
+from app.models.event_kind import resolve_post_type
 from app.models.photo_taxonomy import CATEGORY_FLYER
+from app.models.post_category import (
+    canonicalize_category,
+    is_in_vocabulary,
+    load_post_category_vocabulary,
+    record_off_vocabulary_category,
+)
 from app.services.event_caption_matcher import matches_event_marker
 from app.services.event_date_resolver import (
     REASON_DATE_RANGE,
@@ -133,13 +139,6 @@ OUTCOME_DATE_RANGE = "date_range"
 # response means the output budget was too small, not a bad model answer).
 # See plans/260806_venue-post-multi-event.md.
 OUTCOME_TRUNCATED = "truncated"
-# plans/260810_post-kind-and-post-extraction-attribution.md §A/§B: the model
-# classified every event this post yielded as something other than `event`
-# (promotion/menu/food/other) — no events.event row was created for any of
-# them. Distinct from OUTCOME_NOT_EVENT_LIKE, which means the post never
-# even reached the model (the caption/flyer pre-filter rejected it); this
-# outcome means the model DID look and said "not an event".
-OUTCOME_NOT_AN_EVENT = "not_an_event"
 # A single-event post's extraction had nothing wrong AND cleared the
 # auto-accept predicate (app.services.event_reconciliation.
 # is_clean_extraction) — replaces OUTCOME_EXTRACTED for that exact case
@@ -510,6 +509,12 @@ class EventExtractionService:
         # one caller here that ever invokes the ladder at all.
         venue_resolution_confidence_floor: float = VENUE_RESOLUTION_DEFAULT_CONFIDENCE_FLOOR,
         venue_resolution_margin: float = VENUE_RESOLUTION_DEFAULT_MARGIN,
+        # plans/260811_post-items-and-categories.md §C: optional so every
+        # existing caller/test keeps working unchanged — falls back to
+        # DEFAULT_CATEGORY_VOCABULARY (app.models.post_category) when None.
+        # Read fresh per post (see `_extract_one`), never cached, so an
+        # admin-config edit reaches the very next run with no redeploy.
+        redis_client=None,
     ):
         self.venue_dao = venue_dao
         self.post_source = post_source
@@ -520,6 +525,7 @@ class EventExtractionService:
         self._now = now_provider or (lambda: datetime.now(timezone.utc))
         self.venue_resolution_confidence_floor = venue_resolution_confidence_floor
         self.venue_resolution_margin = venue_resolution_margin
+        self.redis_client = redis_client
 
     def _resolve_venue_ids(self, cfg: dict) -> list[str]:
         if cfg["eligibility_mode"] == "venue_ids":
@@ -846,29 +852,21 @@ class EventExtractionService:
         # overall, like the promoter path already does: per-event nuance is
         # visible on each row's own review_reason instead.
         single_event_outcome: Optional[str] = None
-        # plans/260810_post-kind-and-post-extraction-attribution.md §B, re-
-        # scoped mid-execution: events, promotions and menus are separate
-        # entities (the operator's own correction) — this feature does not
-        # build promotion/menu entities, so a post classified as anything
-        # other than `event` produces NO events.event row at all, only a
-        # counted, logged outcome. The fail-toward-visible rule still
-        # applies: a MISSING or UNRECOGNISED kind is never in
-        # NON_EVENT_KINDS, so it falls through and is treated as an event,
-        # same as before.
-        skipped_non_event = 0
+        # plans/260811_post-items-and-categories.md §B: every extracted item
+        # is now persisted, typed — `260810_post-kind-and-post-extraction-
+        # attribution.md`'s interim ("drop every non-event, count and log
+        # it") is retired. `kept_events` is just `events_data`; the name
+        # survives because the date-resolution block below zips it against
+        # `resolved_dates` one-to-one and was already written against it.
+        kept_events: list[dict] = events_data
 
-        kept_events: list[dict] = []
-        for parsed in events_data:
-            kind = parsed.get("kind")
-            if kind in NON_EVENT_KINDS:
-                skipped_non_event += 1
-                logger.info(
-                    f"[EventExtraction] non-event post skipped for "
-                    f"{handle}/{post.shortcode}: kind={kind!r} "
-                    f"title={parsed.get('title')!r} -- no event row created"
-                )
-                continue
-            kept_events.append(parsed)
+        # ONE vocabulary read per post (not per event): every item this post
+        # yields is canonicalized against the SAME snapshot, and an admin-
+        # config edit still reaches the very next run with no redeploy
+        # (app.models.post_category).
+        category_vocabulary, _fallback_reason = load_post_category_vocabulary(
+            self.redis_client,
+        )
 
         # Each event resolves its OWN date independently, against the post's
         # timestamp — never a sibling's raw text. `vote_on_sibling_years`
@@ -925,6 +923,17 @@ class EventExtractionService:
             raw_extraction = dict(parsed)
             raw_extraction["time_known"] = resolved.time_known
 
+            # plans/260811_post-items-and-categories.md §B/§C: `post_type`
+            # is the model's own `kind`, stored VERBATIM when recognised or
+            # not (resolve_post_type only substitutes KIND_EVENT for a
+            # missing/blank answer — never coerces a real one). `category`
+            # is canonicalized against the vocabulary read once above; a
+            # miss is counted (never rejected) so the vocabulary can grow
+            # from evidence.
+            category = canonicalize_category(parsed.get("category"), category_vocabulary)
+            if category is not None and not is_in_vocabulary(category, category_vocabulary):
+                record_off_vocabulary_category(category)
+
             prepared_events.append({
                 "starts_at": resolved.starts_at,
                 "ends_at": resolved.ends_at,
@@ -934,6 +943,8 @@ class EventExtractionService:
                 "description": parsed["description"],
                 "lineup": parsed["lineup"],
                 "attractions": parsed["attractions"],
+                "post_type": resolve_post_type(parsed.get("kind")),
+                "category": category,
                 "ticket_url": parsed["ticket_url"],
                 "ticket_info": parsed["ticket_info"],
                 "price_text": parsed["price_text"],
@@ -1027,13 +1038,14 @@ class EventExtractionService:
 
         if prepared_events:
             outcome = single_event_outcome if single_event_outcome is not None else OUTCOME_EXTRACTED
-        elif skipped_non_event:
-            # Every parsed event was a recognised non-event kind — nothing
-            # persisted, by design (see the loop above).
-            outcome = OUTCOME_NOT_AN_EVENT
         else:
             # events_data itself was empty ({"events": []}) — unchanged,
-            # pre-existing behaviour for that edge case.
+            # pre-existing behaviour for that edge case. plans/260811_post-
+            # items-and-categories.md: this is the ONLY way prepared_events
+            # can now be empty while kept_events was assigned from
+            # events_data — every parsed event is kept and persisted, so
+            # there is no longer a "recognised non-event kind, nothing
+            # persisted" case (the retired OUTCOME_NOT_AN_EVENT).
             outcome = OUTCOME_EXTRACTED
         return outcome, kind_label
 
@@ -1101,7 +1113,7 @@ __all__ = [
     "OUTCOME_LOW_CONFIDENCE", "OUTCOME_EXTRACTION_FAILED", "OUTCOME_SKIPPED_SEEN",
     "OUTCOME_UNREAD_TIME", "OUTCOME_TRUNCATED", "OUTCOME_WEEKDAY_MISMATCH",
     "OUTCOME_YEAR_INFERRED", "OUTCOME_DATE_RANGE",
-    "OUTCOME_ACCEPTED", "OUTCOME_NOT_AN_EVENT",
+    "OUTCOME_ACCEPTED",
     "REVIEW_REASON_UNREAD_TIME", "DEFAULT_MAX_EVENTS_PER_POST", "ALL_STATUSES",
     "KIND_LABEL_NOT_APPLICABLE", "KIND_LABEL_UNKNOWN", "KIND_LABEL_MIXED",
     "TRIGGER_EXTRACTION", "TRIGGER_HANDLE_REEXTRACTION",
