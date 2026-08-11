@@ -663,6 +663,63 @@ def test_event_different_source_event_key_is_not_a_duplicate(store):
     assert {r["source_event_key"] for r in rows} == {"k1", "k2"}
 
 
+def test_list_events_by_handle_finds_only_events_sharing_that_handle(store):
+    """plans/260811_merge-unresolved-into-resolved-sibling.md's handle-
+    identity merge needs this lookup to find a resolved sibling — proven on
+    the real store's `EXISTS` correlated subquery, not just the fake's dict
+    scan, since a JOIN condition is exactly the kind of thing that is easy
+    to get subtly wrong (e.g. matching against the wrong alias)."""
+    vid = _vid()
+    store.upsert_venue(_venue(vid))
+    handle = f"leh_{vid}"
+    other_handle = f"leh_other_{vid}"
+    a_id = f"evt_leh_a_{vid}"
+    b_id = f"evt_leh_b_{vid}"
+    c_id = f"evt_leh_c_{vid}"
+    store.insert_event(_event_fields(
+        vid, f"leh_a_{vid}", event_id=a_id, source_handle=handle, source_event_key="leh_a_key",
+    ))
+    store.insert_event(_event_fields(
+        vid, f"leh_b_{vid}", event_id=b_id, source_handle=handle, source_event_key="leh_b_key",
+    ))
+    store.insert_event(_event_fields(
+        vid, f"leh_c_{vid}", event_id=c_id, source_handle=other_handle, source_event_key="leh_c_key",
+    ))
+
+    rows = store.list_events_by_handle(handle)
+    assert {r["event_id"] for r in rows} == {a_id, b_id}
+
+    assert store.list_events_by_handle(f"leh_nonexistent_{vid}") == []
+
+
+def test_list_events_by_handle_matches_any_source_after_reattachment(store):
+    """A merged event can carry sources from DIFFERENT handles (a venue-
+    identity merge does not require matching handles) — this lookup must
+    find it via EITHER source's own `source_handle`, not just the ONE the
+    primary-source LATERAL of `_EVENT_SELECT` would pick, or a handle-
+    identity search would silently miss an event whose most-recently-seen
+    post came from a different handle than the one being searched for."""
+    vid = _vid()
+    store.upsert_venue(_venue(vid))
+    handle_a = f"leh_ra_{vid}"
+    handle_b = f"leh_rb_{vid}"
+    canonical_id = f"evt_leh_ra_{vid}"
+    duplicate_id = f"evt_leh_rb_{vid}"
+    store.insert_event(_event_fields(
+        vid, f"leh_ra_{vid}", event_id=canonical_id, source_handle=handle_a,
+        source_event_key="leh_ra_key",
+    ))
+    store.insert_event(_event_fields(
+        vid, f"leh_rb_{vid}", event_id=duplicate_id, source_handle=handle_b,
+        source_event_key="leh_rb_key",
+    ))
+    store.reattach_event_sources(duplicate_id, canonical_id)
+    store.delete_event(duplicate_id)
+
+    assert {r["event_id"] for r in store.list_events_by_handle(handle_a)} == {canonical_id}
+    assert {r["event_id"] for r in store.list_events_by_handle(handle_b)} == {canonical_id}
+
+
 def test_event_ticket_info_and_attractions_round_trip(store):
     """plans/260808_event-ticket-info-and-attractions.md: `attractions`
     binds through the SAME jsonb CAST(:col AS jsonb) + json.dumps() path

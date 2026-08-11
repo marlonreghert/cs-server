@@ -175,6 +175,12 @@ class VenueRepository(RedisVenueDAO):
         API's `sources[]`."""
         return self.rds_store.list_event_sources(event_id)
 
+    def list_events_by_handle(self, source_handle: str):
+        """Every event with at least one source posted under `source_handle`
+        — plans/260811_merge-unresolved-into-resolved-sibling.md's handle-
+        identity merge."""
+        return self.rds_store.list_events_by_handle(source_handle)
+
     def reattach_event_sources(self, from_event_id: str, to_event_id: str) -> None:
         """Re-point every source on `from_event_id` at `to_event_id` — step 3
         of a cross-post merge, always followed by `delete_event(from_event_id)`."""

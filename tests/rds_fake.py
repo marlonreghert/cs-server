@@ -541,6 +541,22 @@ class InMemoryRdsVenueStore:
         rows.sort(key=lambda s: (self._sort_dt(s.get("first_seen_at")), s["id"]))
         return rows
 
+    def list_events_by_handle(self, source_handle: str) -> list[dict]:
+        """Every event with AT LEAST ONE source posted under `source_handle`
+        — plans/260811_merge-unresolved-into-resolved-sibling.md's handle
+        identity needs to find a resolved sibling regardless of which of an
+        event's (possibly several, post-merge) sources carries the matching
+        handle, not just its primary (most-recently-seen) one, or a merged
+        event whose most recent post came from a DIFFERENT handle would be
+        silently unfindable by its earlier, still-real handle."""
+        event_ids = {
+            s["event_id"] for s in self.event_sources.values()
+            if s.get("source_handle") == source_handle
+        }
+        rows = [self._merged_view(self.events[eid]) for eid in event_ids if eid in self.events]
+        rows.sort(key=lambda r: (r.get("starts_at") is None, r.get("starts_at"), r["event_id"]))
+        return rows
+
     def reattach_event_sources(self, from_event_id: str, to_event_id: str) -> None:
         """Re-point every source currently on `from_event_id` at
         `to_event_id` — step 3 of the merge (plans/260807_one-event-many-

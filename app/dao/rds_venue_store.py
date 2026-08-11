@@ -605,6 +605,26 @@ class RdsVenueStore:
             ).mappings()
             return [dict(r) for r in rows]
 
+    def list_events_by_handle(self, source_handle: str) -> list[dict]:
+        """Every event with AT LEAST ONE source posted under `source_handle`
+        — plans/260811_merge-unresolved-into-resolved-sibling.md's handle
+        identity needs to find a resolved sibling regardless of which of an
+        event's (possibly several, post-merge) sources carries the matching
+        handle, not just its primary (most-recently-seen) one — an EXISTS
+        correlated subquery against every source, never the `_EVENT_SELECT`
+        LATERAL's primary-source-only projection."""
+        with self.engine.connect() as conn:
+            rows = conn.execute(
+                text(
+                    f"{self._EVENT_SELECT} WHERE EXISTS ("
+                    "SELECT 1 FROM events.post_item_source esh "
+                    "WHERE esh.post_item_id = e.post_item_id AND esh.source_handle=:h"
+                    ")"
+                ),
+                {"h": source_handle},
+            ).mappings()
+            return [dict(r) for r in rows]
+
     def reattach_event_sources(self, from_event_id: str, to_event_id: str) -> None:
         """Re-point every source currently on `from_event_id` at
         `to_event_id` — step 3 of a cross-post merge
