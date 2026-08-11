@@ -937,6 +937,15 @@ class EventExtractionService:
             prepared_events.append({
                 "starts_at": resolved.starts_at,
                 "ends_at": resolved.ends_at,
+                # plans/260811_expose-time-known.md: sourced from the SAME
+                # resolver output as starts_at itself (never re-derived from
+                # raw_extraction's own copy below) so the two can never
+                # drift within THIS post's own write. Deliberately NOT in
+                # app.services.event_reconciliation.PROTECTABLE_EVENT_
+                # FIELDS — see that module's _confirmed_update_fields for
+                # why it instead travels alongside starts_at across a
+                # confirmed re-extraction or a cross-post merge.
+                "time_known": resolved.time_known,
                 "is_recurring": resolved.is_recurring or bool(parsed["is_recurring"]),
                 "recurrence_text": resolved.recurrence_text or parsed["recurrence_text"],
                 "title": parsed["title"],

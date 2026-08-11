@@ -630,6 +630,14 @@ class InMemoryRdsVenueStore:
         # event dict, which is EXACTLY what the migration's own back-fill
         # does for every row that existed before this column did).
         event_row.setdefault("post_type", "event")
+        # plans/260811_expose-time-known.md (migration 0035): the real
+        # `events.post_item.time_known` column is `NOT NULL DEFAULT false` —
+        # mirrored here for the same reason as post_type's setdefault above
+        # (every real extraction call site sets it explicitly; this only
+        # matters for a fixture/test that omits it, which must read back
+        # False, never a missing key that happens to only work because
+        # EventOut's own field default papers over it).
+        event_row.setdefault("time_known", False)
         self.events[event_id] = event_row
 
         source_fields = {k: v for k, v in fields.items() if k in self._EVENT_SOURCE_FIELDS}

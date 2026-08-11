@@ -819,6 +819,45 @@ def test_event_post_type_defaults_and_category_defaults_to_null(store):
     assert inserted.get("category") is None
 
 
+def test_event_time_known_round_trip(store):
+    """plans/260811_expose-time-known.md (migration 0035): `time_known` is
+    an ordinary real column, sourced from the SAME resolver output as
+    `starts_at` — not read out of the `raw_extraction` blob at serve time.
+    Must survive insert, get, get_by_source, and a partial update, on BOTH
+    store kinds, exactly like post_type/category above."""
+    vid = _vid()
+    store.upsert_venue(_venue(vid))
+    shortcode = f"tk_{vid}"
+    fields = _event_fields(vid, shortcode, time_known=True)
+    inserted = store.insert_event(fields)
+    assert inserted["time_known"] is True
+
+    by_id = store.get_event(fields["event_id"])
+    assert by_id["time_known"] is True
+
+    by_source = store.get_event_by_source("contract_handle", shortcode)
+    assert by_source["time_known"] is True
+
+    updated = store.update_event(fields["event_id"], {"time_known": False})
+    assert updated["time_known"] is False
+    # A field NOT in the partial update survives untouched.
+    assert updated["title"] == fields["title"]
+
+
+def test_event_time_known_defaults_to_false(store):
+    """An event inserted without `time_known` must read back False — the
+    real column's NOT NULL DEFAULT, mirrored by the fake (see
+    InMemoryRdsVenueStore.insert_event) so a caller that omits it (every
+    pre-existing test fixture, and every row written before migration 0035)
+    still gets the SAME honest "unknown" on both store kinds. Never True:
+    an item with no recorded flag is one whose time cannot be vouched for."""
+    vid = _vid()
+    store.upsert_venue(_venue(vid))
+    fields = _event_fields(vid, f"tk_none_{vid}")
+    inserted = store.insert_event(fields)
+    assert inserted.get("time_known") is False
+
+
 def test_list_events_filters_by_venue_and_status(store):
     vid_a, vid_b = _vid(), _vid()
     store.upsert_venue(_venue(vid_a))

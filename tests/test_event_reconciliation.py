@@ -1122,6 +1122,54 @@ class TestFieldLevelProtectionPerFieldTable:
         assert after["lineup"] == []
         assert after["review_reason"] is None  # title/date agree; no divergence
 
+    def test_time_known_follows_starts_at_when_it_updates_from_the_fresh_answer(self):
+        """plans/260811_expose-time-known.md: time_known is deliberately
+        NOT a member of PROTECTABLE_EVENT_FIELDS (see that constant's own
+        docstring) — it travels WITH starts_at instead. `title` is the
+        edited field here (starts_at is not), so starts_at updates from the
+        fresh answer per the ordinary per-field rule; time_known must move
+        with it."""
+        dao = _dao()
+        event_id = self._confirmed_row(dao, edited_fields=["title"], time_known=True)
+
+        later = [_event(
+            "Event A", datetime(2026, 8, 20, tzinfo=timezone.utc), time_known=False,
+        )]
+        reconcile_post_events(
+            venue_dao=dao, source_kind="venue_post", source_handle="h1",
+            source_shortcode="s1", source_permalink=None,
+            prepared_events=later, now=NOW, attribute=_venue_attribute("v1"),
+        )
+        after = dao.get_event(event_id)
+        assert after["starts_at"].date().isoformat() == "2026-08-20"
+        assert after["time_known"] is False
+
+    def test_time_known_is_not_independently_flagged_when_starts_at_is_unchanged(self):
+        """The exact regression an earlier version of this plan shipped: a
+        genuine-red BDD run over the sibling ticket-info/attractions
+        feature caught `time_known` alone (starts_at unchanged) flagging
+        REVIEW_REASON_DIVERGES_FROM_CONFIRMED, once it was briefly a member
+        of PROTECTABLE_EVENT_FIELDS. It must never be compared
+        independently — only starts_at's own decision matters."""
+        dao = _dao()
+        event_id = self._confirmed_row(
+            dao, edited_fields=["price_text"], time_known=True, price_text="R$30",
+        )
+
+        later = [_event(
+            "Event A", datetime(2026, 8, 10, tzinfo=timezone.utc),
+            time_known=False, price_text="R$30",
+        )]
+        reconcile_post_events(
+            venue_dao=dao, source_kind="venue_post", source_handle="h1",
+            source_shortcode="s1", source_permalink=None,
+            prepared_events=later, now=NOW, attribute=_venue_attribute("v1"),
+        )
+        after = dao.get_event(event_id)
+        assert after["starts_at"].date().isoformat() == "2026-08-10"
+        assert after["time_known"] is True  # untouched, never independently overwritten
+        assert after["review_reason"] is None
+
 
 class TestTicketInfoAndAttractions:
     """plans/260808_event-ticket-info-and-attractions.md §B/§C: ticket_info

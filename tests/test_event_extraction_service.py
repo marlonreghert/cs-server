@@ -392,6 +392,10 @@ class TestSingleEventVenuePostIsByteIdenticalToTheOldPath:
         # Clean per is_clean_extraction — auto-accepted, not queued.
         assert stored["status"] == "accepted"
         assert stored["review_reason"] is None
+        # plans/260811_expose-time-known.md: a real column now, sourced from
+        # the SAME resolve_event_datetime call as starts_at — not read out
+        # of raw_extraction's own copy below.
+        assert stored["time_known"] is True
         # `attractions`/`ticket_info` (plans/260808_event-ticket-info-and-
         # attractions.md) now ride in raw_extraction too — this fixture's
         # raw model JSON states neither, so both take their genuinely-absent
@@ -462,6 +466,9 @@ class TestSingleEventVenuePostIsByteIdenticalToTheOldPath:
             # of every prepared_events entry, like attractions/ticket_info
             # above — present on every insert.
             "post_type", "category",
+            # plans/260811_expose-time-known.md: unconditional key of every
+            # prepared_events entry, like post_type/category above.
+            "time_known",
         }
         assert set(stored.keys()) == expected_keys, set(stored.keys())
 
