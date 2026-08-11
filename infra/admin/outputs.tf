@@ -27,3 +27,8 @@ output "route53_zone_id" {
   description = "Zone the manual public-hostname cutover record goes in."
   value       = data.aws_route53_zone.apex.zone_id
 }
+
+output "console_release_role_arn" {
+  description = "Role ARN for the GitHub Actions admin-console release job."
+  value       = aws_iam_role.console_release.arn
+}

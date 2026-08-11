@@ -45,3 +45,15 @@ variable "tags" {
   type    = map(string)
   default = { project = "vibesense", component = "admin-panel" }
 }
+
+variable "release_repository" {
+  description = "GitHub repository allowed to assume the console release role, as owner/name."
+  type        = string
+  default     = "mcbsf/vibes_bot"
+}
+
+variable "release_branch" {
+  description = "The only branch whose workflow runs may assume the console release role."
+  type        = string
+  default     = "main"
+}
