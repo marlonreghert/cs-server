@@ -1,4 +1,3 @@
-@wip
 Feature: Attach a venue's Instagram handle when the venue is added
 
   As an operator adding a venue to the catalog
@@ -10,8 +9,7 @@ Feature: Attach a venue's Instagram handle when the venue is added
   Background:
     Given the add-venue endpoint is configured
     And Instagram discovery at add time is enabled
-    And the Instagram cascade is configured with its free sources, the
-      Google-search tier, and the judge
+    And the Instagram cascade is configured with its free sources, the Google-search tier, and the judge
 
   Scenario: Attach a handle found on the venue's Google listing
     Given BestTime creates the venue "Bar do Cuscuz" successfully

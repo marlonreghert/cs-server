@@ -105,6 +105,11 @@ class CascadeResult:
     tier_errors: list = field(default_factory=list)
     tier_unavailable: list = field(default_factory=list)
     error: Optional[str] = None
+    # "found" | "low_confidence" | "not_found", set by _finalize. Callers that
+    # need the same found/low_confidence/not_found classification the
+    # persisted record carries (e.g. the add-time hook) read this instead of
+    # re-deriving it from accepted/confidence/ambiguous_low themselves.
+    status: Optional[str] = None
 
 
 def handle_as_words(handle: Optional[str]) -> Optional[str]:
@@ -348,6 +353,9 @@ class InstagramCascadeService:
                 result.accepted = bool(existing.instagram_handle)
                 result.source = getattr(existing, "source", None)
                 result.confidence = existing.confidence_score or 0.0
+                result.status = getattr(existing, "status", None) or (
+                    "found" if result.accepted else "not_found"
+                )
                 return result
 
         best: Optional[CascadeResult] = None
@@ -397,12 +405,27 @@ class InstagramCascadeService:
             ):
                 break
 
-        return self._finalize(result, best, venue_id)
+        return self._finalize(result, best, venue_id, config)
 
     def _source_enabled(self, source: str, config: dict) -> bool:
+        """Is this source allowed to run under this config?
+
+        An explicit per-source key (``tier_<source>_enabled``) always wins —
+        this is what lets a caller enable `google_search` while leaving the
+        paid-tier master switch (`tier_apify_search_enabled`) off, which is
+        exactly the add-time shape (strongest discovery path, no spend on the
+        Instagram user-search tier). Absent an explicit key, the master
+        switch's backward-compatible behavior holds: turning it off disables
+        BOTH paid sources, so an operator run passing only
+        `tier_apify_search_enabled: false` stays the zero-cost pass over the
+        whole catalog that app/config.py promises.
+        """
+        explicit = config.get(f"tier_{source}_enabled")
+        if explicit is not None:
+            return explicit is not False
         if source in PAID_SOURCES and config.get("tier_apify_search_enabled") is False:
             return False
-        return config.get(f"tier_{source}_enabled", True) is not False
+        return True
 
     async def _probe(self, handle):
         if self.probe is None:
@@ -456,10 +479,13 @@ class InstagramCascadeService:
         )
         return cand
 
-    def _finalize(self, result: CascadeResult, best, venue_id) -> CascadeResult:
+    def _finalize(
+        self, result: CascadeResult, best, venue_id, config: Optional[dict] = None
+    ) -> CascadeResult:
         if best is None:
             result.accepted = False
-            self._persist(result, status="not_found")
+            result.status = "not_found"
+            self._persist(result, status="not_found", config=config)
             INSTAGRAM_CASCADE_RESULTS_TOTAL.labels(source="none", result="not_found").inc()
             return result
 
@@ -473,14 +499,25 @@ class InstagramCascadeService:
         status = "found" if best.accepted else (
             "low_confidence" if best.confidence >= self.ambiguous_low else "not_found"
         )
-        self._persist(best, status=status)
+        best.status = status
+        self._persist(best, status=status, config=config)
         INSTAGRAM_CASCADE_RESULTS_TOTAL.labels(
             source=best.source or "none",
             result="accepted" if best.accepted else status,
         ).inc()
         return best
 
-    def _persist(self, result: CascadeResult, *, status: str) -> None:
+    def _persist(
+        self, result: CascadeResult, *, status: str, config: Optional[dict] = None
+    ) -> None:
+        if status == "not_found" and (config or {}).get("suppress_not_found_cache"):
+            # A not_found from a run that deliberately skipped a tier (the
+            # add-time run never tries apify_search) must not poison that
+            # tier's freshness gate for `instagram_not_found_cache_ttl_days` —
+            # the tier that was never tried is exactly the one this would
+            # block. The caller still gets the "not_found" CascadeResult back;
+            # only the persisted negative-cache entry is withheld.
+            return
         try:
             self.venue_dao.set_venue_instagram(
                 VenueInstagram(

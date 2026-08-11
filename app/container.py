@@ -837,6 +837,13 @@ class Container:
             # Kill switch for the Google-only catalog path (default off, read
             # fresh on every request; see plans/260804_add-venue-google-only.md).
             admin_config_service=self.admin_config_service,
+            # Inline Instagram discovery at add time (default on via
+            # settings.add_venue_instagram_enabled). None when the cascade
+            # itself is not configured (settings.instagram_cascade_enabled off
+            # or no Apify token) — the handler degrades every add's
+            # instagram.status to "skipped" in that case.
+            # See plans/260811_add-venue-instagram-discovery.md.
+            instagram_cascade_service=self.instagram_cascade_service,
         )
 
         # Server-side batch venue-add: runs a curated list through the same

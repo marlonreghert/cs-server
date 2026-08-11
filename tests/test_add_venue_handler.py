@@ -1616,3 +1616,286 @@ async def test_google_only_transport_failure_never_reaches_the_new_path(
     assert "unavailable" in outcome.body["detail"].lower()
     google_client.search_place_id.assert_not_awaited()
     assert venue_dao.get_venue(_minted_id()) is None
+
+
+# ── add-time Instagram discovery (inline, degrade-safe) ───────────────────────
+# plans/260811_add-venue-instagram-discovery.md
+import asyncio as _asyncio
+
+from app.services.instagram_cascade_service import CascadeResult
+
+
+def _ig_handler(venue_dao, besttime, budget, fake, instagram_cascade_service):
+    """Handler wired with an injected Instagram cascade service (mock)."""
+    return AddVenueHandler(
+        venue_dao=venue_dao,
+        besttime_api=besttime,
+        budget_service=budget,
+        redis_client=fake,
+        instagram_cascade_service=instagram_cascade_service,
+    )
+
+
+def _cascade_result(**overrides) -> CascadeResult:
+    base = dict(
+        venue_id="ven_ig",
+        handle=None,
+        source=None,
+        accepted=False,
+        confidence=0.0,
+        status="not_found",
+    )
+    base.update(overrides)
+    return CascadeResult(**base)
+
+
+@pytest.mark.asyncio
+async def test_instagram_discovery_runs_after_google_enrichment(
+    venue_dao, besttime, budget, fake
+):
+    """_finalize_created_venue must call the cascade AFTER Google enrichment
+    — that call is what populates the vibe row's website_uri the free
+    google_website tier reads."""
+    besttime.add_venue_to_account.return_value = _ok_response("ven_order")
+    besttime.get_live_forecast.return_value = _live_unavailable("ven_order")
+
+    order: list[str] = []
+    enrichment = AsyncMock()
+    enrichment.enrich_venue.side_effect = lambda **kw: order.append("enrich")
+    cascade = AsyncMock()
+
+    async def _discover(venue_id, config=None):
+        order.append("instagram")
+        return _cascade_result(venue_id=venue_id)
+
+    cascade.discover.side_effect = _discover
+
+    handler = AddVenueHandler(
+        venue_dao=venue_dao,
+        besttime_api=besttime,
+        budget_service=budget,
+        redis_client=fake,
+        google_places_enrichment_service=enrichment,
+        instagram_cascade_service=cascade,
+    )
+
+    outcome = await handler.add(_req(place_id="places/ChIJorder"))
+
+    assert outcome.status_code == 201
+    assert order == ["enrich", "instagram"]
+
+
+@pytest.mark.asyncio
+async def test_instagram_discovery_passes_the_add_time_config(
+    venue_dao, besttime, budget, fake
+):
+    """The add-time call must disable apify_search, enable google_search
+    explicitly, enable the judge, and suppress the not_found cache — see
+    ADD_VENUE_INSTAGRAM_CASCADE_CONFIG."""
+    besttime.add_venue_to_account.return_value = _ok_response("ven_cfg")
+    besttime.get_live_forecast.return_value = _live_unavailable("ven_cfg")
+    cascade = AsyncMock()
+    cascade.discover.return_value = _cascade_result(venue_id="ven_cfg")
+    handler = _ig_handler(venue_dao, besttime, budget, fake, cascade)
+
+    await handler.add(_req())
+
+    cascade.discover.assert_awaited_once()
+    args, kwargs = cascade.discover.await_args
+    venue_id, config = args
+    assert venue_id == "ven_cfg"
+    assert config["tier_apify_search_enabled"] is False
+    assert config["tier_google_search_enabled"] is True
+    assert config["judge_enabled"] is True
+    assert config["suppress_not_found_cache"] is True
+
+
+@pytest.mark.asyncio
+async def test_instagram_discovery_skipped_when_service_absent(handler, besttime, fake):
+    # The default `handler` fixture has NO instagram_cascade_service wired.
+    besttime.add_venue_to_account.return_value = _ok_response("ven_noig")
+    besttime.get_live_forecast.return_value = _live_unavailable("ven_noig")
+
+    outcome = await handler.add(_req())
+
+    assert outcome.status_code == 201
+    assert outcome.body["instagram"] == {
+        "status": "skipped",
+        "handle": None,
+        "url": None,
+        "source": None,
+        "confidence": 0.0,
+    }
+
+
+@pytest.mark.asyncio
+async def test_instagram_discovery_skipped_when_disabled_via_settings(
+    venue_dao, besttime, budget, fake, monkeypatch
+):
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "add_venue_instagram_enabled", False)
+    besttime.add_venue_to_account.return_value = _ok_response("ven_offswitch")
+    besttime.get_live_forecast.return_value = _live_unavailable("ven_offswitch")
+    cascade = AsyncMock()
+    handler = _ig_handler(venue_dao, besttime, budget, fake, cascade)
+
+    outcome = await handler.add(_req())
+
+    assert outcome.status_code == 201
+    assert outcome.body["instagram"]["status"] == "skipped"
+    cascade.discover.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_instagram_discovery_not_attempted_on_already_exists(
+    handler, besttime, venue_dao, fake
+):
+    venue = Venue(
+        processed=True,
+        forecast=True,
+        venue_id="ven_existing_ig",
+        venue_name="Bar do Joao",
+        venue_address="Rua das Flores 123, Recife - PE",
+        venue_lat=-8.05,
+        venue_lng=-34.88,
+    )
+    venue_dao.upsert_venue(venue)
+    cascade = AsyncMock()
+    handler.instagram_cascade_service = cascade
+
+    outcome = await handler.add(_req())
+
+    assert outcome.status_code == 200
+    assert outcome.body["status"] == "already_exists"
+    assert "instagram" not in outcome.body
+    cascade.discover.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_instagram_discovery_exception_never_fails_the_add(
+    venue_dao, besttime, budget, fake
+):
+    besttime.add_venue_to_account.return_value = _ok_response("ven_igboom")
+    besttime.get_live_forecast.return_value = _live_unavailable("ven_igboom")
+    cascade = AsyncMock()
+    cascade.discover.side_effect = RuntimeError("cascade blew up")
+    handler = _ig_handler(venue_dao, besttime, budget, fake, cascade)
+
+    outcome = await handler.add(_req())
+
+    assert outcome.status_code == 201
+    assert outcome.body["venue_id"] == "ven_igboom"
+    assert outcome.body["instagram"]["status"] == "error"
+    assert outcome.body["instagram"]["handle"] is None
+
+
+@pytest.mark.asyncio
+async def test_instagram_discovery_deadline_never_fails_the_add(
+    venue_dao, besttime, budget, fake, monkeypatch
+):
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "add_venue_instagram_deadline_seconds", 0.01)
+    besttime.add_venue_to_account.return_value = _ok_response("ven_igslow")
+    besttime.get_live_forecast.return_value = _live_unavailable("ven_igslow")
+    cascade = AsyncMock()
+
+    async def _slow_discover(venue_id, config=None):
+        await _asyncio.sleep(1.0)
+        return _cascade_result(venue_id=venue_id)
+
+    cascade.discover.side_effect = _slow_discover
+    handler = _ig_handler(venue_dao, besttime, budget, fake, cascade)
+
+    outcome = await handler.add(_req())
+
+    assert outcome.status_code == 201
+    assert outcome.body["venue_id"] == "ven_igslow"
+    assert outcome.body["instagram"]["status"] == "timeout"
+    assert outcome.body["instagram"]["handle"] is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "cascade_result, expected",
+    [
+        (
+            _cascade_result(
+                handle="barvibes", source="google_website", accepted=True,
+                confidence=0.9, status="found",
+            ),
+            {
+                "status": "found",
+                "handle": "barvibes",
+                "url": "https://instagram.com/barvibes",
+                "source": "google_website",
+                "confidence": 0.9,
+            },
+        ),
+        (
+            _cascade_result(
+                handle="maybebar", source="venue_website", accepted=False,
+                confidence=0.55, status="low_confidence",
+            ),
+            {
+                "status": "low_confidence",
+                "handle": "maybebar",
+                "url": "https://instagram.com/maybebar",
+                "source": "venue_website",
+                "confidence": 0.55,
+            },
+        ),
+        (
+            _cascade_result(
+                handle=None, source=None, accepted=False, confidence=0.0,
+                status="not_found",
+            ),
+            {
+                "status": "not_found",
+                "handle": None,
+                "url": None,
+                "source": None,
+                "confidence": 0.0,
+            },
+        ),
+    ],
+)
+async def test_instagram_response_shape_per_status(
+    venue_dao, besttime, budget, fake, cascade_result, expected
+):
+    besttime.add_venue_to_account.return_value = _ok_response("ven_shape")
+    besttime.get_live_forecast.return_value = _live_unavailable("ven_shape")
+    cascade = AsyncMock()
+    cascade.discover.return_value = cascade_result
+    handler = _ig_handler(venue_dao, besttime, budget, fake, cascade)
+
+    outcome = await handler.add(_req())
+
+    assert outcome.status_code == 201
+    assert outcome.body["instagram"] == expected
+
+
+@pytest.mark.asyncio
+async def test_instagram_object_is_additive_to_existing_response_fields(
+    venue_dao, besttime, budget, fake
+):
+    """Every existing field on a created response keeps its name, type and
+    value — the instagram object is purely additive."""
+    besttime.add_venue_to_account.return_value = _ok_response("ven_additive")
+    besttime.get_live_forecast.return_value = _live_unavailable("ven_additive")
+    cascade = AsyncMock()
+    cascade.discover.return_value = _cascade_result(venue_id="ven_additive")
+    handler = _ig_handler(venue_dao, besttime, budget, fake, cascade)
+
+    outcome = await handler.add(_req())
+
+    assert outcome.status_code == 201
+    assert outcome.body["status"] == "created"
+    assert outcome.body["venue_id"] == "ven_additive"
+    assert outcome.body["venue_name"] == "Bar do Joao"
+    assert outcome.body["venue_address"] == "Rua das Flores 123, Recife - PE"
+    assert outcome.body["venue_lat"] == -8.05
+    assert outcome.body["venue_lng"] == -34.88
+    assert outcome.body["source"] == "besttime_new"
+    assert "instagram" in outcome.body

@@ -5,6 +5,8 @@ get quietly wrong: URL extraction against URLs seen in real data, the Open Graph
 parse, the confidence weighting, and the judge's ability to answer with no
 images.
 """
+import asyncio
+
 import pytest
 
 from app.api.instagram_profile_probe import (
@@ -24,7 +26,10 @@ from app.services.instagram_handle_sources import (
     REJECT_NON_PROFILE_PATH,
     REJECT_NOT_INSTAGRAM,
     SOURCE_APIFY_SEARCH,
+    SOURCE_ARCHIVED_GMAPS,
+    SOURCE_GOOGLE_SEARCH,
     SOURCE_GOOGLE_WEBSITE,
+    SOURCE_VENUE_WEBSITE,
     extract_handle,
     normalize_handle,
 )
@@ -210,3 +215,148 @@ class TestJudgeModes:
 
     def test_vision_confidence_is_not_capped(self):
         assert cap_for_mode(MODE_VISION_BOTH, 0.99) == 0.99
+
+
+# =============================================================================
+# plans/260811_add-venue-instagram-discovery.md
+# =============================================================================
+
+
+class TestSourceEnabled:
+    """_source_enabled's explicit-key-wins fix.
+
+    Load-bearing: an operator run passing ONLY tier_apify_search_enabled:false
+    must still perform zero paid calls (it disables google_search too), while
+    an add-time config can enable google_search explicitly even with that same
+    master switch off.
+    """
+
+    def _service(self):
+        # No sources/venue_dao needed — _source_enabled reads only its config
+        # argument.
+        return InstagramCascadeService(venue_dao=None)
+
+    def test_explicit_true_enables_google_search_despite_master_switch_off(self):
+        service = self._service()
+        config = {
+            "tier_apify_search_enabled": False,
+            "tier_google_search_enabled": True,
+        }
+        assert service._source_enabled(SOURCE_GOOGLE_SEARCH, config) is True
+
+    def test_master_switch_off_alone_still_disables_apify_search(self):
+        service = self._service()
+        config = {"tier_apify_search_enabled": False}
+        assert service._source_enabled(SOURCE_APIFY_SEARCH, config) is False
+
+    def test_master_switch_off_alone_still_disables_google_search(self):
+        """The zero-cost-run guarantee app/config.py promises: passing only
+        the master switch must disable BOTH paid sources, not just the one
+        whose name happens to match the key."""
+        service = self._service()
+        config = {"tier_apify_search_enabled": False}
+        assert service._source_enabled(SOURCE_GOOGLE_SEARCH, config) is False
+
+    def test_explicit_false_disables_apify_search_even_without_the_master_key(self):
+        service = self._service()
+        config = {"tier_apify_search_enabled": False, "tier_google_search_enabled": True}
+        assert service._source_enabled(SOURCE_APIFY_SEARCH, config) is False
+
+    def test_explicit_false_disables_a_free_source(self):
+        service = self._service()
+        config = {"tier_google_website_enabled": False}
+        assert service._source_enabled(SOURCE_GOOGLE_WEBSITE, config) is False
+
+    @pytest.mark.parametrize(
+        "source",
+        [
+            SOURCE_GOOGLE_WEBSITE,
+            SOURCE_ARCHIVED_GMAPS,
+            SOURCE_VENUE_WEBSITE,
+            SOURCE_APIFY_SEARCH,
+            SOURCE_GOOGLE_SEARCH,
+        ],
+    )
+    def test_default_config_enables_everything(self, source):
+        service = self._service()
+        assert service._source_enabled(source, {}) is True
+
+
+class _Venue:
+    venue_name = "Bar Forte"
+    venue_address = "Recife"
+
+
+class _RecordingDao:
+    """Minimal venue_dao fake: no cached record, no servable-id listing
+    needed for these single-venue discover() tests. Records every
+    set_venue_instagram call for the suppress_not_found_cache assertions."""
+
+    def __init__(self):
+        self.saved: list = []
+
+    def get_venue(self, venue_id):
+        return _Venue()
+
+    def get_venue_instagram(self, venue_id):
+        return None
+
+    def set_venue_instagram(self, record):
+        self.saved.append(record)
+
+
+class _WebsiteSource:
+    def __init__(self, website=None):
+        self.website = website
+
+    async def website_for(self, venue_id, venue=None):
+        return self.website
+
+
+class TestSuppressNotFoundCache:
+    """A not_found from a run that deliberately skipped a tier (add time
+    never tries apify_search) must not poison that tier's freshness gate —
+    the caller still gets the not_found CascadeResult, but nothing is
+    persisted."""
+
+    def test_not_found_is_reported_but_not_persisted_when_suppressed(self):
+        dao = _RecordingDao()
+        service = InstagramCascadeService(venue_dao=dao)  # no sources at all
+
+        result = asyncio.run(
+            service.discover("ven_x", {"suppress_not_found_cache": True})
+        )
+
+        assert result.status == "not_found"
+        assert result.handle is None
+        assert dao.saved == []
+
+    def test_not_found_persists_normally_without_the_flag(self):
+        dao = _RecordingDao()
+        service = InstagramCascadeService(venue_dao=dao)
+
+        result = asyncio.run(service.discover("ven_x", {}))
+
+        assert result.status == "not_found"
+        assert len(dao.saved) == 1
+        assert dao.saved[0].status == "not_found"
+
+    def test_a_found_result_still_persists_with_the_flag_set(self):
+        """suppress_not_found_cache must gate only the not_found branch — a
+        found (or low_confidence) result persists exactly as it does today."""
+        dao = _RecordingDao()
+        # A google_website hit alone (provenance 0.75) clears the accept bar
+        # even with no name match and no probe — see PROVENANCE_WEIGHT.
+        service = InstagramCascadeService(
+            venue_dao=dao,
+            google_listing=_WebsiteSource("https://instagram.com/barforte"),
+        )
+
+        result = asyncio.run(
+            service.discover("ven_x", {"suppress_not_found_cache": True})
+        )
+
+        assert result.status == "found"
+        assert result.accepted is True
+        assert len(dao.saved) == 1
+        assert dao.saved[0].instagram_handle == "barforte"

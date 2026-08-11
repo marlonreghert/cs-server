@@ -71,6 +71,10 @@ def _classify(outcome: AddVenueOutcome) -> dict:
             res["outcome"] = "created_recovered_timeout"
         else:
             res["outcome"] = "created"
+        # Instagram discovery outcome for this row — see
+        # plans/260811_add-venue-instagram-discovery.md. Always present on a
+        # 201 body (AddVenueHandler._finalize_created_venue sets it).
+        res["instagram"] = body.get("instagram")
     elif code == 200 and status == "already_exists":
         res["outcome"] = "already_exists"
     elif code == 200 and status == "matched_via_geo_fallback":
@@ -78,6 +82,9 @@ def _classify(outcome: AddVenueOutcome) -> dict:
         res["newly_linked"] = body.get("newly_linked")
         res["match_reason"] = body.get("match_reason")
         res["venue_id"] = body.get("venue_id")
+        # Present only when newly_linked (AddVenueHandler only runs discovery
+        # for a newly-linked geo-fallback outcome); None otherwise.
+        res["instagram"] = body.get("instagram")
     elif code == 429:
         # Internal quota vs BestTime's own venue cap.
         res["outcome"] = (

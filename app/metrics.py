@@ -1044,6 +1044,12 @@ ADD_VENUE_BY_ADDRESS_TOTAL = Counter(
     # genuine metric no-op.
 )
 
+ADD_VENUE_INSTAGRAM_TOTAL = Counter(
+    "add_venue_instagram_total",
+    "Outcomes of the Instagram handle discovery run inline at venue-add time",
+    ["result"],  # found | low_confidence | not_found | timeout | skipped | error
+)
+
 INVENTORY_SYNC_VENUES_TOTAL = Counter(
     "inventory_sync_venues_total",
     "Per-venue outcomes during the monthly BestTime inventory sync",

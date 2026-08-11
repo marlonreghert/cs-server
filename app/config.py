@@ -320,6 +320,22 @@ class Settings(BaseSettings):
     instagram_judge_model: str = "gpt-5.6-luna"
     instagram_judge_max_venue_photos: int = 3
 
+    # Add-time Instagram discovery hook
+    # (plans/260811_add-venue-instagram-discovery.md). Runs the handle cascade
+    # inline right after a venue is created/newly geo-linked so a handle
+    # reaches serving without waiting on the full cascade run, which nothing
+    # schedules. Kill switch for the whole hook — default on; the cascade
+    # itself still needs instagram_google_search_enabled=true (+ an Apify
+    # token) and instagram_judge_enabled=true to reach beyond the three free
+    # sources — see AddVenueHandler.ADD_VENUE_INSTAGRAM_CASCADE_CONFIG.
+    add_venue_instagram_enabled: bool = True
+    # Inline budget for the add path. vibes_bot's admin-add proxy
+    # (ADD_VENUE_PROXY_TIMEOUT_SECONDS) gives the whole add 90s and the
+    # BestTime create can already consume a good chunk of that; this must
+    # leave headroom so a slow cascade degrades to "no handle" instead of
+    # turning a successful add into a proxy timeout.
+    add_venue_instagram_deadline_seconds: float = 25.0
+
     # Pipeline run registry: how many recent runs per pipeline stay selectable
     # in Grafana. This is the cardinality ceiling — series = pipelines x size.
     pipeline_run_registry_enabled: bool = True

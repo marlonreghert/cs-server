@@ -27,6 +27,7 @@ from app.dao.redis_venue_dao import RedisVenueDAO
 from app.dao.venue_row import venue_from_row
 from app.metrics import (
     ADD_VENUE_BY_ADDRESS_TOTAL,
+    ADD_VENUE_INSTAGRAM_TOTAL,
     VENUE_MONTHLY_NEW_COUNT,
 )
 from app.models import (
@@ -87,6 +88,34 @@ ADD_VENUE_GOOGLE_ONLY_CONFIG_KEY = "add_venue_google_only"
 GOOGLE_ONLY_VENUE_ID_PREFIX = "vsg_"
 GOOGLE_ONLY_VENUE_ID_HASH_LEN = 24
 
+# Add-time Instagram cascade config (plans/260811_add-venue-instagram-discovery.md).
+# Deliberately DIFFERENT from the operator whole-catalogue default
+# (admin_trigger_router.JOB_REGISTRY["instagram"]["default_config"]): the three
+# free sources plus the Google-search tier (the strongest single discovery
+# path) with the judge required to accept it, but NEVER the paid Apify user
+# search — that stays reachable only through an explicit operator run.
+ADD_VENUE_INSTAGRAM_CASCADE_CONFIG = {
+    "tier_google_website_enabled": True,
+    "tier_archived_gmaps_website_enabled": True,
+    "tier_venue_website_enabled": True,
+    # The master paid-tier switch: kept False so a bug that removes the
+    # explicit google_search override below still can't spend the user-search
+    # tier at add time (see InstagramCascadeService._source_enabled).
+    "tier_apify_search_enabled": False,
+    # Explicit per-source override: _source_enabled checks this key before
+    # falling back to the master switch above, so google_search runs even
+    # though the master paid switch is off.
+    "tier_google_search_enabled": True,
+    # google_search can never clear the accept bar on its own (see
+    # PROVENANCE_WEIGHT in instagram_cascade_service.py) — the judge is the
+    # only path that can accept one of its candidates.
+    "judge_enabled": True,
+    # The add-time run deliberately skips apify_search; a not_found written
+    # here would block that untried tier from ever running for this venue for
+    # instagram_not_found_cache_ttl_days.
+    "suppress_not_found_cache": True,
+}
+
 
 class AddVenueByAddressRequest(BaseModel):
     """Request body for POST /admin/venues/by-address."""
@@ -127,6 +156,7 @@ class AddVenueHandler:
         rds_store=None,
         timeout_recovery_grace_seconds: float = DEFAULT_TIMEOUT_RECOVERY_GRACE_SECONDS,
         admin_config_service=None,
+        instagram_cascade_service=None,
     ) -> None:
         self.venue_dao = venue_dao
         self.besttime = besttime_api
@@ -151,6 +181,11 @@ class AddVenueHandler:
         # hours, reviews, business status, rating) after persist. Absent -> the add
         # still succeeds with the BestTime-baseline price only (degrade-safe).
         self.google_places_enrichment_service = google_places_enrichment_service
+        # Optional: runs the Instagram handle cascade inline for a just-created
+        # or just-newly-linked venue (see _discover_instagram_handle). Absent ->
+        # every add reports instagram.status="skipped" and still succeeds
+        # (dependency-aware, same guardrail as the Google enrichment service).
+        self.instagram_cascade_service = instagram_cascade_service
 
     async def add(self, request: AddVenueByAddressRequest) -> AddVenueOutcome:
         radius_m = request.fallback_radius_meters or DEFAULT_FALLBACK_RADIUS_M
@@ -352,6 +387,12 @@ class AddVenueHandler:
         # BestTime call. Degrade-safe: any failure logs and the add still succeeds.
         await self._enrich_from_google(venue, request.place_id)
 
+        # Attempt Instagram discovery inline. Runs AFTER the Google enrichment
+        # above because that call is what populates the vibe row's
+        # `website_uri` the free google_website tier reads. Never fails the
+        # add: see _discover_instagram_handle.
+        instagram = await self._discover_instagram_handle(venue)
+
         # Best-effort cache of week_raw days if BestTime included them.
         for day in analysis:
             try:
@@ -383,6 +424,7 @@ class AddVenueHandler:
             "venue_lat": venue.venue_lat,
             "venue_lng": venue.venue_lng,
             "source": source,
+            "instagram": instagram,
         }
         if recovered_from_timeout:
             body["recovered_from_timeout"] = True
@@ -679,6 +721,7 @@ class AddVenueHandler:
         # Upsert the matched venue if not already in our geo index.
         existing = self.venue_dao.get_venue(match.venue_id)
         was_new = existing is None
+        instagram = None
         if was_new:
             # Geo-link provenance, persisted at link time: undo_geo_link
             # requires geo_linked=True (a normally-created venue must never
@@ -707,29 +750,33 @@ class AddVenueHandler:
             self.budget.record_new_venue_from_discovery()
             # The venue_filter call interacted with this venue — record it.
             self.budget.mark_touched(match.venue_id)
+            # Instagram discovery only for a venue newly linked here — an
+            # already-catalogued match already had its chance (or is due for
+            # one on the next cascade run, not a second inline attempt).
+            instagram = await self._discover_instagram_handle(venue)
         VENUE_MONTHLY_NEW_COUNT.set(self.budget.get_snapshot().month_counter)
         self._save_address_cache(
             request.venue_name, request.venue_address, match.venue_id
         )
 
         ADD_VENUE_BY_ADDRESS_TOTAL.labels(result="matched_via_geo_fallback").inc()
-        return AddVenueOutcome(
-            status_code=200,
-            body={
-                "status": "matched_via_geo_fallback",
-                "venue_id": match.venue_id,
-                "venue_name": match.venue_name,
-                "venue_address": match.venue_address,
-                "venue_lat": match.venue_lat,
-                "venue_lng": match.venue_lng,
-                "source": "venues_filter_radius",
-                # was_new drives undoability (only a newly-created row is
-                # undoable); match_reason feeds batch automation (auto-keep
-                # "exact", queue "containment" for review within the undo window).
-                "newly_linked": was_new,
-                "match_reason": match_reason,
-            },
-        )
+        body = {
+            "status": "matched_via_geo_fallback",
+            "venue_id": match.venue_id,
+            "venue_name": match.venue_name,
+            "venue_address": match.venue_address,
+            "venue_lat": match.venue_lat,
+            "venue_lng": match.venue_lng,
+            "source": "venues_filter_radius",
+            # was_new drives undoability (only a newly-created row is
+            # undoable); match_reason feeds batch automation (auto-keep
+            # "exact", queue "containment" for review within the undo window).
+            "newly_linked": was_new,
+            "match_reason": match_reason,
+        }
+        if was_new:
+            body["instagram"] = instagram
+        return AddVenueOutcome(status_code=200, body=body)
 
     # ── Google-only catalog path (no BestTime venue exists) ──────────────────
     def _google_only_enabled(self) -> bool:
@@ -1147,6 +1194,70 @@ class AddVenueHandler:
                 f"[AddVenueHandler] Google enrichment failed for {venue.venue_id}: "
                 f"{type(e).__name__}: {e}"
             )
+
+    async def _discover_instagram_handle(self, venue: Venue) -> dict:
+        """Best-effort Instagram discovery for a just-created or just-newly-
+        linked venue, run with ADD_VENUE_INSTAGRAM_CASCADE_CONFIG under a
+        deadline.
+
+        Never raises and never blocks the add on a slow or broken cascade: an
+        unconfigured service, a deadline, or any exception from the cascade
+        itself all degrade to a "no handle" outcome here — the venue the
+        caller already persisted is returned as a successful 201/200 either
+        way. Every outcome is counted on ADD_VENUE_INSTAGRAM_TOTAL.
+        """
+        empty = {
+            "status": "skipped",
+            "handle": None,
+            "url": None,
+            "source": None,
+            "confidence": 0.0,
+        }
+        if not settings.add_venue_instagram_enabled or self.instagram_cascade_service is None:
+            ADD_VENUE_INSTAGRAM_TOTAL.labels(result="skipped").inc()
+            return empty
+
+        try:
+            try:
+                result = await asyncio.wait_for(
+                    self.instagram_cascade_service.discover(
+                        venue.venue_id, dict(ADD_VENUE_INSTAGRAM_CASCADE_CONFIG)
+                    ),
+                    timeout=settings.add_venue_instagram_deadline_seconds,
+                )
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "[AddVenueHandler] Instagram discovery deadline "
+                    f"({settings.add_venue_instagram_deadline_seconds}s) exceeded "
+                    f"for {venue.venue_id}; venue stays created with no handle"
+                )
+                ADD_VENUE_INSTAGRAM_TOTAL.labels(result="timeout").inc()
+                return {**empty, "status": "timeout"}
+
+            status = result.status or ("found" if result.accepted else "not_found")
+            handle = result.handle if status in ("found", "low_confidence") else None
+            body = {
+                "status": status,
+                "handle": handle,
+                "url": f"https://instagram.com/{handle}" if handle else None,
+                "source": result.source if handle else None,
+                "confidence": round(result.confidence or 0.0, 4),
+            }
+            logger.info(
+                f"[AddVenueHandler] Instagram discovery for {venue.venue_id}: "
+                f"status={status} source={body['source']} confidence={body['confidence']}"
+            )
+            ADD_VENUE_INSTAGRAM_TOTAL.labels(result=status).inc()
+            return body
+        except Exception as e:
+            # Any other failure (the cascade raising, a bug in the mapping
+            # above) must degrade to "no handle", never to a failed add.
+            logger.error(
+                f"[AddVenueHandler] Instagram discovery failed for "
+                f"{venue.venue_id}: {type(e).__name__}: {e}"
+            )
+            ADD_VENUE_INSTAGRAM_TOTAL.labels(result="error").inc()
+            return {**empty, "status": "error"}
 
 
 def _fold_text(text: str) -> str:
