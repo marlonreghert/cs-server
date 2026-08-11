@@ -20,6 +20,8 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+import pytest
+
 from app.models.venue import Venue
 from app.services.event_merge import compute_handle_identity, merge_touched_events
 from app.services.event_reconciliation import new_event_id
@@ -91,53 +93,71 @@ class TestComputeHandleIdentity:
         assert compute_handle_identity({"starts_at": _DATE, "title": _TITLE}) is None
 
 
-def _seed_pair(store: InMemoryRdsVenueStore, *, handle=_HANDLE, venue_id="v1") -> tuple[str, str]:
-    resolved_id = _insert(
-        store, "resolved_post", venue_id=venue_id, source_handle=handle,
-        source_kind="venue_post", title=_TITLE, starts_at=_DATE, status="accepted",
-    )
-    unresolved_id = _insert(
-        store, "unresolved_post", venue_id=None, source_handle=handle,
-        source_kind="promoter_post", title=_TITLE, starts_at=_DATE,
-        status="pending_review", review_reason="unresolved_venue",
-    )
+def _seed_pair(
+    store: InMemoryRdsVenueStore, *, handle=_HANDLE, venue_id="v1", unresolved_id_smaller=True,
+) -> tuple[str, str]:
+    """Seeds one resolved + one unresolved event sharing a handle identity.
+    `unresolved_id_smaller` controls INSERTION order (and therefore which
+    event_id — a time-ordered ULID — sorts first): the DEFAULT (True) is the
+    harder case, matching how the real production pairs actually arise (the
+    unresolved post can easily be archived/extracted before its resolved
+    sibling)."""
+    if unresolved_id_smaller:
+        unresolved_id = _insert(
+            store, "unresolved_post", venue_id=None, source_handle=handle,
+            source_kind="promoter_post", title=_TITLE, starts_at=_DATE,
+            status="pending_review", review_reason="unresolved_venue",
+        )
+        resolved_id = _insert(
+            store, "resolved_post", venue_id=venue_id, source_handle=handle,
+            source_kind="venue_post", title=_TITLE, starts_at=_DATE, status="accepted",
+        )
+    else:
+        resolved_id = _insert(
+            store, "resolved_post", venue_id=venue_id, source_handle=handle,
+            source_kind="venue_post", title=_TITLE, starts_at=_DATE, status="accepted",
+        )
+        unresolved_id = _insert(
+            store, "unresolved_post", venue_id=None, source_handle=handle,
+            source_kind="promoter_post", title=_TITLE, starts_at=_DATE,
+            status="pending_review", review_reason="unresolved_venue",
+        )
+    assert (unresolved_id < resolved_id) == unresolved_id_smaller  # fixture sanity
     return resolved_id, unresolved_id
 
 
 class TestDirectionIsStructural:
     """The resolved member always survives and adopts nothing; the
-    unresolved member always adopts the resolved member's venue — proven by
-    feeding the SAME pair to `merge_touched_events` in BOTH orders, so the
-    outcome can never depend on which event_id sorts first or which arrived
-    at the DAO last (the exact shape of two ordering bugs this project has
-    already shipped — see the plan's own evidence)."""
+    unresolved member always adopts the resolved member's venue. Two
+    INDEPENDENT axes can each hide an ordering bug, so both are
+    parametrized together rather than assumed to co-vary:
+      - which event_id (ULID) sorts first — a canonical-selection bug that
+        picks "the oldest id in the WHOLE group" instead of "the oldest id
+        among the RESOLVED members" only shows up when the unresolved
+        item's id sorts first, which every OTHER fixture in this module
+        happens NOT to exercise (a prior version of this test suite created
+        the resolved member first everywhere, and stayed green when this
+        exact bug was deliberately reintroduced — see the PR);
+      - which event is fed to `merge_touched_events` first — the real
+        `_merge_one` entry point a crawl actually calls per post.
 
-    def test_resolved_processed_first(self):
+    This is the exact shape of two ordering bugs this project has already
+    shipped (see the plan's own evidence): an event attributed to whichever
+    venue was processed last, and a cursor advanced before the work it
+    guarded.
+    """
+
+    @pytest.mark.parametrize("unresolved_id_smaller", [True, False])
+    @pytest.mark.parametrize("resolved_processed_first", [True, False])
+    def test_the_resolved_member_always_survives(self, unresolved_id_smaller, resolved_processed_first):
         store = _store_with_venue()
-        resolved_id, unresolved_id = _seed_pair(store)
-        merge_touched_events(store, [resolved_id, unresolved_id], datetime.now(timezone.utc))
+        resolved_id, unresolved_id = _seed_pair(store, unresolved_id_smaller=unresolved_id_smaller)
+        ids = (
+            [resolved_id, unresolved_id] if resolved_processed_first
+            else [unresolved_id, resolved_id]
+        )
+        merge_touched_events(store, ids, datetime.now(timezone.utc))
         assert store.get_event(unresolved_id) is None
-        survivor = store.get_event(resolved_id)
-        assert survivor is not None
-        assert survivor["venue_id"] == "v1"
-
-    def test_unresolved_processed_first(self):
-        store = _store_with_venue()
-        resolved_id, unresolved_id = _seed_pair(store)
-        merge_touched_events(store, [unresolved_id, resolved_id], datetime.now(timezone.utc))
-        assert store.get_event(unresolved_id) is None
-        survivor = store.get_event(resolved_id)
-        assert survivor is not None
-        assert survivor["venue_id"] == "v1"
-
-    def test_a_resolved_item_never_adopts_null_even_when_its_id_sorts_first(self):
-        """`resolved_id`'s ULID sorts BEFORE `unresolved_id`'s (created
-        first) — proving the survivor is chosen by which member is
-        RESOLVED, never by which id happens to sort first."""
-        store = _store_with_venue()
-        resolved_id, unresolved_id = _seed_pair(store)
-        assert resolved_id < unresolved_id  # sanity: resolved sorts first
-        merge_touched_events(store, [unresolved_id, resolved_id], datetime.now(timezone.utc))
         survivor = store.get_event(resolved_id)
         assert survivor is not None
         assert survivor["venue_id"] == "v1"

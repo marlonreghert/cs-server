@@ -120,12 +120,23 @@ def step_given_two_posts_different_days(context):
 
 @given("only one of them resolved a venue")
 def step_given_only_one_resolved_a_venue(context):
-    context.muirs_resolved_id = _seed_resolved(
-        context, "muirs_resolved", handle=context.muirs_resolved_handle,
-    )
+    # The UNRESOLVED item is seeded FIRST on purpose — its event_id (a
+    # time-ordered ULID) therefore sorts BEFORE the resolved item's. A
+    # canonical-selection bug that picks "the oldest id in the whole group"
+    # instead of "the oldest id among the RESOLVED members" would silently
+    # pick the unresolved item here and pass every OTHER fixture in this
+    # file, since they all happen to create the resolved member first —
+    # this is the one shaped to catch exactly that.
     context.muirs_unresolved_id = _seed_unresolved(
         context, "muirs_unresolved", handle=context.muirs_unresolved_handle,
         starts_at=context.muirs_unresolved_date,
+    )
+    context.muirs_resolved_id = _seed_resolved(
+        context, "muirs_resolved", handle=context.muirs_resolved_handle,
+    )
+    assert context.muirs_unresolved_id < context.muirs_resolved_id, (
+        "fixture sanity: the unresolved item's id must sort first for the "
+        "direction proof below to mean anything"
     )
 
 
@@ -196,6 +207,21 @@ def step_given_two_resolved_posts_same_venue(context):
     context.muirs_second_resolved_id = _seed_resolved(context, "muirs_baseline_b")
 
 
+def _ordered(context, first_id) -> list[str]:
+    """`context.muirs_touched_ids` in insertion order, with `first_id`
+    (when set) moved to the front — PROCESSING order, deliberately
+    independent of the CREATION order `_seed` recorded it in. The pair's
+    creation order is separately pinned (unresolved first, see "only one of
+    them resolved a venue") to stress the id-sorting shape of this bug;
+    this function stresses the ITERATION-order shape on top of it, so a
+    fix that only guards one of the two can never pass both."""
+    ids = list(context.muirs_touched_ids)
+    if first_id and first_id in ids:
+        ids.remove(first_id)
+        ids.insert(0, first_id)
+    return ids
+
+
 # ── When ──────────────────────────────────────────────────────────────────────
 # "the posts are extracted" would collide with date_correctness_and_path_
 # parity_steps.py's OWN identical text (bound to a real EventExtractionService
@@ -205,14 +231,13 @@ def step_given_two_resolved_posts_same_venue(context):
 # sibling-feature step modules already document for this exact situation.
 @when("the touched events are merged")
 def step_when_the_touched_events_are_merged(context):
-    merge_touched_events(context.ee_dao, list(context.muirs_touched_ids), datetime.now(timezone.utc))
+    ids = _ordered(context, context.muirs_resolved_id)
+    merge_touched_events(context.ee_dao, ids, datetime.now(timezone.utc))
 
 
 @when("the unresolved post is extracted first")
 def step_when_unresolved_post_extracted_first(context):
-    ids = list(context.muirs_touched_ids)
-    ids.remove(context.muirs_unresolved_id)
-    ids.insert(0, context.muirs_unresolved_id)
+    ids = _ordered(context, context.muirs_unresolved_id)
     merge_touched_events(context.ee_dao, ids, datetime.now(timezone.utc))
 
 
