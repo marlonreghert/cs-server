@@ -84,3 +84,46 @@ class TestUnknownIds:
         assert touched == []
         assert summary["considered"] == 0
         assert summary["unknown_venue_ids"] == 1
+
+
+class TestOperatorRunPaidTiers:
+    """The whole-catalogue Run dialog must not silently buy Google searches.
+
+    Once the Google-search collaborator is built on credential presence alone
+    (plans/260811_instagram-discovery-admin-flags.md), the ONLY thing standing
+    between a routine operator run and a paid search per catalogue venue is
+    this default. `_source_enabled` falls through to the PAID_SOURCES master
+    switch when a per-source key is absent, and this run leaves that master
+    True for the Instagram user search — so an absent key here means "on".
+    """
+
+    def _instagram_defaults(self):
+        from app.routers.admin_trigger_router import JOB_REGISTRY
+
+        return JOB_REGISTRY["instagram"]["default_config"]
+
+    def test_google_search_is_explicitly_disabled_by_default(self):
+        defaults = self._instagram_defaults()
+        assert "tier_google_search_enabled" in defaults, (
+            "an absent key falls through to the paid master switch, which this "
+            "run leaves True — the tier must be disabled EXPLICITLY"
+        )
+        assert defaults["tier_google_search_enabled"] is False
+
+    def test_the_default_run_does_not_reach_google_search(self):
+        from app.services.instagram_cascade_service import InstagramCascadeService
+        from app.services.instagram_handle_sources import SOURCE_GOOGLE_SEARCH
+
+        service = InstagramCascadeService(venue_dao=None)
+        assert not service._source_enabled(
+            SOURCE_GOOGLE_SEARCH, dict(self._instagram_defaults())
+        )
+
+    def test_an_operator_can_still_opt_in(self):
+        from app.services.instagram_cascade_service import InstagramCascadeService
+        from app.services.instagram_handle_sources import SOURCE_GOOGLE_SEARCH
+
+        config = dict(self._instagram_defaults())
+        config["tier_google_search_enabled"] = True
+        service = InstagramCascadeService(venue_dao=None)
+        assert service._source_enabled(SOURCE_GOOGLE_SEARCH, config)

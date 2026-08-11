@@ -158,6 +158,17 @@ JOB_REGISTRY = {
             "tier_archived_gmaps_website_enabled": True,
             "tier_venue_website_enabled": True,
             "tier_apify_search_enabled": True,
+            # Explicit, and explicitly OFF. Without this key _source_enabled
+            # falls through to the PAID_SOURCES master switch, which this run
+            # leaves True — so once the collaborator is built on credential
+            # presence alone (plans/260811_instagram-discovery-admin-flags.md),
+            # a whole-catalogue run would make a paid Google search for EVERY
+            # venue. With judge_enabled False below, none of those candidates
+            # could ever clear the accept bar (PROVENANCE_WEIGHT 0.20), so the
+            # spend would buy nothing. An operator who wants this tier turns it
+            # on here — it renders as its own control on the Run dialog — and
+            # turns the judge on with it.
+            "tier_google_search_enabled": False,
             "judge_enabled": False,
             "venue_ids": "",
         },

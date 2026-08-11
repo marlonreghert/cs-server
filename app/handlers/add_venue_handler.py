@@ -1272,11 +1272,16 @@ class AddVenueHandler:
             ADD_VENUE_INSTAGRAM_TOTAL.labels(result="skipped").inc()
             return empty
 
-        google_search_enabled, judge_enabled = self._resolve_instagram_discovery_flags()
-        cascade_config = _build_instagram_cascade_config(
-            google_search_enabled, judge_enabled
-        )
         try:
+            # Inside the guard on purpose: resolving the flags reads admin
+            # config, and "no discovery failure can fail an add" has to hold
+            # for that read too, not just for the cascade call below.
+            google_search_enabled, judge_enabled = (
+                self._resolve_instagram_discovery_flags()
+            )
+            cascade_config = _build_instagram_cascade_config(
+                google_search_enabled, judge_enabled
+            )
             try:
                 result = await asyncio.wait_for(
                     self.instagram_cascade_service.discover(
