@@ -569,6 +569,7 @@ class Container:
         from app.services.vibe_modes_config import validate_vibe_modes_config
         from app.models.venue_category import validate_category_map_config
         from app.models.post_category import validate_post_category_vocabulary_config
+        from app.models.menu_lifecycle import validate_menu_expiry_days_config
         from app.services.event_venue_targeting import (
             validate_event_candidate_categories_config,
         )
@@ -592,6 +593,11 @@ class Container:
                 # no dedicated endpoint (see event_targeting_summary's own
                 # comment on admin_trigger_router.py for the precedent).
                 "post_category_vocabulary": validate_post_category_vocabulary_config,
+                # plans/260811_menu-item-lifecycle.md §C: how long a dish
+                # stays "current" after it was last seen — the SAME generic
+                # admin-config CRUD route every key here uses, no dedicated
+                # endpoint.
+                "menu_expiry_days": validate_menu_expiry_days_config,
             },
         )
 

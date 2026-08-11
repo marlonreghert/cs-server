@@ -148,6 +148,7 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from app.metrics import EVENT_MERGE_TOTAL, EVENT_SOURCES_PER_EVENT
+from app.models.event_kind import KIND_MENU
 from app.services.event_identity import normalize_title
 from app.services.event_reconciliation import (
     PROTECTABLE_EVENT_FIELDS as _SCALAR_MERGE_FIELDS,
@@ -198,6 +199,37 @@ def compute_event_identity(
     if not venue_id or starts_at is None:
         return None
     return (venue_id, starts_at.date(), normalize_title(title))
+
+
+def compute_menu_identity(venue_id: Optional[str], title: Optional[str]) -> Optional[tuple]:
+    """`(venue_id, normalized title)` — see plans/260811_menu-item-
+    lifecycle.md §A. ONLY for `post_type == "menu"` rows (see
+    `app.models.event_kind.KIND_MENU`); `compute_event_identity` stays the
+    identity for every event AND promotion, completely untouched by this
+    function's existence — see `merge_touched_events`'s dispatch for where
+    that boundary is drawn.
+
+    Deliberately, and ONLY here, WITHOUT a date — the reverse of `compute_
+    event_identity`, and the reverse for a reason that must stay visible:
+    for an EVENT, the date is what DISTINGUISHES two otherwise-identical
+    listings ("Karaoke" on Friday and "Karaoke" on Saturday are two real
+    nights, and merging them on title alone would silently lose one). For a
+    DISH, the date is noise about when someone happened to post about it —
+    "Especial do dia" posted in March and again in June is the same daily
+    special, not two dishes. A production menu item makes the problem this
+    function exists to fix concrete: `title='Especial do dia', starts_at=
+    NULL, is_recurring=true` — no date, so `compute_event_identity` would
+    return `None` for it forever, and every re-extraction (or future post
+    about the same dish) would create another row.
+
+    Reuses `normalize_title` — the SAME normalisation `compute_event_
+    identity`/`compute_source_event_key` already hash, never a second one.
+    `None` when `venue_id` is missing: an unresolved menu item has no
+    identity, stays unmerged and stays queued — same posture as an
+    unresolved event, no venue, no guess."""
+    if not venue_id:
+        return None
+    return (venue_id, normalize_title(title))
 
 
 def compute_handle_identity(event: dict) -> Optional[tuple]:
@@ -515,14 +547,80 @@ def _merge_handle_group(venue_dao, event: dict, absorbed: set[str], now: datetim
         EVENT_SOURCES_PER_EVENT.observe(len(venue_dao.list_event_sources(canonical["event_id"])))
 
 
+def _merge_menu_item(venue_dao, item: dict, absorbed: set[str], now: datetime) -> None:
+    """Cross-post identity for a `post_type == "menu"` row — plans/260811_
+    menu-item-lifecycle.md §A. Reuses `choose_canonical`/`merge_event_
+    fields`/`_finish_absorption` COMPLETELY UNCHANGED — a dish and an event
+    absorb into their canonical row via the exact same mechanics (oldest-
+    ULID-or-protected wins, a null never overwrites a known value,
+    `operator_edited_fields` wins) once two rows are found to share an
+    identity; the ONLY thing that differs for a menu item is HOW that
+    identity is computed (`compute_menu_identity`, never `compute_event_
+    identity` — see its own docstring for why the two must stay apart) and
+    HOW its siblings are found (every OTHER menu item at the same venue,
+    never date-scoped, and never routed through `_merge_handle_group` —
+    handle identity exists to attach a DATED, venue-less event to a
+    resolved sibling from the same account, which has no equivalent for a
+    dish: a venue-less menu item has no identity at all, per `compute_menu_
+    identity`, and stays queued exactly like any other unresolved item)."""
+    identity = compute_menu_identity(item.get("venue_id"), item.get("title"))
+    if identity is None:
+        EVENT_MERGE_TOTAL.labels(identity="menu", outcome="no_identity").inc()
+        return
+
+    siblings = [
+        sibling for sibling in venue_dao.list_events(venue_id=item["venue_id"])
+        if sibling["event_id"] != item["event_id"]
+        and sibling["event_id"] not in absorbed
+        and sibling.get("post_type") == KIND_MENU
+        and compute_menu_identity(sibling.get("venue_id"), sibling.get("title")) == identity
+    ]
+    if not siblings:
+        EVENT_MERGE_TOTAL.labels(identity="menu", outcome="no_match").inc()
+        return
+
+    group = [item] + siblings
+    canonical = choose_canonical(group)
+    if canonical is None:
+        EVENT_MERGE_TOTAL.labels(identity="menu", outcome="two_confirmed").inc()
+        return
+
+    canonical_id = canonical["event_id"]
+    for other in group:
+        if other["event_id"] == canonical_id:
+            continue
+        changed_fields, review_reason = merge_event_fields(canonical, other)
+        update: dict = dict(changed_fields)
+        if review_reason != canonical.get("review_reason"):
+            update["review_reason"] = review_reason
+        if update:
+            venue_dao.update_event(canonical_id, update)
+            canonical = venue_dao.get_event(canonical_id)
+        _finish_absorption(venue_dao, other["event_id"], canonical_id, absorbed)
+
+    absorbed.add(canonical_id)
+    EVENT_MERGE_TOTAL.labels(identity="menu", outcome="merged").inc()
+    EVENT_SOURCES_PER_EVENT.observe(len(venue_dao.list_event_sources(canonical_id)))
+
+
 def merge_touched_events(venue_dao, event_ids: list[str], now: datetime) -> None:
     """Called once per post, immediately after
     `event_reconciliation.reconcile_post_events` persists it, with every
     event id that call touched (inserted or updated). For each, looks for
-    another PRE-EXISTING event sharing its identity and folds them together
-    — the runtime half of the collapse migration 0026 performs once,
-    historically, so a post extracted after this feature ships never
+    another PRE-EXISTING event/dish sharing its identity and folds them
+    together — the runtime half of the collapse migration 0026 performs
+    once, historically, so a post extracted after this feature ships never
     re-fragments an identity a previous post already established.
+
+    Dispatches on `post_type` BEFORE touching anything else — see plans/
+    260811_menu-item-lifecycle.md's own warning: a date-less identity
+    applied to an EVENT would silently merge two real, differently-dated
+    listings into one. `post_type == "menu"` (`app.models.event_kind.
+    KIND_MENU`) routes to `_merge_menu_item`; EVERY OTHER post_type (event,
+    promotion, or an unrecognised value stored verbatim) routes to
+    `_merge_one` — the ORIGINAL, completely unmodified venue/handle-identity
+    path (see tests/test_menu_item_lifecycle.py's `TestEventAndPromotion
+    IdentityUnchangedByMenuDispatch`, pinned against this exact branch).
 
     `now` feeds `_absorb_unresolved_sibling`'s `linked_at` bookkeeping
     (plans/260811_merge-unresolved-into-resolved-sibling.md §D) when a
@@ -534,7 +632,13 @@ def merge_touched_events(venue_dao, event_ids: list[str], now: datetime) -> None
     for event_id in event_ids:
         if event_id in absorbed:
             continue
-        _merge_one(venue_dao, event_id, absorbed, now)
+        item = venue_dao.get_event(event_id)
+        if item is None:
+            continue  # already absorbed by an earlier event_id in this same call
+        if item.get("post_type") == KIND_MENU:
+            _merge_menu_item(venue_dao, item, absorbed, now)
+        else:
+            _merge_one(venue_dao, event_id, absorbed, now)
 
 
 def _merge_one(venue_dao, event_id: str, absorbed: set[str], now: datetime) -> None:
@@ -599,6 +703,7 @@ def _merge_one(venue_dao, event_id: str, absorbed: set[str], now: datetime) -> N
 
 
 __all__ = [
-    "compute_event_identity", "compute_handle_identity", "choose_canonical",
-    "merge_event_fields", "merge_touched_events", "REVIEW_REASON_SOURCES_DISAGREE",
+    "compute_event_identity", "compute_menu_identity", "compute_handle_identity",
+    "choose_canonical", "merge_event_fields", "merge_touched_events",
+    "REVIEW_REASON_SOURCES_DISAGREE",
 ]

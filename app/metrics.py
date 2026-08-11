@@ -1372,6 +1372,16 @@ EVENT_SOURCES_PER_EVENT = Histogram(
 # `confirmed_member`/`operator_edited` are the SAME per-candidate group
 # protections a venue-identity merge already honours, extended rather than
 # bypassed, each counted by which reason refused that one candidate.
+#
+# `identity="menu"` (plans/260811_menu-item-lifecycle.md — app.services.
+# event_merge.compute_menu_identity, `(venue_id, normalized title)`, NO
+# date): `no_identity` is a missing venue (an unresolved dish, the ONLY gap
+# this identity has — there is no date to be missing); `no_match` is no
+# other `post_type="menu"` row sharing the identity; `two_confirmed` mirrors
+# the venue-identity guard (two confirmed rows for what would be the same
+# dish are left alone for an operator). Never `ambiguous_venue`/
+# `confirmed_member`/`operator_edited` — a menu item has no handle-identity
+# analog (see `app.services.event_merge._merge_menu_item`'s docstring).
 EVENT_MERGE_TOTAL = Counter(
     "event_merge_total",
     "Cross-post event identity merge attempts, by identity kind and outcome",
@@ -1379,6 +1389,27 @@ EVENT_MERGE_TOTAL = Counter(
     # identity=venue: merged, no_identity, no_match, two_confirmed
     # identity=handle: merged, no_identity, no_match, ambiguous_venue,
     #                  confirmed_member, operator_edited
+    # identity=menu: merged, no_identity, no_match, two_confirmed
+)
+
+# Snapshot of events.post_item (post_type="menu" only) by current-vs-expired
+# state, using the DEFAULT expiry window (app.models.menu_lifecycle.
+# DEFAULT_MENU_EXPIRY_DAYS) as an approximation — deliberately NOT the live
+# admin-configured override: this gauge is refreshed from
+# app.services.event_reconciliation.update_events_gauge, shared by both
+# extraction paths, one of which (the scheduled shared-handle crawl) runs
+# with no Redis client wired in some deployments, and a background
+# observability snapshot degrading to "roughly right" is the correct trade
+# against adding a hard Redis dependency there. plans/260811_menu-item-
+# lifecycle.md's own ask: "watch the expired share" — a rising
+# `state="expired"` share means either a venue stopped posting or extraction
+# stopped recognising its dishes, and those need telling apart (not this
+# gauge's job alone).
+MENU_ITEM_FRESHNESS_TOTAL = Gauge(
+    "menu_item_freshness_total",
+    "post_type='menu' rows by current-vs-expired state (default expiry window)",
+    ["state"],
+    # state: current, expired
 )
 
 # =============================================================================
