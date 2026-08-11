@@ -473,6 +473,15 @@ class RdsVenueStore:
         # protectable via operator_edited_fields, like every other scalar
         # here.
         "post_type", "category",
+        # plans/260811_expose-time-known.md (migration 0035) — whether
+        # starts_at's clock time was actually read, as opposed to a
+        # defaulted midnight. A plain SQL column like any other here, but
+        # deliberately NOT in app.services.event_reconciliation.
+        # PROTECTABLE_EVENT_FIELDS — it is metadata about starts_at, not
+        # independent content, and travels WITH whichever starts_at value
+        # a merge/re-extraction decision lands on (see that module's
+        # _confirmed_update_fields docstring).
+        "time_known",
     )
     _EVENT_JSONB_COLUMNS = ("lineup", "operator_edited_fields", "attractions")
     # Python dict key -> real SQL column name, for the one column whose
@@ -522,7 +531,7 @@ class RdsVenueStore:
         "e.price_text, e.location_text, e.confidence, e.status, e.review_reason, "
         "e.location_resolution, e.location_confidence, e.linked_by, e.linked_at, "
         "e.operator_edited_fields, e.ticket_info, e.attractions, "
-        "e.post_type, e.category, "
+        "e.post_type, e.category, e.time_known, "
         "e.updated_at, v.venue_name, "
         "ps.source_kind, ps.source_handle, ps.source_shortcode, ps.source_permalink, "
         "ps.source_event_key, ps.source_event_index, ps.cover_photo_key, ps.raw_extraction, "
@@ -551,7 +560,7 @@ class RdsVenueStore:
         "e.price_text, e.location_text, e.confidence, e.status, e.review_reason, "
         "e.location_resolution, e.location_confidence, e.linked_by, e.linked_at, "
         "e.operator_edited_fields, e.ticket_info, e.attractions, "
-        "e.post_type, e.category, "
+        "e.post_type, e.category, e.time_known, "
         "e.updated_at, v.venue_name, "
         "es.source_kind, es.source_handle, es.source_shortcode, es.source_permalink, "
         "es.source_event_key, es.source_event_index, es.cover_photo_key, "

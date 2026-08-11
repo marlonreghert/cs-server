@@ -313,6 +313,17 @@ def merge_event_fields(canonical: dict, duplicate: dict) -> tuple[dict, Optional
             existing=canonical, new=duplicate, fields=_SCALAR_MERGE_FIELDS,
             values_equal=_values_agree, resolve_conflict=_resolve_unedited_conflict,
         )
+        if "starts_at" in changed:
+            # `time_known` (plans/260811_expose-time-known.md) is
+            # deliberately NOT a member of `_SCALAR_MERGE_FIELDS` — see
+            # event_reconciliation._confirmed_update_fields's docstring for
+            # why comparing it as an ordinary scalar would spuriously flag
+            # REVIEW_REASON_DIVERGES_FROM_CONFIRMED. It travels WITH
+            # starts_at instead, from whichever side just won it.
+            changed["time_known"] = (
+                duplicate.get("time_known", False) if prefer_duplicate
+                else canonical.get("time_known", False)
+            )
         merged_lineup = _union_lineup(canonical.get("lineup"), duplicate.get("lineup"))
         if merged_lineup != (canonical.get("lineup") or []):
             changed["lineup"] = merged_lineup
@@ -333,12 +344,19 @@ def merge_event_fields(canonical: dict, duplicate: dict) -> tuple[dict, Optional
         d_empty = _is_empty(field, d_val, duplicate)
         if c_empty and not d_empty:
             changed[field] = d_val
+            if field == "starts_at":
+                # See merge_event_fields' confirmed branch above for why
+                # time_known travels WITH starts_at rather than being its
+                # own entry in _SCALAR_MERGE_FIELDS.
+                changed["time_known"] = duplicate.get("time_known", False)
         elif d_empty or _values_agree(field, c_val, d_val):
             continue  # duplicate empty, or both agree — canonical value stands
         else:
             disagreed = True
             more_recent = duplicate if _recency(duplicate) > _recency(canonical) else canonical
             changed[field] = more_recent.get(field)
+            if field == "starts_at":
+                changed["time_known"] = more_recent.get("time_known", False)
 
     merged_lineup = _union_lineup(canonical.get("lineup"), duplicate.get("lineup"))
     if merged_lineup != (canonical.get("lineup") or []):

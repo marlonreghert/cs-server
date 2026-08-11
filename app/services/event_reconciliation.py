@@ -463,6 +463,21 @@ def _confirmed_update_fields(existing: dict, prepared: dict) -> tuple[dict, bool
     a row with no record of what an operator edited gets NOTHING updated,
     lists included, exactly as it did before either union existed.
 
+    `time_known` (plans/260811_expose-time-known.md) is deliberately NOT a
+    member of `PROTECTABLE_EVENT_FIELDS` — it is metadata ABOUT `starts_at`,
+    never independent content of its own, and comparing it as an ordinary
+    scalar would flag `REVIEW_REASON_DIVERGES_FROM_CONFIRMED` purely because
+    two posts disagree on whether a time was stated, even when `starts_at`
+    itself did not change (the far more common case: an early teaser states
+    no time, a later post does — `event_field_is_absent`'s own starts_at
+    rule already treats that as "nothing to update" when the OLDER row
+    already knows a time. A bare per-field disagreement on `time_known`
+    would then contradict a row `changed` never touched at all). Instead it
+    is set to travel WITH `starts_at`, below: whenever the fresh answer's
+    `starts_at` wins, its `time_known` wins too; whenever the existing value
+    is kept, `time_known` is left alone (never added to `changed`) so the
+    DAO's partial update does not touch it either.
+
     Returns `(changed_fields, diverges)`: `changed_fields` never includes
     identity/bookkeeping columns (the caller adds those), and `diverges`
     tells the caller whether to set `REVIEW_REASON_DIVERGES_FROM_CONFIRMED`.
@@ -486,6 +501,11 @@ def _confirmed_update_fields(existing: dict, prepared: dict) -> tuple[dict, bool
         # never a source whose recency needs comparing against the row's own.
         resolve_conflict=lambda field, existing_value, new_value: new_value,
     )
+    if "starts_at" in changed:
+        # The fresh answer's starts_at won — its own time_known rides along
+        # (see this function's docstring). Always `prepared`'s: identical
+        # reasoning to resolve_conflict above.
+        changed["time_known"] = prepared.get("time_known", False)
 
     merged_lineup = union_lineup(existing.get("lineup"), prepared.get("lineup"))
     if merged_lineup != (existing.get("lineup") or []):

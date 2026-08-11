@@ -1,4 +1,3 @@
-@wip
 Feature: Say whether an item's start time was actually read
   Nearly every item starts at midnight Recife, because a date was resolved and
   no clock time was. A consumer cannot tell that from a genuine midnight show by

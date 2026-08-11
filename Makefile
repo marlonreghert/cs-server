@@ -122,6 +122,8 @@ test-unit:
 		tests/test_crawl_schedule_sync.py \
 		tests/test_admin_crawl_router.py \
 		tests/test_scheduler.py \
+		tests/test_time_known_migration.py \
+		tests/test_expose_time_known.py \
 		-v
 
 test-integration:

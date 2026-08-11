@@ -89,6 +89,17 @@ class EventOut(BaseModel):
     source_permalink: Optional[str] = None
     starts_at: Optional[datetime] = None
     ends_at: Optional[datetime] = None
+    # plans/260811_expose-time-known.md: whether `starts_at`'s clock time was
+    # actually read from the post, or is a defaulted midnight standing in for
+    # "no time was stated" (app.services.event_date_resolver.
+    # resolve_event_datetime: a stated "00h" and a defaulted midnight land on
+    # the exact same `starts_at` instant, so the clock alone can never tell
+    # them apart — nightlife genuinely runs events at midnight). Defaults
+    # False, never True: a row with no recorded flag (every row that
+    # predates this column) is one whose time cannot be vouched for, and
+    # asserting a start that was never read would be the exact mislabelling
+    # this field exists to prevent.
+    time_known: bool = False
     is_recurring: bool = False
     recurrence_text: Optional[str] = None
     title: Optional[str] = None

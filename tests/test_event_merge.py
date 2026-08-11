@@ -289,6 +289,74 @@ class TestFieldMergeMatrix:
         assert reason == "low_confidence"
 
 
+class TestTimeKnownTravelsWithStartsAt:
+    """plans/260811_expose-time-known.md: `time_known` is deliberately NOT a
+    member of `_SCALAR_MERGE_FIELDS` (app.services.event_reconciliation.
+    PROTECTABLE_EVENT_FIELDS) — an earlier version of this plan put it
+    there, and a genuine-red BDD run over the sibling ticket-info/
+    attractions feature caught the defect these tests pin: comparing it as
+    an ordinary independent scalar flags sources_disagree purely because two
+    posts differ on whether a time was stated, even when `starts_at` itself
+    never changed. It travels WITH `starts_at` instead — these prove both
+    halves of that: no spurious flag when starts_at doesn't move, and the
+    correct value when it does."""
+
+    def test_disagreeing_time_known_alone_is_not_flagged_when_starts_at_does_not_change(self):
+        """The exact regression: an older canonical already knows the time
+        (time_known=True); a newer, less-informative duplicate names the
+        SAME starts_at (so `starts_at` genuinely agrees — see
+        `_values_agree`) but its own `time_known` is False. That must never
+        register as a disagreement — `time_known` alone carries no content
+        the field-merge matrix should be judging."""
+        canonical = _event("evt_a", time_known=True, last_seen_at=_D1)
+        duplicate = _event("evt_b", time_known=False, last_seen_at=_D2)
+        changed, reason = merge_event_fields(canonical, duplicate)
+        assert "time_known" not in changed
+        assert reason is None
+
+    def test_time_known_follows_starts_at_when_the_duplicate_fills_in_a_blank(self):
+        canonical = _event("evt_a", starts_at=None, time_known=False)
+        duplicate = _event(
+            "evt_b", starts_at=_D1, time_known=True, raw_extraction={"time_known": True},
+        )
+        changed, _reason = merge_event_fields(canonical, duplicate)
+        assert changed["starts_at"] == _D1
+        assert changed["time_known"] is True
+
+    def test_time_known_follows_starts_at_when_a_genuine_disagreement_picks_the_duplicate(self):
+        canonical = _event(
+            "evt_a", starts_at=_D1, time_known=True, last_seen_at=_D1,
+            raw_extraction={"time_known": True},
+        )
+        duplicate = _event(
+            "evt_b", starts_at=_D2, time_known=False, last_seen_at=datetime(2026, 8, 9, tzinfo=timezone.utc),
+            raw_extraction={"time_known": True},
+        )
+        changed, reason = merge_event_fields(canonical, duplicate)
+        assert changed["starts_at"] == _D2
+        assert changed["time_known"] is False  # the WINNING side's own value
+        assert reason == REVIEW_REASON_SOURCES_DISAGREE
+
+    def test_time_known_stays_untouched_when_starts_at_is_kept(self):
+        """The canonical's real time stands (the duplicate's defaulted
+        midnight is treated as absent — see TestFieldMergeMatrix's own
+        teaser test) — time_known must not be dragged along into `changed`
+        just because it exists in the row; it was never decided here."""
+        detailed = datetime(2026, 8, 8, 22, 0, tzinfo=timezone.utc)
+        teaser = datetime(2026, 8, 8, 0, 0, tzinfo=timezone.utc)
+        canonical = _event(
+            "evt_a", starts_at=detailed, time_known=True,
+            raw_extraction={"time_known": True},
+        )
+        duplicate = _event(
+            "evt_b", starts_at=teaser, time_known=False,
+            raw_extraction={"time_known": False},
+        )
+        changed, _reason = merge_event_fields(canonical, duplicate)
+        assert "starts_at" not in changed
+        assert "time_known" not in changed
+
+
 class TestConfirmedCanonicalIsFrozen:
     def test_a_confirmed_canonicals_fields_are_never_recomputed(self):
         canonical = _event("evt_a", status="confirmed", title="Corrected by Operator")
@@ -417,6 +485,23 @@ class TestFieldLevelProtectionOnTheMergePath:
         duplicate = _event("evt_b", lineup=["DJ B"])
         changed, _reason = merge_event_fields(canonical, duplicate)
         assert changed["lineup"] == ["DJ A", "DJ B"]
+
+    def test_time_known_follows_starts_at_on_the_confirmed_with_list_path_too(self):
+        """Same lockstep rule as TestTimeKnownTravelsWithStartsAt, proven on
+        the OTHER branch of merge_event_fields (a confirmed canonical whose
+        operator_edited_fields is a real list) — the two branches compute
+        `changed` independently and each needed the fix."""
+        canonical = _event(
+            "evt_a", status="confirmed", operator_edited_fields=["price_text"],
+            starts_at=_D1, time_known=True, last_seen_at=_D1,
+        )
+        duplicate = _event(
+            "evt_b", starts_at=_D2, time_known=False, last_seen_at=_D2,
+        )
+        changed, _reason = merge_event_fields(canonical, duplicate)
+        # starts_at is unedited -> the more recently seen duplicate wins.
+        assert changed["starts_at"] == _D2
+        assert changed["time_known"] is False
 
     def test_attractions_union_even_when_the_canonical_is_confirmed_and_edited(self):
         """The confirmed-canonical analog of TestFieldMergeMatrix's own

@@ -581,6 +581,9 @@ class PromoterCrawlService:
 
             prepared_events.append({
                 "starts_at": resolved_date.starts_at, "ends_at": resolved_date.ends_at,
+                # plans/260811_expose-time-known.md: same resolver output as
+                # starts_at — see EventExtractionService's identical wiring.
+                "time_known": resolved_date.time_known,
                 "is_recurring": resolved_date.is_recurring or bool(parsed["is_recurring"]),
                 "recurrence_text": resolved_date.recurrence_text or parsed["recurrence_text"],
                 "title": parsed["title"], "description": parsed["description"],
