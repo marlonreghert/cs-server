@@ -29,3 +29,46 @@ def is_int(value: Any) -> bool:
 def is_string_list(value: Any) -> bool:
     """A list whose every element is a string (an empty list qualifies)."""
     return isinstance(value, list) and all(isinstance(item, str) for item in value)
+
+
+# ── instagram_discovery ──────────────────────────────────────────────────────
+# plans/260811_instagram-discovery-admin-flags.md: the two add-time Instagram
+# discovery spend switches (the Google-search tier, the LLM judge), settable
+# from admin config so an operator can start/stop that spend without a
+# redeploy. AddVenueHandler resolves this key fresh on every add (see
+# AddVenueHandler._resolve_instagram_discovery_flags); the Settings values
+# (app/config.py `instagram_google_search_enabled` / `instagram_judge_enabled`)
+# are the fallback only when this key is absent or a field is unset.
+INSTAGRAM_DISCOVERY_FIELDS = ("google_search_enabled", "judge_enabled")
+
+
+def validate_instagram_discovery_config(value: Any) -> dict:
+    """Validate an admin write to ``admin_config:instagram_discovery`` before
+    persistence (``AdminConfigService.set`` dispatches here).
+
+    Body shape: a JSON object with zero or more of the boolean fields
+    ``google_search_enabled`` / ``judge_enabled``. Unknown fields and
+    non-boolean values are rejected with ``ValueError``/``TypeError`` so a
+    malformed write never reaches RDS or the Redis mirror. Returns the value
+    unchanged (byte-compatible with what ``AddVenueHandler`` reads back) —
+    an absent field simply means "no override for that field", not "disable
+    it", which is exactly what the resolution helper's fallback-to-Settings
+    behavior expects.
+    """
+    if not isinstance(value, dict):
+        raise TypeError(
+            f"instagram_discovery config must be an object, got {type(value).__name__}"
+        )
+    unknown = sorted(set(value) - set(INSTAGRAM_DISCOVERY_FIELDS))
+    if unknown:
+        raise ValueError(
+            f"instagram_discovery config has unknown field(s): {unknown}; "
+            f"allowed: {list(INSTAGRAM_DISCOVERY_FIELDS)}"
+        )
+    for field in INSTAGRAM_DISCOVERY_FIELDS:
+        if field in value and not isinstance(value[field], bool):
+            raise TypeError(
+                f"instagram_discovery.{field} must be a boolean, got "
+                f"{type(value[field]).__name__}"
+            )
+    return value

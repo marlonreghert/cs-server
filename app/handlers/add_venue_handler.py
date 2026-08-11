@@ -87,34 +87,51 @@ ADD_VENUE_GOOGLE_ONLY_CONFIG_KEY = "add_venue_google_only"
 # name+address hash, truncated. Cannot collide with BestTime's "ven_" ids.
 GOOGLE_ONLY_VENUE_ID_PREFIX = "vsg_"
 GOOGLE_ONLY_VENUE_ID_HASH_LEN = 24
+# Admin-config key for the two add-time Instagram discovery spend switches
+# (the Google-search tier, the LLM judge). Shape {"google_search_enabled"?:
+# bool, "judge_enabled"?: bool}; both fields optional. Read fresh on every
+# add by _resolve_instagram_discovery_flags, matching _google_only_enabled's
+# resolution precedent exactly. See
+# plans/260811_instagram-discovery-admin-flags.md.
+INSTAGRAM_DISCOVERY_CONFIG_KEY = "instagram_discovery"
 
-# Add-time Instagram cascade config (plans/260811_add-venue-instagram-discovery.md).
-# Deliberately DIFFERENT from the operator whole-catalogue default
-# (admin_trigger_router.JOB_REGISTRY["instagram"]["default_config"]): the three
-# free sources plus the Google-search tier (the strongest single discovery
-# path) with the judge required to accept it, but NEVER the paid Apify user
-# search — that stays reachable only through an explicit operator run.
-ADD_VENUE_INSTAGRAM_CASCADE_CONFIG = {
-    "tier_google_website_enabled": True,
-    "tier_archived_gmaps_website_enabled": True,
-    "tier_venue_website_enabled": True,
-    # The master paid-tier switch: kept False so a bug that removes the
-    # explicit google_search override below still can't spend the user-search
-    # tier at add time (see InstagramCascadeService._source_enabled).
-    "tier_apify_search_enabled": False,
-    # Explicit per-source override: _source_enabled checks this key before
-    # falling back to the master switch above, so google_search runs even
-    # though the master paid switch is off.
-    "tier_google_search_enabled": True,
-    # google_search can never clear the accept bar on its own (see
-    # PROVENANCE_WEIGHT in instagram_cascade_service.py) — the judge is the
-    # only path that can accept one of its candidates.
-    "judge_enabled": True,
-    # The add-time run deliberately skips apify_search; a not_found written
-    # here would block that untried tier from ever running for this venue for
-    # instagram_not_found_cache_ttl_days.
-    "suppress_not_found_cache": True,
-}
+
+def _build_instagram_cascade_config(
+    google_search_enabled: bool, judge_enabled: bool
+) -> dict:
+    """The add-time Instagram cascade config
+    (plans/260811_add-venue-instagram-discovery.md), built fresh per add from
+    the two resolved switches. Deliberately DIFFERENT from the operator
+    whole-catalogue default
+    (admin_trigger_router.JOB_REGISTRY["instagram"]["default_config"]): the
+    three free sources always on, the Google-search tier and the judge
+    resolved per add (plans/260811_instagram-discovery-admin-flags.md), but
+    NEVER the paid Apify user search — that stays reachable only through an
+    explicit operator run. Everything below except the two resolved fields is
+    fixed and NOT operator-editable."""
+    return {
+        "tier_google_website_enabled": True,
+        "tier_archived_gmaps_website_enabled": True,
+        "tier_venue_website_enabled": True,
+        # The master paid-tier switch: kept False so a bug that removes the
+        # explicit google_search override below still can't spend the
+        # user-search tier at add time (see
+        # InstagramCascadeService._source_enabled). NOT operator-editable —
+        # the "instagram_discovery" admin key has no field for this.
+        "tier_apify_search_enabled": False,
+        # Explicit per-source override: _source_enabled checks this key
+        # before falling back to the master switch above, so google_search
+        # can run even though the master paid switch is off.
+        "tier_google_search_enabled": google_search_enabled,
+        # google_search can never clear the accept bar on its own (see
+        # PROVENANCE_WEIGHT in instagram_cascade_service.py) — the judge is
+        # the only path that can accept one of its candidates.
+        "judge_enabled": judge_enabled,
+        # The add-time run deliberately skips apify_search; a not_found
+        # written here would block that untried tier from ever running for
+        # this venue for instagram_not_found_cache_ttl_days.
+        "suppress_not_found_cache": True,
+    }
 
 
 class AddVenueByAddressRequest(BaseModel):
@@ -799,6 +816,43 @@ class AddVenueHandler:
                 return bool(raw.get("enabled"))
         return bool(settings.add_venue_google_only_enabled)
 
+    def _resolve_instagram_discovery_flags(self) -> tuple[bool, bool]:
+        """Resolve (google_search_enabled, judge_enabled) for THIS add, read
+        fresh from admin config every call so a panel toggle takes effect on
+        the next add with no restart. Copies _google_only_enabled's
+        resolution pattern exactly:
+
+        1. The admin value wins whenever the key is present and the field is
+           set — including an explicit ``false``.
+        2. Otherwise the corresponding Settings value is the fallback (which
+           reproduces today's behavior when the key was never written).
+        3. On ANY read failure, both flags resolve to disabled — failing open
+           would spend money during a config outage.
+
+        An unconfigured admin_config_service (no service wired at all) is not
+        an outage; it falls back to Settings like case 2, same as
+        _google_only_enabled.
+        """
+        google_search_enabled = settings.instagram_google_search_enabled
+        judge_enabled = settings.instagram_judge_enabled
+        if self.admin_config_service is None:
+            return google_search_enabled, judge_enabled
+        try:
+            raw = self.admin_config_service.get(INSTAGRAM_DISCOVERY_CONFIG_KEY)
+        except Exception as e:
+            logger.warning(
+                "[AddVenueHandler] admin config read failed for "
+                f"{INSTAGRAM_DISCOVERY_CONFIG_KEY!r}; disabling both "
+                f"Instagram discovery tiers for this add: {type(e).__name__}: {e}"
+            )
+            return False, False
+        if isinstance(raw, dict):
+            if "google_search_enabled" in raw:
+                google_search_enabled = bool(raw.get("google_search_enabled"))
+            if "judge_enabled" in raw:
+                judge_enabled = bool(raw.get("judge_enabled"))
+        return google_search_enabled, judge_enabled
+
     def _no_geo_match_rejection_body(
         self,
         request: AddVenueByAddressRequest,
@@ -1197,8 +1251,9 @@ class AddVenueHandler:
 
     async def _discover_instagram_handle(self, venue: Venue) -> dict:
         """Best-effort Instagram discovery for a just-created or just-newly-
-        linked venue, run with ADD_VENUE_INSTAGRAM_CASCADE_CONFIG under a
-        deadline.
+        linked venue, run under a deadline with a config built fresh from
+        _resolve_instagram_discovery_flags + _build_instagram_cascade_config
+        so an admin-config toggle takes effect on this very add.
 
         Never raises and never blocks the add on a slow or broken cascade: an
         unconfigured service, a deadline, or any exception from the cascade
@@ -1218,10 +1273,19 @@ class AddVenueHandler:
             return empty
 
         try:
+            # Inside the guard on purpose: resolving the flags reads admin
+            # config, and "no discovery failure can fail an add" has to hold
+            # for that read too, not just for the cascade call below.
+            google_search_enabled, judge_enabled = (
+                self._resolve_instagram_discovery_flags()
+            )
+            cascade_config = _build_instagram_cascade_config(
+                google_search_enabled, judge_enabled
+            )
             try:
                 result = await asyncio.wait_for(
                     self.instagram_cascade_service.discover(
-                        venue.venue_id, dict(ADD_VENUE_INSTAGRAM_CASCADE_CONFIG)
+                        venue.venue_id, cascade_config
                     ),
                     timeout=settings.add_venue_instagram_deadline_seconds,
                 )
@@ -1245,7 +1309,8 @@ class AddVenueHandler:
             }
             logger.info(
                 f"[AddVenueHandler] Instagram discovery for {venue.venue_id}: "
-                f"status={status} source={body['source']} confidence={body['confidence']}"
+                f"status={status} source={body['source']} confidence={body['confidence']} "
+                f"google_search_enabled={google_search_enabled} judge_enabled={judge_enabled}"
             )
             ADD_VENUE_INSTAGRAM_TOTAL.labels(result=status).inc()
             return body

@@ -48,14 +48,25 @@ class Container:
 
 
     def _build_google_search_source(self):
-        """The Google-search tier, or None. Opt-in and dependency-aware."""
-        if not self.settings.instagram_google_search_enabled:
-            return None
+        """The Google-search tier, or None.
+
+        Built on CREDENTIAL presence (APIFY_API_TOKEN) alone — NOT on
+        ``settings.instagram_google_search_enabled``. That flag is now
+        fallback/bootstrap only (plans/260811_instagram-discovery-admin-flags.md):
+        AddVenueHandler resolves the live enable/disable per add from admin
+        config, and a runtime admin-panel enable must have something to
+        enable. The flag still gates USE at request time, just not existence.
+        A flag left on with no token logs a startup warning — the one
+        silent-failure state this design introduces (the panel would say "on"
+        and nothing would happen).
+        """
         if not self.settings.apify_api_token:
-            logger.warning(
-                "[Container] Google search tier enabled but no Apify token; "
-                "venues with no web presence stay unreachable"
-            )
+            if self.settings.instagram_google_search_enabled:
+                logger.warning(
+                    "[Container] instagram_google_search_enabled is true but "
+                    "no Apify token is configured; the Google-search tier "
+                    "stays unreachable even if admin config enables it"
+                )
             return None
         from app.api.apify_google_search_client import ApifyGoogleSearchClient
         from app.services.instagram_cascade_adapters import GoogleSearchInstagramSource
@@ -72,19 +83,24 @@ class Container:
         )
 
     def _build_instagram_judge(self):
-        """The judge, or None. Opt-in and dependency-aware, like every other
-        optional enrichment path: no key or not enabled means the cascade runs
-        exactly as before rather than failing to start."""
+        """The judge, or None.
+
+        Built on CREDENTIAL presence (OPENAI_API_KEY) alone — NOT on
+        ``settings.instagram_judge_enabled``. Same rationale as
+        ``_build_google_search_source`` (see its docstring): the flag is now
+        fallback/bootstrap only, resolved live per add by AddVenueHandler, so
+        existence must not depend on it. A flag left on with no key logs a
+        startup warning.
+        """
         from app.services.instagram_judge import InstagramJudge
 
-        if not self.settings.instagram_judge_enabled:
-            logger.info("[Container] Instagram judge disabled")
-            return None
         if not self.settings.openai_api_key:
-            logger.warning(
-                "[Container] Instagram judge enabled but no OpenAI key is "
-                "configured; ambiguous candidates will go unadjudicated"
-            )
+            if self.settings.instagram_judge_enabled:
+                logger.warning(
+                    "[Container] instagram_judge_enabled is true but no "
+                    "OpenAI key is configured; ambiguous candidates will go "
+                    "unadjudicated even if admin config enables the judge"
+                )
             return None
         from app.api.openai_instagram_judge_client import OpenAIInstagramJudgeClient
 
@@ -570,6 +586,7 @@ class Container:
         from app.models.venue_category import validate_category_map_config
         from app.models.post_category import validate_post_category_vocabulary_config
         from app.models.menu_lifecycle import validate_menu_expiry_days_config
+        from app.services.config_validation import validate_instagram_discovery_config
         from app.services.event_venue_targeting import (
             validate_event_candidate_categories_config,
         )
@@ -598,6 +615,12 @@ class Container:
                 # admin-config CRUD route every key here uses, no dedicated
                 # endpoint.
                 "menu_expiry_days": validate_menu_expiry_days_config,
+                # plans/260811_instagram-discovery-admin-flags.md: the two
+                # add-time Instagram discovery spend switches — the SAME
+                # generic admin-config CRUD route every key here uses, no
+                # dedicated endpoint. Resolved fresh per add by
+                # AddVenueHandler._resolve_instagram_discovery_flags.
+                "instagram_discovery": validate_instagram_discovery_config,
             },
         )
 

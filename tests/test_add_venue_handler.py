@@ -1625,7 +1625,9 @@ import asyncio as _asyncio
 from app.services.instagram_cascade_service import CascadeResult
 
 
-def _ig_handler(venue_dao, besttime, budget, fake, instagram_cascade_service):
+def _ig_handler(
+    venue_dao, besttime, budget, fake, instagram_cascade_service, admin_config_service=None
+):
     """Handler wired with an injected Instagram cascade service (mock)."""
     return AddVenueHandler(
         venue_dao=venue_dao,
@@ -1633,6 +1635,7 @@ def _ig_handler(venue_dao, besttime, budget, fake, instagram_cascade_service):
         budget_service=budget,
         redis_client=fake,
         instagram_cascade_service=instagram_cascade_service,
+        admin_config_service=admin_config_service,
     )
 
 
@@ -1687,11 +1690,16 @@ async def test_instagram_discovery_runs_after_google_enrichment(
 
 @pytest.mark.asyncio
 async def test_instagram_discovery_passes_the_add_time_config(
-    venue_dao, besttime, budget, fake
+    venue_dao, besttime, budget, fake, monkeypatch
 ):
-    """The add-time call must disable apify_search, enable google_search
-    explicitly, enable the judge, and suppress the not_found cache — see
-    ADD_VENUE_INSTAGRAM_CASCADE_CONFIG."""
+    """The add-time call must disable apify_search, resolve google_search and
+    judge from Settings (no admin_config_service wired here, so the fallback
+    applies — see _build_instagram_cascade_config /
+    _resolve_instagram_discovery_flags), and suppress the not_found cache."""
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "instagram_google_search_enabled", True)
+    monkeypatch.setattr(settings, "instagram_judge_enabled", True)
     besttime.add_venue_to_account.return_value = _ok_response("ven_cfg")
     besttime.get_live_forecast.return_value = _live_unavailable("ven_cfg")
     cascade = AsyncMock()
@@ -1708,6 +1716,159 @@ async def test_instagram_discovery_passes_the_add_time_config(
     assert config["tier_google_search_enabled"] is True
     assert config["judge_enabled"] is True
     assert config["suppress_not_found_cache"] is True
+
+
+# ── instagram_discovery admin-config resolution ────────────────────────────────
+# plans/260811_instagram-discovery-admin-flags.md
+
+
+def test_build_instagram_cascade_config_keeps_every_fixed_entry():
+    """Only the two resolved fields vary; everything else is fixed and NOT
+    operator-editable — in particular tier_apify_search_enabled stays False
+    (defence in depth) regardless of the resolved values."""
+    from app.handlers.add_venue_handler import _build_instagram_cascade_config
+
+    for google_search_enabled, judge_enabled in (
+        (True, True), (True, False), (False, True), (False, False),
+    ):
+        config = _build_instagram_cascade_config(google_search_enabled, judge_enabled)
+        assert config["tier_google_website_enabled"] is True
+        assert config["tier_archived_gmaps_website_enabled"] is True
+        assert config["tier_venue_website_enabled"] is True
+        assert config["tier_apify_search_enabled"] is False
+        assert config["suppress_not_found_cache"] is True
+        assert config["tier_google_search_enabled"] is google_search_enabled
+        assert config["judge_enabled"] is judge_enabled
+
+
+def test_resolve_flags_falls_back_to_settings_when_admin_config_absent(
+    venue_dao, besttime, budget, fake, monkeypatch
+):
+    """No admin_config_service wired at all: today's behavior — the resolved
+    values are exactly the Settings values."""
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "instagram_google_search_enabled", True)
+    monkeypatch.setattr(settings, "instagram_judge_enabled", False)
+    handler = AddVenueHandler(
+        venue_dao=venue_dao, besttime_api=besttime, budget_service=budget,
+        redis_client=fake,
+    )
+
+    assert handler._resolve_instagram_discovery_flags() == (True, False)
+
+
+def test_resolve_flags_falls_back_to_settings_when_admin_key_is_stored_absent(
+    venue_dao, besttime, budget, fake, monkeypatch
+):
+    """admin_config_service IS wired but has never stored the key (get()
+    returns None): same fallback as no service at all — reproduces today's
+    behavior exactly, per the plan's acceptance criteria."""
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "instagram_google_search_enabled", False)
+    monkeypatch.setattr(settings, "instagram_judge_enabled", True)
+    admin_config = _AdminConfigStub(value=None)
+    handler = AddVenueHandler(
+        venue_dao=venue_dao, besttime_api=besttime, budget_service=budget,
+        redis_client=fake, admin_config_service=admin_config,
+    )
+
+    assert handler._resolve_instagram_discovery_flags() == (False, True)
+
+
+def test_resolve_flags_admin_value_wins_over_an_enabled_setting(
+    venue_dao, besttime, budget, fake, monkeypatch
+):
+    """An explicit admin false beats an enabled Setting for BOTH fields."""
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "instagram_google_search_enabled", True)
+    monkeypatch.setattr(settings, "instagram_judge_enabled", True)
+    admin_config = _AdminConfigStub(
+        value={"google_search_enabled": False, "judge_enabled": False}
+    )
+    handler = AddVenueHandler(
+        venue_dao=venue_dao, besttime_api=besttime, budget_service=budget,
+        redis_client=fake, admin_config_service=admin_config,
+    )
+
+    assert handler._resolve_instagram_discovery_flags() == (False, False)
+
+
+def test_resolve_flags_admin_value_wins_over_a_disabled_setting(
+    venue_dao, besttime, budget, fake, monkeypatch
+):
+    """An explicit admin true beats a disabled Setting for BOTH fields."""
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "instagram_google_search_enabled", False)
+    monkeypatch.setattr(settings, "instagram_judge_enabled", False)
+    admin_config = _AdminConfigStub(
+        value={"google_search_enabled": True, "judge_enabled": True}
+    )
+    handler = AddVenueHandler(
+        venue_dao=venue_dao, besttime_api=besttime, budget_service=budget,
+        redis_client=fake, admin_config_service=admin_config,
+    )
+
+    assert handler._resolve_instagram_discovery_flags() == (True, True)
+
+
+def test_resolve_flags_partial_admin_override_falls_back_per_field(
+    venue_dao, besttime, budget, fake, monkeypatch
+):
+    """A stored config that only sets one field leaves the OTHER field on the
+    Settings fallback — an absent field is "no override", not "disable"."""
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "instagram_google_search_enabled", True)
+    monkeypatch.setattr(settings, "instagram_judge_enabled", True)
+    admin_config = _AdminConfigStub(value={"judge_enabled": False})
+    handler = AddVenueHandler(
+        venue_dao=venue_dao, besttime_api=besttime, budget_service=budget,
+        redis_client=fake, admin_config_service=admin_config,
+    )
+
+    assert handler._resolve_instagram_discovery_flags() == (True, False)
+
+
+def test_resolve_flags_disables_both_on_any_read_failure(
+    venue_dao, besttime, budget, fake, monkeypatch
+):
+    """A read failure must disable BOTH tiers, never fall back to Settings —
+    failing open would spend money during a config outage. Settings are both
+    True here specifically to prove the failure path overrides them."""
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "instagram_google_search_enabled", True)
+    monkeypatch.setattr(settings, "instagram_judge_enabled", True)
+    admin_config = _AdminConfigStub(raise_exc=RuntimeError("simulated RDS outage"))
+    handler = AddVenueHandler(
+        venue_dao=venue_dao, besttime_api=besttime, budget_service=budget,
+        redis_client=fake, admin_config_service=admin_config,
+    )
+
+    assert handler._resolve_instagram_discovery_flags() == (False, False)
+
+
+def test_resolve_flags_ignores_a_malformed_stored_value(
+    venue_dao, besttime, budget, fake, monkeypatch
+):
+    """A non-dict stored value (should never happen post-validator, but the
+    resolver must not crash on it) is treated like an absent key: fall back
+    to Settings rather than raise or silently spend."""
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "instagram_google_search_enabled", True)
+    monkeypatch.setattr(settings, "instagram_judge_enabled", False)
+    admin_config = _AdminConfigStub(value="not-a-dict")
+    handler = AddVenueHandler(
+        venue_dao=venue_dao, besttime_api=besttime, budget_service=budget,
+        redis_client=fake, admin_config_service=admin_config,
+    )
+
+    assert handler._resolve_instagram_discovery_flags() == (True, False)
 
 
 @pytest.mark.asyncio
