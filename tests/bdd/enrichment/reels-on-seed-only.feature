@@ -1,4 +1,3 @@
-@wip
 Feature: Crawl a target's reels once, on its first run
   A reel is also a grid post, so after the first run the posts stream already
   carries almost every reel — thirty-two reels results bought one new post on a
