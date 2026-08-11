@@ -110,3 +110,31 @@ def normalize_handle(raw: Optional[str]) -> Optional[str]:
     if not text or any(c.isspace() for c in text):
         return None
     return text
+
+
+def group_venue_ids_by_handle(instagram_handles: dict[str, str]) -> dict[str, list[str]]:
+    """Reverses `venue_id -> instagram_handle` (RdsVenueStore.
+    list_instagram_handles) into `normalized_handle -> [venue_id, ...]`.
+
+    Deliberately NOT `event_venue_resolution.build_handle_index`, which
+    collapses to ONE winning venue_id per handle (fine for its own job: the
+    promoter resolution ladder picks a single best venue). Originally added
+    by plans/260809_scheduled-incremental-instagram-crawl.md for
+    `instagram_crawl_service.py` (the 1,114-handle-rows/1,066-distinct-
+    handles gap — 48 handles are shared by two venue rows — so archiving/
+    extraction chaining for a `kind='venue'` target must reach EVERY venue
+    currently pointing at that handle, not just one). Homed here (rather
+    than in instagram_crawl_service.py, which imports FROM
+    event_extraction_service.py) so plans/260811_extract-by-handle.md's
+    by-handle re-extraction can resolve the same mapping without a circular
+    import; instagram_crawl_service.py re-exports this name for its
+    existing importers, unchanged."""
+    out: dict[str, list[str]] = {}
+    for venue_id, raw_handle in (instagram_handles or {}).items():
+        handle = normalize_handle(raw_handle)
+        if not handle:
+            continue
+        out.setdefault(handle, []).append(venue_id)
+    for ids in out.values():
+        ids.sort()
+    return out

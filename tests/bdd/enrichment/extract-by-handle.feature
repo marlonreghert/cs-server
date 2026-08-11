@@ -1,4 +1,3 @@
-@wip
 Feature: Extract the posts archived under a handle
   A post archived under an Instagram handle is unreachable today: extraction can
   only be pointed at venue ids, whose archive prefixes those posts do not share.
@@ -26,7 +25,7 @@ Feature: Extract the posts archived under a handle
   Scenario: Process a post archived under two prefixes only once
     Given a post archived under both a handle and a venue
     When extraction runs for that handle
-    Then that post is extracted once
+    Then that archived post is extracted only once
 
   Scenario: Report a handle with nothing archived
     Given a handle with no archived posts

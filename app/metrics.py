@@ -1245,6 +1245,23 @@ EVENT_EXTRACTION_EVENTS_PER_POST = Histogram(
     buckets=(1, 2, 3, 5, 8, 13, 20),
 )
 
+# plans/260811_extract-by-handle.md §Error Handling: a post re-extracted
+# after a date/attribution fix supersedes the stale row(s) it previously
+# produced (event_reconciliation.reconcile_post_events' existing "an event
+# this run did not re-emit" rule — see that module) — but the SAME rule also
+# fires on an ORDINARY re-extraction (a post processed twice by the venue_ids/
+# event_candidates path, no operator-triggered fix involved). Conflating the
+# two would hide extract-by-handle's own §B going wrong (a corrected date
+# quietly failing to supersede its stale sibling would look identical to
+# "nothing superseded because nothing needed to be", on this counter alone,
+# unless the trigger is split out). `trigger`: "handle_reextraction" (this
+# feature's mode="handles" path) vs "extraction" (every other path).
+EVENT_EXTRACTION_SUPERSEDED_TOTAL = Counter(
+    "event_extraction_superseded_total",
+    "Event rows moved to status=superseded by a post's own reconciliation, by what triggered the reconciliation",
+    ["trigger"],
+)
+
 # One malformed entry inside an otherwise-valid multi-event list must be
 # skipped and counted, never fatal to its siblings — this is the counter
 # that proves the skip actually happened rather than silently vanishing.
