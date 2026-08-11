@@ -1,4 +1,3 @@
-@wip
 Feature: Store what a post actually announced, and what kind of thing it is
   An event sells an experience; a promotion sells a price; a menu item is a
   dish. Calling all three an event makes every query and every reviewer read

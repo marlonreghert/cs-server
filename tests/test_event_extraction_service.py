@@ -396,12 +396,13 @@ class TestSingleEventVenuePostIsByteIdenticalToTheOldPath:
         # attractions.md) now ride in raw_extraction too — this fixture's
         # raw model JSON states neither, so both take their genuinely-absent
         # values ([] / None), same as every OTHER field here that the model
-        # didn't state. `kind` (plans/260810_post-kind-and-post-extraction-
-        # attribution.md §A) rides in raw_extraction the SAME way — it is
-        # never its own events.event column (see that plan's §B re-scope:
-        # events/promotions/menus are separate entities, so this feature
-        # persists no `kind` column at all, only the model's raw answer
-        # inside this JSONB blob).
+        # didn't state. `kind` rides in raw_extraction the SAME way — the
+        # model's RAW field name is still "kind" (see the extraction
+        # prompts/parser), but plans/260811_post-items-and-categories.md
+        # gives it its own persisted column now, named `post_type` (asserted
+        # below, alongside `category`) — retiring `260810_post-kind-and-
+        # post-extraction-attribution.md`'s "no persisted kind column"
+        # interim this comment used to describe.
         assert "kind" not in stored
         assert stored["raw_extraction"] == {
             "kind": None,
@@ -411,15 +412,21 @@ class TestSingleEventVenuePostIsByteIdenticalToTheOldPath:
             "attractions": [], "ticket_url": "https://tickets.example/x",
             "ticket_info": None, "price_text": "R$30",
             "location_text": "Rua das Flores, 123", "confidence": 0.87,
-            "time_known": True,
+            "category": None, "time_known": True,
         }
         assert stored["first_seen_at"] is not None
         assert stored["last_seen_at"] is not None
         assert stored["event_id"].startswith("evt_")
 
-        # The two genuinely NEW columns — expected additions, not drift.
+        # The genuinely NEW columns — expected additions, not drift.
         assert stored["source_event_key"] is not None
         assert stored["source_event_index"] == 1
+        # plans/260811_post-items-and-categories.md: a missing `kind`
+        # defaults `post_type` to "event" (fail-toward-visible still applies
+        # to the genuinely-absent case); `category` is None — this fixture's
+        # raw model JSON never stated one.
+        assert stored["post_type"] == "event"
+        assert stored["category"] is None
 
         # The promoter-only ladder columns: a venue event never runs the
         # ladder (attribution is a constant venue_id), so these stay NULL —
@@ -451,6 +458,10 @@ class TestSingleEventVenuePostIsByteIdenticalToTheOldPath:
             # keys of EVERY prepared_events entry — present on every insert,
             # not just once an operator or a later post touches them.
             "attractions", "ticket_info",
+            # plans/260811_post-items-and-categories.md: unconditional keys
+            # of every prepared_events entry, like attractions/ticket_info
+            # above — present on every insert.
+            "post_type", "category",
         }
         assert set(stored.keys()) == expected_keys, set(stored.keys())
 
@@ -503,9 +514,16 @@ class TestLowConfidenceQueuesForReview:
 # ── plans/260810_post-kind-and-post-extraction-attribution.md §A/§B ────────
 # (re-scoped mid-execution: a non-event post produces no events.event row at
 # all — counted and logged, never persisted with a discriminator column.)
-class TestNonEventProducesNoRow:
+class TestNonEventPersistsWithItsOwnType:
+    """plans/260811_post-items-and-categories.md §B retires `260810_post-
+    kind-and-post-extraction-attribution.md`'s interim (compute `kind`, drop
+    every non-event without persisting it): every extracted item is stored
+    now, typed via `post_type`. This class replaces the old
+    TestNonEventProducesNoRow, which pinned exactly the drop behaviour this
+    plan reverses."""
+
     @pytest.mark.parametrize("kind", ["promotion", "menu", "food", "other"])
-    def test_each_non_event_kind_persists_nothing(self, kind, caplog):
+    def test_each_non_event_kind_is_persisted_with_that_post_type(self, kind):
         dao = _dao()
         _seed_venue(dao, "v1", "v1_handle")
         posts = {"v1": [_post(
@@ -515,23 +533,17 @@ class TestNonEventProducesNoRow:
         client = _FakeOpenAIClient([_extraction_json(kind=kind, title="Coisa")])
         service = EventExtractionService(dao, _FakePostSource(posts), client)
 
-        with caplog.at_level("INFO"):
-            result = _run(service.run(cfg))
+        _run(service.run(cfg))
 
-        assert dao.get_event_by_source("v1_handle", "s1") is None
-        assert dao.list_events() == []
-        assert result["outcomes"].get("not_an_event") == 1
-        # Greppable: handle, shortcode and kind all appear in the log line an
-        # operator would search for.
-        assert any(
-            "v1_handle" in r.message and "s1" in r.message and kind in r.message
-            for r in caplog.records
-        ), caplog.records
+        row = dao.get_event_by_source("v1_handle", "s1")
+        assert row is not None
+        assert row["post_type"] == kind
+        assert dao.list_events() != []
 
     def test_event_kind_is_unaffected(self):
         """The control case: `kind="event"` goes through the ordinary flow,
-        proving the skip is specific to the four non-event kinds, not a
-        side effect of the field existing at all."""
+        proving the four non-event kinds are treated identically to it now
+        (typed and persisted), not specially."""
         dao = _dao()
         _seed_venue(dao, "v1", "v1_handle")
         posts = {"v1": [_post(
@@ -545,15 +557,24 @@ class TestNonEventProducesNoRow:
         result = _run(service.run(cfg))
 
         assert result["outcomes"].get(OUTCOME_ACCEPTED) == 1
-        assert dao.get_event_by_source("v1_handle", "s1") is not None
+        row = dao.get_event_by_source("v1_handle", "s1")
+        assert row is not None
+        assert row["post_type"] == "event"
 
-    @pytest.mark.parametrize("kind", [None, "", "giveaway", "EVENT"])
-    def test_missing_unknown_or_differently_cased_kind_is_never_dropped(self, kind):
-        """Fail-toward-visible: only a value that EXACTLY matches a
-        recognised non-event kind is dropped. None, blank, an unrecognised
-        string, and a differently-cased "EVENT" (normalize_kind lowercases
-        it to "event", still not a member of NON_EVENT_KINDS) all proceed
-        through the ordinary event flow."""
+    @pytest.mark.parametrize("kind,expected_post_type", [
+        (None, "event"), ("", "event"), ("giveaway", "giveaway"), ("EVENT", "event"),
+    ])
+    def test_missing_defaults_to_event_but_unrecognised_is_kept_verbatim(
+        self, kind, expected_post_type,
+    ):
+        """The judgement call plans/260811_post-items-and-categories.md is
+        explicit about: a MISSING/blank kind still defaults to "event" (the
+        one case fail-toward-visible still applies to, since post_type is
+        NOT NULL and there is no real answer to preserve), but an
+        UNRECOGNISED kind ("giveaway") is stored VERBATIM, never coerced to
+        "event" — a persisted, typed row is inspectable and correctable, so
+        masquerading as an event is no longer necessary. "EVENT" (differently
+        cased) normalizes to "event" via normalize_kind, same as before."""
         dao = _dao()
         _seed_venue(dao, "v1", "v1_handle")
         posts = {"v1": [_post(
@@ -567,7 +588,9 @@ class TestNonEventProducesNoRow:
 
         _run(service.run(cfg))
 
-        assert dao.get_event_by_source("v1_handle", "s1") is not None
+        row = dao.get_event_by_source("v1_handle", "s1")
+        assert row is not None
+        assert row["post_type"] == expected_post_type
 
 
 class TestDryRunSpendsNothing:

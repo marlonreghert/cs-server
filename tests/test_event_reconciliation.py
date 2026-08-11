@@ -1204,3 +1204,83 @@ class TestTicketInfoAndAttractions:
         )
         after = dao.get_event(event_id)
         assert {a["name"] for a in after["attractions"]} == {"DJ A", "DJ B"}
+
+
+# ── plans/260811_post-items-and-categories.md §B ────────────────────────────
+class TestPostTypeAndCategoryFieldProtection:
+    """`post_type` joins the operator-editable fields (the plan requires a
+    test asserting exactly this) — proven by membership AND by driving it
+    through reconcile_post_events exactly like TestTicketInfoAndAttractions
+    does for ticket_info. `category` joins too (kept fresh from every
+    re-extraction today; see app/services/event_reconciliation.py's own
+    comment on PROTECTABLE_EVENT_FIELDS for why joining costs nothing before
+    a PATCH route for it exists)."""
+
+    def test_post_type_and_category_are_protectable_fields(self):
+        assert "post_type" in PROTECTABLE_EVENT_FIELDS
+        assert "category" in PROTECTABLE_EVENT_FIELDS
+
+    def _confirmed_row(self, dao, *, edited_fields, **overrides):
+        events = [_event("Event A", datetime(2026, 8, 10, tzinfo=timezone.utc), **overrides)]
+        reconcile_post_events(
+            venue_dao=dao, source_kind="venue_post", source_handle="h1",
+            source_shortcode="s1", source_permalink=None,
+            prepared_events=events, now=NOW, attribute=_venue_attribute("v1"),
+        )
+        row = _rows(dao, "h1", "s1")[0]
+        dao.update_event(row["event_id"], {
+            "status": STATUS_CONFIRMED, "operator_edited_fields": edited_fields,
+        })
+        return row["event_id"]
+
+    def test_an_unedited_post_type_updates_from_the_fresh_answer(self):
+        dao = _dao()
+        event_id = self._confirmed_row(dao, edited_fields=["title"], post_type="menu")
+        later = [_event(
+            "Event A", datetime(2026, 8, 10, tzinfo=timezone.utc), post_type="event",
+        )]
+        reconcile_post_events(
+            venue_dao=dao, source_kind="venue_post", source_handle="h1",
+            source_shortcode="s1", source_permalink=None,
+            prepared_events=later, now=NOW, attribute=_venue_attribute("v1"),
+        )
+        after = dao.get_event(event_id)
+        assert after["post_type"] == "event"
+        assert after["review_reason"] is None
+
+    def test_an_operator_edited_post_type_holds_and_flags_when_the_fresh_answer_differs(self):
+        """The exact scenario tests/bdd/enrichment/post-items-and-
+        categories.feature's "Let an operator correct a misclassified item"
+        drives end-to-end through the real admin API — this is the same
+        guarantee at the reconciliation layer directly, the lower-level
+        edge case BDD does not isolate on its own."""
+        dao = _dao()
+        event_id = self._confirmed_row(dao, edited_fields=["post_type"], post_type="event")
+        later = [_event(
+            "Event A", datetime(2026, 8, 10, tzinfo=timezone.utc), post_type="menu",
+        )]
+        reconcile_post_events(
+            venue_dao=dao, source_kind="venue_post", source_handle="h1",
+            source_shortcode="s1", source_permalink=None,
+            prepared_events=later, now=NOW, attribute=_venue_attribute("v1"),
+        )
+        after = dao.get_event(event_id)
+        assert after["post_type"] == "event"
+        assert after["review_reason"] == REVIEW_REASON_DIVERGES_FROM_CONFIRMED
+
+    def test_a_null_category_never_overwrites_a_known_one(self):
+        dao = _dao()
+        event_id = self._confirmed_row(
+            dao, edited_fields=["title"], category="samba",
+        )
+        later = [_event(
+            "Event A", datetime(2026, 8, 10, tzinfo=timezone.utc), category=None,
+        )]
+        reconcile_post_events(
+            venue_dao=dao, source_kind="venue_post", source_handle="h1",
+            source_shortcode="s1", source_permalink=None,
+            prepared_events=later, now=NOW, attribute=_venue_attribute("v1"),
+        )
+        after = dao.get_event(event_id)
+        assert after["category"] == "samba"
+        assert after["review_reason"] is None

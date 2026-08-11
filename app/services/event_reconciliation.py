@@ -214,6 +214,21 @@ PROTECTABLE_EVENT_FIELDS = (
     # deliberately NOT here — see union_attractions below and §C: a list is
     # additive, never a value to CHOOSE a winner for.
     "ticket_info",
+    # plans/260811_post-items-and-categories.md §B: `post_type` joins the
+    # operator-editable fields — a misclassification is fixed in place
+    # through `operator_edited_fields`, the same protection every other
+    # scalar here already gets (the plan requires a test for exactly this).
+    # `category` joins for the SAME reason ordinary scalars like
+    # `price_text`/`location_text` are here: an unedited value keeps
+    # refreshing from each re-extraction's fresh (canonicalized) answer,
+    # through this table's existing generic per-field rule — `EventPatch`
+    # (app/routers/admin_events_router.py) does not accept `category` in
+    # THIS PR (the console is updated separately), so `operator_edited_
+    # fields` can never actually contain "category" yet; being in this
+    # tuple only buys the "keep it fresh" half today; the protection half
+    # activates automatically once a PATCH route exists, with no reconciler
+    # change needed then.
+    "post_type", "category",
 )
 
 

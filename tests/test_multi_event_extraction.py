@@ -342,15 +342,49 @@ class TestBothPromptsStateKindAndItsPrecedence:
         assert "This field is REQUIRED" in prompt
 
 
+# ── plans/260811_post-items-and-categories.md §C ────────────────────────────
+class TestBothPromptsStateCategoryAndItsVocabulary:
+    """Extending only MULTI_EVENT_EXTRACTION_PROMPT with `category` is the
+    exact same half-fix TestBothPromptsStateKindAndItsPrecedence already
+    guards against above — asserted directly on BOTH prompt strings, since a
+    bug here is invisible to any test that only exercises the multi-event
+    path (both real runtime callers use it). EXTRACTION_PROMPT/
+    MULTI_EVENT_EXTRACTION_PROMPT are built from DEFAULT_CATEGORY_VOCABULARY
+    at import time (app.models.post_category) — the OUTGOING network call
+    rebuilds the prompt from the LIVE admin-configured vocabulary instead
+    (OpenAIEventExtractionClient._category_vocabulary), covered by
+    tests/bdd/enrichment/post-items-and-categories.feature's "Read the
+    vocabulary from configuration" scenario, not here."""
+
+    @pytest.mark.parametrize("prompt", [EXTRACTION_PROMPT, MULTI_EVENT_EXTRACTION_PROMPT])
+    def test_prompt_mentions_category(self, prompt):
+        assert "category" in prompt
+
+    @pytest.mark.parametrize("prompt", [EXTRACTION_PROMPT, MULTI_EVENT_EXTRACTION_PROMPT])
+    def test_prompt_states_the_seeded_category_vocabulary(self, prompt):
+        from app.models.post_category import DEFAULT_CATEGORY_VOCABULARY
+
+        for category in DEFAULT_CATEGORY_VOCABULARY:
+            assert category in prompt
+
+    @pytest.mark.parametrize("prompt", [EXTRACTION_PROMPT, MULTI_EVENT_EXTRACTION_PROMPT])
+    def test_prompt_steers_without_confining(self, prompt):
+        """The plan's own distinction: PREFER a listed word when one fits,
+        answer freely otherwise — never confined to the list."""
+        assert "PREFER" in prompt
+        assert "answer freely" in prompt
+
+
 class TestKindFieldParsing:
     """`_parse_event_fields` (via parse_extraction_response / parse_multi_
     event_extraction_response) stores the model's raw `kind` verbatim,
-    lowercased/stripped — never coerced into a known value. The fail-toward-
-    visible rule (a missing/unrecognised kind reads as an event) is enforced
-    by the CALLERS that decide whether to persist an event row
-    (EventExtractionService/PromoterCrawlService skip only a value in
-    app.models.event_kind.NON_EVENT_KINDS), not by this parsing step, which
-    is deliberately dumb: it records exactly what the model said."""
+    lowercased/stripped — never coerced into a known value. What a
+    missing/unrecognised kind is STORED AS on `post_item.post_type` is
+    enforced by the CALLERS (app.models.event_kind.resolve_post_type: a
+    missing/blank kind defaults to "event"; an unrecognised one is kept
+    verbatim — plans/260811_post-items-and-categories.md §B), not by this
+    parsing step, which is deliberately dumb: it records exactly what the
+    model said."""
 
     def test_kind_is_parsed_and_lowercased(self):
         parsed = parse_extraction_response(json.dumps({"kind": "MENU"}))
@@ -373,6 +407,33 @@ class TestKindFieldParsing:
             json.dumps({"events": [{"kind": "promotion"}, {"kind": "event"}]}),
         )
         assert [e["kind"] for e in events] == ["promotion", "event"]
+
+
+# ── plans/260811_post-items-and-categories.md §C ────────────────────────────
+class TestCategoryFieldParsing:
+    """`_parse_event_fields` stores the model's raw `category` trimmed but
+    otherwise unchanged — matching against the admin-configured vocabulary
+    and canonicalizing the stored spelling is the SERVICE layer's job
+    (app.models.post_category, via event_extraction_service.py/
+    promoter_crawl_service.py), the same split `kind` already uses."""
+
+    def test_category_is_parsed_and_trimmed_but_not_canonicalized(self):
+        parsed = parse_extraction_response(json.dumps({"category": "  ROCK  "}))
+        assert parsed["category"] == "ROCK"
+
+    def test_missing_category_is_none(self):
+        parsed = parse_extraction_response(json.dumps({}))
+        assert parsed["category"] is None
+
+    def test_blank_category_is_none(self):
+        parsed = parse_extraction_response(json.dumps({"category": "   "}))
+        assert parsed["category"] is None
+
+    def test_category_survives_the_multi_event_shape_too(self):
+        events, _malformed, _malformed_attractions = parse_multi_event_extraction_response(
+            json.dumps({"events": [{"category": "samba"}, {"category": "rock"}]}),
+        )
+        assert [e["category"] for e in events] == ["samba", "rock"]
 
 
 # ── truncation detection via finish_reason ────────────────────────────────────

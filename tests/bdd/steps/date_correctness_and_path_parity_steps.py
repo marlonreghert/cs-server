@@ -53,7 +53,7 @@ from tests.bdd.steps.instagram_event_extraction_steps import (
     _run_extraction,
     _stored_event,
 )
-from tests.bdd.steps.post_kind_and_post_extraction_attribution_steps import _kind_metric
+from tests.bdd.steps.post_kind_and_post_extraction_attribution_steps import _kind_label_total
 from tests.bdd.steps.scheduled_incremental_instagram_crawl_steps import (
     _post as _ic_post,
     _program_posts,
@@ -367,8 +367,10 @@ def step_given_one_post_is_a_menu_item(context):
     # verbatim below rather than redefined, which would collide) -- that
     # step only touches the global Prometheus REGISTRY and this attribute,
     # never context.ee_dao/context.ic_dao, so it is safe to reuse from a
-    # shared-handle (ic_) scenario too.
-    context.pk_kind_before = _kind_metric("not_an_event", "menu")
+    # shared-handle (ic_) scenario too. plans/260811_post-items-and-
+    # categories.md: outcome-agnostic now (a menu item is persisted, not
+    # dropped as "not_an_event") -- see `_kind_label_total`'s own docstring.
+    context.pk_kind_before = _kind_label_total("menu")
     _program_posts(context, context.ic_handle, "posts", [
         _ic_post(
             context.sdva_shortcode, "2026-08-05T20:00:00.000Z",

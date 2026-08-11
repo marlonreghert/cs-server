@@ -1280,6 +1280,24 @@ EVENT_EXTRACTION_MALFORMED_ATTRACTIONS_TOTAL = Counter(
     "Individual malformed attraction entries skipped within an otherwise-valid extraction",
 )
 
+# plans/260811_post-items-and-categories.md §C/§Error Handling: `category`
+# is free text steered toward app.models.post_category's admin-configurable
+# vocabulary but never confined to it — this counts every answer that did
+# NOT match, labeled by the raw value, so the vocabulary can be grown from
+# evidence rather than guesswork. `category` is CAPPED by
+# app.models.post_category.record_off_vocabulary_category (the only writer
+# of this counter) at `_MAX_TRACKED_OFF_VOCABULARY_LABELS` distinct values,
+# bucketing the rest under `OFF_VOCABULARY_OVERFLOW_LABEL` — an unbounded
+# label fed directly by model output is a cardinality bomb. WATCH THE
+# OFF-VOCABULARY RATE: high means the vocabulary is wrong; near zero means
+# the model is being over-steered and everything is forced onto the
+# nearest listed word.
+POST_CATEGORY_OFF_VOCABULARY_TOTAL = Counter(
+    "post_category_off_vocabulary_total",
+    "Post-item category answers that did not match the configured vocabulary, by raw value (capped)",
+    ["category"],
+)
+
 # `method` is what makes this worth reading: whether links are coming from
 # exact @-mentions/location tags or from fuzzy name matching is the
 # difference between a resolver that is working and one that is guessing

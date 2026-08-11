@@ -715,6 +715,53 @@ def test_event_ticket_info_and_attractions_default_to_null_and_empty(store):
     assert inserted.get("attractions") in (None, [])
 
 
+def test_event_post_type_and_category_round_trip(store):
+    """plans/260811_post-items-and-categories.md (migration 0034): the real
+    store's `_EVENT_COLUMNS` allow-list is exactly the trap this contract
+    file exists to catch — a column the SQL insert/update list forgets is
+    silently dropped, invisible on the fake (which stores whatever dict key
+    it is handed). Both `post_type` and `category` must survive insert,
+    get, get_by_source, and a partial update, on BOTH store kinds."""
+    vid = _vid()
+    store.upsert_venue(_venue(vid))
+    shortcode = f"ptc_{vid}"
+    fields = _event_fields(vid, shortcode, post_type="menu", category="samba / pagode")
+    inserted = store.insert_event(fields)
+    assert inserted["post_type"] == "menu"
+    assert inserted["category"] == "samba / pagode"
+
+    by_id = store.get_event(fields["event_id"])
+    assert by_id["post_type"] == "menu"
+    assert by_id["category"] == "samba / pagode"
+
+    by_source = store.get_event_by_source("contract_handle", shortcode)
+    assert by_source["post_type"] == "menu"
+    assert by_source["category"] == "samba / pagode"
+
+    updated = store.update_event(fields["event_id"], {
+        "post_type": "event", "category": "rock",
+    })
+    assert updated["post_type"] == "event"
+    assert updated["category"] == "rock"
+    # A field NOT in the partial update survives untouched.
+    assert updated["title"] == fields["title"]
+
+
+def test_event_post_type_defaults_and_category_defaults_to_null(store):
+    """An event inserted without `post_type` must read back "event" — the
+    real column's NOT NULL DEFAULT, mirrored by the fake (see
+    InMemoryRdsVenueStore.insert_event) so a caller that forgets it (every
+    pre-existing test fixture that predates this plan) still gets the SAME
+    historically-accurate value on both store kinds. `category` defaults to
+    None — it is never invented."""
+    vid = _vid()
+    store.upsert_venue(_venue(vid))
+    fields = _event_fields(vid, f"ptc_none_{vid}")
+    inserted = store.insert_event(fields)
+    assert inserted.get("post_type") == "event"
+    assert inserted.get("category") is None
+
+
 def test_list_events_filters_by_venue_and_status(store):
     vid_a, vid_b = _vid(), _vid()
     store.upsert_venue(_venue(vid_a))
@@ -775,6 +822,29 @@ def test_confirmed_event_with_a_venue_is_not_queued(store):
     inserted = store.insert_event(_event_fields(vid, shortcode, status="confirmed"))
     ids = {r["event_id"] for r in store.list_events_awaiting_decision()}
     assert inserted["event_id"] not in ids
+
+
+def test_queue_predicate_ignores_post_type_in_both_directions(store):
+    """plans/260811_post-items-and-categories.md: what needs a decision is a
+    property of the row's STATE, never its type — a clean item of ANY type
+    (post_type is not even accepted/confirmed, just pending) stays out, a
+    flagged item of ANY type comes back. Proven for every post_type this
+    plan names, both ways, so a regression that adds a type filter to the
+    predicate (the bug the plan explicitly warns against) fails here."""
+    vid = _vid()
+    store.upsert_venue(_venue(vid))
+    for post_type in ("event", "promotion", "menu", "food", "other", "giveaway"):
+        clean_shortcode = f"queue_clean_{post_type}_{uuid.uuid4().hex[:8]}"
+        clean = store.insert_event(_event_fields(
+            vid, clean_shortcode, status="confirmed", post_type=post_type,
+        ))
+        flagged_shortcode = f"queue_flagged_{post_type}_{uuid.uuid4().hex[:8]}"
+        flagged = store.insert_event(_event_fields(
+            vid, flagged_shortcode, status="pending_review", post_type=post_type,
+        ))
+        ids = {r["event_id"] for r in store.list_events_awaiting_decision()}
+        assert clean["event_id"] not in ids, (post_type, "clean item was queued")
+        assert flagged["event_id"] in ids, (post_type, "flagged item was not queued")
 
 
 # ── events.crawl_target write shape (production incident, 2026-08-09) ────────
