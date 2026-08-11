@@ -64,6 +64,41 @@ def test_classify_geo_link_carries_reason():
     assert r["venue_id"] == "vX"
 
 
+def test_classify_carries_instagram_on_created_row():
+    """plans/260811_add-venue-instagram-discovery.md: _classify must copy the
+    instagram object onto a created row's batch result."""
+    ig = {"status": "found", "handle": "barvibes", "url": "https://instagram.com/barvibes",
+          "source": "google_website", "confidence": 0.9}
+    r = _classify(AddVenueOutcome(201, {
+        "status": "created", "venue_id": "v1", "instagram": ig,
+    }))
+    assert r["outcome"] == "created"
+    assert r["instagram"] == ig
+
+
+def test_classify_carries_instagram_on_newly_linked_geo_row():
+    ig = {"status": "not_found", "handle": None, "url": None, "source": None,
+          "confidence": 0.0}
+    r = _classify(AddVenueOutcome(200, {
+        "status": "matched_via_geo_fallback", "newly_linked": True,
+        "match_reason": "exact", "venue_id": "v4", "instagram": ig,
+    }))
+    assert r["outcome"] == "geo_linked"
+    assert r["instagram"] == ig
+
+
+def test_classify_instagram_is_none_when_geo_link_was_not_newly_linked():
+    """A geo-fallback link to an already-catalogued venue runs no discovery —
+    AddVenueHandler's body carries no 'instagram' key at all, so the row
+    reflects that (None, not a stale/fabricated value)."""
+    r = _classify(AddVenueOutcome(200, {
+        "status": "matched_via_geo_fallback", "newly_linked": False,
+        "match_reason": "exact", "venue_id": "v5",
+    }))
+    assert r["outcome"] == "geo_linked"
+    assert r["instagram"] is None
+
+
 def test_classify_created_google_only_is_not_confused_with_timeout_recovery():
     """A 201 with status=created_google_only must classify distinctly from a
     plain 'created' even though both are 201s — the batch job summary needs
