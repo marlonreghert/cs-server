@@ -29,7 +29,6 @@ from app.services.event_extraction_service import (
     ArchivedPost,
     EventExtractionService,
     EventPostSource,
-    HANDLE_OUTCOME_AMBIGUOUS_VENUES,
     HANDLE_OUTCOME_EXTRACTED,
     HANDLE_OUTCOME_NOTHING_ARCHIVED,
     HANDLE_OUTCOME_NO_VENUE_MAPPED,
@@ -112,6 +111,15 @@ def _dao() -> VenueRepository:
 
 def _seed_venue(dao: VenueRepository, vid: str, handle: str) -> None:
     dao.upsert_venue(Venue(venue_id=vid, venue_name=f"V {vid}", venue_lat=RECIFE_LAT, venue_lng=RECIFE_LNG))
+    dao.set_venue_instagram(VenueInstagram(venue_id=vid, instagram_handle=handle, status="found"))
+
+
+def _seed_named_venue(dao: VenueRepository, vid: str, handle: str, venue_name: str) -> None:
+    """Like `_seed_venue`, with a REAL venue name — needed for the
+    multi-venue ladder tests, which resolve on `name_similarity` against
+    each event's own `location_text`; `_seed_venue`'s arbitrary "V <id>"
+    names are indistinguishable from each other for that purpose."""
+    dao.upsert_venue(Venue(venue_id=vid, venue_name=venue_name, venue_lat=RECIFE_LAT, venue_lng=RECIFE_LNG))
     dao.set_venue_instagram(VenueInstagram(venue_id=vid, instagram_handle=handle, status="found"))
 
 
@@ -318,7 +326,7 @@ class TestHandlesModeOrchestration:
         assert row["venue_id"] == "v1"
         assert result["handles"] == [{
             "handle": "entreamigosobode", "outcome": HANDLE_OUTCOME_EXTRACTED,
-            "posts_archived": 1, "posts_qualifying": 1,
+            "posts_archived": 1, "posts_qualifying": 1, "venue_ids": ["v1"],
         }]
         assert result["qualifying_posts"] == 1
 
@@ -347,22 +355,24 @@ class TestHandlesModeOrchestration:
             {"handle": "nobody_home", "outcome": HANDLE_OUTCOME_NO_VENUE_MAPPED},
         ]
 
-    def test_a_handle_shared_by_two_venues_is_never_guessed(self):
+    def test_a_handle_shared_by_two_venues_still_reads_and_reports_both(self):
+        """Not skipped: the multi-venue branch reads posts and reports
+        HANDLE_OUTCOME_EXTRACTED with both venue_ids, then resolves each
+        event's own venue through the ladder -- see
+        TestMultiVenueHandleAttribution for the resolution itself."""
         dao = _dao()
-        _seed_venue(dao, "v1", "sharedhandle")
-        _seed_venue(dao, "v2", "sharedhandle")
+        _seed_named_venue(dao, "v1", "sharedhandle", "Bar Central")
+        _seed_named_venue(dao, "v2", "sharedhandle", "Bar Central Boa Viagem")
         post_source = _StubPostSource()
         post_source.posts_by_handle["sharedhandle"] = [_post("s1")]
-        openai = _FakeOpenAIClient([])
+        openai = _FakeOpenAIClient([_event_json(location_text="Bar Central")])
 
         result = _run_handles(dao, post_source, openai, handles="sharedhandle")
 
-        assert result["handles"][0]["outcome"] == HANDLE_OUTCOME_AMBIGUOUS_VENUES
-        assert sorted(result["handles"][0]["venue_ids"]) == ["v1", "v2"]
-        # Never guessed: no event row was written for either venue.
-        assert dao.list_events() == []
-        assert openai.calls == 0
-        assert post_source.calls == []  # posts_for_handle is never even called
+        report = result["handles"][0]
+        assert report["outcome"] == HANDLE_OUTCOME_EXTRACTED, report
+        assert sorted(report["venue_ids"]) == ["v1", "v2"], report
+        assert post_source.calls == [("sharedhandle", ["v1", "v2"])]
 
     def test_max_posts_per_venue_caps_the_by_handle_read(self):
         dao = _dao()
@@ -554,14 +564,14 @@ class TestSupersessionOnReExtraction:
 
 
 # ── The real production case (§Evidence) ────────────────────────────────────────
-def _ferias_events_json(year: int) -> str:
+def _ferias_events_json(year: int, *, location_text: str | None = None) -> str:
     dates = [f"0{i + 1}/07/{year}" for i in range(4)]
     events = [
         {
             "title": f"FERIAS AMIGOS PARK -- semana {i + 1}", "description": None,
             "date_text": dates[i], "time_text": "16h", "is_recurring": False,
             "recurrence_text": None, "lineup": [], "ticket_url": None,
-            "price_text": None, "location_text": None, "confidence": 0.9,
+            "price_text": None, "location_text": location_text, "confidence": 0.9,
         }
         for i in range(4)
     ]
@@ -596,4 +606,133 @@ class TestFeriasReExtractionRealCase:
         assert {r["starts_at"].year for r in live} == {2026}
         assert len(superseded) == 4, superseded
         assert {r["starts_at"].year for r in superseded} == {2027}
+        assert {r["event_id"] for r in wrong_rows} == {r["event_id"] for r in superseded}
+
+
+# ── Multi-venue handles: routed through the SAME resolution ladder ────────────
+class TestMultiVenueHandleAttribution:
+    """A handle mapping to several venues (`@entreamigosobode`'s real shape:
+    two venues) resolves each event's OWN venue through
+    `event_venue_resolution.build_location_text_attribute_fn` — the SAME
+    closure `PromoterCrawlService._process_post` uses for the scheduled
+    shared-handle crawl, reused directly rather than re-implemented. See
+    `tests/test_promoter_crawl_service.py::TestAttributionBehaviourPinnedAcrossExtraction`
+    for the pin that a future edit to the shared function cannot silently
+    change the promoter-crawl path's own outcome.
+    """
+
+    def _two_venues(self, dao, handle="entreamigosobode"):
+        _seed_named_venue(dao, "v1", handle, "Entre Amigos O Bode")
+        _seed_named_venue(dao, "v2", handle, "Entre Amigos O Bode Espinheiro")
+
+    def test_a_post_naming_one_venue_resolves_to_it(self):
+        dao = _dao()
+        self._two_venues(dao)
+        post_source = _StubPostSource()
+        post_source.posts_by_handle["entreamigosobode"] = [_post("s1")]
+        openai = _FakeOpenAIClient([_event_json(location_text="Entre Amigos O Bode Espinheiro")])
+
+        _run_handles(dao, post_source, openai, handles="entreamigosobode")
+
+        row = dao.get_event_by_source("entreamigosobode", "s1")
+        assert row is not None
+        assert row["venue_id"] == "v2", row
+        assert row["location_resolution"] == "auto", row
+
+    def test_a_post_naming_neither_venue_is_attributed_to_no_venue_and_queued(self):
+        dao = _dao()
+        self._two_venues(dao)
+        post_source = _StubPostSource()
+        post_source.posts_by_handle["entreamigosobode"] = [_post("s1")]
+        openai = _FakeOpenAIClient([_event_json(
+            location_text="Praça de Alimentação, Shopping Recife",
+        )])
+
+        _run_handles(dao, post_source, openai, handles="entreamigosobode")
+
+        row = dao.get_event_by_source("entreamigosobode", "s1")
+        assert row is not None
+        assert row["venue_id"] is None, row
+        assert row["status"] == "pending_review", row  # queued for a human
+        assert "unresolved_venue" in (row["review_reason"] or ""), row
+
+    def test_source_handle_uses_the_crawl_target_convention_not_a_venues_own_casing(self):
+        """The multi-venue mirror of
+        TestSupersessionOnReExtraction.test_source_handle_matches_the_venues_own_stored_casing_not_the_operators_input:
+        there, the RIGHT convention was the venue's own stored handle; HERE
+        it is the opposite -- `archive_handle` (the crawl_target's own,
+        always-normalized key), never `_handle_for(venue_id)`. Each venue's
+        own stored `instagram_handle` is deliberately given a DIFFERENT,
+        mixed-case spelling from `archive_handle` and from each other, so a
+        regression that reached for either venue's own casing (the natural,
+        wrong instinct that mirrors the single-venue convention) would be
+        caught, not coincide by accident."""
+        dao = _dao()
+        dao.upsert_venue(Venue(venue_id="v1", venue_name="Entre Amigos O Bode", venue_lat=RECIFE_LAT, venue_lng=RECIFE_LNG))
+        dao.set_venue_instagram(VenueInstagram(venue_id="v1", instagram_handle="EntreAmigosOBode", status="found"))
+        dao.upsert_venue(Venue(venue_id="v2", venue_name="Entre Amigos O Bode Espinheiro", venue_lat=RECIFE_LAT, venue_lng=RECIFE_LNG))
+        dao.set_venue_instagram(VenueInstagram(venue_id="v2", instagram_handle="ENTREAMIGOSOBODE", status="found"))
+        post_source = _StubPostSource()
+        post_source.posts_by_handle["entreamigosobode"] = [_post("s1")]
+        openai = _FakeOpenAIClient([_event_json(location_text="Entre Amigos O Bode Espinheiro")])
+
+        _run_handles(dao, post_source, openai, handles="entreamigosobode")
+
+        # Reachable under the NORMALIZED handle -- not either venue's own,
+        # differently-cased, stored spelling.
+        rows_under_normalized = dao.list_events_by_source("entreamigosobode", "s1")
+        rows_under_v1_casing = dao.list_events_by_source("EntreAmigosOBode", "s1")
+        rows_under_v2_casing = dao.list_events_by_source("ENTREAMIGOSOBODE", "s1")
+        assert len(rows_under_normalized) == 1, rows_under_normalized
+        assert rows_under_normalized[0]["source_handle"] == "entreamigosobode"
+        assert rows_under_v1_casing == []
+        assert rows_under_v2_casing == []
+
+
+class TestFeriasReExtractionTwoVenueHandle:
+    """The exact case the plan's own Evidence opens with:
+    `@entreamigosobode` maps to TWO venues. Re-extracting the four FÉRIAS
+    posts through mode="handles" must resolve them (by name) to the SAME
+    venue every time and leave exactly four LIVE events dated 2026 --
+    attributed, never eight, and never split across the wrong venue."""
+
+    def test_four_wrong_year_events_resolve_and_supersede_across_a_two_venue_handle(self):
+        dao = _dao()
+        _seed_named_venue(dao, "v1", "entreamigosobode", "Entre Amigos O Bode")
+        _seed_named_venue(dao, "v2", "entreamigosobode", "Entre Amigos O Bode Espinheiro")
+        post_source = _StubPostSource()
+        post_source.posts_by_handle["entreamigosobode"] = [_post("dcpp_ferias_2v")]
+
+        _run_handles(dao, post_source, _FakeOpenAIClient([
+            _ferias_events_json(2027, location_text="Entre Amigos O Bode Espinheiro"),
+        ]), handles="entreamigosobode")
+        wrong_rows = dao.list_events_by_source("entreamigosobode", "dcpp_ferias_2v")
+        assert len(wrong_rows) == 4, wrong_rows
+        assert {r["starts_at"].year for r in wrong_rows} == {2027}
+        assert all(r["venue_id"] == "v2" for r in wrong_rows), wrong_rows
+
+        _run_handles(dao, post_source, _FakeOpenAIClient([
+            _ferias_events_json(2026, location_text="Entre Amigos O Bode Espinheiro"),
+        ]), handles="entreamigosobode")
+
+        all_rows = dao.list_events_by_source("entreamigosobode", "dcpp_ferias_2v")
+        assert len(all_rows) == 8, all_rows
+
+        # Half one: the visible half -- four live events, dated 2026,
+        # attributed to the venue their location_text actually named.
+        live = [r for r in all_rows if r["status"] != "superseded"]
+        assert len(live) == 4, live
+        assert {r["starts_at"].year for r in live} == {2026}, live
+        assert all(r["venue_id"] == "v2" for r in live), live
+
+        # Half two: the half that proves identity continuity held. If
+        # source_handle had been wrong (e.g. either venue's own casing
+        # instead of the crawl_target convention), the second pass would
+        # never have MATCHED the first pass's rows at all -- it would have
+        # opened a second identity space, and this count would be 4, not 8
+        # (the stale 2027 rows would be invisible to list_events_by_source
+        # under the WRONG handle, not "superseded" under the right one).
+        superseded = [r for r in all_rows if r["status"] == "superseded"]
+        assert len(superseded) == 4, superseded
+        assert {r["starts_at"].year for r in superseded} == {2027}, superseded
         assert {r["event_id"] for r in wrong_rows} == {r["event_id"] for r in superseded}

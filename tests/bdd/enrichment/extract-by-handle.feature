@@ -58,3 +58,22 @@ Feature: Extract the posts archived under a handle
     Given a venue whose posts are archived under that venue
     When extraction runs for that venue
     Then those posts are extracted
+
+  Scenario: Resolve a multi-venue handle's post from its own location text
+    Given a handle mapping to two venues
+    And a post whose location text names one of them
+    When extraction runs for that handle
+    Then the event resolves to the named venue
+
+  Scenario: Queue a multi-venue handle's post that names neither venue
+    Given a handle mapping to two venues
+    And a post whose location text names neither of them
+    When extraction runs for that handle
+    Then the event is attributed to no venue and queued
+
+  Scenario: Re-extract the four FÉRIAS events across a two-venue handle
+    Given a handle mapping to two venues
+    And an archived post whose four events were stored with a wrong date, all naming one venue
+    When extraction runs for that handle
+    Then four corrected events are live, attributed to the named venue
+    And the four events with the wrong date are superseded

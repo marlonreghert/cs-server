@@ -78,6 +78,13 @@ from app.services.event_reconciliation import (
     reconcile_post_events,
     update_events_gauge,
 )
+from app.services.event_venue_resolution import (
+    DEFAULT_CONFIDENCE_FLOOR as VENUE_RESOLUTION_DEFAULT_CONFIDENCE_FLOOR,
+    DEFAULT_MARGIN as VENUE_RESOLUTION_DEFAULT_MARGIN,
+    build_handle_index,
+    build_location_text_attribute_fn,
+    candidate_venues_for_ids,
+)
 from app.services.event_venue_targeting import (
     _parse_timestamp,
     _run_prefix_date,
@@ -175,11 +182,14 @@ TRIGGER_HANDLE_REEXTRACTION = "handle_reextraction"
 # `run()`'s result dict (mode="handles" only) — mirrors
 # PromoterCrawlService.run()'s own `report["accounts"]` shape, so an operator
 # (or a test) can tell "ran, found nothing" apart from "never even looked"
-# without inferring it from `qualifying_posts` alone.
+# without inferring it from `qualifying_posts` alone. `HANDLE_OUTCOME_
+# EXTRACTED` covers BOTH a single-venue and a multi-venue handle — the
+# per-report `venue_ids` list is what tells them apart; there is no longer
+# an "ambiguous, refused" outcome now that a multi-venue handle resolves
+# through the SAME ladder the shared-handle crawl uses (§below).
 HANDLE_OUTCOME_EXTRACTED = "extracted"
 HANDLE_OUTCOME_NOTHING_ARCHIVED = "nothing_archived"
 HANDLE_OUTCOME_NO_VENUE_MAPPED = "no_venue_mapped"
-HANDLE_OUTCOME_AMBIGUOUS_VENUES = "ambiguous_venues"
 
 DEFAULT_MAX_VENUES = 25
 DEFAULT_MAX_POSTS_PER_VENUE = 20
@@ -209,6 +219,17 @@ class ArchivedPost:
     # SAME classified flyer already loaded for `flyer_photo_key`, so checking
     # it costs no extra model call.
     flyer_names_time: Optional[str] = None
+    # Instagram's own location tag (`{"name": str, "lat": float, "lng":
+    # float}` or None) — plans/260811_extract-by-handle.md: fed to
+    # `event_venue_resolution.resolve_event_venue`'s rung 2 when a MULTI-
+    # VENUE handle's post is re-extracted. Captured in `promoter=<handle>`
+    # manifest entries (`PromoterCrawlService._archive_post_images`) but
+    # NEVER in `venue_id=<v>` ones (`InstagramCrawlChainer.
+    # _archive_venue_posts` has no such field) — a real, permanent data gap
+    # for posts archived under the older per-venue layout, not a bug this
+    # dataclass can fix retroactively. Always None for a post read via
+    # `posts_for_venue`.
+    location_tag: Optional[dict] = None
 
 
 class EventPostSource:
@@ -280,6 +301,10 @@ class EventPostSource:
                     "permalink": entry.get("permalink"),
                     "caption": entry.get("caption"),
                     "timestamp": entry.get("uploaded_at"),
+                    # Present only on a promoter=<handle>-archived entry —
+                    # see ArchivedPost.location_tag's own docstring for why
+                    # a venue_id=<v>-archived entry never has one.
+                    "location_tag": entry.get("location_tag"),
                     "flyer_photo_key": None,
                     "flyer_confidence": None,
                     "flyer_names_time": None,
@@ -316,6 +341,7 @@ class EventPostSource:
             flyer_confidence=bucket["flyer_confidence"],
             flyer_names_time=bucket["flyer_names_time"],
             any_photo_key=bucket["any_photo_key"],
+            location_tag=bucket.get("location_tag"),
         )
 
     async def posts_for_venue(self, venue_id: str, since: datetime) -> list[ArchivedPost]:
@@ -478,6 +504,12 @@ class EventExtractionService:
         flyer_confidence_floor: float = DEFAULT_FLYER_CONFIDENCE_FLOOR,
         max_events_per_post: int = DEFAULT_MAX_EVENTS_PER_POST,
         now_provider=None,
+        # plans/260811_extract-by-handle.md: the SAME floor/margin
+        # `PromoterCrawlService` uses for its own resolution ladder calls —
+        # only reached by `_run_handles`' multi-venue branch, which is the
+        # one caller here that ever invokes the ladder at all.
+        venue_resolution_confidence_floor: float = VENUE_RESOLUTION_DEFAULT_CONFIDENCE_FLOOR,
+        venue_resolution_margin: float = VENUE_RESOLUTION_DEFAULT_MARGIN,
     ):
         self.venue_dao = venue_dao
         self.post_source = post_source
@@ -486,6 +518,8 @@ class EventExtractionService:
         self.flyer_confidence_floor = flyer_confidence_floor
         self.max_events_per_post = max_events_per_post
         self._now = now_provider or (lambda: datetime.now(timezone.utc))
+        self.venue_resolution_confidence_floor = venue_resolution_confidence_floor
+        self.venue_resolution_margin = venue_resolution_margin
 
     def _resolve_venue_ids(self, cfg: dict) -> list[str]:
         if cfg["eligibility_mode"] == "venue_ids":
@@ -561,23 +595,42 @@ class EventExtractionService:
         configured handle — reading BOTH archive spellings (§A) and never
         calling Apify. See plans/260811_extract-by-handle.md.
 
-        Attribution is resolved the SAME way a first pass would: a handle
-        mapping to exactly one venue attributes directly to it (the common
-        case — every scenario this mode was built for). A handle shared by
-        SEVERAL venues needs the SAME per-event, post-extraction resolution
-        ladder the scheduled shared-handle crawl already runs
-        (`InstagramCrawlChainer._chain_shared_handle` ->
-        `PromoterCrawlService._process_post`) — a materially different
-        pipeline (per-event attribution against `location_text`, not a
-        constant `venue_id`) that this read-path feature does not wire in.
-        Guessing which of the several venues owns a re-read post would risk
-        exactly the silent mis-attribution CLAUDE.md and
-        `event_venue_resolution` both forbid, so a multi-venue handle is
-        logged and skipped here rather than guessed — a real, deliberate
-        scope limit, not an oversight (see the plan's own review notes).
-        """
+        Attribution is resolved the SAME way a first pass would, for BOTH
+        shapes a handle can take:
+          - one venue (the common case): attribute directly, exactly like
+            the venue_ids/event_candidates branch above.
+          - several venues (a shared handle — the plan's own motivating
+            case, e.g. `@entreamigosobode`): resolve EACH event's venue from
+            its own `location_text` through
+            `event_venue_resolution.build_location_text_attribute_fn` — the
+            SAME closure `PromoterCrawlService._process_post` calls for the
+            scheduled shared-handle crawl (`InstagramCrawlChainer.
+            _chain_shared_handle`), so this read path and that live-crawl
+            path share ONE resolution ladder, never two. `_process_post`
+            itself is never called here: it fetches its vision image via a
+            LIVE HTTP download keyed off a freshly-fetched post's
+            `image_urls` (no seam for an already-archived S3 key), and this
+            path already has the bytes — re-using `_process_post` wholesale
+            would mean re-downloading or a presigned-URL workaround, both
+            of which this feature exists to avoid. `_extract_one` already
+            does the archived-post half correctly (S3 image fetch, OpenAI
+            call, date resolution) for the single-venue case; the ladder
+            closure is the only piece the multi-venue case adds.
+
+        `source_handle` uses a DIFFERENT convention for each shape, and
+        getting it backwards silently duplicates instead of superseding
+        (plans/260811_extract-by-handle.md §B) — see the comment at each
+        assignment below for which convention applies and why; the OTHER
+        write site is `InstagramCrawlChainer._chain` (`handle = target
+        ["handle"]`, threaded through `chain_venue` ->
+        `_chain_shared_handle` -> `_process_post(handle=handle, ...)`)."""
         handle_map = group_venue_ids_by_handle(self.venue_dao.list_instagram_handles() or {})
         qualifying_posts = 0
+        # One `now` for every event this call resolves — mirrors `run()`'s
+        # own single `now = self._now()`, shared across every account/post a
+        # real crawl processes in one pass (`PromoterCrawlService.run()`),
+        # rather than a fresh clock read per post.
+        now = self._now()
 
         for raw_handle in cfg["eligibility_handles"]:
             archive_handle = normalize_handle(raw_handle)
@@ -595,31 +648,6 @@ class EventExtractionService:
                 })
                 continue
 
-            if len(venue_ids) > 1:
-                logger.warning(
-                    f"[EventExtraction] handle {raw_handle!r} maps to "
-                    f"{len(venue_ids)} venues ({', '.join(venue_ids)}) -- "
-                    "extract-by-handle only supports a handle mapping to a "
-                    "single venue; per-post attribution across several venues "
-                    "needs the shared-handle crawl's own resolution ladder, "
-                    "not this read path. Refusing to guess; nothing extracted "
-                    "for this handle."
-                )
-                handle_reports.append({
-                    "handle": raw_handle, "outcome": HANDLE_OUTCOME_AMBIGUOUS_VENUES,
-                    "venue_ids": venue_ids,
-                })
-                continue
-
-            venue_id = venue_ids[0]
-            # The SAME handle string a first pass over this venue would have
-            # used (see `_handle_for`, used identically by the venue_ids/
-            # event_candidates branch above) — NEVER the operator's raw
-            # config input — so a re-extraction's `source_handle` matches
-            # the original rows exactly and `reconcile_post_events` can
-            # supersede/update them instead of inserting duplicates (§B).
-            handle = self._handle_for(venue_id)
-
             posts = await self.post_source.posts_for_handle(archive_handle, venue_ids, since)
             if not posts:
                 logger.info(f"[EventExtraction] handle {raw_handle!r}: nothing archived for it")
@@ -631,21 +659,53 @@ class EventExtractionService:
             if cfg["max_posts_per_venue"]:
                 posts = posts[: cfg["max_posts_per_venue"]]
 
-            # §C: cost stated before it is spent -- extraction is free of
-            # Apify but not of OpenAI (a vision call per qualifying post).
+            if len(venue_ids) == 1:
+                venue_id = venue_ids[0]
+                # SINGLE-VENUE convention: the SAME handle string a first
+                # pass over this venue would have used (`_handle_for`, used
+                # identically by the venue_ids/event_candidates branch
+                # above) — NEVER the operator's raw config input. A venue's
+                # own `instagram_handle` is stored as the venue's OWN
+                # record, independent of (and not necessarily identical in
+                # casing to) any crawl_target key.
+                handle = self._handle_for(venue_id)
+                attribute_fn = None  # fixed-venue closure, built inside _extract_one
+            else:
+                venue_id = None
+                # MULTI-VENUE convention: `target["handle"]` — the
+                # `events.crawl_target` row's own key, ALWAYS normalized
+                # (`admin_crawl_router.create_crawl_target` calls
+                # `normalize_handle` before `upsert_crawl_target`) — is what
+                # `InstagramCrawlChainer._chain`/`_chain_shared_handle`
+                # actually writes as `source_handle` for a shared handle's
+                # posts. `archive_handle` (this function's own normalized
+                # form of the operator's input) is that SAME string, so it —
+                # not `_handle_for(venue_id)`, which would be WRONG here —
+                # is what must be reused for identity continuity (§B).
+                handle = archive_handle
+
             qualifying_here = [
                 p for p in posts if p.shortcode and post_qualifies(
                     p, flyer_confidence_floor=self.flyer_confidence_floor,
                 )[0]
             ]
+            # §C: cost stated before it is spent -- extraction is free of
+            # Apify but not of OpenAI (a vision call per qualifying post).
             logger.info(
                 f"[EventExtraction] handle {raw_handle!r}: {len(qualifying_here)} of "
-                f"{len(posts)} archived posts qualify for extraction (venue={venue_id})"
+                f"{len(posts)} archived posts qualify for extraction "
+                f"(venue={venue_id if venue_id else venue_ids})"
             )
             handle_reports.append({
                 "handle": raw_handle, "outcome": HANDLE_OUTCOME_EXTRACTED,
                 "posts_archived": len(posts), "posts_qualifying": len(qualifying_here),
+                "venue_ids": venue_ids,
             })
+
+            candidate_venues, handle_index = (
+                (None, None) if venue_id is not None
+                else (candidate_venues_for_ids(self.venue_dao, venue_ids), build_handle_index(self.venue_dao))
+            )
 
             for post in posts:
                 if not post.shortcode:
@@ -661,16 +721,35 @@ class EventExtractionService:
                 if cfg["dry_run"]:
                     continue
 
+                if venue_id is None:
+                    # Built PER POST — the ladder closes over each post's
+                    # own caption/location_tag, never a sibling's.
+                    attribute_fn = build_location_text_attribute_fn(
+                        caption=post.caption, location_tag=post.location_tag,
+                        promoter_handle=archive_handle, venues=candidate_venues,
+                        handle_index=handle_index, venue_dao=self.venue_dao, now=now,
+                        confidence_floor=self.venue_resolution_confidence_floor,
+                        margin=self.venue_resolution_margin,
+                        # Bounded to this handle's own venues (two or three,
+                        # never the whole catalog) — the SAME reasoning
+                        # `_chain_shared_handle` already applies for opting
+                        # in: a caption naming a branch in passing is a
+                        # trustworthy signal against a FEW candidates.
+                        location_text_fallback_to_caption=True,
+                    )
+
                 outcome, kind_label = await self._extract_one(
                     venue_id, handle, post, cfg, trigger=TRIGGER_HANDLE_REEXTRACTION,
+                    attribute_fn=attribute_fn,
                 )
                 bump(outcome, kind_label)
 
         return qualifying_posts
 
     async def _extract_one(
-        self, venue_id: str, handle: str, post: ArchivedPost, cfg: dict,
+        self, venue_id: Optional[str], handle: str, post: ArchivedPost, cfg: dict,
         *, trigger: str = TRIGGER_EXTRACTION,
+        attribute_fn: Optional[Callable[[dict, str], tuple[dict, Optional[Callable[[], None]]]]] = None,
     ) -> tuple[str, str]:
         """Returns (outcome, kind_label) — see KIND_LABEL_* above for what
         the second element means. `trigger` labels
@@ -678,7 +757,20 @@ class EventExtractionService:
         supersedes a stale row of THIS post (plans/260811_extract-by-
         handle.md §Error Handling) — TRIGGER_EXTRACTION for the two
         pre-existing modes (unchanged behaviour), TRIGGER_HANDLE_REEXTRACTION
-        when `_run_handles` is the caller."""
+        when `_run_handles` is the caller.
+
+        `attribute_fn` — plans/260811_extract-by-handle.md: pluggable so
+        `_run_handles`' multi-venue branch can pass the SAME resolution-
+        ladder closure `PromoterCrawlService._process_post` uses
+        (`event_venue_resolution.build_location_text_attribute_fn`), instead
+        of this method's own fixed-`venue_id` attribution. Defaults to
+        `None`, in which case the fixed-venue closure below is built exactly
+        as it always has been — the single-venue path (the common case) is
+        BYTE-FOR-BYTE unchanged. `venue_id` may be `None` only when
+        `attribute_fn` is given (the multi-venue branch does not know a
+        single venue ahead of time); `_record_failure` below already treats
+        a `None` venue_id as "not yet known", matching how a promoter post's
+        own failure placeholder never sets one either."""
         # ALL rows already extracted from this post, not just one — a post
         # can hold several events now, so get_event_by_source (at most one
         # row) is unsafe here. Mirrors PromoterCrawlService._process_post.
@@ -879,13 +971,20 @@ class EventExtractionService:
                     # extraction` holds, so this event is auto-`accepted`.
                     single_event_outcome = OUTCOME_ACCEPTED
 
-        # The ONE thing parameterised: a venue post's events are always
-        # attributed to the POSTING venue — never the resolution ladder, and
-        # a named `location_text` is recorded but never re-attributes the
-        # event elsewhere (plans/260806_venue-post-multi-event.md §D). No
-        # side effect to defer, unlike the promoter ladder — always None.
-        def _attribute(fields: dict, event_id: str) -> tuple[dict, Optional[Callable[[], None]]]:
-            return {"venue_id": venue_id}, None
+        # The common case: a venue post's events are attributed to the
+        # POSTING venue — never the resolution ladder, and a named
+        # `location_text` is recorded but never re-attributes the event
+        # elsewhere (plans/260806_venue-post-multi-event.md §D). No side
+        # effect to defer — always None. UNCHANGED for every caller that
+        # does not pass `attribute_fn` (the single-venue path, the common
+        # case). `_run_handles`' multi-venue branch passes the SAME
+        # resolution-ladder closure PromoterCrawlService._process_post uses
+        # instead (plans/260811_extract-by-handle.md).
+        if attribute_fn is not None:
+            _attribute = attribute_fn
+        else:
+            def _attribute(fields: dict, event_id: str) -> tuple[dict, Optional[Callable[[], None]]]:
+                return {"venue_id": venue_id}, None
 
         touched_event_ids: list[str] = []
         reconcile_post_events(
@@ -939,7 +1038,7 @@ class EventExtractionService:
         return outcome, kind_label
 
     def _record_failure(
-        self, venue_id: str, handle: str, post: ArchivedPost,
+        self, venue_id: Optional[str], handle: str, post: ArchivedPost,
         raw_text: Optional[str], error_text: str, existing_events: list[dict],
     ) -> None:
         """A total extraction failure (API error, or a response so malformed
@@ -948,7 +1047,12 @@ class EventExtractionService:
         confirmed row only ever gets raw_extraction/last_seen_at touched;
         every other existing row for this post is marked extraction_failed
         so the failure is visible without losing the post. A post with NO
-        prior rows gets one placeholder row recording the failure."""
+        prior rows gets one placeholder row recording the failure.
+
+        `venue_id=None` (only reachable from `_run_handles`' multi-venue
+        branch, where no single venue is known ahead of extraction) is
+        written through as-is — the same "not yet known" value a promoter
+        post's own failure placeholder already carries."""
         now = self._now()
         raw_extraction = (
             {"raw_response": raw_text} if raw_text is not None else {"error": error_text}
@@ -1002,5 +1106,5 @@ __all__ = [
     "KIND_LABEL_NOT_APPLICABLE", "KIND_LABEL_UNKNOWN", "KIND_LABEL_MIXED",
     "TRIGGER_EXTRACTION", "TRIGGER_HANDLE_REEXTRACTION",
     "HANDLE_OUTCOME_EXTRACTED", "HANDLE_OUTCOME_NOTHING_ARCHIVED",
-    "HANDLE_OUTCOME_NO_VENUE_MAPPED", "HANDLE_OUTCOME_AMBIGUOUS_VENUES",
+    "HANDLE_OUTCOME_NO_VENUE_MAPPED",
 ]

@@ -22,12 +22,17 @@ exact situation.
 """
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 
 from behave import given, then, when  # type: ignore[import-untyped]
 
+from app.models.instagram import VenueInstagram
+from app.models.venue import Venue
 from app.services.event_identity import compute_source_event_key
 from tests.bdd.steps.instagram_event_extraction_steps import (
+    RECIFE_LAT,
+    RECIFE_LNG,
     _add_handle_post,
     _add_post,
     _extraction_json,
@@ -35,6 +40,12 @@ from tests.bdd.steps.instagram_event_extraction_steps import (
 )
 
 _TS = datetime(2026, 7, 1, 12, 0, tzinfo=timezone.utc)
+
+# The plan's own §Evidence names — reused here (not reinvented) for the
+# same reason stream_dedupe_and_venue_attribution_steps.py uses them for
+# ITS two-venue fixture: this is the real production shape.
+_VENUE_A_NAME = "Entre Amigos O Bode"
+_VENUE_B_NAME = "Entre Amigos O Bode Espinheiro"
 
 
 def _rows_for(context, shortcode: str) -> list[dict]:
@@ -251,3 +262,111 @@ def step_then_field_keeps_the_operators_value(context):
     assert row["status"] == "confirmed", row
     rows = _rows_for(context, "ebh_curated")
     assert len(rows) == 1, rows  # never duplicated
+
+
+# ── Multi-venue handles: the plan's own motivating shape ──────────────────────
+def _ferias_two_venue_json(year: int) -> str:
+    events = [
+        {
+            "title": f"FERIAS AMIGOS PARK -- semana {i + 1}", "description": None,
+            "date_text": f"0{i + 1}/07/{year}", "time_text": "16h", "is_recurring": False,
+            "recurrence_text": None, "lineup": [], "ticket_url": None, "price_text": None,
+            "location_text": _VENUE_B_NAME, "confidence": 0.9,
+        }
+        for i in range(4)
+    ]
+    return json.dumps({"events": events})
+
+
+@given("a handle mapping to two venues")
+def step_given_handle_mapping_to_two_venues(context):
+    # Rename the Background's venue to a real, resolver-distinguishable
+    # name, then add a SECOND venue sharing the SAME handle -- the plan's
+    # own motivating shape (@entreamigosobode maps to two venues).
+    context.ee_dao.upsert_venue(Venue(
+        venue_id=context.ee_venue_id, venue_name=_VENUE_A_NAME,
+        venue_lat=RECIFE_LAT, venue_lng=RECIFE_LNG,
+    ))
+    context.ee_venue_b_id = "venue_2"
+    context.ee_dao.upsert_venue(Venue(
+        venue_id=context.ee_venue_b_id, venue_name=_VENUE_B_NAME,
+        venue_lat=RECIFE_LAT, venue_lng=RECIFE_LNG,
+    ))
+    context.ee_dao.set_venue_instagram(
+        VenueInstagram(venue_id=context.ee_venue_b_id, instagram_handle=context.ee_handle, status="found")
+    )
+
+
+@given("a post whose location text names one of them")
+def step_given_post_location_text_names_one_of_them(context):
+    _add_handle_post(context, "ebh_multi_named", timestamp=_TS)
+    context.ee_openai.program(_extraction_json(
+        date_text="15/08/2026", time_text="20h", location_text=_VENUE_B_NAME,
+    ))
+
+
+@given("a post whose location text names neither of them")
+def step_given_post_location_text_names_neither(context):
+    _add_handle_post(context, "ebh_multi_unresolved", timestamp=_TS)
+    context.ee_openai.program(_extraction_json(
+        date_text="15/08/2026", time_text="20h",
+        location_text="Praça de Alimentação, Shopping Recife",
+    ))
+
+
+@given("an archived post whose four events were stored with a wrong date, all naming one venue")
+def step_given_ferias_two_venue_wrong_date(context):
+    shortcode = "ebh_ferias_2v"
+    _add_handle_post(context, shortcode, timestamp=_TS)
+    context.ee_ferias_shortcode = shortcode
+    context.ee_ferias_stale_ids = []
+    for i in range(4):
+        title = f"FERIAS AMIGOS PARK -- semana {i + 1}"
+        starts_at = datetime(2027, 7, 1 + 7 * i, 16, 0, tzinfo=timezone.utc)
+        event_id = f"evt_ebh_ferias2v_{i}"
+        context.ee_dao.insert_event({
+            "event_id": event_id, "venue_id": context.ee_venue_b_id,
+            "source_kind": "venue_post", "source_handle": context.ee_handle,
+            "source_shortcode": shortcode,
+            "source_event_key": compute_source_event_key(title, starts_at),
+            "status": "pending_review", "title": title, "starts_at": starts_at,
+            "raw_extraction": {"time_known": True},
+        })
+        context.ee_ferias_stale_ids.append(event_id)
+    # The upcoming "extraction runs for that handle" step re-extracts with
+    # the CORRECTED year, all four naming the SAME venue -- the real
+    # production case, not four independently-resolved coin flips.
+    context.ee_openai.program(_ferias_two_venue_json(2026))
+
+
+@then("the event resolves to the named venue")
+def step_then_event_resolves_to_named_venue(context):
+    row = context.ee_dao.get_event_by_source(context.ee_handle, "ebh_multi_named")
+    assert row is not None
+    assert row["venue_id"] == context.ee_venue_b_id, row
+    assert row["location_resolution"] == "auto", row
+
+
+@then("the event is attributed to no venue and queued")
+def step_then_event_attributed_to_no_venue_and_queued(context):
+    row = context.ee_dao.get_event_by_source(context.ee_handle, "ebh_multi_unresolved")
+    assert row is not None
+    assert row["venue_id"] is None, row
+    assert row["status"] == "pending_review", row  # queued for a human
+    assert "unresolved_venue" in (row["review_reason"] or ""), row
+
+
+@then("four corrected events are live, attributed to the named venue")
+def step_then_four_corrected_events_live(context):
+    rows = context.ee_dao.list_events_by_source(context.ee_handle, context.ee_ferias_shortcode)
+    live = [r for r in rows if r["status"] != "superseded"]
+    assert len(live) == 4, live
+    assert {r["starts_at"].year for r in live} == {2026}, live
+    assert all(r["venue_id"] == context.ee_venue_b_id for r in live), live
+
+
+@then("the four events with the wrong date are superseded")
+def step_then_four_wrong_date_events_superseded(context):
+    for event_id in context.ee_ferias_stale_ids:
+        row = context.ee_dao.get_event(event_id)
+        assert row["status"] == "superseded", row

@@ -34,8 +34,10 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from typing import Optional
+from datetime import datetime
+from typing import Callable, Optional
 
+from app.metrics import EVENT_VENUE_LINK_TOTAL
 from app.services.instagram_cascade_service import name_similarity
 from app.services.instagram_handle_sources import normalize_handle
 from app.services.venue_eligibility import haversine_km
@@ -299,11 +301,132 @@ def resolve_event_venue(
     return ResolutionResult(RESOLUTION_UNRESOLVED, None, None, None, candidates)
 
 
+# `method` is what makes EVENT_VENUE_LINK_TOTAL worth reading: whether links
+# come from exact @-mentions/location tags or fuzzy name matching is the
+# difference between a resolver that is working and one that is guessing
+# successfully so far. `result` is auto, queued, or unresolved (never
+# `manual` — a manual link is set by an operator PATCH, never by this ladder).
+RESULT_LABEL = {
+    RESOLUTION_AUTO: "auto",
+    RESOLUTION_QUEUED: "queued",
+    RESOLUTION_UNRESOLVED: "unresolved",
+}
+
+# The SAME shape `event_reconciliation.AttributeFn` names — duplicated as a
+# type alias only (not the logic it describes) because event_reconciliation
+# already imports FROM this module (RESOLUTION_MANUAL, above); importing
+# the other way would cycle. `attribute(fields, event_id) -> (fields_to_
+# merge, on_persisted)`, see `event_reconciliation.reconcile_post_events`'s
+# own docstring for the full contract.
+AttributeFn = Callable[[dict, str], tuple[dict, Optional[Callable[[], None]]]]
+
+
+def build_location_text_attribute_fn(
+    *,
+    caption: Optional[str],
+    location_tag: Optional[dict],
+    promoter_handle: Optional[str],
+    venues: list,
+    handle_index: dict,
+    venue_dao,
+    now: datetime,
+    confidence_floor: float = DEFAULT_CONFIDENCE_FLOOR,
+    margin: float = DEFAULT_MARGIN,
+    location_text_fallback_to_caption: bool = False,
+    attribution_outcomes: Optional[list] = None,
+) -> AttributeFn:
+    """THE one definition of "how a caller resolves one post's events against
+    a bounded venue candidate set from each event's own `location_text`" —
+    an `event_reconciliation.AttributeFn` closure, built once per POST
+    (closing over the post-level `caption`/`location_tag`/`promoter_handle`
+    and the caller's own `venues`/`handle_index`), called once per EVENT that
+    post yields.
+
+    Extracted from `PromoterCrawlService._process_post`'s own inline
+    `_attribute` closure (plans/260811_extract-by-handle.md's coordination
+    note) so there is ONE ladder call site, not two that can drift — this
+    repo has already been bitten by exactly that shape of duplication four
+    times (two escapers, two freeze rules, two cap resolutions, two
+    field-list arrays). `PromoterCrawlService._process_post` (every live
+    promoter/shared-handle crawl) and `EventExtractionService._run_handles`
+    (a multi-venue handle's ALREADY-ARCHIVED posts, re-extracted with no
+    re-crawl) both call this SAME function; neither builds its own ladder.
+
+    `location_text_fallback_to_caption` — plans/260810_post-kind-and-post-
+    extraction-attribution.md §C: default False, so a REAL promoter account
+    (whose candidate set is the WHOLE servable catalog) is byte-for-byte
+    unchanged — a caption is noisier free text than a promoter's own
+    `location_text`, and name-matching it against the whole catalog risks a
+    false match the bounded, few-candidate shared-handle/multi-venue-handle
+    case does not. Both callers that pass `venues` bounded to one handle's
+    own two or three venues pass `True`.
+
+    Returns `(fields_to_merge, on_persisted)` per `reconcile_post_events`'
+    contract: `on_persisted` writes `event_venue_link_candidate` rows and
+    bumps `EVENT_VENUE_LINK_TOTAL` — deferred until AFTER the event row is
+    committed, since that table's FK is real and non-deferrable (migration
+    0024_promoter_accounts).
+    """
+
+    def _attribute(fields: dict, event_id: str) -> tuple[dict, Optional[Callable[[], None]]]:
+        location_text = fields["location_text"]
+        if not location_text and location_text_fallback_to_caption:
+            location_text = caption
+        resolution = resolve_event_venue(
+            caption=caption, location_text=location_text,
+            location_tag=location_tag, promoter_handle=promoter_handle,
+            venues=venues, handle_index=handle_index,
+            confidence_floor=confidence_floor, margin=margin,
+        )
+
+        def _on_persisted() -> None:
+            if resolution.candidates:
+                venue_dao.replace_event_venue_link_candidates(event_id, [
+                    {
+                        "venue_id": c.venue_id, "rank": rank, "score": c.score,
+                        "method": c.method, "evidence": c.evidence,
+                    }
+                    for rank, c in enumerate(resolution.candidates, start=1)
+                ])
+            EVENT_VENUE_LINK_TOTAL.labels(
+                method=resolution.method or "none",
+                result=RESULT_LABEL[resolution.resolution],
+            ).inc()
+
+        if attribution_outcomes is not None:
+            attribution_outcomes.append(resolution.resolution)
+
+        if resolution.resolution == RESOLUTION_AUTO:
+            result_fields = {
+                "venue_id": resolution.venue_id,
+                "location_resolution": RESOLUTION_AUTO,
+                "location_confidence": resolution.confidence,
+                "linked_by": resolution.method,
+                "linked_at": now,
+            }
+        elif resolution.resolution == RESOLUTION_UNRESOLVED:
+            result_fields = {
+                "venue_id": None,
+                "location_resolution": RESOLUTION_UNRESOLVED,
+                "location_confidence": None,
+                "linked_by": None,
+                "linked_at": None,
+            }
+        else:
+            # RESOLUTION_QUEUED: leave the four link columns out of the
+            # returned dict entirely — the reconciler's partial-update path
+            # means they stay NULL, the "awaiting review" state.
+            result_fields = {}
+        return result_fields, _on_persisted
+
+    return _attribute
+
+
 __all__ = [
     "METHOD_HANDLE_MENTION", "METHOD_LOCATION_TAG", "METHOD_NAME_MATCH",
     "RESOLUTION_AUTO", "RESOLUTION_MANUAL", "RESOLUTION_UNRESOLVED", "RESOLUTION_QUEUED",
     "DEFAULT_CONFIDENCE_FLOOR", "DEFAULT_MARGIN", "LOCATION_TAG_MATCH_FLOOR",
-    "VenueLite", "LinkCandidate", "ResolutionResult",
+    "VenueLite", "LinkCandidate", "ResolutionResult", "RESULT_LABEL", "AttributeFn",
     "extract_mentions", "gate_auto_link", "build_venue_catalog", "candidate_venues_for_ids",
-    "build_handle_index", "resolve_event_venue",
+    "build_handle_index", "resolve_event_venue", "build_location_text_attribute_fn",
 ]

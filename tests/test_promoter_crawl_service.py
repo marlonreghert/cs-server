@@ -511,6 +511,104 @@ class TestSourceKindAndMetricsParity:
         assert dao.get_event_by_source("sharedhandle", "km3") is None
 
 
+# ── plans/260811_extract-by-handle.md: the attribution closure moved ────────
+class TestAttributionBehaviourPinnedAcrossExtraction:
+    """`_process_post`'s venue-attribution closure was extracted verbatim
+    into `event_venue_resolution.build_location_text_attribute_fn`, so
+    `EventExtractionService._run_handles` can resolve a multi-venue handle's
+    re-extracted posts through the SAME ladder call rather than a second
+    one. This pins the REAL promoter path's own outcome — same inputs, same
+    persisted fields, same `EVENT_VENUE_LINK_TOTAL` metric — through
+    `_process_post` itself (never the extracted function directly), so a
+    future edit to the shared function that changes promoter-crawl
+    behaviour fails HERE, not silently.
+    """
+
+    def _venues(self, dao):
+        dao.upsert_venue(Venue(venue_id="v1", venue_name="Zetta Lounge", venue_lat=-8.05, venue_lng=-34.88))
+        dao.upsert_venue(Venue(venue_id="v2", venue_name="Casa Rosa", venue_lat=-8.06, venue_lng=-34.90))
+        return build_venue_catalog(dao), build_handle_index(dao)
+
+    def _post(self, shortcode: str, caption: str) -> dict:
+        return {
+            "shortcode": shortcode, "caption": caption,
+            "permalink": f"https://instagram.com/p/{shortcode}",
+            "timestamp": datetime(2026, 8, 1, tzinfo=timezone.utc).isoformat(),
+            "image_urls": [],
+        }
+
+    def _metric(self, method: str, result: str) -> float:
+        from prometheus_client import REGISTRY
+
+        return REGISTRY.get_sample_value(
+            "event_venue_link_total", {"method": method, "result": result},
+        ) or 0.0
+
+    def test_a_confident_name_match_auto_links_and_records_the_link_fields(self, dao):
+        venues, handle_index = self._venues(dao)
+        openai_client = _FakeOpenAIClient()
+        openai_client.program(_extraction_json(
+            date_text="15/08", time_text="20h", location_text="Casa Rosa",
+        ))
+        service = PromoterCrawlService(venue_dao=dao, posts_client=None, openai_client=openai_client)
+        before = self._metric("name_match", "auto")
+
+        _run(service._process_post(
+            handle="promo", post=self._post("pin_auto", "Ingressos abertos!"),
+            venues=venues, handle_index=handle_index, now=datetime.now(timezone.utc),
+        ))
+
+        row = dao.get_event_by_source("promo", "pin_auto")
+        assert row["venue_id"] == "v2", row
+        assert row["location_resolution"] == "auto", row
+        assert row["location_confidence"] is not None, row
+        assert row["linked_by"] == "name_match", row
+        after = self._metric("name_match", "auto")
+        assert after - before == 1.0, (before, after)
+
+    def test_a_score_below_the_floor_leaves_the_event_unresolved(self, dao):
+        venues, handle_index = self._venues(dao)
+        openai_client = _FakeOpenAIClient()
+        openai_client.program(_extraction_json(
+            date_text="15/08", time_text="20h", location_text="Somewhere else entirely",
+        ))
+        service = PromoterCrawlService(venue_dao=dao, posts_client=None, openai_client=openai_client)
+        before = self._metric("none", "unresolved")
+
+        _run(service._process_post(
+            handle="promo", post=self._post("pin_unresolved", "Ingressos abertos!"),
+            venues=venues, handle_index=handle_index, now=datetime.now(timezone.utc),
+        ))
+
+        row = dao.get_event_by_source("promo", "pin_unresolved")
+        assert row["venue_id"] is None, row
+        assert row["location_resolution"] == "unresolved", row
+        assert row["location_confidence"] is None, row
+        assert row["linked_by"] is None, row
+        after = self._metric("none", "unresolved")
+        assert after - before == 1.0, (before, after)
+
+    def test_an_at_mention_of_a_known_venue_handle_auto_links_by_identity(self, dao):
+        dao.set_venue_instagram(VenueInstagram(venue_id="v1", instagram_handle="zettalounge", status="found"))
+        venues, handle_index = self._venues(dao)
+        openai_client = _FakeOpenAIClient()
+        openai_client.program(_extraction_json(date_text="15/08", time_text="20h", location_text=None))
+        service = PromoterCrawlService(venue_dao=dao, posts_client=None, openai_client=openai_client)
+        before = self._metric("handle_mention", "auto")
+
+        _run(service._process_post(
+            handle="promo", post=self._post("pin_mention", "Hoje é no @zettalounge! Ingressos abertos!"),
+            venues=venues, handle_index=handle_index, now=datetime.now(timezone.utc),
+        ))
+
+        row = dao.get_event_by_source("promo", "pin_mention")
+        assert row["venue_id"] == "v1", row
+        assert row["linked_by"] == "handle_mention", row
+        assert row["location_confidence"] == 1.0, row
+        after = self._metric("handle_mention", "auto")
+        assert after - before == 1.0, (before, after)
+
+
 class TestFakeOpenAIClientExhaustion:
     """The fake's own contract, proven in isolation: exhaustion must RAISE,
     never silently return a default that could pass a test by accident."""
