@@ -210,3 +210,80 @@ resource "aws_s3_bucket_policy" "site" {
     }]
   })
 }
+
+# ----------------------------------------------------------------------------
+# GitHub Actions release role — lets CI publish the admin console bundle.
+#
+# admin-ui is a React app served from this bucket through CloudFront, and its
+# release was a manual `npm run build && aws s3 sync && create-invalidation`
+# that nothing in CI ran. A PR merged green, deployed green, and left the
+# console serving a stale bundle showing help text that PR had deleted — the
+# operator debugged a UI that had never shipped.
+#
+# OIDC, not an access key: nothing long-lived is stored in GitHub, so there is
+# no secret to leak or rotate. The trust condition pins BOTH the repository and
+# the branch, so a fork, a pull request from a fork, or any other ref cannot
+# assume this role.
+# ----------------------------------------------------------------------------
+data "aws_iam_openid_connect_provider" "github" {
+  url = "https://token.actions.githubusercontent.com"
+}
+
+resource "aws_iam_role" "console_release" {
+  name        = "vibesense-admin-console-release"
+  description = "GitHub Actions OIDC: publish the admin console bundle. Scoped to ${var.release_repository} on ${var.release_branch}."
+  tags        = var.tags
+
+  # One hour: a release takes seconds, and a short session limits how long a
+  # leaked token is useful.
+  max_session_duration = 3600
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect    = "Allow"
+      Action    = "sts:AssumeRoleWithWebIdentity"
+      Principal = { Federated = data.aws_iam_openid_connect_provider.github.arn }
+      Condition = {
+        StringEquals = {
+          "token.actions.githubusercontent.com:aud" = "sts.amazonaws.com"
+          "token.actions.githubusercontent.com:sub" = "repo:${var.release_repository}:ref:refs/heads/${var.release_branch}"
+        }
+      }
+    }]
+  })
+}
+
+# Least privilege, and deliberately narrow: write objects into THIS bucket and
+# invalidate THIS distribution. No s3:GetObject (a sync diffs on ListBucket
+# metadata), no bucket-policy or distribution-config rights, no wildcard
+# resources — a compromised workflow can replace the console bundle and
+# nothing else.
+resource "aws_iam_role_policy" "console_release" {
+  name = "admin-console-release"
+  role = aws_iam_role.console_release.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid      = "SyncConsoleBundle"
+        Effect   = "Allow"
+        Action   = ["s3:PutObject", "s3:DeleteObject"]
+        Resource = "${aws_s3_bucket.site.arn}/*"
+      },
+      {
+        Sid      = "ListBucketForSyncDiff"
+        Effect   = "Allow"
+        Action   = "s3:ListBucket"
+        Resource = aws_s3_bucket.site.arn
+      },
+      {
+        Sid      = "InvalidateConsoleOnly"
+        Effect   = "Allow"
+        Action   = "cloudfront:CreateInvalidation"
+        Resource = aws_cloudfront_distribution.site.arn
+      },
+    ]
+  })
+}
