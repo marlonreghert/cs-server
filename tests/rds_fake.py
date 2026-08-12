@@ -923,6 +923,9 @@ class InMemoryRdsVenueStore:
                 # actually executed writes both, together, never zero by
                 # default.
                 "last_run_reels_fetched": None, "last_run_reels_new": None,
+                # plans/260812_crawl-error-visibility.md §B (migration 0036):
+                # NULL until a run actually fails — never invented.
+                "last_failure_kind": None, "last_failure_at": None,
                 "created_at": now, "updated_at": now,
             }
             row.update({k: v for k, v in fields.items() if k != "handle"})

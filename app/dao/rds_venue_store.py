@@ -1566,6 +1566,13 @@ class RdsVenueStore:
         # reels stream actually executed — NULL means "not yet measured",
         # never zero.
         "last_run_reels_fetched", "last_run_reels_new",
+        # plans/260812_crawl-error-visibility.md §B (migration 0036): which
+        # outcome (blocked, handle_not_found, or failed) the target's last
+        # FAILED run hit, and when — written by run_target, left standing
+        # (never cleared) on a run that did not fail, so these always answer
+        # "what was the last failure and when." NULL means no failure has
+        # ever been recorded.
+        "last_failure_kind", "last_failure_at",
     )
     _CRAWL_TARGET_SELECT = (
         "SELECT handle, kind, enabled, cron, timezone, crawl_reels, "
@@ -1573,7 +1580,8 @@ class RdsVenueStore:
         "reels_results_limit, reels_seed_results_limit, "
         "cursor_posts_at, cursor_reels_at, last_run_at, last_run_results, "
         "last_run_cost_usd, consecutive_failures, notes, "
-        "last_run_reels_fetched, last_run_reels_new, created_at, updated_at "
+        "last_run_reels_fetched, last_run_reels_new, "
+        "last_failure_kind, last_failure_at, created_at, updated_at "
         "FROM events.crawl_target"
     )
 
