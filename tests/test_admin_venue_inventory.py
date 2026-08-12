@@ -3,8 +3,10 @@ import importlib
 from types import SimpleNamespace
 
 from app.models import Venue
+from app.models.instagram import VenueInstagram
 
 admin_trigger_router = importlib.import_module("app.routers.admin_trigger_router")
+_venue_instagram_item = admin_trigger_router._venue_instagram_item
 
 
 class _InventoryDao:
@@ -91,3 +93,118 @@ def test_admin_inventory_lists_deprecated_with_cache_flags():
     assert item["cache_flags"]["live_forecast"] is True
     assert item["cache_flags"]["weekly_forecast"] is True
     assert item["cache_flags"]["menu_data"] is True
+    # cache_flags.instagram keeps its exact membership-only meaning: "closed"
+    # IS in the fake's ig_map (even though the value is a bare `object()`,
+    # not a real VenueInstagram — see get_venue_instagram_bulk above).
+    assert item["cache_flags"]["instagram"] is True
+    # The projected `instagram` field must degrade to nulls rather than raise
+    # or 500 the listing when the stored record isn't a real VenueInstagram.
+    assert item["instagram"] == {
+        "handle": None,
+        "url": None,
+        "status": None,
+        "confidence": None,
+        "source": None,
+    }
+
+
+def test_admin_inventory_reports_no_instagram_object_for_absent_record():
+    dao = _InventoryDao()
+    admin_trigger_router.set_container(SimpleNamespace(pipeline_repository=dao))
+
+    response = admin_trigger_router.list_venue_inventory(
+        status="active", q=None, limit=50, cursor=None,
+    )
+
+    item = response["items"][0]
+    assert item["venue_id"] == "active"
+    assert item["cache_flags"]["instagram"] is False
+    assert item["instagram"] is None
+
+
+# ── _venue_instagram_item: pure projection coverage ─────────────────────────
+
+
+def test_venue_instagram_item_none_for_absent_record():
+    assert _venue_instagram_item(None) is None
+
+
+def test_venue_instagram_item_found_carries_full_shape():
+    record = VenueInstagram(
+        venue_id="v1",
+        instagram_handle="champagne_recifee",
+        instagram_url="https://instagram.com/champagne_recifee",
+        confidence_score=0.78,
+        status="found",
+        source="venue_website",
+    )
+    assert _venue_instagram_item(record) == {
+        "handle": "champagne_recifee",
+        "url": "https://instagram.com/champagne_recifee",
+        "status": "found",
+        "confidence": 0.78,
+        "source": "venue_website",
+    }
+
+
+def test_venue_instagram_item_low_confidence():
+    record = VenueInstagram(
+        venue_id="v2",
+        instagram_handle="casaduvidosa",
+        instagram_url="https://instagram.com/casaduvidosa",
+        confidence_score=0.55,
+        status="low_confidence",
+        source="google_search",
+    )
+    item = _venue_instagram_item(record)
+    assert item["status"] == "low_confidence"
+    assert item["handle"] == "casaduvidosa"
+
+
+def test_venue_instagram_item_not_found_returns_null_handle_not_none():
+    """A `not_found` record must return the object (distinguishable from
+    "nobody looked"), just with a null handle."""
+    record = VenueInstagram(venue_id="v3", status="not_found")
+    item = _venue_instagram_item(record)
+    assert item is not None
+    assert item["handle"] is None
+    assert item["status"] == "not_found"
+
+
+def test_venue_instagram_item_missing_source_degrades_to_null_source():
+    """Records predating the `source` field exist in production; `source`
+    must be null, not a raise."""
+    record = VenueInstagram(
+        venue_id="v4",
+        instagram_handle="barantigo",
+        instagram_url="https://instagram.com/barantigo",
+        confidence_score=0.6,
+        status="found",
+        source=None,
+    )
+    item = _venue_instagram_item(record)
+    assert item["handle"] == "barantigo"
+    assert item["source"] is None
+
+
+def test_venue_instagram_item_missing_confidence_score_defaults_to_zero():
+    """`confidence_score` has a pydantic default of 0.0, so a record missing
+    it at parse time already produces 0.0 rather than raising; this pins that
+    projected value stays consistent through the projection helper."""
+    record = VenueInstagram(venue_id="v5", instagram_handle="x", status="found")
+    item = _venue_instagram_item(record)
+    assert item["confidence"] == 0.0
+
+
+def test_venue_instagram_item_malformed_record_degrades_without_raising():
+    """A record that isn't even a VenueInstagram instance (e.g. a stray
+    object making it into the bulk-read map) must degrade to an all-null
+    object rather than raise and take the whole listing down with it."""
+    item = _venue_instagram_item(object())
+    assert item == {
+        "handle": None,
+        "url": None,
+        "status": None,
+        "confidence": None,
+        "source": None,
+    }
