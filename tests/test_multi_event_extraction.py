@@ -51,7 +51,7 @@ class TestParseMultiEventExtractionResponse:
             {"title": "Adilson Ramos", "location_text": "RioMar", "confidence": 0.9},
             {"title": "Khrystal", "location_text": "Terra", "confidence": 0.9},
         ]})
-        events, malformed, malformed_attractions = parse_multi_event_extraction_response(raw)
+        events, malformed, malformed_attractions, _truncated_by_cap = parse_multi_event_extraction_response(raw)
         assert [e["title"] for e in events] == ["O Homem do Fraque Verde", "Adilson Ramos", "Khrystal"]
         assert malformed == 0
         assert malformed_attractions == 0
@@ -60,7 +60,7 @@ class TestParseMultiEventExtractionResponse:
         """The plan's own invariant: a single-event post must behave exactly
         like today, just wrapped in a list of one."""
         raw = json.dumps({"events": [{"title": "Festa", "confidence": 0.9}]})
-        events, malformed, malformed_attractions = parse_multi_event_extraction_response(raw)
+        events, malformed, malformed_attractions, _truncated_by_cap = parse_multi_event_extraction_response(raw)
         assert len(events) == 1
         assert events[0]["title"] == "Festa"
         assert malformed == 0
@@ -72,7 +72,7 @@ class TestParseMultiEventExtractionResponse:
             "not-an-object",
             {"title": "Valid B", "confidence": 0.9},
         ]})
-        events, malformed, malformed_attractions = parse_multi_event_extraction_response(raw)
+        events, malformed, malformed_attractions, _truncated_by_cap = parse_multi_event_extraction_response(raw)
         assert [e["title"] for e in events] == ["Valid A", "Valid B"]
         assert malformed == 1
         assert malformed_attractions == 0
@@ -98,12 +98,30 @@ class TestParseMultiEventExtractionResponse:
         entries beyond the ceiling — they are over budget, not defective, so
         they must never inflate the malformed counter."""
         raw = json.dumps({"events": [{"title": f"E{i}", "confidence": 0.9} for i in range(5)]})
-        events, malformed, malformed_attractions = parse_multi_event_extraction_response(
+        events, malformed, malformed_attractions, truncated_by_cap = parse_multi_event_extraction_response(
             raw, max_events=2,
         )
         assert len(events) == 2
         assert malformed == 0
         assert malformed_attractions == 0
+        assert truncated_by_cap is True
+
+    def test_truncated_by_cap_is_false_when_the_raw_list_fits(self):
+        """plans/260812_crawl-error-visibility.md §D: a post whose raw list
+        is AT or under the cap is not truncated — 'the cap bit' must mean
+        something was actually dropped, not merely that a cap exists."""
+        raw = json.dumps({"events": [{"title": f"E{i}", "confidence": 0.9} for i in range(2)]})
+        _events, _malformed, _malformed_attractions, truncated_by_cap = (
+            parse_multi_event_extraction_response(raw, max_events=2)
+        )
+        assert truncated_by_cap is False
+
+    def test_truncated_by_cap_is_false_when_no_cap_is_given(self):
+        raw = json.dumps({"events": [{"title": f"E{i}", "confidence": 0.9} for i in range(5)]})
+        _events, _malformed, _malformed_attractions, truncated_by_cap = (
+            parse_multi_event_extraction_response(raw)
+        )
+        assert truncated_by_cap is False
 
 
 # ── output budget scaling ─────────────────────────────────────────────────────
@@ -259,7 +277,7 @@ class TestMalformedAttractionsCountedPerMultiEventResponse:
                 "attractions": [{"styles": []}, {"styles": []}],
             },
         ]})
-        events, malformed, malformed_attractions = parse_multi_event_extraction_response(raw)
+        events, malformed, malformed_attractions, _truncated_by_cap = parse_multi_event_extraction_response(raw)
         assert malformed == 0
         assert malformed_attractions == 3
         assert [e["title"] for e in events] == ["Event A", "Event B"]
@@ -403,7 +421,7 @@ class TestKindFieldParsing:
         assert parsed["kind"] == "giveaway"
 
     def test_kind_survives_the_multi_event_shape_too(self):
-        events, _malformed, _malformed_attractions = parse_multi_event_extraction_response(
+        events, _malformed, _malformed_attractions, _truncated_by_cap = parse_multi_event_extraction_response(
             json.dumps({"events": [{"kind": "promotion"}, {"kind": "event"}]}),
         )
         assert [e["kind"] for e in events] == ["promotion", "event"]
@@ -430,7 +448,7 @@ class TestCategoryFieldParsing:
         assert parsed["category"] is None
 
     def test_category_survives_the_multi_event_shape_too(self):
-        events, _malformed, _malformed_attractions = parse_multi_event_extraction_response(
+        events, _malformed, _malformed_attractions, _truncated_by_cap = parse_multi_event_extraction_response(
             json.dumps({"events": [{"category": "samba"}, {"category": "rock"}]}),
         )
         assert [e["category"] for e in events] == ["samba", "rock"]

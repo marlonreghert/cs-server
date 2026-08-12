@@ -1286,6 +1286,19 @@ EVENT_EXTRACTION_MALFORMED_ATTRACTIONS_TOTAL = Counter(
     "Individual malformed attraction entries skipped within an otherwise-valid extraction",
 )
 
+# plans/260812_crawl-error-visibility.md §D: a post whose model response
+# named MORE events than `max_events_per_post` kept — the model already
+# generated (and was already paid for) every event; the cap only decides how
+# many are kept. Distinct from OUTCOME_TRUNCATED (a truncated OUTPUT TOKEN
+# BUDGET, where nothing is persisted at all) — this counts a post that WAS
+# fully persisted, just capped. An operator can also query which specific
+# posts were truncated via `events.post_item_source.source_events_
+# truncated` (migration 0036); this counter is the "how often" trend view.
+EVENT_EXTRACTION_CAP_TRUNCATED_POSTS_TOTAL = Counter(
+    "event_extraction_cap_truncated_posts_total",
+    "Posts whose event list exceeded the per-post event cap and was truncated",
+)
+
 # plans/260811_post-items-and-categories.md §C/§Error Handling: `category`
 # is free text steered toward app.models.post_category's admin-configurable
 # vocabulary but never confined to it — this counts every answer that did
@@ -1434,8 +1447,16 @@ CRAWL_RUNS_TOTAL = Counter(
     "Scheduled Instagram crawl attempts, by handle kind, result type, and outcome",
     ["handle_kind", "result_type", "outcome"],
     # result_type: posts, reels
-    # outcome: success, empty, failed, skipped_disabled, skipped_failures,
-    #          skipped_budget, credit_exhausted
+    # outcome: success, empty, failed, blocked, handle_not_found,
+    #          skipped_disabled, skipped_failures, skipped_budget,
+    #          credit_exhausted
+    # plans/260812_crawl-error-visibility.md §Error Handling: `blocked` and
+    # `handle_not_found` are ADDITIVE labels on this SAME counter — a
+    # Prometheus series only exists after its first increment, so the
+    # ABSENCE of a `blocked` series is itself the evidence that no target
+    # was blocked this window. Watch the BLOCKED rate across many targets at
+    # once: a rise there means Instagram is rate-limiting the whole account,
+    # not that individual venues went quiet.
 )
 
 # The number that maps to money: every BILLED result the actor returned,

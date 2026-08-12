@@ -44,6 +44,7 @@ from app.api.openai_event_extraction_client import (
     parse_multi_event_extraction_response,
 )
 from app.metrics import (
+    EVENT_EXTRACTION_CAP_TRUNCATED_POSTS_TOTAL,
     EVENT_EXTRACTION_MALFORMED_ATTRACTIONS_TOTAL,
     EVENT_EXTRACTION_MALFORMED_EVENTS_TOTAL,
     EVENT_EXTRACTION_POSTS_TOTAL,
@@ -133,22 +134,24 @@ class ApifyPromoterPostsClient:
     promoter accounts.
 
     Detecting a private/missing account from Apify's own response is
-    UNVERIFIED against live data (see the plan's Open Questions):
-    `fetch_recent_posts` already drops any per-item `error` entry before
-    this adapter ever sees a result, and an account with zero recent posts
-    is a legitimate empty crawl, not evidence of unavailability. So this
-    adapter never raises `PromoterAccountUnavailable` today — the
-    skip-and-continue path it exists to trigger is proven at the
-    orchestration level (BDD, with a fake posts client) and must be
-    re-armed here once a live crawl shows what an unavailable account's
-    payload actually looks like.
+    UNVERIFIED against live data (see the plan's Open Questions): this
+    adapter reads only `.posts` off `fetch_recent_posts`'s FetchPostsResult
+    (plans/260812_crawl-error-visibility.md §A gave the client edge visibility
+    into `.error_code`, but nothing here interprets it yet — the promoter path
+    is not in that plan's scope), and an account with zero recent posts is a
+    legitimate empty crawl, not evidence of unavailability. So this adapter
+    never raises `PromoterAccountUnavailable` today — the skip-and-continue
+    path it exists to trigger is proven at the orchestration level (BDD, with
+    a fake posts client) and must be re-armed here once a live crawl shows
+    what an unavailable account's payload actually looks like.
     """
 
     def __init__(self, apify_client):
         self.apify_client = apify_client
 
     async def fetch_recent_posts(self, handle: str, *, results_limit: int) -> list[dict]:
-        return await self.apify_client.fetch_recent_posts(handle, results_limit=results_limit)
+        result = await self.apify_client.fetch_recent_posts(handle, results_limit=results_limit)
+        return result.posts
 
 
 def parse_promoter_crawl_config(
@@ -498,7 +501,7 @@ class PromoterCrawlService:
             return 0
 
         try:
-            events_data, malformed_count, malformed_attractions_count = (
+            events_data, malformed_count, malformed_attractions_count, truncated_by_cap = (
                 parse_multi_event_extraction_response(
                     raw_text, max_events=self.max_events_per_post,
                 )
@@ -512,6 +515,19 @@ class PromoterCrawlService:
             PROMOTER_CRAWL_POSTS_TOTAL.labels(outcome=OUTCOME_EXTRACTION_FAILED).inc()
             _bump_kind_metric(OUTCOME_EXTRACTION_FAILED)
             return 0
+
+        if truncated_by_cap:
+            # plans/260812_crawl-error-visibility.md §D: not in that plan's
+            # own BDD/pytest scope (venue posts only), wired here too for
+            # parity — the shared parser makes this a promoter post's own
+            # fact just as much as a venue post's, and leaving it unset
+            # would read as a silent (and wrong) "never truncated."
+            EVENT_EXTRACTION_CAP_TRUNCATED_POSTS_TOTAL.inc()
+            logger.warning(
+                f"[PromoterCrawl] {handle}/{shortcode}: event list truncated "
+                f"to the per-post cap ({self.max_events_per_post}) -- the "
+                "model's response was complete, only the tail was dropped"
+            )
 
         if malformed_count:
             EVENT_EXTRACTION_MALFORMED_EVENTS_TOTAL.inc(malformed_count)
@@ -596,6 +612,15 @@ class PromoterCrawlService:
                 "confidence": parsed["confidence"],
                 "review_reason": review_reason,
                 "raw_extraction": parsed,
+                # plans/260812_crawl-error-visibility.md §D: same value for
+                # every event this post yields — a fact about the PARSE, not
+                # any one event. `source_media_type`/`source_uploaded_at`
+                # (§C) are NOT set here: that plan's own scope is venue
+                # posts, and this path has no `ArchivedPost.media_type`/
+                # `.timestamp` equivalent wired to it (`post` here is the
+                # raw, just-fetched Apify dict, not an archived-and-read-back
+                # ArchivedPost) — left for a follow-up, not silently guessed.
+                "source_events_truncated": truncated_by_cap,
             })
 
         # plans/260810_date-correctness-review-reasons-and-path-parity.md

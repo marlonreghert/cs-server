@@ -21,7 +21,7 @@ from typing import Callable, Optional
 
 from behave import given, then, when  # type: ignore[import-untyped]
 
-from app.api.apify_instagram_client import ApifyCreditExhaustedError
+from app.api.apify_instagram_client import ApifyCreditExhaustedError, FetchPostsResult
 from app.models.instagram import VenueInstagram
 from app.services.archive_sources import SOURCE_INSTAGRAM_POSTS
 from tests.bdd.steps.photo_classification_steps import _FakeClassifierClient
@@ -66,8 +66,8 @@ class _FakeApifyInstagram:
             raise ApifyCreditExhaustedError("Apify credits exhausted (402)")
         factory = self.posts_factory_by_handle.get(username)
         if factory:
-            return list(factory())[:results_limit]
-        return list(self.posts_by_handle.get(username, []))[:results_limit]
+            return FetchPostsResult(posts=list(factory())[:results_limit])
+        return FetchPostsResult(posts=list(self.posts_by_handle.get(username, []))[:results_limit])
 
 
 def _single_post(shortcode: str, *, caption: str = "", likes: int = 1,

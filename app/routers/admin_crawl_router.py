@@ -185,6 +185,14 @@ class CrawlTargetOut(BaseModel):
     last_run_reels_fetched: Optional[int] = None
     last_run_reels_new: Optional[int] = None
     consecutive_failures: int = 0
+    # plans/260812_crawl-error-visibility.md §B: which outcome (`blocked`,
+    # `handle_not_found`, or `failed`) this target's last FAILED run hit, and
+    # when — so an operator can see WHY a target stopped producing without
+    # reading logs. Both null until a run actually fails; never cleared by a
+    # later SUCCESSFUL run, so they always answer "what was the last failure
+    # and when," even if that failure was several runs ago.
+    last_failure_kind: Optional[str] = None
+    last_failure_at: Optional[datetime] = None
     notes: Optional[str] = None
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
