@@ -1039,15 +1039,22 @@ async def delete_admin_config(key: str):
     return {"status": "ok", "key": key}
 
 
-def _venue_cache_flags_bulk(venue_dao, venue_ids: list[str]) -> dict[str, dict[str, bool]]:
+def _venue_cache_flags_bulk(
+    venue_dao, venue_ids: list[str]
+) -> tuple[dict[str, dict[str, bool]], dict[str, object]]:
     """Cache-presence flags for a whole page of venues (P4): one round-trip per
     key family for the whole page instead of ~16 reads PER venue.
 
     `weekly_forecast` keeps its original "any of the 7 days" semantics (a
     7-MGET union) — distinct from `update_data_quality_metrics`'s Monday-only
-    gauge, which must not be unified with this one."""
+    gauge, which must not be unified with this one.
+
+    Returns the presence flags alongside the raw Instagram record map (the
+    same `get_venue_instagram_bulk` result the `instagram` flag is derived
+    from), so `list_venue_inventory` can project the handle/url/status/
+    confidence/source onto each item without a second bulk read."""
     if not venue_ids:
-        return {}
+        return {}, {}
 
     weekly_present: set[str] = set()
     for day_int in range(7):
@@ -1063,13 +1070,18 @@ def _venue_cache_flags_bulk(venue_dao, venue_ids: list[str]) -> dict[str, dict[s
     menu_data_map = venue_dao.get_venue_menu_data_bulk(venue_ids)
     vibe_profile_map = venue_dao.get_venue_vibe_profile_bulk(venue_ids)
 
-    return {
+    flags = {
         vid: {
             "live_forecast": vid in live_map,
             "weekly_forecast": vid in weekly_present,
             "vibe_attributes": vid in vibe_map,
             "photos": bool(photos_map.get(vid)),
             "opening_hours": vid in hours_map,
+            # Membership only — a `not_found` record still counts as
+            # "present" here, exactly as before this field started being
+            # returned alongside it. Do not change this to `has_instagram()`
+            # or any status check; other panels and tests read this exact
+            # boolean.
             "instagram": vid in ig_map,
             "reviews": vid in reviews_map,
             "menu_photos": vid in menu_photos_map,
@@ -1078,6 +1090,34 @@ def _venue_cache_flags_bulk(venue_dao, venue_ids: list[str]) -> dict[str, dict[s
         }
         for vid in venue_ids
     }
+    return flags, ig_map
+
+
+def _venue_instagram_item(record) -> Optional[dict]:
+    """Project a stored Instagram record onto the inventory item's public
+    shape. `None` means "nobody has looked" (no cached record at all); a
+    `not_found` record still returns an object (with a null handle) so the
+    panel can tell "searched, found nothing" apart from "never searched".
+
+    Defensive by construction: `get_venue_instagram_bulk` already drops
+    records that fail JSON/pydantic parsing (they simply never appear in the
+    map), but this listing is a troubleshooting surface and must survive any
+    record that reaches here regardless of shape — `getattr` with a default
+    never raises, and the whole projection is additionally wrapped so one bad
+    row degrades to nulls instead of 500ing the entire page."""
+    if record is None:
+        return None
+    try:
+        return {
+            "handle": getattr(record, "instagram_handle", None),
+            "url": getattr(record, "instagram_url", None),
+            "status": getattr(record, "status", None),
+            "confidence": getattr(record, "confidence_score", None),
+            "source": getattr(record, "source", None),
+        }
+    except Exception as e:
+        logger.error(f"[AdminTrigger] Failed to project Instagram record: {e}")
+        return {"handle": None, "url": None, "status": None, "confidence": None, "source": None}
 
 
 @router.get("/venues/inventory")
@@ -1122,8 +1162,10 @@ def list_venue_inventory(
         next_cursor = str(next_offset) if next_offset < len(venues) else None
 
         # P4: one bulk presence lookup per key family for the whole page,
-        # instead of ~16 reads PER page venue.
-        cache_flags_by_id = _venue_cache_flags_bulk(
+        # instead of ~16 reads PER page venue. Also returns the raw Instagram
+        # record map so the `instagram` field below reuses it instead of
+        # issuing a second bulk read.
+        cache_flags_by_id, instagram_by_id = _venue_cache_flags_bulk(
             venue_dao, [venue.venue_id for venue in page]
         )
 
@@ -1143,6 +1185,7 @@ def list_venue_inventory(
                     ),
                     "google_business_status": venue.google_business_status,
                     "cache_flags": cache_flags_by_id.get(venue.venue_id, {}),
+                    "instagram": _venue_instagram_item(instagram_by_id.get(venue.venue_id)),
                 }
                 for venue in page
             ],
