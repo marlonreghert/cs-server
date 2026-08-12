@@ -177,10 +177,16 @@ When the parser drops entries because `max_events_per_post` was reached, record
 it on the post's sources and count it in a metric. The operator must be able to
 ask "which posts did we truncate" without reading logs.
 
-Leave the cap at 20 in this plan. Raising it changes OpenAI output-budget sizing
-(`compute_multi_event_max_completion_tokens`) and risks the truncated-response
-failure `OUTCOME_TRUNCATED` already guards; that is a separate, measurable
-decision and needs its own evidence.
+Leave the cap at 20 in this plan — the number is decided in
+`260812_events-per-post-cap.md`, using the signal this section adds.
+
+Do not carry over the intuition that raising the cap costs more. It does not:
+the cap is applied at **parse** time (`openai_event_extraction_client.py:524`,
+`events_raw[:max_events]`) while the prompt asks for "EVERY distinct event the
+post announces, however many there are" (line 204). The model already generates
+— and we already pay for — the events we then slice away. Only
+`compute_multi_event_max_completion_tokens`, a separate ceiling, interacts with
+`OUTCOME_TRUNCATED`. Keep the two apart when reasoning about either.
 
 ## Data, Config, And API Impact
 - **Migration `0036_source_media_type`** — adds `source_media_type text NULL`
