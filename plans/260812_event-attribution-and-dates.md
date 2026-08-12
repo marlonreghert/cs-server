@@ -121,8 +121,10 @@ older than its post is pushed a year into the future.
 
 ## Implementation Approach
 
-One commit and one feature file per section on a single branch and PR, per the
-operator's standing preference for phased multi-defect fixes.
+One commit per section on a single branch and PR, each commit landing that
+section's code together with its own scenarios, per the operator's standing
+preference for phased multi-defect fixes. The scenarios all live in this plan's
+single slug-named feature file (below), grouped by section.
 
 ### A. Per-event evidence outranks post-level evidence
 Reorder `resolve_event_venue` so the event's own `location_text` is consulted
@@ -141,6 +143,22 @@ evidence; the first of twenty is nearly worthless. When the caption resolves to
 more than one known venue and the event's own text gave nothing, resolve to
 **no venue** and queue for review — `unresolved_venue` is the correct answer
 there, and the queue already exists for exactly this.
+
+**A second, different outcome needs its own review reason.** Once per-event
+evidence is honoured, the common case stops being "we cannot tell where this is"
+and becomes "we can tell exactly where this is, and it is not a venue we carry"
+— the roundup's 492 usable `location_text` values name **159 distinct handles**,
+only about a dozen of which are in the catalog. Record that as
+`venue_not_in_catalog`, distinct from `unresolved_venue`. The distinction is
+load-bearing twice over: an operator can action the first and cannot action the
+second, and the second doubles as a ranked venue-acquisition backlog.
+
+This constant is shared with `260812_backfill-misattributed-links.md`, which
+needs it to avoid drowning the review queue when it repairs existing rows. It
+belongs in `event_reconciliation` beside the other review reasons. **Whichever
+plan ships first defines it**; the other imports it. If this plan ships without
+it, freshly-crawled rows and backfilled rows will describe the same situation in
+two different words.
 
 Keep `promoter_handle` self-link suppression as it is.
 
@@ -221,7 +239,21 @@ interact.
 ## Data, Config, And API Impact
 - **Migration** — a column on `events.post_item_source` for the structured date
   interpretation (§C's determinism guard). Nullable, additive, no back-fill.
-- **Config** — `date_year_roll_grace_days`, default 60.
+
+  **Revision-number coordination.** `260812_crawl-error-visibility.md` also adds
+  columns to `events.post_item_source` and claims `0036`. Both branch from
+  `0035_time_known`, so whichever lands second must **re-parent onto the first
+  and take the next free revision**; two migrations declaring
+  `down_revision = "0035_time_known"` gives Alembic multiple heads and breaks
+  CI's scratch-Postgres migrate step. Run `alembic heads` before writing the
+  revision id.
+- **Admin config** (Redis-backed and runtime-editable, *not* `app/config.py` —
+  the same mechanism as `menu_expiry_days` and the category vocabulary, so the
+  first guess can be corrected without a deploy) — `date_year_roll_grace_days`,
+  default 60.
+- **Review reason** — `venue_not_in_catalog` (§A), shared with
+  `260812_backfill-misattributed-links.md`. Additive; the admin console is a
+  released client, so review-reason values are append-only.
 - **Link method values** — a new or refined value from §A. The admin API and
   console read `linked_by`; released clients must keep working, so add, never
   remove or repurpose an existing value.
@@ -258,14 +290,22 @@ Scenarios:
 - Keep linking correctly when the caption names exactly one venue and the event
   names none.
 - Never self-link to the promoter's own handle.
+- Prefer the event's own text over an Instagram location tag.
+- Record `venue_not_in_catalog` when the event names a handle we do not carry.
 - Send a Casa Forte event to the Casa Forte venue, not the account's default.
+- Keep a Boa Viagem event at the account's own venue.
 - Queue for review when the branch cannot be determined.
+- Never let a neighbourhood drag an event to an unrelated venue.
 - Resolve "É HOJE" to the post's own date.
 - Resolve a range stated as "de 06 a 09 de fevereiro" to its first day.
+- Resolve a comma-listed range to its first day.
 - Mark a collapsed range with the range flag.
+- Resolve a three-letter month.
+- Resolve a weekday stated with its day number.
 - Keep the current year for a date a few days older than its post.
 - Roll the year for a date months older than its post.
 - Reuse a stored interpretation when the same post is extracted again.
+- Ignore an absolute date supplied by the model.
 - Leave an unreadable date unresolved and queued.
 
 Pytest unit tests:
