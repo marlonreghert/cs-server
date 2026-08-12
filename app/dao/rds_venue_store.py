@@ -503,6 +503,14 @@ class RdsVenueStore:
         "source_kind", "source_handle", "source_shortcode", "source_permalink",
         "source_event_key", "source_event_index", "cover_photo_key",
         "raw_extraction", "first_seen_at", "last_seen_at",
+        # plans/260812_crawl-error-visibility.md §C/§D (migration 0036):
+        # Apify's own media type ("Video"/"Image"/"Sidecar" — NOT
+        # events.post_item.post_type, an unrelated event/promotion/menu
+        # classification) and the post's own upload timestamp (distinct from
+        # first_seen_at/last_seen_at above, which are CRAWL times), plus
+        # whether the per-post event cap (§D) dropped trailing entries from
+        # this post's own extraction.
+        "source_media_type", "source_uploaded_at", "source_events_truncated",
     )
     _EVENT_SOURCE_JSONB_COLUMNS = ("raw_extraction",)
 
@@ -535,12 +543,14 @@ class RdsVenueStore:
         "e.updated_at, v.venue_name, "
         "ps.source_kind, ps.source_handle, ps.source_shortcode, ps.source_permalink, "
         "ps.source_event_key, ps.source_event_index, ps.cover_photo_key, ps.raw_extraction, "
+        "ps.source_media_type, ps.source_uploaded_at, ps.source_events_truncated, "
         "agg.first_seen_at, agg.last_seen_at "
         "FROM events.post_item e "
         "LEFT JOIN venues.venue v ON v.venue_id = e.venue_id "
         "LEFT JOIN LATERAL ("
         "  SELECT source_kind, source_handle, source_shortcode, source_permalink, "
-        "         source_event_key, source_event_index, cover_photo_key, raw_extraction "
+        "         source_event_key, source_event_index, cover_photo_key, raw_extraction, "
+        "         source_media_type, source_uploaded_at, source_events_truncated "
         "  FROM events.post_item_source es WHERE es.post_item_id = e.post_item_id "
         "  ORDER BY es.last_seen_at DESC, es.id DESC LIMIT 1"
         ") ps ON true "
@@ -564,7 +574,8 @@ class RdsVenueStore:
         "e.updated_at, v.venue_name, "
         "es.source_kind, es.source_handle, es.source_shortcode, es.source_permalink, "
         "es.source_event_key, es.source_event_index, es.cover_photo_key, "
-        "es.raw_extraction, es.first_seen_at, es.last_seen_at "
+        "es.raw_extraction, es.first_seen_at, es.last_seen_at, "
+        "es.source_media_type, es.source_uploaded_at, es.source_events_truncated "
         "FROM events.post_item_source es "
         "JOIN events.post_item e ON e.post_item_id = es.post_item_id "
         "LEFT JOIN venues.venue v ON v.venue_id = e.venue_id"
@@ -607,7 +618,8 @@ class RdsVenueStore:
                 text(
                     "SELECT id, post_item_id AS event_id, source_kind, source_handle, "
                     "source_shortcode, source_permalink, source_event_key, source_event_index, "
-                    "cover_photo_key, raw_extraction, first_seen_at, last_seen_at "
+                    "cover_photo_key, raw_extraction, first_seen_at, last_seen_at, "
+                    "source_media_type, source_uploaded_at, source_events_truncated "
                     "FROM events.post_item_source WHERE post_item_id=:e ORDER BY first_seen_at, id"
                 ),
                 {"e": event_id},

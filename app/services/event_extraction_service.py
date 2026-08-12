@@ -54,6 +54,7 @@ from app.api.openai_event_extraction_client import (
     parse_multi_event_extraction_response,
 )
 from app.metrics import (
+    EVENT_EXTRACTION_CAP_TRUNCATED_POSTS_TOTAL,
     EVENT_EXTRACTION_MALFORMED_ATTRACTIONS_TOTAL,
     EVENT_EXTRACTION_MALFORMED_EVENTS_TOTAL,
     EVENT_EXTRACTION_POSTS_TOTAL,
@@ -229,6 +230,15 @@ class ArchivedPost:
     # dataclass can fix retroactively. Always None for a post read via
     # `posts_for_venue`.
     location_tag: Optional[dict] = None
+    # plans/260812_crawl-error-visibility.md §C: Apify's own media type
+    # ("Video"/"Image"/"Sidecar" — see `apify_instagram_client.fetch_recent_
+    # posts`'s `post_type` mapping), carried through every manifest entry's
+    # `post_type` key (NOT `events.post_item.post_type`, an unrelated
+    # event/promotion/menu classification — see `source_media_type`'s own
+    # column comment in rds_venue_store.py for the collision this name
+    # avoids). None when no manifest entry recorded one (pre-existing
+    # archives from before this field existed).
+    media_type: Optional[str] = None
 
 
 class EventPostSource:
@@ -300,6 +310,13 @@ class EventPostSource:
                     "permalink": entry.get("permalink"),
                     "caption": entry.get("caption"),
                     "timestamp": entry.get("uploaded_at"),
+                    # plans/260812_crawl-error-visibility.md §C: Apify's own
+                    # media type, carried by every manifest entry's
+                    # `post_type` key (see `ArchivedPost.media_type`'s own
+                    # docstring for the naming collision this sidesteps) —
+                    # a base field, first-seen like `timestamp`/`caption`
+                    # above.
+                    "media_type": entry.get("post_type"),
                     # Present only on a promoter=<handle>-archived entry —
                     # see ArchivedPost.location_tag's own docstring for why
                     # a venue_id=<v>-archived entry never has one.
@@ -341,6 +358,7 @@ class EventPostSource:
             flyer_names_time=bucket["flyer_names_time"],
             any_photo_key=bucket["any_photo_key"],
             location_tag=bucket.get("location_tag"),
+            media_type=bucket.get("media_type"),
         )
 
     async def posts_for_venue(self, venue_id: str, since: datetime) -> list[ArchivedPost]:
@@ -814,7 +832,7 @@ class EventExtractionService:
             return OUTCOME_TRUNCATED, KIND_LABEL_NOT_APPLICABLE
 
         try:
-            events_data, malformed_count, malformed_attractions_count = (
+            events_data, malformed_count, malformed_attractions_count, truncated_by_cap = (
                 parse_multi_event_extraction_response(
                     raw_text, max_events=self.max_events_per_post,
                 )
@@ -825,6 +843,14 @@ class EventExtractionService:
             )
             self._record_failure(venue_id, handle, post, raw_text, str(e), existing_events)
             return OUTCOME_EXTRACTION_FAILED, KIND_LABEL_NOT_APPLICABLE
+
+        if truncated_by_cap:
+            EVENT_EXTRACTION_CAP_TRUNCATED_POSTS_TOTAL.inc()
+            logger.warning(
+                f"[EventExtraction] {handle}/{post.shortcode}: event list "
+                f"truncated to the per-post cap ({self.max_events_per_post}) "
+                "-- the model's response was complete, only the tail was dropped"
+            )
 
         # See KIND_LABEL_* above: computed here, once, from the parsed
         # events this post actually yielded — never from the outcome label,
@@ -962,6 +988,16 @@ class EventExtractionService:
                 "confidence": parsed["confidence"],
                 "review_reason": review_reason,
                 "raw_extraction": raw_extraction,
+                # plans/260812_crawl-error-visibility.md §C: both come from
+                # the SAME manifest record the archive already wrote — one
+                # column addition and two assignments, not a new data path.
+                "source_media_type": post.media_type,
+                "source_uploaded_at": post.timestamp,
+                # §D: whether the per-post event cap dropped trailing
+                # entries from THIS post's own extraction — the same value
+                # for every event this post yields, since truncation is a
+                # fact about the PARSE, not about any one event.
+                "source_events_truncated": truncated_by_cap,
             })
 
             if len(events_data) == 1:

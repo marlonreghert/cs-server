@@ -1,4 +1,3 @@
-@wip
 Feature: Crawl error visibility
   A crawl that failed must be reported as a failure, not as an account with
   nothing to say. Apify returns a structured error item in an otherwise empty
@@ -85,13 +84,13 @@ Feature: Crawl error visibility
   Scenario: Record that a post was truncated by the per-post event cap
     Given the per-post event cap is 20
     And a post for "somebar" from which the model returns 25 events
-    When the post is extracted
+    When the post is extracted by the crawl
     Then 20 events are stored for that post
     And the stored sources record that the post was truncated by the cap
 
   Scenario: Do not mark a post as cap-truncated when it fits
     Given the per-post event cap is 20
     And a post for "somebar" from which the model returns 4 events
-    When the post is extracted
+    When the post is extracted by the crawl
     Then 4 events are stored for that post
     And the stored sources do not record a cap truncation
