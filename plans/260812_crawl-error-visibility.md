@@ -164,13 +164,34 @@ schedule — but **surface it, do not silently disable**: write the reason to th
 target so the admin API can say why, and log at warning. A target that vanishes
 from the rotation with no explanation is the failure mode this plan is about.
 
-### C. Persist media type
+### C. Persist media type — and the post's own timestamp
 Add the Apify media type to `events.post_item_source`. Name it so it cannot be
 confused with `post_item.post_type` — `source_media_type` — and say why in the
 migration docstring.
 
-Back-fill is not required; existing rows keep NULL, meaning "not recorded",
-which is honest. Do not guess a value from the archived image.
+**Persist the post's own `uploaded_at` in the same column addition.** This is
+not scope creep, it closes a structural hole: `resolve_event_datetime` anchors
+every date in the system on the post's timestamp, and that anchor is **stored
+nowhere in RDS**. `post_item_source` carries `first_seen_at`/`last_seen_at`,
+which are *crawl* times, not post times. Today the anchor exists only in the S3
+manifest (`archive_sources.py`'s `uploaded_at`), so any future re-resolution of
+a stored `date_text` — and `260812_event-attribution-and-dates.md` §C/§D will
+make several of them wrong-but-fixable — needs an S3 join to answer "relative to
+when?". One nullable timestamp column now makes every later date repair a pure
+RDS operation.
+
+Both values come from the same manifest record the archive already writes, so
+this is one column addition and two assignments, not a new data path.
+
+**Back-fill both from the S3 manifest**, in the same operator script shape
+`260812_backfill-misattributed-links.md` uses — dry-run by default, idempotent,
+no Apify and no OpenAI. `uploaded_at` and `post_type` are recorded facts sitting
+in a bucket we own; leaving the columns NULL for every pre-existing row would be
+choosing to lose data we already have. What must **not** happen is guessing
+either value from the archived image.
+
+If the back-fill is deferred, say so explicitly in the PR and leave the columns
+nullable — but do not describe NULL as "honest" when the value is recoverable.
 
 ### D. Record cap truncation
 When the parser drops entries because `max_events_per_post` was reached, record
@@ -190,8 +211,10 @@ post announces, however many there are" (line 204). The model already generates
 
 ## Data, Config, And API Impact
 - **Migration `0036_source_media_type`** — adds `source_media_type text NULL`
-  to `events.post_item_source`, plus whatever column §D needs for cap
-  truncation. Additive and nullable; no back-fill.
+  and `source_uploaded_at timestamptz NULL` to `events.post_item_source`, plus
+  whatever column §D needs for cap truncation. Additive and nullable; both new
+  columns are back-filled from the S3 manifest by an operator script (§C), not
+  by the migration.
 
   **Revision-number coordination.** `260812_event-attribution-and-dates.md` also
   adds a column to `events.post_item_source`, and
@@ -243,6 +266,11 @@ Scenarios:
 - Count only the real posts when a dataset mixes an error item with posts.
 - Surface the last failure kind on the admin crawl-target read model.
 - Persist a source post's media type.
+- Persist a source post's own upload timestamp, distinct from its crawl time.
+- Back-fill media type and upload timestamp for existing sources from the
+  archive manifest.
+- Change nothing on a second back-fill run.
+- Leave a source whose manifest entry is missing untouched rather than guessing.
 - Record that a post was truncated by the per-post event cap.
 - Do not mark a post as cap-truncated when it fits.
 
