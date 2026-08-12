@@ -159,3 +159,28 @@ Feature: Event attribution and dates
     When the date is resolved
     Then the event has no start date
     And the event is queued for review with reason "missing_date"
+
+  # ── E. A greeting is not an event ──────────────────────────────────────────
+
+  Scenario: Type a birthday greeting as other, not as an event
+    Given a post whose caption reads "Parabéns pelos seus 31 anos! Feliz aniversário!"
+    And the post names a venue and a date but no lineup and no time
+    When the post is extracted
+    Then the item's post type is "other"
+    And the item's post type is not "event"
+
+  Scenario: Type a recap of a past night as other
+    Given a post whose caption thanks everyone who came last Friday
+    And the post names the venue, the date and the acts that played
+    When the post is extracted
+    Then the item's post type is "other"
+
+  Scenario: Keep typing a genuine announcement as an event
+    Given a post announcing a party on Friday with its lineup and door price
+    When the post is extracted
+    Then the item's post type is "event"
+
+  Scenario: Type a daily food offer as a promotion, not an event
+    Given a post announcing "Especial do dia" with a price and no lineup
+    When the post is extracted
+    Then the item's post type is "promotion"
