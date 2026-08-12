@@ -349,6 +349,30 @@ above, which is the only evidence that the bar is safe. The determinism argument
 `openai_event_extraction_client`'s docstring makes for dates applies here
 unchanged.
 
+### C2. A one-off sweep over the existing corpus
+The merge layer in §C runs on events a crawl **touches**. That fixes the future
+and leaves the past exactly as it is: the Conchittas cluster stops growing but
+never becomes one row, because nothing re-touches those eight rows.
+
+So ship an apply-mode sweep alongside the read-only
+`scripts/measure_event_dedup.py` — same predicate, same bands, same config, same
+`choose_canonical`/`merge_event_fields`/`_finish_absorption` path. It must not
+be a second implementation of the rule; if the measurement script and the sweep
+can ever disagree about a pair, the measurement stops being evidence.
+
+Discipline, identical to the other history-repair scripts:
+dry-run by default, `--apply` to write, idempotent, resumable, and a report
+naming the surviving and absorbed titles for every pair it would merge.
+
+**Order it after the free deterministic repairs.** Run it once
+`260812_history-repair-dates.md` has applied: repairing a date changes which
+rows share a calendar date, and the same local date is half §D's candidate
+window. Sweeping first computes merges against dates that are about to move.
+
+Only the auto band sweeps. The suggest band writes suggestions, which the
+existing pipeline hook produces anyway as rows are touched — a historical
+backlog of suggestions nobody asked for is queue landfill (§C).
+
 ### D. The candidate window: same venue, same night
 Candidates for a title-similarity comparison are rows at the **same
 `venue_id`** whose starts are either on the **same Recife local date** or
@@ -455,7 +479,8 @@ why §B2 exists as an independent condition rather than a refinement.
   list (additive; the console is a released client and nothing may be removed).
   Two new actions: apply a suggestion, and reverse a merge.
 - **New file** — `scripts/measure_event_dedup.py`, the corpus measurement §B
-  requires before the bars are set.
+  requires before the bars are set, carrying §C2's `--apply` sweep mode so the
+  measurement and the sweep can never disagree about a pair.
 - **Rollback:** revert. Merges already applied are reversible by §E's admin
   action; the suggestion table is derived and can be dropped.
 
@@ -506,6 +531,10 @@ Scenarios:
 - Refuse to merge across differing post types at the same venue on one night.
 - Collapse the whole Rodolpho cluster to a single row while leaving the
   greeting standing.
+- Collapse an existing cluster that no crawl has touched, via the sweep.
+- Report every merge and write nothing when the sweep runs without `--apply`.
+- Change nothing on a second sweep.
+- Sweep only the auto band, never the suggest band.
 - Never absorb a row whose operator edited its title, but still suggest it.
 - Never absorb a row whose operator edited its venue.
 - Leave a group with two confirmed members entirely alone.
