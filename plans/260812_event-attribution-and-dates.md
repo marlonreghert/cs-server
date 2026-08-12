@@ -6,7 +6,8 @@ fix/event-attribution-and-dates
 ## Goal
 An event links to the venue **its own text names**, not to whichever venue the
 surrounding post happened to mention first. A date expression the model read
-correctly must not be lost because a regex did not recognise its shape.
+correctly must not be lost because a regex did not recognise its shape. A post
+that only *talks about* an event is not filed as one.
 
 ## Non-goals
 - **Merging duplicate events.** Deferred by the operator, agreed. §A will reduce
@@ -236,6 +237,43 @@ Boundary tests are mandatory: one day inside the window, exactly on it, one day
 outside, and a December/January case where the window and the year boundary
 interact.
 
+### E. A greeting is not an event
+The extraction prompt types a post that merely *talks about* an event as an
+`event`. The live instance:
+
+```
+title       '31 Anos'
+description 'Parabéns pelos seus 31 anos! Feliz aniversário!'
+post_type   event      category  party
+lineup      []         starts_at 2026-08-08 03:00   time_known false
+```
+
+That is a birthday greeting congratulating a promoter on their 31st year. It has
+no lineup, no stated time, and announces nothing a user could attend. It sits in
+the catalogue as a party.
+
+Both prompts already carry an explicit precedence list over
+`event | promotion | menu | food | other`. Extend it: **a post that
+congratulates, thanks, recaps, or reports on something is `other`, even when it
+names a real event, a real venue and a real date.** The test is whether the post
+*announces something attendable*, not whether an event is mentioned. A recap of
+last Friday names a date, a venue and a lineup, and is still not an event.
+
+This is the same class of defect as `"Especial do dia"` being typed `event`
+rather than `promotion` — the model reaches for `event` as the default when a
+post is *about* nightlife. State the negative cases, do not just re-weight the
+positive ones.
+
+`resolve_post_type` and `NON_EVENT_KINDS` already carry `other` and need no
+change; this is prompt work plus the parser test that proves an `other` verdict
+survives into the column.
+
+**Coordination:** `260812_event-dedup-fuzzy-title.md` §B2 refuses to merge across
+differing `post_type` and relies on this section to re-type `'31 Anos'`. Its
+guard is deliberately belt-and-braces — it also refuses that pair on disjoint
+token sets — so the two plans can land in either order without either being
+wrong in the meantime.
+
 ## Data, Config, And API Impact
 - **Migration** — a column on `events.post_item_source` for the structured date
   interpretation (§C's determinism guard). Nullable, additive, no back-fill.
@@ -307,6 +345,10 @@ Scenarios:
 - Reuse a stored interpretation when the same post is extracted again.
 - Ignore an absolute date supplied by the model.
 - Leave an unreadable date unresolved and queued.
+- Type a birthday greeting as "other", not as an event.
+- Type a recap of a past night as "other" even though it names a venue, a date
+  and a lineup.
+- Keep typing a genuine announcement as an event.
 
 Pytest unit tests:
 - Ladder precedence: per-event mention beats caption mention; caption mention
@@ -346,6 +388,8 @@ Manual or integration checks:
   currently-wrong ones no longer produce 2027 dates.
 - A range resolves to its first day and is flagged as a range.
 - The same `date_text` always yields the same `source_event_key`.
+- A greeting or a recap is typed `other`, and `'31 Anos'` specifically is no
+  longer typed `event`.
 - `make test-feature`, `make test-unit`, `make test-bdd` pass, and CI's
   scratch-Postgres migrate step is green.
 
