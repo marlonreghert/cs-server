@@ -125,11 +125,20 @@ Feature: Event attribution and dates
     When the date is resolved
     Then the event starts on 2026-09-05
 
+  # 2026-07-02 is genuinely a Thursday. Do not "simplify" this to a date where
+  # the weekday and the day number disagree — the resolver corroborates them and
+  # would correctly raise a weekday mismatch, which is a different scenario.
   Scenario: Resolve a weekday stated with its day number
+    Given a post published on 2026-06-25
+    And an extracted event whose date text is "Quinta (02)"
+    When the date is resolved
+    Then the event starts on 2026-07-02
+
+  Scenario: Flag a weekday that contradicts its day number
     Given a post published on 2026-08-31
     And an extracted event whose date text is "Quinta (02)"
     When the date is resolved
-    Then the event starts on 2026-09-02
+    Then the event is flagged with a weekday mismatch
 
   Scenario: Reuse a stored interpretation when the same post is extracted again
     Given a post already extracted with date text "É HOJE" resolving to 2026-08-07
