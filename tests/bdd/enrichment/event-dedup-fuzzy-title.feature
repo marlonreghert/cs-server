@@ -213,3 +213,66 @@ Feature: Event dedup by fuzzy title
     Given the production titles from the Conchittas cluster
     When each title's content identity key is computed
     Then every key equals the key stored for it before this feature shipped
+
+  # ── shared lineup: an independent auto-merge signal (§B2) ──────────────────
+
+  Scenario: Merge two rows sharing two performers even though neither title contains the other
+    Given an item "ONILDO ALMEIDA & CONVIDADOS" at "Sala de Reboco" on 2026-08-14
+    And an item "Homenagem aos 98 anos de Onildo Almeida" at "Sala de Reboco" on 2026-08-14
+    And both items list "Cezzinha", "Josildo Sá" and "Silvério Pessoa"
+    When the merge pass runs
+    Then the two items are merged
+    And the merge records shared lineup as its reason
+
+  Scenario: Merge a row whose title shares nothing with its twin but whose lineup matches
+    Given an item "Rodolpho Produções" at "Conchittas Bar" on 2026-08-07
+    And an item "SEXTOU NO CONCHITTAS BAR!" at "Conchittas Bar" on 2026-08-07
+    And both items list the same eleven performers
+    When the merge pass runs
+    Then the two items are merged
+
+  Scenario: Refuse to merge two rows sharing only one performer
+    Given an item "Quarta do Rock" at "Conchittas Bar" on 2026-08-05
+    And an item "Samba de Quarta" at "Conchittas Bar" on 2026-08-05
+    And both items list only "DJ Fabinho" in common
+    When the merge pass runs
+    Then the two items are not merged
+
+  Scenario: Refuse to merge on lineup when one side has no lineup
+    Given an item "Rodolpho" at "Conchittas Bar" on 2026-08-07 with no lineup
+    And an item "Noite do Brega" at "Conchittas Bar" on 2026-08-07 listing three performers
+    When the merge pass runs
+    Then the two items are not merged by the lineup rule
+
+  Scenario: Treat the same performer written in different case as one name
+    Given an item listing "DAYANNE" and "PALAS PINHO"
+    And a sibling item at the same venue and night listing "Dayanne" and "Palas Pinho"
+    When the merge pass runs
+    Then the two items are merged
+
+  Scenario: Treat a performer and a longer name containing it as two names
+    Given an item listing "Dayanne" and "Cheila do Pará"
+    And a sibling item at the same venue and night listing "Dayanne Henrique" and "Anny Love"
+    When the merge pass runs
+    Then the two items are not merged by the lineup rule
+
+  # ── a greeting is not the party (§B2 non-event guard) ──────────────────────
+
+  Scenario: Refuse to merge a birthday greeting into the party it congratulates
+    Given an item "31 Anos" at "Conchittas Bar" on 2026-08-07 typed as "other"
+    And an item "Aniversário do Rodolpho Produções" at "Conchittas Bar" on 2026-08-07 typed as "event"
+    When the merge pass runs
+    Then the two items are not merged
+
+  Scenario: Refuse to merge across differing post types at one venue on one night
+    Given an item "Especial do dia" at "Conchittas Bar" on 2026-08-07 typed as "promotion"
+    And an item "Especial do dia no Conchittas" at "Conchittas Bar" on 2026-08-07 typed as "event"
+    When the merge pass runs
+    Then the two items are not merged
+
+  Scenario: Collapse the whole Rodolpho cluster to a single row
+    Given the eight production rows of the Conchittas Rodolpho cluster
+    When the merge pass runs
+    Then the seven event rows survive as one item titled "Aniversário do Rodolpho Produções"
+    And that item carries every source post of the seven
+    And "31 Anos" is still a separate item
