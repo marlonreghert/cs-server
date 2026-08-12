@@ -11,6 +11,7 @@ import asyncio
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
+from app.api.apify_instagram_client import FetchPostsResult
 from app.dao.venue_repository import VenueRepository
 from app.services import job_lock
 from app.services.crawl_schedule_sync import CrawlScheduleSync, job_id_for
@@ -130,7 +131,7 @@ class _GatedApifyClient:
     ):
         self.calls += 1
         await self._gate.wait()
-        return []
+        return FetchPostsResult(posts=[])
 
 
 class _FakeBudgetDao:

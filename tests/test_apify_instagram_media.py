@@ -29,7 +29,8 @@ def _client_with_items(items):
 
 def _fetch(items, results_limit=10):
     client = _client_with_items(items)
-    return asyncio.run(client.fetch_recent_posts("somehandle", results_limit=results_limit))
+    result = asyncio.run(client.fetch_recent_posts("somehandle", results_limit=results_limit))
+    return result.posts
 
 
 class TestSingleImagePost:
@@ -197,3 +198,75 @@ class TestScheduledCrawlParameters:
         ])
         assert posts[0]["is_pinned"] is True
         assert posts[1]["is_pinned"] is False
+
+
+class TestErrorItemClassification:
+    """plans/260812_crawl-error-visibility.md §A: the client no longer just
+    drops an error item — it surfaces the fields a caller needs to tell a
+    permanently-wrong handle, a transient block, and a genuinely empty
+    stream apart. Classification itself (which of those three a given
+    code/count combination MEANS) is `instagram_crawl_service._run_stream`'s
+    job, not this client's — these tests pin only what the client reports."""
+
+    def _fetch_result(self, items, results_limit=10):
+        client = _client_with_items(items)
+        return asyncio.run(client.fetch_recent_posts("somehandle", results_limit=results_limit))
+
+    def test_not_found_error_item_is_reported(self):
+        result = self._fetch_result([
+            {"error": "not_found", "errorDescription": "Post does not exist"},
+        ])
+        assert result.posts == []
+        assert result.error_code == "not_found"
+        assert result.error_description == "Post does not exist"
+        assert result.request_error_count == 0
+
+    def test_no_items_with_request_errors_reports_the_count(self):
+        result = self._fetch_result([{
+            "error": "no_items",
+            "errorDescription": "Empty or private data for provided input",
+            "requestErrorMessages": [
+                "Request blocked, retrying it again with different session",
+            ] * 11,
+        }])
+        assert result.posts == []
+        assert result.error_code == "no_items"
+        assert result.request_error_count == 11
+
+    def test_no_items_with_no_request_errors_reports_zero(self):
+        result = self._fetch_result([{
+            "error": "no_items",
+            "errorDescription": "Empty or private data for provided input",
+        }])
+        assert result.posts == []
+        assert result.error_code == "no_items"
+        assert result.request_error_count == 0
+
+    def test_an_unrecognised_error_code_is_still_reported_verbatim(self):
+        """A future Apify error this client has never seen must not be
+        silently swallowed — the caller decides what an unknown code means
+        (transient failure, never success); this client's only job is to
+        not lose it."""
+        result = self._fetch_result([{"error": "some_new_code"}])
+        assert result.posts == []
+        assert result.error_code == "some_new_code"
+
+    def test_a_dataset_with_no_error_item_reports_none(self):
+        result = self._fetch_result([
+            {"shortCode": "ok1", "displayUrl": "https://x/ok1.jpg"},
+        ])
+        assert result.error_code is None
+        assert result.request_error_count == 0
+
+    def test_a_mixed_dataset_keeps_both_the_posts_and_the_error(self):
+        """The evidence this plan is built on: a dataset can carry real
+        posts AND an error item together in the same response."""
+        result = self._fetch_result([
+            {"shortCode": "ok1", "displayUrl": "https://x/ok1.jpg"},
+            {"shortCode": "ok2", "displayUrl": "https://x/ok2.jpg"},
+            {"shortCode": "ok3", "displayUrl": "https://x/ok3.jpg"},
+            {"error": "no_items"},
+        ])
+        assert len(result.posts) == 3
+        assert {p["shortcode"] for p in result.posts} == {"ok1", "ok2", "ok3"}
+        assert result.error_code == "no_items"

@@ -469,6 +469,11 @@ class TestSingleEventVenuePostIsByteIdenticalToTheOldPath:
             # plans/260811_expose-time-known.md: unconditional key of every
             # prepared_events entry, like post_type/category above.
             "time_known",
+            # plans/260812_crawl-error-visibility.md §C/§D: unconditional
+            # keys of every prepared_events entry, like post_type/category/
+            # time_known above — present on every insert, not just once a
+            # media type or a truncation is known.
+            "source_media_type", "source_uploaded_at", "source_events_truncated",
         }
         assert set(stored.keys()) == expected_keys, set(stored.keys())
 

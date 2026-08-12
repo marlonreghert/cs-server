@@ -10,6 +10,7 @@ profile scraper call — halving API costs.
 """
 import logging
 import time
+from dataclasses import dataclass, field
 from typing import Optional
 import httpx
 
@@ -109,6 +110,38 @@ class ApifyCreditExhaustedError(Exception):
     pass
 
 
+@dataclass(frozen=True)
+class FetchPostsResult:
+    """`fetch_recent_posts`'s return shape (plans/260812_crawl-error-
+    visibility.md §A). `posts` never includes an Apify error item — that
+    item's own fields surface separately here instead of being discarded by
+    a bare `continue`, so a caller that needs to (today, only
+    `instagram_crawl_service._run_stream`) can tell a blocked scrape or a
+    non-existent handle apart from a genuinely empty result. Every other
+    existing caller (`archive_sources._fetch_instagram`,
+    `InstagramPostsEnrichmentService.enrich_all_venues`,
+    `ApifyPromoterPostsClient.fetch_recent_posts`) reads only `.posts` and
+    is otherwise unaffected.
+
+    `error_code` is Apify's own `error` value verbatim (e.g. `"not_found"`,
+    `"no_items"`), or None when the dataset carried no error item at all —
+    the common case, and the ONLY thing that means "no error". `error_
+    description` is Apify's own `errorDescription` prose, carried through
+    for logging ONLY: `not_found` and a genuinely-blocked `no_items` can
+    share the exact same description text, so control flow must never
+    branch on it (see the module's `fetch_recent_posts` docstring).
+    `request_error_count` is `len(requestErrorMessages)` on the error item —
+    the one signal, alongside `error_code`, that tells a real Instagram
+    block (a non-empty count) apart from a genuinely empty/private stream
+    (zero) when `error_code == "no_items"`.
+    """
+
+    posts: list = field(default_factory=list)
+    error_code: Optional[str] = None
+    error_description: Optional[str] = None
+    request_error_count: int = 0
+
+
 class ApifyInstagramClient:
     """Async HTTP client for Apify Instagram scraper actors."""
 
@@ -199,7 +232,7 @@ class ApifyInstagramClient:
         *,
         only_posts_newer_than: Optional[str] = None,
         results_type: str = "posts",
-    ) -> list[dict]:
+    ) -> FetchPostsResult:
         """Fetch recent posts (or reels) for an Instagram profile.
 
         Uses apify/instagram-scraper. `resultsType` defaults to "posts" (the
@@ -241,9 +274,17 @@ class ApifyInstagramClient:
             results_type: "posts" (default) or "reels".
 
         Returns:
-            List of post dicts with keys: caption, likes_count, comments_count,
-            timestamp, post_type, shortcode, permalink, image_urls,
-            is_pinned. Empty list on error.
+            FetchPostsResult — `.posts` is a list of post dicts with keys:
+            caption, likes_count, comments_count, timestamp, post_type,
+            shortcode, permalink, image_urls, is_pinned; `.error_code`/
+            `.error_description`/`.request_error_count` surface an Apify
+            error item instead of silently discarding it (plans/260812_
+            crawl-error-visibility.md §A) — see FetchPostsResult's own
+            docstring for what each means and why control flow must never
+            read `.error_description`'s text. `.posts` is `[]` on a
+            transport-level failure (unchanged from before this dataclass
+            existed — `_run_actor_sync` itself already returns None/[] and
+            logs the transport error).
         """
         run_input = {
             "directUrls": [f"https://www.instagram.com/{username}/"],
@@ -258,11 +299,27 @@ class ApifyInstagramClient:
         )
 
         if not items:
-            return []
+            return FetchPostsResult(posts=[])
 
         posts = []
+        # Apify's own error item — `{"error": "no_items", "errorDescription":
+        # "...", "requestErrorMessages": [...]}` — carries no post fields, so
+        # it is never appended to `posts`; its fields are captured here
+        # instead of being discarded by a bare `continue` (the defect
+        # plans/260812_crawl-error-visibility.md exists to fix). At most one
+        # error item has ever been observed per dataset (see the plan's own
+        # evidence table); if more than one arrives, the FIRST is kept —
+        # never overwritten by a second, so a caller's classification is
+        # deterministic regardless of dataset order.
+        error_code: Optional[str] = None
+        error_description: Optional[str] = None
+        request_error_count = 0
         for item in items:
             if "error" in item:
+                if error_code is None:
+                    error_code = item.get("error")
+                    error_description = item.get("errorDescription")
+                    request_error_count = len(item.get("requestErrorMessages") or [])
                 continue
             posts.append({
                 "caption": item.get("caption", ""),
@@ -282,7 +339,24 @@ class ApifyInstagramClient:
         logger.info(
             f"[ApifyInstagram] Fetched {len(posts)} {results_type} for @{username}"
         )
-        return posts
+        if error_code is not None:
+            # Logged HERE too (in addition to whatever the caller logs) so
+            # the raw Apify fields are on record even for a caller that
+            # never inspects them (archive_sources._fetch_instagram,
+            # InstagramPostsEnrichmentService.enrich_all_venues,
+            # ApifyPromoterPostsClient.fetch_recent_posts) — never a decision
+            # point, only a trace. `errorDescription` is logged but never
+            # matched on: Apify reuses the same prose for a genuinely-empty
+            # stream and a blocked one (see FetchPostsResult's docstring).
+            logger.warning(
+                f"[ApifyInstagram] {username} {results_type}: Apify returned "
+                f"error={error_code!r} request_error_count={request_error_count} "
+                f"description={error_description!r}"
+            )
+        return FetchPostsResult(
+            posts=posts, error_code=error_code, error_description=error_description,
+            request_error_count=request_error_count,
+        )
 
     async def _run_actor_sync(
         self, actor_id: str, run_input: dict, endpoint_label: str

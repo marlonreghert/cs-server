@@ -483,9 +483,9 @@ def parse_extraction_response(raw_text: str) -> dict:
 
 def parse_multi_event_extraction_response(
     raw_text: str, *, max_events: Optional[int] = None,
-) -> tuple[list[dict], int, int]:
+) -> tuple[list[dict], int, int, bool]:
     """Parse a `{"events": [...]}` response into (parsed_events,
-    malformed_event_count, malformed_attraction_count).
+    malformed_event_count, malformed_attraction_count, truncated_by_cap).
 
     A post can announce several events at several venues (plans/260806_multi-
     event-posts.md) — a city-listings roundup, not a single-party flyer. Each
@@ -506,6 +506,18 @@ def parse_multi_event_extraction_response(
     bound (`event_extraction_max_events_per_post`); entries beyond it are
     silently dropped, not counted as malformed (they are not defective, just
     over the configured ceiling).
+
+    `truncated_by_cap` (plans/260812_crawl-error-visibility.md §D) is True
+    when the RAW `events` list (before slicing) held MORE entries than
+    `max_events` — a DIFFERENT event from `OUTCOME_TRUNCATED` above this
+    function's sibling `_extract_one`/`PromoterCrawlService._process_post`
+    already report: that one means the model's own OUTPUT TOKEN BUDGET ran
+    out (the response never finished, nothing is persisted); this one means
+    the response was well-formed and complete, and the cap deliberately kept
+    only the first `max_events` of it. Computed from the RAW list length —
+    never from `len(events)` after malformed items are dropped, which would
+    under-count a truncated batch that also happened to contain a malformed
+    entry among its first `max_events`.
     """
     cleaned = _strip_fences(raw_text)
     if not cleaned:
@@ -520,6 +532,7 @@ def parse_multi_event_extraction_response(
     events_raw = data.get("events")
     if not isinstance(events_raw, list):
         raise EventExtractionParseError("response has no 'events' list")
+    truncated_by_cap = bool(max_events) and len(events_raw) > max_events
     if max_events:
         events_raw = events_raw[:max_events]
 
@@ -533,7 +546,7 @@ def parse_multi_event_extraction_response(
         fields, item_malformed_attractions = _parse_event_fields(item)
         events.append(fields)
         malformed_attractions += item_malformed_attractions
-    return events, malformed, malformed_attractions
+    return events, malformed, malformed_attractions, truncated_by_cap
 
 
 class OpenAIEventExtractionClient:
