@@ -55,10 +55,14 @@ In `instagram_crawl_service._run_stream`, an empty `kept` returns
   **`consecutive_failures` is reset to 0** (line ~1109). A target that is
   blocked on every single run keeps a zero failure count forever and never
   trips `max_consecutive_failures`.
-- `last_run_results` is written as **1** and `last_run_cost_usd` bills for it —
-  the error item is counted by `CRAWL_RESULTS_TOTAL` and charged against the
-  monthly budget, because `result_count` is taken from the raw response before
-  the error item is dropped.
+- `last_run_results` is written as **0** and nothing is over-charged
+  internally. An earlier draft of this plan claimed the error item was billed
+  to `CRAWL_RESULTS_TOTAL`, the monthly budget and `last_run_cost_usd`; that was
+  **wrong**, and it was checked against `main` during execution: the client's
+  bare `continue` already dropped the error item before returning, so
+  `result_count` was already `0`. Apify still bills on *their* side for the
+  returned dataset item — that is outside our control and this plan does not
+  change it.
 - The cursor correctly does not advance (only `OUTCOME_SUCCESS` writes it), so
   the target is not silently marked as seeded.
 
@@ -154,10 +158,13 @@ counted by `CRAWL_RUNS_TOTAL` with their own `outcome` labels, and both setting
 `OUTCOME_EMPTY` keeps its current meaning and must stay reachable — a real
 empty stream is not a failure and must not increment the counter.
 
-**Do not bill an error item.** `result_count` must exclude error items before
-`CRAWL_RESULTS_TOTAL`, the budget increment, and `last_run_cost_usd`. This is
-a real overcharge today, small per run but paid on every fire of every broken
-target, forever.
+**Keep error items out of the billed count — as a guarantee, not a fix.**
+`result_count` must exclude error items before `CRAWL_RESULTS_TOTAL`, the
+budget increment, and `last_run_cost_usd`. It already does, incidentally,
+because the client drops them with a `continue`; §A turns that accident into a
+property of the client's contract, which is worth pinning with a test. **Do not
+describe this as an overcharge being fixed** — an earlier draft did, and it was
+false.
 
 For `handle_not_found`, prefer disabling the target over letting it retry on a
 schedule — but **surface it, do not silently disable**: write the reason to the
