@@ -1,4 +1,4 @@
-# Event Dedup By Fuzzy Title — a low bar for proposing a merge, a high bar for applying one
+# Event Dedup — title containment and shared lineup, with a low bar for proposing a merge and a high bar for applying one
 
 ## Branch
 feature/event-dedup-fuzzy-title
@@ -7,6 +7,10 @@ feature/event-dedup-fuzzy-title
 One real party stored under six title variants must become one row, or one row
 plus a merge an operator can accept in a click — without ever collapsing two
 genuinely different events a venue ran on the same night.
+
+Two independent signals do this: **title containment** (§B) and **shared
+lineup** (§B2). Neither alone reaches every duplicate in the motivating cluster,
+and the second is the stronger of the two where it applies.
 
 ## Non-goals
 - **Redefining `source_event_key` or `compute_event_identity`.** §A explains
@@ -93,6 +97,46 @@ In every false positive above, both sides do (`marcelino/freire` vs
 `jeferson/tenorio`; `cobra/gigante` vs `sorvete`; `1` vs `2`; `bolinha` vs `jb`).
 In every true positive, the shorter title's distinctive words are a subset of
 the longer's.
+
+### Titles are not the only evidence, and they are not the best evidence
+Two of the cluster's rows are provably the same event and **no title rule can
+show it** — each row's title appears in the *other's description*:
+
+```
+TITLE: Rodolpho Produções
+  desc: "SEXTOU NO CONCHITTAS BAR; mais de 10 horas de festa, com DJ no intervalo."
+TITLE: SEXTOU NO CONCHITTAS BAR!
+  desc: "Rodolpho Produções comanda uma noite com mais de 10 horas de festa..."
+```
+
+They also share **eleven performers**. Measured across all 574 live
+venue-linked rows, inside §D's candidate window:
+
+| shared lineup names | candidate pairs | false positives |
+|---|---|---|
+| ≥ 1 | 9 | — |
+| **≥ 2** | **7** | **0** |
+| ≥ 3 | 7 | 0 |
+
+Every pair at ≥2 is a genuine duplicate, and the threshold is not delicate —
+no pair sits at exactly 2, so ≥2 and ≥3 agree. It reaches the two clusters
+containment cannot:
+
+```
+Rodolpho Produções           ↔ SEXTOU NO CONCHITTAS BAR!               11 shared
+ONILDO ALMEIDA & CONVIDADOS  ↔ Homenagem aos 98 anos de Onildo Almeida  3 shared
+```
+
+Neither pair has one title contained in the other. Lineup is therefore a
+**first-class signal, not a tie-break** — see §B2.
+
+### One row in the cluster is not an event at all
+`'31 Anos'` has description `"Parabéns pelos seus 31 anos! Feliz aniversário!"`,
+no lineup, no time, and comes from its own post. It is a birthday *greeting*
+typed as `post_type = 'event'`, `category = 'party'`. Merging it into the party
+would be wrong; it is a **classification** defect, fixed upstream in
+`260812_event-attribution-and-dates.md` §E. This plan's job is only to make sure
+the merge layer never absorbs it — see §B2's non-event guard.
 
 ### Identity is load-bearing and must not move
 `event_identity.py`'s module docstring is explicit: migration
@@ -237,16 +281,47 @@ The generic-event vocabulary is runtime-configurable admin config, matching
 project makes first-guess vocabularies configurable rather than shipping them as
 code, and this one will need tuning per city.
 
+### B2. Shared lineup: a second, independent auto-merge signal
+Inside §D's candidate window, **two rows sharing at least two normalised lineup
+names auto-merge**, regardless of what their titles say. This is not a
+tie-break on the title rule and must not be implemented as one — it is an
+independent sufficient condition, because it is the *only* signal that reaches
+`SEXTOU NO CONCHITTAS BAR!` and the Onildo pair.
+
+Normalise a performer name with the same casefold/accent-strip/punctuation
+treatment the title tokens get, and reuse `union_lineup`'s notion of a name
+rather than writing a second one.
+
+**Two is the floor and it is load-bearing.** A single shared name is a resident
+DJ or house band playing the venue on both of two genuinely different nights —
+that is why the window alone is not enough. The measurement above found no pair
+at exactly 2, so the rule is not balanced on a knife edge, but the threshold
+must be configurable and the boundary must be tested at 1, 2 and 3.
+
+**Non-event guard, applying to this section and §B alike.** Never merge across
+differing `post_type`, and never absorb a row whose `post_type` is not `event`
+into one that is. `'31 Anos'` is the live instance: same venue, same night,
+plausibly the same subject, and genuinely not the same thing. A greeting, a
+recap, a menu and a promotion each have their own lifecycle and must not be
+folded into a party.
+
+Lineup and title containment are **complementary, and the plan needs both**.
+Neither alone reaches all seven of the cluster's real duplicates: `'Rodolpho'`
+has an empty lineup and is reachable only by containment; `'SEXTOU NO
+CONCHITTAS BAR!'` has an empty distinctive title set and is reachable only by
+lineup.
+
 ### C. Three bands, and only the middle one is new surface
 The operator asked for "a very low bar for same-venue events regarding title
 match". A low bar for **proposing** a merge is safe and is what they should get.
 A low bar for **silently applying** one destroys real listings — the corpus
 above proves it does, not in theory but on rows that exist.
 
-- **Auto-merge** (subset): applied by the pipeline, immediately after the
-  existing exact-identity pass, reusing `choose_canonical` / `merge_event_fields`
-  / `_finish_absorption` **unchanged** in every respect except §E's
-  reversibility.
+- **Auto-merge** (title subset **or** §B2's shared-lineup rule, either alone
+  being sufficient): applied by the pipeline, immediately after the existing
+  exact-identity pass, reusing `choose_canonical` / `merge_event_fields` /
+  `_finish_absorption` **unchanged** in every respect except §E's
+  reversibility. Both are subject to §B2's non-event guard.
 - **Suggest** (overlap, no containment): persisted as a suggestion and surfaced
   on the review queue's payload with both distinctive sets, so the operator sees
   *why*. Applying it is an explicit admin action. Never applied by the pipeline.
@@ -337,14 +412,22 @@ qualifies — the Conchittas row. Small, and that is the point: it clears a clas
 of permanently-stuck rows without opening a door.
 
 ### G. What the cluster looks like afterwards
-Eight rows become **three**: the merged Rodolpho row (five titles plus the
-undated one folded in), `'31 Anos'` (distinctive `{31}`, correctly not merged —
-`31` is not `{producoes, rodolpho}`), and `'SEXTOU NO CONCHITTAS BAR!'` (empty
-distinctive set, correctly untouched). Neither leftover is reachable by *any*
-safe title rule; both are visible to an operator through the suggestion band's
-sibling listing if they want to finish the job by hand. Say this plainly rather
-than implying the cluster collapses to one — it does not, and a plan that
-promised it would be lying about what title similarity can do.
+Eight rows become **two**, and the second one is not a duplicate:
+
+- **One merged Rodolpho row**, reached by both signals working together —
+  `'Rodolpho'` and `'31º Rodolpho Produções'` by title containment (empty and
+  one-name lineups respectively), `'SEXTOU NO CONCHITTAS BAR!'` by shared
+  lineup (empty distinctive title set), the 8th-dated `'Aniversário…'` through
+  §D's ±8h window, and the undated row through §F.
+- **`'31 Anos'`, left standing on purpose** — held back by §B2's non-event
+  guard once `260812_event-attribution-and-dates.md` §E re-types it, and by the
+  disjoint-set refusal even before that. It is a birthday greeting, not the
+  party.
+
+An earlier draft of this plan claimed eight rows become three, treating
+`'SEXTOU NO CONCHITTAS BAR!'` as unreachable. That was true of title similarity
+alone and is no longer true: the lineup signal reaches it, which is precisely
+why §B2 exists as an independent condition rather than a refinement.
 
 ## Data, Config, And API Impact
 - **Migration `0037_event_merge_suggestions`** — a table for suggested merges
@@ -399,6 +482,17 @@ Scenarios:
 - Absorb an undated row into its dated twin from the same account.
 - Refuse to absorb an undated row whose distinctive set is only a subset.
 - Never absorb a confirmed row.
+- Merge two rows sharing two performers even though neither title contains the
+  other.
+- Merge a row whose title shares nothing with its twin but whose lineup shares
+  eleven names.
+- Refuse to merge two rows sharing only one performer at the same venue on the
+  same night.
+- Refuse to merge a row that has no lineup on the strength of lineup alone.
+- Refuse to merge a birthday greeting into the party it congratulates.
+- Refuse to merge across differing post types at the same venue on one night.
+- Collapse the whole Rodolpho cluster to a single row while leaving the
+  greeting standing.
 - Never absorb a row whose operator edited its title, but still suggest it.
 - Never absorb a row whose operator edited its venue.
 - Leave a group with two confirmed members entirely alone.
@@ -423,6 +517,20 @@ Pytest unit tests:
   the rule has to break one of them first.
 - Symmetry: the band for `(a, b)` equals the band for `(b, a)`, over the full
   production title list.
+- The lineup rule, pinned against production lineups: `Rodolpho Produções` /
+  `SEXTOU NO CONCHITTAS BAR!` (11 shared) and `ONILDO ALMEIDA & CONVIDADOS` /
+  `Homenagem aos 98 anos de Onildo Almeida` (3 shared) must land in **auto**
+  despite failing containment. Boundary at 1, 2 and 3 shared names. A pair
+  where one side's lineup is empty must never auto-merge on lineup. Performer
+  normalisation must treat `DAYANNE` and `Dayanne` as one name and `Dayanne`
+  and `Dayanne Henrique` as two.
+- The non-event guard: `'31 Anos'` (`post_type` non-`event` after
+  `event-attribution-and-dates` §E) is never absorbed into the party, asserted
+  both by post type and, independently, by the disjoint-set refusal so the guard
+  is not the only thing holding it.
+- Signal independence: a pair passing containment but not lineup auto-merges, a
+  pair passing lineup but not containment auto-merges, and neither rule is
+  implemented as a tie-break on the other.
 - Determinism: the same inputs give the same bands and the same canonical across
   two runs and across two candidate orderings.
 - The candidate window: same local date across a 21-hour gap includes; 8 hours
@@ -454,9 +562,12 @@ Manual or integration checks:
   feature needs is already in RDS.
 
 ## Acceptance Criteria
-- The five Rodolpho-family rows and the undated one become one row at Conchittas
-  Bar, and `'31 Anos'` and `'SEXTOU NO CONCHITTAS BAR!'` are still two separate
-  rows.
+- The seven Rodolpho-family rows — including `'SEXTOU NO CONCHITTAS BAR!'`, via
+  lineup, and the undated one, via §F — become **one** row at Conchittas Bar.
+- `'31 Anos'` is still its own row, and is refused by the non-event guard as
+  well as by the disjoint-set rule.
+- A pair is auto-merged on shared lineup alone when containment fails, and on
+  containment alone when lineup is empty.
 - Every false-positive pair in the Evidence section is refused or suggested, and
   none is merged.
 - No confirmed, manually-linked, `venue_id`-edited or `title`-edited row is ever
