@@ -329,6 +329,18 @@ above proves it does, not in theory but on rows that exist.
   shown. A suggestion nobody would ever accept is queue noise, and this project
   has already learned that a queue full of undecidable items stops being read.
 
+**Auto-merge ships disabled.** Put the auto band behind an admin-config flag
+defaulting to **off**, so deploying this feature changes no data. Merging is a
+corpus-wide, partly-irreversible mutation that begins on the next pipeline run;
+it must be an operator's deliberate act on a chosen day, after
+`scripts/measure_event_dedup.py` has been run against the post-backfill corpus
+and its output reviewed — not a side effect of whenever the next unrelated
+deploy happens to fire. The suggest band may ship enabled: it writes only
+derived rows and applies nothing.
+
+With the flag off, this branch's deploy is schema-plus-dormant-code and is safe
+to land alongside anything else.
+
 **No LLM anywhere in this path.** Not because the merge layer computes
 `source_event_key` — it does not — but because a suggestion that changes between
 runs re-opens a decision the operator already closed, and because a
@@ -435,9 +447,10 @@ why §B2 exists as an independent condition rather than a refinement.
   created/decided timestamps, decision), plus a nullable `superseded_by` on
   `events.post_item` for §E. Additive; no back-fill; a suggestion is derived
   data and is safe to recompute.
-- **Config (admin, runtime)** — the generic-event vocabulary; the Portuguese
-  stopword list; the candidate window in hours (default 8); the undated
-  absorption window in days (default 14).
+- **Config (admin, runtime)** — `event_dedup_auto_merge_enabled`, **default
+  `false`** (§C); the shared-lineup threshold (default 2); the generic-event
+  vocabulary; the Portuguese stopword list; the candidate window in hours
+  (default 8); the undated absorption window in days (default 14).
 - **Admin API** — `GET /admin/events/review` items gain a `merge_suggestions`
   list (additive; the console is a released client and nothing may be removed).
   Two new actions: apply a suggestion, and reverse a merge.
@@ -555,9 +568,16 @@ reintroduced bug, because both passes computed the same wrong number. "8 became
 
 Manual or integration checks:
 - Run `scripts/measure_event_dedup.py` against a **restored snapshot** — never
-  production — after `fix/event-attribution-and-dates` has landed, and record
-  the auto/suggest/refuse counts and every auto pair in the PR. A single
-  unexplained auto pair blocks the merge.
+  production — and record the auto/suggest/refuse counts and every auto pair in
+  the PR. A single unexplained auto pair blocks the merge.
+
+  **Measure after `260812_backfill-misattributed-links.md` has run, not merely
+  after `fix/event-attribution-and-dates` has landed.** The attribution fix only
+  corrects rows crawled from then on; the ~487 existing mis-attributed rows keep
+  their wrong `venue_id` until the backfill repairs them, and `venue_id` is half
+  of §D's candidate window. Measuring before the backfill measures a corpus that
+  is about to change underneath the thresholds — Teatro Riachuelo's 131-row
+  bucket, for one, does not empty until the backfill runs.
 - No re-crawl, no re-extraction, no external calls of any kind. Everything this
   feature needs is already in RDS.
 
@@ -576,8 +596,10 @@ Manual or integration checks:
   readable with the event that absorbed it recorded.
 - `compute_source_event_key` and `compute_event_identity` produce identical
   output before and after this change.
-- The measurement script's post-attribution-fix output is recorded in the PR and
+- The measurement script's post-backfill output is recorded in the PR and
   contains no unexplained auto pair.
+- Auto-merge is disabled by default, and the feature's deploy provably changes
+  no existing row.
 - `make test-feature`, `make test-unit`, `make test-bdd` pass, and CI's
   scratch-Postgres migrate step is green.
 
