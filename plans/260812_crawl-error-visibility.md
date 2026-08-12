@@ -84,8 +84,18 @@ name collision worth not deepening.
 ### A truncated roundup looks identical to a complete one
 `DEFAULT_MAX_EVENTS_PER_POST = 20` caps how many items one post can yield.
 Across the 2026-08-12 snapshot, `source_event_index` reaches exactly 20 on
-**14 separate posts** — all from `oquetemhojeemnatal`, whose roundups routinely
-list more than twenty events. Nothing records that the cap bit.
+**20 separate posts** (of 115 source posts total) — all from
+`oquetemhojeemnatal`, whose roundups routinely list more than twenty events.
+Nothing records that the cap bit.
+
+**That count is indicative, not exact, and that is itself the argument for §D.**
+`source_event_index` is a surviving artifact read back after de-duplication,
+supersession and cross-post merging have already run, so counting truncation
+from it after the fact gives a different answer depending on how you key and
+filter it (20 by max-index per post; 16 by distinct-index count; 18 by source-row
+count). Only an explicit signal recorded **at parse time**, when the slice
+actually happens, is trustworthy — which is what §D adds. Do not treat any
+retrospective figure, including this one, as the measurement.
 
 There is already an `OUTCOME_TRUNCATED` (`event_extraction_service.py:141`),
 but it means something else — the model's *output token budget* ran out and the
@@ -108,8 +118,10 @@ counter. Media type is never persisted. Cap-truncated posts are silent.
 
 ## Implementation Approach
 
-Ship as **one commit and one feature file per section** on a single branch and
-PR, per the operator's standing preference for phased multi-defect fixes.
+Ship as **one commit per section** on a single branch and PR, each commit
+landing that section's code together with its own scenarios, per the operator's
+standing preference for phased multi-defect fixes. The scenarios all live in
+this plan's single slug-named feature file (below), grouped by section.
 
 ### A. Parse the error item at the client edge
 In `apify_instagram_client.fetch_recent_posts`, stop discarding error items.
@@ -174,6 +186,19 @@ decision and needs its own evidence.
 - **Migration `0036_source_media_type`** — adds `source_media_type text NULL`
   to `events.post_item_source`, plus whatever column §D needs for cap
   truncation. Additive and nullable; no back-fill.
+
+  **Revision-number coordination.** `260812_event-attribution-and-dates.md` also
+  adds a column to `events.post_item_source`, and
+  `260812_event-dedup-fuzzy-title.md` adds `0037_event_merge_suggestions`. All
+  branch from `0035_time_known`, so whichever lands second must **re-parent onto
+  the first and take the next free revision** rather than declaring a second head
+  — two migrations both claiming `down_revision = "0035_time_known"` gives
+  Alembic multiple heads and breaks CI's scratch-Postgres migrate step. Check
+  `alembic heads` before writing the revision id, not after.
+
+  §D's cap-truncation column and `260812_events-per-post-cap.md`'s
+  offered-event-count are **the same fact recorded at the same moment**. Whichever
+  lands second extends the other's column rather than adding a parallel one.
 - **`crawl_target`** — a column recording the last run's failure kind/reason,
   if one does not already serve. Check `0030_crawl_target` and the existing
   `consecutive_failures`/`last_status` fields before adding; say which you
@@ -209,9 +234,11 @@ Scenarios:
 - Refuse to bill an error item as a crawl result.
 - Leave the cursor unadvanced when a stream fails.
 - Treat an unrecognised Apify error code as a transient failure.
+- Count only the real posts when a dataset mixes an error item with posts.
 - Surface the last failure kind on the admin crawl-target read model.
 - Persist a source post's media type.
 - Record that a post was truncated by the per-post event cap.
+- Do not mark a post as cap-truncated when it fits.
 
 Pytest unit tests:
 - Error-item classification: `not_found`; `no_items` with request errors;
