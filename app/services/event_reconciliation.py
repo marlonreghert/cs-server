@@ -121,6 +121,19 @@ ALL_STATUSES = (
 # the event, since a review reason has been forgotten at least once at every
 # call site that could set one.
 REVIEW_REASON_UNRESOLVED_VENUE = "unresolved_venue"
+# plans/260812_event-attribution-and-dates.md §A: the SECOND, distinct
+# outcome that appears once per-event evidence is honoured — "we can tell
+# EXACTLY where this is, and it is not a venue we carry", as opposed to "we
+# cannot tell where this is at all". An operator can action the first
+# (crawl the missing venue) and cannot action the second in the same way; it
+# doubles as a ranked venue-acquisition backlog. Shared with
+# `260812_backfill-misattributed-links.md`, which imports this constant.
+# Its literal value MUST equal
+# `app.services.event_venue_resolution.METHOD_VENUE_NOT_IN_CATALOG` — not
+# imported (event_venue_resolution already imports RESOLUTION_MANUAL FROM
+# this module; importing back would cycle) — kept in lockstep by
+# tests/test_event_venue_resolution.py's own literal-equality guard.
+REVIEW_REASON_VENUE_NOT_IN_CATALOG = "venue_not_in_catalog"
 # The fallback reason for the residual case: a fresh row landed on
 # `pending_review` for some OTHER combination `is_clean_extraction` checks
 # (e.g. confidence recorded as None) with no venue_id gap and no reason any
@@ -723,7 +736,16 @@ def reconcile_post_events(
         # reasons already say (both can be true at once: a low-confidence
         # extraction with no venue either), never in place of them.
         reasons = [fields["review_reason"]] if fields.get("review_reason") else []
-        if effective_venue_id is None:
+        # §A: `venue_not_in_catalog` is already a complete, more specific
+        # answer to "why no venue" than the generic `unresolved_venue` —
+        # layering the generic one on top would read as "we both cannot
+        # tell AND can tell exactly", which is never true at once. Skip the
+        # generic append only when the specific one is already present;
+        # every other no-venue path is completely unaffected.
+        if (
+            effective_venue_id is None
+            and REVIEW_REASON_VENUE_NOT_IN_CATALOG not in reasons
+        ):
             reasons.append(REVIEW_REASON_UNRESOLVED_VENUE)
         fields["review_reason"] = "; ".join(reasons) if reasons else None
 
@@ -929,6 +951,7 @@ __all__ = [
     "ALL_STATUSES", "update_events_gauge",
     "REVIEW_REASON_UNRESOLVED_VENUE", "REVIEW_REASON_NEEDS_REVIEW",
     "REVIEW_REASON_DIVERGES_FROM_CONFIRMED", "REVIEW_REASON_ABSENT_FROM_LATEST_EXTRACTION",
+    "REVIEW_REASON_VENUE_NOT_IN_CATALOG",
     # Shared with app.services.event_merge's confirmed-canonical branch — see
     # the coordination note beside PROTECTABLE_EVENT_FIELDS above.
     "PROTECTABLE_EVENT_FIELDS", "event_field_is_absent", "event_time_known",

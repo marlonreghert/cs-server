@@ -396,7 +396,14 @@ def step_then_its_posts_are_crawled(context):
     assert entry is not None and entry["posts_crawled"] > 0, context.pe_last_report
 
 
-# ── Scenario 4: handle mention wins, auto ────────────────────────────────────
+# ── Scenario 4: a caption-only handle mention still wins, auto ──────────────
+# plans/260812_event-attribution-and-dates.md §A reordered the ladder: an
+# @-mention is now authoritative when it comes from the EVENT's OWN
+# location_text (`METHOD_HANDLE_MENTION`) — this fixture's mention lives
+# only in the CAPTION (location_text is null), which is now the DEMOTED
+# rung 5, `METHOD_CAPTION_HANDLE_MENTION`. Still auto-links (a caption
+# naming exactly one known venue is good evidence when the event's own text
+# gives nothing), but under the new, distinct label.
 @given("a promoter post whose caption mentions a known venue's handle")
 def step_given_a_promoter_post_whose_caption_mentions_a_known_venues_handle(context):
     _ensure_context(context)
@@ -422,28 +429,31 @@ def step_then_the_link_resolution_is(context, resolution):
     assert _current_event(context)["location_resolution"] == resolution
 
 
-# ── Scenario 5: certainty beats score ────────────────────────────────────────
-@given("a promoter post that mentions a known venue's handle")
-def step_given_a_promoter_post_that_mentions_a_known_venues_handle(context):
+# ── Scenario 5: per-event evidence beats a caption-only mention ─────────────
+# plans/260812_event-attribution-and-dates.md §A: this scenario used to be
+# named "Prefer a handle mention over a higher-scoring name match" and
+# asserted the OPPOSITE outcome — the exact 487/494-wrong-link precedence
+# bug this plan fixes. The mention here lives ONLY in the post's CAPTION
+# (rung 5, demoted); `location_text` (the event's OWN text, rung 4) names a
+# DIFFERENT venue by name. Per-event evidence now outranks the caption,
+# deliberately reversing this scenario's pre-plan expectation.
+@given("a promoter post that mentions a known venue's handle only in its caption")
+def step_given_a_promoter_post_that_mentions_a_known_venues_handle_only_in_caption(context):
     _ensure_context(context)
-    venue_a = _create_venue(context, "Mentioned Venue A", handle="mentionedvenuea_ig")
+    _create_venue(context, "Mentioned Venue A", handle="mentionedvenuea_ig")
     handle = _active_promoter(context, "eventspromoter2")
     _seed_post(context, handle, "s5_post", caption="Ingressos abertos! Bora pro @mentionedvenuea_ig hoje!")
-    context.pe_expected_venue_id = venue_a
 
 
-@given("its location text matches a different venue by name with a higher score")
-def step_given_its_location_text_matches_a_different_venue_with_a_higher_score(context):
-    _create_venue(context, "Casa Rosa Exata")
-    # An exact name match scores 1.0 on the fuzzy path — deliberately a
-    # "higher score" than the handle mention would carry IF it were scored.
-    # It is not scored: rung 1 is an identity, and this is exactly the case
-    # that proves certainty outranks it.
+@given("its location text matches a different venue by name")
+def step_given_its_location_text_matches_a_different_venue_by_name(context):
+    venue_id = _create_venue(context, "Casa Rosa Exata")
+    context.pe_expected_venue_id = venue_id
     context.pe_openai.program(_extraction_json(location_text="Casa Rosa Exata"))
 
 
-@then("the event is linked to the venue whose handle was mentioned")
-def step_then_the_event_is_linked_to_the_venue_whose_handle_was_mentioned(context):
+@then("the event is linked to the venue its own location text named")
+def step_then_the_event_is_linked_to_the_venue_its_own_location_text_named(context):
     assert _current_event(context)["venue_id"] == context.pe_expected_venue_id
 
 

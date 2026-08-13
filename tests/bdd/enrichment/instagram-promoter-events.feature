@@ -37,14 +37,14 @@ Feature: Instagram promoter events
     Given a promoter post whose caption mentions a known venue's handle
     When the promoter crawl runs
     Then the event is linked to that venue
-    And the link method is "handle_mention"
+    And the link method is "caption_handle_mention"
     And the link resolution is "auto"
 
-  Scenario: Prefer a handle mention over a higher-scoring name match
-    Given a promoter post that mentions a known venue's handle
-    And its location text matches a different venue by name with a higher score
+  Scenario: Per-event location text outranks a caption-only handle mention
+    Given a promoter post that mentions a known venue's handle only in its caption
+    And its location text matches a different venue by name
     When the promoter crawl runs
-    Then the event is linked to the venue whose handle was mentioned
+    Then the event is linked to the venue its own location text named
 
   Scenario: Link from an Instagram location tag when no handle is mentioned
     Given a promoter post with no handle mention
