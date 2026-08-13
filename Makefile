@@ -101,6 +101,7 @@ test-unit:
 		tests/test_event_reconciliation.py \
 		tests/test_event_merge.py \
 		tests/test_event_merge_handle_identity.py \
+		tests/test_backfill_event_venue_links.py \
 		tests/test_event_sources_migration.py \
 		tests/test_post_items_migration.py \
 		tests/test_post_category.py \
@@ -126,6 +127,8 @@ test-unit:
 		tests/test_time_known_migration.py \
 		tests/test_expose_time_known.py \
 		tests/test_menu_item_lifecycle.py \
+		tests/test_source_media_type_migration.py \
+		tests/test_promoter_event_visibility.py \
 		-v
 
 test-integration:

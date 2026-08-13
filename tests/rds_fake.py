@@ -426,6 +426,17 @@ class InMemoryRdsVenueStore:
         "source_kind", "source_handle", "source_shortcode", "source_permalink",
         "source_event_key", "source_event_index", "cover_photo_key",
         "raw_extraction", "first_seen_at", "last_seen_at",
+        # plans/260812_crawl-error-visibility.md §C/§D (migration 0036):
+        # Apify's own media type, the post's own upload timestamp (distinct
+        # from first_seen_at/last_seen_at above, which are CRAWL times), and
+        # whether the per-post event cap dropped trailing entries from this
+        # post's own extraction.
+        "source_media_type", "source_uploaded_at", "source_events_truncated",
+        # plans/260812_event-attribution-and-dates.md §C (migration 0037):
+        # the model's structured date-interpretation fallback, persisted
+        # NEXT TO raw_extraction (its own column) — the determinism guard's
+        # own store.
+        "date_interpretation",
     )
 
     # A source's first/last_seen_at can be an ISO string (the fake's own
@@ -655,6 +666,14 @@ class InMemoryRdsVenueStore:
             "raw_extraction": source_fields.get("raw_extraction"),
             "first_seen_at": source_fields.get("first_seen_at", now),
             "last_seen_at": source_fields.get("last_seen_at", now),
+            # plans/260812_crawl-error-visibility.md §C/§D (migration 0036):
+            # nullable/false-defaulted, mirroring the real column defaults.
+            "source_media_type": source_fields.get("source_media_type"),
+            "source_uploaded_at": source_fields.get("source_uploaded_at"),
+            "source_events_truncated": source_fields.get("source_events_truncated", False),
+            # plans/260812_event-attribution-and-dates.md §C (migration
+            # 0037): nullable, mirroring the real column default.
+            "date_interpretation": source_fields.get("date_interpretation"),
         }
         self.event_sources[source_row["id"]] = source_row
         return self.get_event(event_id)
@@ -923,6 +942,9 @@ class InMemoryRdsVenueStore:
                 # actually executed writes both, together, never zero by
                 # default.
                 "last_run_reels_fetched": None, "last_run_reels_new": None,
+                # plans/260812_crawl-error-visibility.md §B (migration 0036):
+                # NULL until a run actually fails — never invented.
+                "last_failure_kind": None, "last_failure_at": None,
                 "created_at": now, "updated_at": now,
             }
             row.update({k: v for k, v in fields.items() if k != "handle"})

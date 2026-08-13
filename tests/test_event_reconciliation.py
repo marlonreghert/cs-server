@@ -1332,3 +1332,95 @@ class TestPostTypeAndCategoryFieldProtection:
         after = dao.get_event(event_id)
         assert after["category"] == "samba"
         assert after["review_reason"] is None
+
+
+class TestSourceUploadedAtMetric:
+    """plans/260813_promoter-source-provenance-parity.md Error Handling: the
+    readiness-gate metric for plans/260813_history-repair-dates.md. Tested
+    here, driven directly against `reconcile_post_events`, rather than once
+    per caller — this module is the ONE place both `EventExtractionService`
+    and `PromoterCrawlService` persist through, so a single suite here
+    covers both without a second, duplicated increment in either."""
+
+    def _snapshot(self, source_kind: str, outcome: str) -> float:
+        from prometheus_client import REGISTRY
+
+        return REGISTRY.get_sample_value(
+            "event_source_uploaded_at_total",
+            {"source_kind": source_kind, "outcome": outcome},
+        ) or 0.0
+
+    def test_a_fresh_row_with_an_upload_time_counts_as_present(self):
+        dao = _dao()
+        before = self._snapshot("promoter_post", "present")
+        events = [_event(
+            "Event A", datetime(2026, 8, 10, tzinfo=timezone.utc),
+            source_uploaded_at=datetime(2026, 8, 9, 20, 0, tzinfo=timezone.utc),
+        )]
+        reconcile_post_events(
+            venue_dao=dao, source_kind="promoter_post", source_handle="h1",
+            source_shortcode="s_metric_present", source_permalink=None,
+            prepared_events=events, now=NOW, attribute=_venue_attribute("v1"),
+        )
+        assert self._snapshot("promoter_post", "present") == before + 1
+
+    def test_a_fresh_row_with_no_upload_time_counts_as_null(self):
+        dao = _dao()
+        before = self._snapshot("promoter_post", "null")
+        events = [_event(
+            "Event A", datetime(2026, 8, 10, tzinfo=timezone.utc), source_uploaded_at=None,
+        )]
+        reconcile_post_events(
+            venue_dao=dao, source_kind="promoter_post", source_handle="h1",
+            source_shortcode="s_metric_null", source_permalink=None,
+            prepared_events=events, now=NOW, attribute=_venue_attribute("v1"),
+        )
+        assert self._snapshot("promoter_post", "null") == before + 1
+
+    def test_both_writing_paths_are_labelled_distinctly(self):
+        dao = _dao()
+        before_promoter = self._snapshot("promoter_post", "null")
+        before_venue = self._snapshot("venue_post", "null")
+        events = [_event(
+            "Event A", datetime(2026, 8, 10, tzinfo=timezone.utc), source_uploaded_at=None,
+        )]
+        reconcile_post_events(
+            venue_dao=dao, source_kind="venue_post", source_handle="h1",
+            source_shortcode="s_metric_venue", source_permalink=None,
+            prepared_events=events, now=NOW, attribute=_venue_attribute("v1"),
+        )
+        assert self._snapshot("venue_post", "null") == before_venue + 1
+        assert self._snapshot("promoter_post", "null") == before_promoter  # unchanged
+
+    def test_a_confirmed_rows_re_extraction_is_not_counted(self):
+        """source_uploaded_at is not in PROTECTABLE_EVENT_FIELDS -- a
+        confirmed row's re-extraction never touches it, so it must not be
+        counted as a fresh write either way (see EVENT_SOURCE_UPLOADED_AT_
+        TOTAL's own docstring)."""
+        dao = _dao()
+        events = [_event(
+            "Event A", datetime(2026, 8, 10, tzinfo=timezone.utc),
+            source_uploaded_at=datetime(2026, 8, 9, 20, 0, tzinfo=timezone.utc),
+        )]
+        reconcile_post_events(
+            venue_dao=dao, source_kind="promoter_post", source_handle="h1",
+            source_shortcode="s_metric_confirmed", source_permalink=None,
+            prepared_events=events, now=NOW, attribute=_venue_attribute("v1"),
+        )
+        row = _rows(dao, "h1", "s_metric_confirmed")[0]
+        dao.update_event(row["event_id"], {
+            "status": STATUS_CONFIRMED, "operator_edited_fields": ["title"],
+        })
+
+        before_present = self._snapshot("promoter_post", "present")
+        before_null = self._snapshot("promoter_post", "null")
+        later = [_event(
+            "Event A", datetime(2026, 8, 10, tzinfo=timezone.utc), source_uploaded_at=None,
+        )]
+        reconcile_post_events(
+            venue_dao=dao, source_kind="promoter_post", source_handle="h1",
+            source_shortcode="s_metric_confirmed", source_permalink=None,
+            prepared_events=later, now=NOW, attribute=_venue_attribute("v1"),
+        )
+        assert self._snapshot("promoter_post", "present") == before_present
+        assert self._snapshot("promoter_post", "null") == before_null

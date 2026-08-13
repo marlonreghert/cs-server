@@ -9,6 +9,8 @@ import json
 
 import pytest
 
+from app.api.apify_instagram_client import FetchPostsResult
+
 from app.dao.media_archive_store import MediaArchiveStore, extension_for
 from app.services.venue_photo_archive_service import (
     InvalidArchivePath,
@@ -381,7 +383,7 @@ class _FakeIgClient:
 
     async def fetch_recent_posts(self, username, results_limit=10):
         self.calls.append(username)
-        return list(self.posts)[:results_limit]
+        return FetchPostsResult(posts=list(self.posts)[:results_limit])
 
 
 class _RecordingDownloader:

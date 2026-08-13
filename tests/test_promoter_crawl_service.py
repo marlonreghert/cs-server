@@ -594,13 +594,20 @@ class TestAttributionBehaviourPinnedAcrossExtraction:
         after = self._metric("none", "unresolved")
         assert after - before == 1.0, (before, after)
 
-    def test_an_at_mention_of_a_known_venue_handle_auto_links_by_identity(self, dao):
+    def test_a_caption_at_mention_auto_links_when_the_event_has_no_location_text(self, dao):
+        """plans/260812_event-attribution-and-dates.md §A demoted a CAPTION
+        mention below every per-event signal: with `location_text=None`
+        (the event's own text says nothing), the caption's single, known-
+        venue mention is still good evidence and auto-links — but now
+        through the distinct `caption_handle_mention` method, not
+        `handle_mention` (that value is reserved for a mention found in the
+        EVENT's own location_text — see the next test)."""
         dao.set_venue_instagram(VenueInstagram(venue_id="v1", instagram_handle="zettalounge", status="found"))
         venues, handle_index = self._venues(dao)
         openai_client = _FakeOpenAIClient()
         openai_client.program(_extraction_json(date_text="15/08", time_text="20h", location_text=None))
         service = PromoterCrawlService(venue_dao=dao, posts_client=None, openai_client=openai_client)
-        before = self._metric("handle_mention", "auto")
+        before = self._metric("caption_handle_mention", "auto")
 
         _run(service._process_post(
             handle="promo", post=self._post("pin_mention", "Hoje é no @zettalounge! Ingressos abertos!"),
@@ -608,6 +615,32 @@ class TestAttributionBehaviourPinnedAcrossExtraction:
         ))
 
         row = dao.get_event_by_source("promo", "pin_mention")
+        assert row["venue_id"] == "v1", row
+        assert row["linked_by"] == "caption_handle_mention", row
+        assert row["location_confidence"] == 1.0, row
+        after = self._metric("caption_handle_mention", "auto")
+        assert after - before == 1.0, (before, after)
+
+    def test_an_at_mention_in_the_events_own_location_text_auto_links_by_identity(self, dao):
+        """The TOP rung: an @-mention found in the event's OWN
+        `location_text` auto-links via `handle_mention`, outranking
+        anything the post's caption says (plans/260812_event-attribution-
+        and-dates.md §A)."""
+        dao.set_venue_instagram(VenueInstagram(venue_id="v1", instagram_handle="zettalounge", status="found"))
+        venues, handle_index = self._venues(dao)
+        openai_client = _FakeOpenAIClient()
+        openai_client.program(_extraction_json(
+            date_text="15/08", time_text="20h", location_text="@zettalounge",
+        ))
+        service = PromoterCrawlService(venue_dao=dao, posts_client=None, openai_client=openai_client)
+        before = self._metric("handle_mention", "auto")
+
+        _run(service._process_post(
+            handle="promo", post=self._post("pin_mention_own", "Ingressos abertos!"),
+            venues=venues, handle_index=handle_index, now=datetime.now(timezone.utc),
+        ))
+
+        row = dao.get_event_by_source("promo", "pin_mention_own")
         assert row["venue_id"] == "v1", row
         assert row["linked_by"] == "handle_mention", row
         assert row["location_confidence"] == 1.0, row
@@ -818,3 +851,229 @@ class TestPromoterEventCoverPhoto:
         row = dao.get_event_by_source("promo", "p1")
         assert row is not None
         assert row["cover_photo_key"] is None
+
+
+class TestSourceProvenance:
+    """plans/260813_promoter-source-provenance-parity.md §A/§B:
+    `source_media_type`/`source_uploaded_at` are now written on the promoter
+    path too. Called directly against `_process_post` (same pattern as
+    TestLocationTextFallbackToCaption/TestSourceKindAndMetricsParity above),
+    since the assignment itself is the unit under test.
+
+    Timestamp-parsing coverage lives here rather than re-testing
+    `event_venue_targeting._parse_timestamp` in isolation: that helper is
+    REUSED unchanged (imported, not reimplemented — see the plan's own
+    "reuse whatever parsing the venue path already applies" instruction),
+    so what actually needs proving is that THIS service wires it into
+    `source_uploaded_at` without ever substituting `now()` or
+    `first_seen_at` for a value it could not parse.
+    """
+
+    def _post(self, shortcode: str, *, timestamp="", media_type=None, **overrides) -> dict:
+        post = {
+            "shortcode": shortcode, "caption": "Ingressos abertos! Vem pro role.",
+            "permalink": f"https://instagram.com/p/{shortcode}",
+            "timestamp": timestamp, "image_urls": [],
+        }
+        if media_type is not None:
+            post["post_type"] = media_type
+        post.update(overrides)
+        return post
+
+    def _service(self, dao, *, openai_client=None) -> PromoterCrawlService:
+        return PromoterCrawlService(
+            venue_dao=dao, posts_client=None,
+            openai_client=openai_client or _FakeOpenAIClient(),
+        )
+
+    # ── timestamp parsing: valid instant, empty, missing key, malformed ─────
+    def test_a_valid_iso_timestamp_is_recorded_as_the_upload_time(self, dao):
+        openai_client = _FakeOpenAIClient()
+        openai_client.program(_extraction_json())
+        post = self._post("ts_valid", timestamp="2026-08-12T15:26:00.000Z")
+        service = self._service(dao, openai_client=openai_client)
+
+        _run(service._process_post(
+            handle="promo", post=post, venues=[], handle_index={},
+            now=datetime.now(timezone.utc),
+        ))
+
+        row = dao.get_event_by_source("promo", "ts_valid")
+        assert row["source_uploaded_at"] == datetime(2026, 8, 12, 15, 26, tzinfo=timezone.utc), row
+
+    def test_an_empty_string_timestamp_is_stored_as_null(self, dao):
+        openai_client = _FakeOpenAIClient()
+        openai_client.program(_extraction_json())
+        post = self._post("ts_empty", timestamp="")
+        service = self._service(dao, openai_client=openai_client)
+
+        _run(service._process_post(
+            handle="promo", post=post, venues=[], handle_index={},
+            now=datetime.now(timezone.utc),
+        ))
+
+        row = dao.get_event_by_source("promo", "ts_empty")
+        assert row["source_uploaded_at"] is None, row
+
+    def test_a_missing_timestamp_key_is_stored_as_null(self, dao):
+        openai_client = _FakeOpenAIClient()
+        openai_client.program(_extraction_json())
+        post = self._post("ts_missing")
+        del post["timestamp"]
+        service = self._service(dao, openai_client=openai_client)
+
+        _run(service._process_post(
+            handle="promo", post=post, venues=[], handle_index={},
+            now=datetime.now(timezone.utc),
+        ))
+
+        row = dao.get_event_by_source("promo", "ts_missing")
+        assert row["source_uploaded_at"] is None, row
+
+    def test_a_malformed_timestamp_is_stored_as_null_and_does_not_raise(self, dao):
+        openai_client = _FakeOpenAIClient()
+        openai_client.program(_extraction_json())
+        post = self._post("ts_bad", timestamp="not-a-date")
+        service = self._service(dao, openai_client=openai_client)
+
+        _run(service._process_post(
+            handle="promo", post=post, venues=[], handle_index={},
+            now=datetime.now(timezone.utc),
+        ))
+
+        row = dao.get_event_by_source("promo", "ts_bad")
+        assert row["source_uploaded_at"] is None, row
+
+    def test_a_malformed_timestamp_logs_a_warning_naming_the_post(self, dao, caplog):
+        import logging
+
+        openai_client = _FakeOpenAIClient()
+        openai_client.program(_extraction_json())
+        post = self._post("ts_bad_log", timestamp="not-a-date")
+        service = self._service(dao, openai_client=openai_client)
+
+        with caplog.at_level(logging.WARNING, logger="app.services.promoter_crawl_service"):
+            _run(service._process_post(
+                handle="promo", post=post, venues=[], handle_index={},
+                now=datetime.now(timezone.utc),
+            ))
+
+        assert any(
+            "promo/ts_bad_log" in r.message and "not-a-date" in r.message
+            for r in caplog.records
+        ), caplog.records
+
+    def test_a_missing_timestamp_never_logs_a_warning(self, dao, caplog):
+        """An absent Apify timestamp is a normal, expected gap -- only a
+        NON-empty value that fails to parse is evidence Apify changed its
+        format. Logging a warning for the common case would drown out the
+        signal the warning exists to carry."""
+        import logging
+
+        openai_client = _FakeOpenAIClient()
+        openai_client.program(_extraction_json())
+        post = self._post("ts_none", timestamp="")
+        service = self._service(dao, openai_client=openai_client)
+
+        with caplog.at_level(logging.WARNING, logger="app.services.promoter_crawl_service"):
+            _run(service._process_post(
+                handle="promo", post=post, venues=[], handle_index={},
+                now=datetime.now(timezone.utc),
+            ))
+
+        assert caplog.records == [], caplog.records
+
+    def test_upload_time_is_never_substituted_with_the_crawl_time(self, dao):
+        """The regression this plan exists to prevent: a missing upload time
+        must stay NULL, never silently fall back to `now`/`first_seen_at` --
+        see the plan's own Evidence section on why that would poison
+        260813_history-repair-dates.md's anchor."""
+        openai_client = _FakeOpenAIClient()
+        openai_client.program(_extraction_json())
+        post = self._post("ts_no_fallback", timestamp="")
+        crawl_time = datetime(2026, 8, 13, 9, 0, tzinfo=timezone.utc)
+        service = self._service(dao, openai_client=openai_client)
+
+        _run(service._process_post(
+            handle="promo", post=post, venues=[], handle_index={}, now=crawl_time,
+        ))
+
+        row = dao.get_event_by_source("promo", "ts_no_fallback")
+        assert row["source_uploaded_at"] is None, row
+        assert row["first_seen_at"] == crawl_time, row  # the crawl time IS recorded -- just not here
+
+    # ── the naming collision: media type vs. item type ───────────────────────
+    def test_source_media_type_is_the_raw_dicts_post_type_not_the_items(self, dao):
+        """The regression test for the naming collision the plan's own
+        Evidence section names: the raw Apify dict's `post_type` key is the
+        MEDIA type ("Video"/"Image"/"Sidecar"), completely unrelated to
+        `events.post_item.post_type` (event/promotion/menu/food/other). A
+        row must hold BOTH, distinctly -- media type "Video", item type
+        "event" -- never one overwriting the other."""
+        openai_client = _FakeOpenAIClient()
+        openai_client.program(_extraction_json(kind="event"))
+        post = self._post("kind_collision", timestamp="2026-08-12T15:26:00.000Z", media_type="Video")
+        service = self._service(dao, openai_client=openai_client)
+
+        _run(service._process_post(
+            handle="promo", post=post, venues=[], handle_index={},
+            now=datetime.now(timezone.utc),
+        ))
+
+        row = dao.get_event_by_source("promo", "kind_collision")
+        assert row["source_media_type"] == "Video", row
+        assert row["post_type"] == "event", row
+
+    def test_source_media_type_is_null_when_the_raw_dict_carries_none(self, dao):
+        openai_client = _FakeOpenAIClient()
+        openai_client.program(_extraction_json())
+        post = self._post("no_media_type")
+        assert "post_type" not in post
+        service = self._service(dao, openai_client=openai_client)
+
+        _run(service._process_post(
+            handle="promo", post=post, venues=[], handle_index={},
+            now=datetime.now(timezone.utc),
+        ))
+
+        row = dao.get_event_by_source("promo", "no_media_type")
+        assert row["source_media_type"] is None, row
+
+    def test_every_event_from_one_post_shares_the_same_provenance(self, dao):
+        """One post, several events (plans/260806_multi-event-posts.md) --
+        `source_media_type`/`source_uploaded_at` are facts about the PARSE,
+        not any one event, so every row this post yields must carry
+        identical values."""
+        import json
+
+        events_payload = json.dumps({"events": [
+            {
+                "title": "Show A", "description": None, "date_text": "12/08", "time_text": None,
+                "is_recurring": False, "recurrence_text": None, "lineup": [], "ticket_url": None,
+                "price_text": None, "location_text": None, "confidence": 0.9,
+            },
+            {
+                "title": "Show B", "description": None, "date_text": "13/08", "time_text": None,
+                "is_recurring": False, "recurrence_text": None, "lineup": [], "ticket_url": None,
+                "price_text": None, "location_text": None, "confidence": 0.9,
+            },
+        ]})
+
+        class _RawMultiEventClient:
+            async def extract_events(self, *, caption, image_data_uri=None, max_events):
+                return events_payload, False
+
+        post = self._post("multi_same", timestamp="2026-08-12T15:26:00.000Z", media_type="Sidecar")
+        service = self._service(dao, openai_client=_RawMultiEventClient())
+
+        _run(service._process_post(
+            handle="promo", post=post, venues=[], handle_index={},
+            now=datetime.now(timezone.utc),
+        ))
+
+        rows = dao.list_events_by_source("promo", "multi_same")
+        assert len(rows) == 2, rows
+        assert {r["source_media_type"] for r in rows} == {"Sidecar"}, rows
+        assert {r["source_uploaded_at"] for r in rows} == {
+            datetime(2026, 8, 12, 15, 26, tzinfo=timezone.utc),
+        }, rows

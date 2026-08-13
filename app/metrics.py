@@ -1251,6 +1251,26 @@ EVENT_EXTRACTION_EVENTS_PER_POST = Histogram(
     buckets=(1, 2, 3, 5, 8, 13, 20),
 )
 
+# plans/260813_promoter-source-provenance-parity.md Error Handling: the
+# readiness gate for plans/260813_history-repair-dates.md, which anchors its
+# re-resolution on `source_uploaded_at` and refuses to run when too many
+# rows have no anchor. Labelled by `source_kind` (`promoter_post`/
+# `venue_post`) so a widening null RATE on one writing path is visible even
+# while the other stays healthy — incremented once per freshly written
+# (inserted or ordinarily re-extracted) row in `event_reconciliation.
+# reconcile_post_events`, the ONE place both callers persist through. A
+# `confirmed` row's re-extraction never touches `source_uploaded_at` at all
+# (it is not in PROTECTABLE_EVENT_FIELDS — an operator's confirmation
+# freezes content, this column included) and is deliberately NOT counted
+# here: it is not a fresh write, and counting it would mix "this crawl just
+# produced a null" with "an old, frozen row happens to have one".
+EVENT_SOURCE_UPLOADED_AT_TOTAL = Counter(
+    "event_source_uploaded_at_total",
+    "Source rows freshly written, by writing path and whether an upload "
+    "time was recorded",
+    ["source_kind", "outcome"],  # outcome: present, null
+)
+
 # plans/260811_extract-by-handle.md §Error Handling: a post re-extracted
 # after a date/attribution fix supersedes the stale row(s) it previously
 # produced (event_reconciliation.reconcile_post_events' existing "an event
@@ -1286,6 +1306,19 @@ EVENT_EXTRACTION_MALFORMED_ATTRACTIONS_TOTAL = Counter(
     "Individual malformed attraction entries skipped within an otherwise-valid extraction",
 )
 
+# plans/260812_crawl-error-visibility.md §D: a post whose model response
+# named MORE events than `max_events_per_post` kept — the model already
+# generated (and was already paid for) every event; the cap only decides how
+# many are kept. Distinct from OUTCOME_TRUNCATED (a truncated OUTPUT TOKEN
+# BUDGET, where nothing is persisted at all) — this counts a post that WAS
+# fully persisted, just capped. An operator can also query which specific
+# posts were truncated via `events.post_item_source.source_events_
+# truncated` (migration 0036); this counter is the "how often" trend view.
+EVENT_EXTRACTION_CAP_TRUNCATED_POSTS_TOTAL = Counter(
+    "event_extraction_cap_truncated_posts_total",
+    "Posts whose event list exceeded the per-post event cap and was truncated",
+)
+
 # plans/260811_post-items-and-categories.md §C/§Error Handling: `category`
 # is free text steered toward app.models.post_category's admin-configurable
 # vocabulary but never confined to it — this counts every answer that did
@@ -1314,6 +1347,37 @@ EVENT_VENUE_LINK_TOTAL = Counter(
     ["method", "result"],
 )
 
+# plans/260813_handle-attribution-hardening.md §A/Error Handling: rung 4
+# (name match) invocations skipped because `location_text` was an @handle
+# with nothing else usable after stripping it — the expected steady state
+# for promoter roundups (`@mahalilacafe`, `@espaco.muta`, ...). A high rate
+# here is the fix doing its job, not a fault; it is the counterpart to
+# EVENT_VENUE_LINK_TOTAL's `method="venue_not_in_catalog"` series, which is
+# what those skipped events should resolve to instead.
+EVENT_VENUE_NAME_MATCH_SKIPPED_TOTAL = Counter(
+    "event_venue_name_match_skipped_total",
+    "Rung-4 name-match invocations skipped because location_text was handle-only",
+)
+
+# plans/260812_event-attribution-and-dates.md §C/Error Handling: how each
+# event's date was actually reached — `deterministic` (the proven regex
+# finders in event_date_resolver.py resolved it on their own, no model
+# fallback consulted), `structured_fallback` (the deterministic finders
+# found nothing and the model's date_interpretation resolved it),
+# `stored_interpretation_reuse` (the determinism guard reused a PREVIOUSLY
+# stored interpretation rather than trusting a fresh, possibly-different
+# model answer), or `unresolved` (nothing resolved it at all). The
+# FALLBACK rate is the signal that matters here: if it climbs, the
+# deterministic finders are decaying against real flyer text and nobody
+# would otherwise notice — a dashboard should watch it, not just today's
+# raw count.
+EVENT_DATE_RESOLUTION_TOTAL = Counter(
+    "event_date_resolution_total",
+    "How an event's date was reached: deterministic finder, structured "
+    "model fallback, stored-interpretation reuse, or unresolved",
+    ["path"],
+)
+
 # The operator-load signal. Widened by plans/260807_review-queue-
 # completeness-and-venue-names.md: this NO LONGER means "ambiguous promoter
 # links" — it is every event awaiting a human decision (anything
@@ -1327,6 +1391,28 @@ EVENT_REVIEW_QUEUE_DEPTH = Gauge(
     "event_review_queue_depth",
     "Events awaiting an operator decision (pending_review, or a promoter "
     "event with no location decision yet)",
+)
+
+# plans/260813_hide-promoter-events.md: every admin events read (the list and
+# the review queue), labelled by whether the promoter-hiding filter was
+# actually applied (`filter_applied`, from the live admin-config flag at read
+# time) — lets an operator confirm the config read is even reaching a "true"
+# value in production, not just that SOME reads happened.
+ADMIN_EVENTS_READ_TOTAL = Counter(
+    "admin_events_read_total",
+    "Admin events reads, by path and whether the promoter filter was applied",
+    ["path", "filter_applied"],
+)
+
+# How many promoter-only items one read actually hid, by path. The plan's own
+# named signal to watch: "If the hidden count ever reaches zero while
+# promoter rows exist, the unanimity rule in §A has broken" — a healthy
+# system keeps incrementing this as long as the known promoter backlog (587
+# rows, all from one account) sits in `events.post_item`.
+ADMIN_EVENTS_PROMOTER_HIDDEN_TOTAL = Counter(
+    "admin_events_promoter_hidden_total",
+    "Promoter-only items hidden from an admin events read, by path",
+    ["path"],
 )
 
 # plans/260806_event-cover-presign.md — `result` distinguishes a working sign
@@ -1434,8 +1520,16 @@ CRAWL_RUNS_TOTAL = Counter(
     "Scheduled Instagram crawl attempts, by handle kind, result type, and outcome",
     ["handle_kind", "result_type", "outcome"],
     # result_type: posts, reels
-    # outcome: success, empty, failed, skipped_disabled, skipped_failures,
-    #          skipped_budget, credit_exhausted
+    # outcome: success, empty, failed, blocked, handle_not_found,
+    #          skipped_disabled, skipped_failures, skipped_budget,
+    #          credit_exhausted
+    # plans/260812_crawl-error-visibility.md §Error Handling: `blocked` and
+    # `handle_not_found` are ADDITIVE labels on this SAME counter — a
+    # Prometheus series only exists after its first increment, so the
+    # ABSENCE of a `blocked` series is itself the evidence that no target
+    # was blocked this window. Watch the BLOCKED rate across many targets at
+    # once: a rise there means Instagram is rate-limiting the whole account,
+    # not that individual venues went quiet.
 )
 
 # The number that maps to money: every BILLED result the actor returned,

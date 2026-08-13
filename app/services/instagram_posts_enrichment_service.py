@@ -69,9 +69,14 @@ class InstagramPostsEnrichmentService:
         successful = 0
         for venue_id, handle in venues_to_process:
             try:
-                raw_posts = await self.apify_client.fetch_recent_posts(
+                # fetch_recent_posts returns a FetchPostsResult (plans/260812_
+                # crawl-error-visibility.md §A); this path only ever needs the
+                # posts — the client itself already logs a blocked/not-found
+                # error at warning.
+                result = await self.apify_client.fetch_recent_posts(
                     handle, results_limit=self.posts_per_venue
                 )
+                raw_posts = result.posts
 
                 ig_posts = VenueInstagramPosts(
                     venue_id=venue_id,
