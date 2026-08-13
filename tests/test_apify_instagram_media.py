@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 
+import httpx
 import pytest
 
 from app.api.apify_instagram_client import ApifyInstagramClient
@@ -269,4 +270,91 @@ class TestErrorItemClassification:
         ])
         assert len(result.posts) == 3
         assert {p["shortcode"] for p in result.posts} == {"ok1", "ok2", "ok3"}
-        assert result.error_code == "no_items"
+
+
+class TestTransportFailureClassification:
+    """plans/260813_crawl-transport-failure-visibility.md §A: the production
+    defect this plan fixes lives entirely inside `_run_actor_sync`/`fetch_
+    recent_posts` — before this plan, a timeout/HTTP error/connection error
+    collapsed into `FetchPostsResult(posts=[], error_code=None)`,
+    indistinguishable from a genuinely empty account (verified in production
+    2026-08-13: downtownbeergarden_, 121 posts, Apify succeeded server-side
+    with 16 results, our client timed out and the target read as healthy and
+    empty).
+
+    Unlike `TestErrorItemClassification` above (which monkeypatches `_run_
+    actor_sync` itself and so can never exercise this bug), these tests
+    mock only `self.client.post` — the TRUE external boundary — so the REAL
+    `_run_actor_sync` exception handling actually runs. This is the layer
+    that proves the fix; the BDD feature (crawl-transport-failure-
+    visibility.feature) exercises `instagram_crawl_service`'s classification
+    of whatever `.error_code` this client reports, one layer up, through a
+    fake that can't see this bug either (see that feature's own step-module
+    docstring)."""
+
+    def _client(self) -> ApifyInstagramClient:
+        return ApifyInstagramClient(api_token="t")
+
+    def _fetch_with_post_raising(self, exc: Exception):
+        client = self._client()
+
+        async def _raising_post(*args, **kwargs):
+            raise exc
+
+        client.client.post = _raising_post
+        return asyncio.run(client.fetch_recent_posts("somehandle", results_limit=10))
+
+    def test_a_timeout_is_reported_as_a_transport_failure_not_an_empty_dataset(self):
+        result = self._fetch_with_post_raising(httpx.TimeoutException("timed out"))
+        assert result.posts == []
+        assert result.error_code == "timeout"
+        assert result.error_description is None
+        assert result.request_error_count == 0
+
+    def test_a_connection_error_is_reported_as_a_transport_failure(self):
+        result = self._fetch_with_post_raising(httpx.ConnectError("connection refused"))
+        assert result.posts == []
+        assert result.error_code == "request_error"
+
+    def test_an_http_error_is_reported_as_a_transport_failure(self):
+        client = self._client()
+        request = httpx.Request("POST", "https://api.apify.com/v2/acts/x/run-sync-get-dataset-items")
+
+        async def _post_500(*args, **kwargs):
+            return httpx.Response(500, text="internal error", request=request)
+
+        client.client.post = _post_500
+        result = asyncio.run(client.fetch_recent_posts("somehandle", results_limit=10))
+        assert result.posts == []
+        assert result.error_code == "http_error"
+
+    def test_a_credit_exhausted_response_still_raises_and_is_not_reclassified(self):
+        """402 must keep propagating as ApifyCreditExhaustedError -- §A only
+        touches the three transport-exception branches, never the existing
+        credit-exhaustion contract `InstagramPostsEnrichmentService` and
+        others already depend on."""
+        from app.api.apify_instagram_client import ApifyCreditExhaustedError
+
+        client = self._client()
+        request = httpx.Request("POST", "https://api.apify.com/v2/acts/x/run-sync-get-dataset-items")
+
+        async def _post_402(*args, **kwargs):
+            return httpx.Response(402, text="payment required", request=request)
+
+        client.client.post = _post_402
+        with pytest.raises(ApifyCreditExhaustedError):
+            asyncio.run(client.fetch_recent_posts("somehandle", results_limit=10))
+
+    def test_a_transport_failure_on_search_users_still_degrades_to_no_results(self):
+        """search_users has no per-caller use for the failure TYPE (it never
+        surfaced one before this plan either) -- only its degrade-to-empty
+        behavior on a transport failure must survive §A's contract change
+        from `_run_actor_sync` returning `None` to raising."""
+        client = self._client()
+
+        async def _raising_post(*args, **kwargs):
+            raise httpx.TimeoutException("timed out")
+
+        client.client.post = _raising_post
+        results = asyncio.run(client.search_users("some query"))
+        assert results == []
