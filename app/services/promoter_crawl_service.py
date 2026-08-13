@@ -538,7 +538,28 @@ class PromoterCrawlService:
         if malformed_attractions_count:
             EVENT_EXTRACTION_MALFORMED_ATTRACTIONS_TOTAL.inc(malformed_attractions_count)
 
-        post_ts = _parse_timestamp(post.get("timestamp")) or now
+        # plans/260813_promoter-source-provenance-parity.md §A/§B: the raw
+        # Apify dict's `timestamp` is the post's own upload time — parsed
+        # HERE, once, and kept as its own value (`source_uploaded_at`
+        # below) separately from `post_ts`, which falls back to `now` ONLY
+        # for date resolution (`resolve_event_datetime` needs an anchor
+        # even when the post carries no timestamp). That fallback must
+        # never leak into `source_uploaded_at`: `260813_history-repair-
+        # dates.md` anchors its re-resolution on this column, and a crawl
+        # time silently standing in for a missing upload time would give it
+        # a confidently wrong anchor — worse than the NULL it already knows
+        # how to skip. A present-but-unparseable value (not a merely empty/
+        # missing one) is Apify having changed its format, not a normal gap
+        # — logged at warning so an operator sees a format drift, not an
+        # error for something expected to happen.
+        raw_timestamp = post.get("timestamp")
+        source_uploaded_at = _parse_timestamp(raw_timestamp)
+        if raw_timestamp and source_uploaded_at is None:
+            logger.warning(
+                f"[PromoterCrawl] unparseable post timestamp for "
+                f"{handle}/{shortcode}: {raw_timestamp!r}"
+            )
+        post_ts = source_uploaded_at or now
 
         # plans/260811_post-items-and-categories.md §B: every extracted item
         # is now persisted, typed — `260810_post-kind-and-post-extraction-
@@ -663,14 +684,29 @@ class PromoterCrawlService:
                 "confidence": parsed["confidence"],
                 "review_reason": review_reason,
                 "raw_extraction": parsed,
+                # plans/260813_promoter-source-provenance-parity.md §A: the
+                # NAME COLLISION is deliberate and correct, not a bug — the
+                # raw Apify dict's OWN "post_type" key is the MEDIA type
+                # ("Video"/"Image"/"Sidecar"; see apify_instagram_client.
+                # fetch_recent_posts), a completely different thing from the
+                # `"post_type"` key two lines above (`resolve_post_type(...)`
+                # — event/promotion/menu/food/other, persisted to
+                # events.post_item.post_type). Reading `post["post_type"]`
+                # here is intentional; do not "fix" it to read from `parsed`.
+                # Same value for every event this post yields — a fact about
+                # the PARSE (this ONE post), not any one event — mirroring
+                # `source_events_truncated` below.
+                "source_media_type": post.get("post_type"),
+                # §B: the post's own upload time, parsed once above and
+                # NEVER substituted — NULL when the raw timestamp was
+                # missing, empty, or unparseable (see `source_uploaded_at`'s
+                # computation above `post_ts`). Never `post_ts` itself (which
+                # silently falls back to `now` for date resolution) and
+                # never `first_seen_at` (a crawl time, not a post time).
+                "source_uploaded_at": source_uploaded_at,
                 # plans/260812_crawl-error-visibility.md §D: same value for
                 # every event this post yields — a fact about the PARSE, not
-                # any one event. `source_media_type`/`source_uploaded_at`
-                # (§C) are NOT set here: that plan's own scope is venue
-                # posts, and this path has no `ArchivedPost.media_type`/
-                # `.timestamp` equivalent wired to it (`post` here is the
-                # raw, just-fetched Apify dict, not an archived-and-read-back
-                # ArchivedPost) — left for a follow-up, not silently guessed.
+                # any one event.
                 "source_events_truncated": truncated_by_cap,
                 # plans/260812_event-attribution-and-dates.md §C: the
                 # interpretation ACTUALLY USED to resolve this event's date

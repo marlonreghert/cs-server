@@ -1251,6 +1251,26 @@ EVENT_EXTRACTION_EVENTS_PER_POST = Histogram(
     buckets=(1, 2, 3, 5, 8, 13, 20),
 )
 
+# plans/260813_promoter-source-provenance-parity.md Error Handling: the
+# readiness gate for plans/260813_history-repair-dates.md, which anchors its
+# re-resolution on `source_uploaded_at` and refuses to run when too many
+# rows have no anchor. Labelled by `source_kind` (`promoter_post`/
+# `venue_post`) so a widening null RATE on one writing path is visible even
+# while the other stays healthy — incremented once per freshly written
+# (inserted or ordinarily re-extracted) row in `event_reconciliation.
+# reconcile_post_events`, the ONE place both callers persist through. A
+# `confirmed` row's re-extraction never touches `source_uploaded_at` at all
+# (it is not in PROTECTABLE_EVENT_FIELDS — an operator's confirmation
+# freezes content, this column included) and is deliberately NOT counted
+# here: it is not a fresh write, and counting it would mix "this crawl just
+# produced a null" with "an old, frozen row happens to have one".
+EVENT_SOURCE_UPLOADED_AT_TOTAL = Counter(
+    "event_source_uploaded_at_total",
+    "Source rows freshly written, by writing path and whether an upload "
+    "time was recorded",
+    ["source_kind", "outcome"],  # outcome: present, null
+)
+
 # plans/260811_extract-by-handle.md §Error Handling: a post re-extracted
 # after a date/attribution fix supersedes the stale row(s) it previously
 # produced (event_reconciliation.reconcile_post_events' existing "an event

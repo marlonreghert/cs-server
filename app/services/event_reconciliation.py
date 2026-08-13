@@ -72,7 +72,12 @@ import logging
 from datetime import datetime, timezone
 from typing import Callable, Optional
 
-from app.metrics import EVENT_EXTRACTION_EVENTS_PER_POST, EVENTS_TOTAL, MENU_ITEM_FRESHNESS_TOTAL
+from app.metrics import (
+    EVENT_EXTRACTION_EVENTS_PER_POST,
+    EVENT_SOURCE_UPLOADED_AT_TOTAL,
+    EVENTS_TOTAL,
+    MENU_ITEM_FRESHNESS_TOTAL,
+)
 from app.models.event_kind import KIND_MENU
 from app.models.menu_lifecycle import DEFAULT_MENU_EXPIRY_DAYS, is_menu_item_current
 from app.services.event_identity import compute_source_event_key, normalize_title
@@ -689,6 +694,19 @@ def reconcile_post_events(
             "last_seen_at": now,
         }
         fields.update(prepared)
+
+        # plans/260813_promoter-source-provenance-parity.md Error Handling:
+        # the readiness-gate metric for plans/260813_history-repair-dates.md
+        # — every row this branch freshly writes (insert or an ordinary,
+        # non-confirmed re-extraction), counted once, here, so both callers
+        # (EventExtractionService, PromoterCrawlService) are covered without
+        # a second, duplicated increment in each. See EVENT_SOURCE_UPLOADED_
+        # AT_TOTAL's own docstring for why the confirmed branch above is
+        # deliberately excluded.
+        EVENT_SOURCE_UPLOADED_AT_TOTAL.labels(
+            source_kind=source_kind,
+            outcome="present" if fields.get("source_uploaded_at") is not None else "null",
+        ).inc()
 
         if existing is None:
             event_id = new_event_id()
