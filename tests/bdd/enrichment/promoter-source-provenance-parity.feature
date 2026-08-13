@@ -1,4 +1,3 @@
-@wip
 Feature: Promoter source provenance parity
   Every stored source row records when its post was posted and what medium it
   was, whichever pipeline read it. A missing value is stored as absent, never
