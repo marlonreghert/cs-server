@@ -681,3 +681,47 @@ class TestProductionCorrectLinksUnaffected:
         assert result.resolution == RESOLUTION_AUTO
         assert result.venue_id == f"v_{handle}"
         assert result.method == METHOD_HANDLE_MENTION
+
+
+# ── §B: an event's own unrecognized handle outranks an ambiguous caption ──
+class TestUnrecognizedHandleOutranksAmbiguousCaption:
+    """plans/260813_handle-attribution-hardening.md §B, the diagnosis's own
+    finding: measured on the real pipeline, a promoter roundup whose CAPTION
+    names several known venues caused every event with an unrecognized
+    handle of its OWN to be reported as the generic ambiguous-caption
+    refusal instead of venue_not_in_catalog, because that branch returned
+    before the unrecognized-handle fallback was ever reached. Per-event
+    evidence must outrank post-level evidence for WHY an event has no venue,
+    the same precedence plans/260812_event-attribution-and-dates.md §A
+    already established for WHICH venue an event links to."""
+
+    def test_unrecognized_handle_wins_over_an_ambiguous_caption(self):
+        v1 = _venue("v1", "Seu Chico Botequim")
+        v2 = _venue("v2", "Sempre Rock Bar")
+        handle_index = {"seuchicobotequim": "v1", "semprerockbar": "v2"}
+        result = resolve_event_venue(
+            caption="Roteiro: @seuchicobotequim e @semprerockbar bombando! Ingressos abertos.",
+            location_text="@totallyunknownhandle999", location_tag=None,
+            promoter_handle="oquetemhojeemnatal", venues=[v1, v2], handle_index=handle_index,
+        )
+        assert result.resolution == RESOLUTION_UNRESOLVED
+        assert result.venue_id is None
+        assert result.method == METHOD_VENUE_NOT_IN_CATALOG
+
+    def test_a_genuinely_ambiguous_caption_with_no_event_evidence_still_refuses(self):
+        """Regression guard for the fix above: when the event's own text
+        gives NOTHING (not even an unrecognized handle), the ambiguous-
+        caption refusal must still fire exactly as it did before this
+        plan -- the precedence only applies when there IS a specific
+        per-event signal to prefer."""
+        v1 = _venue("v1", "Seu Chico Botequim")
+        v2 = _venue("v2", "Sempre Rock Bar")
+        handle_index = {"seuchicobotequim": "v1", "semprerockbar": "v2"}
+        result = resolve_event_venue(
+            caption="Roteiro: @seuchicobotequim e @semprerockbar bombando! Ingressos abertos.",
+            location_text=None, location_tag=None,
+            promoter_handle="oquetemhojeemnatal", venues=[v1, v2], handle_index=handle_index,
+        )
+        assert result.resolution == RESOLUTION_UNRESOLVED
+        assert result.venue_id is None
+        assert result.method == METHOD_AMBIGUOUS_CAPTION_REFUSAL

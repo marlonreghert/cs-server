@@ -404,6 +404,24 @@ def _known_venue_mentions(
     return resolved, unrecognized
 
 
+def _venue_not_in_catalog_result(handle: str) -> ResolutionResult:
+    """The ONE place `resolve_event_venue` returns
+    `METHOD_VENUE_NOT_IN_CATALOG` (plans/260813_handle-attribution-
+    hardening.md §B) — both the ladder's own end-of-line fallback and the
+    ambiguous-caption branch's per-event-outranks-post-level short-circuit
+    reach this, so the log line and the metric-visible `method` value can
+    never drift between the two call sites. Logs the handle: this is the
+    venue-acquisition backlog (Error Handling) — the most frequently named
+    unknown handle across these logs is the venue most worth adding next."""
+    logger.info(
+        f"[EventVenueResolution] venue_not_in_catalog: event's own text names "
+        f"unrecognized handle @{handle}"
+    )
+    return ResolutionResult(
+        RESOLUTION_UNRESOLVED, None, METHOD_VENUE_NOT_IN_CATALOG, None, [],
+    )
+
+
 def resolve_event_venue(
     *,
     caption: Optional[str],
@@ -533,6 +551,23 @@ def resolve_event_venue(
             RESOLUTION_AUTO, venue.venue_id, METHOD_CAPTION_HANDLE_MENTION, 1.0, [candidate],
         )
     if len(distinct_caption_venues) > 1:
+        # plans/260813_handle-attribution-hardening.md §B: the event's own
+        # text is per-event evidence; the caption is post-level evidence for
+        # every event the post yields. plans/260812_event-attribution-and-
+        # dates.md §A already established that the FORMER outranks the
+        # LATTER for WHICH venue an event links to (rung 1 before rung 5) —
+        # the same precedence applies to WHY an event has no venue. An
+        # event whose own text names a SPECIFIC handle we do not carry has
+        # concrete per-event evidence; a caption naming several venues is
+        # only ambiguous POST-level evidence. Report the specific reason,
+        # not the ambiguous one — measured live: without this, all 12
+        # unlinked events on one incremental crawl of a roundup account
+        # stored the generic `unresolved_venue` even though every one named
+        # a specific unknown handle, because this branch returned first and
+        # the venue_not_in_catalog check below was never reached for them.
+        if unrecognized_event_handle is not None:
+            return _venue_not_in_catalog_result(unrecognized_event_handle)
+
         # The caption names several known venues and the event's own text
         # gave nothing conclusive — worthless as evidence for THIS event.
         # Refuse rather than guess (the 487/494 bug): no venue, and a
@@ -559,9 +594,7 @@ def resolve_event_venue(
     # still have named a SPECIFIC handle we simply do not carry — concrete
     # evidence of exactly where this is, distinct from "no idea at all".
     if unrecognized_event_handle is not None:
-        return ResolutionResult(
-            RESOLUTION_UNRESOLVED, None, METHOD_VENUE_NOT_IN_CATALOG, None, [],
-        )
+        return _venue_not_in_catalog_result(unrecognized_event_handle)
 
     if not candidates:
         return ResolutionResult(RESOLUTION_UNRESOLVED, None, None, None, [])
