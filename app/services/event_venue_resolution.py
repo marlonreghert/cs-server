@@ -28,7 +28,15 @@ one resolves.
      place", not two that can drift apart — plus proximity:
      `venue_eligibility.haversine_km` breaks ties among same-named venues
      when the location tag supplied coordinates even though its NAME did not
-     clear rung 2's bar.
+     clear rung 2's bar. plans/260813_handle-attribution-hardening.md §A:
+     every `@handle` token is stripped out of `location_text` BEFORE this
+     rung ever sees it (`_strip_handles_for_name_match`) — an @handle is an
+     exact identifier, not a name fragment, and fuzzy-scoring its characters
+     against a venue's name is a category error, not a low-confidence match
+     (`@mahalilacafe` scored 0.76 against "Maria Café" on the shared
+     substring "café", well above the floor). When nothing with actual
+     alphabetic content survives the strip, this rung does not run at all
+     for that text.
   5. @-mention in the POST CAPTION — kept, but demoted below every per-event
      signal, and only trusted when it is UNAMBIGUOUS (the caption names
      exactly one known venue). A caption naming several known venues (a
@@ -56,7 +64,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Callable, Optional
 
-from app.metrics import EVENT_VENUE_LINK_TOTAL
+from app.metrics import EVENT_VENUE_LINK_TOTAL, EVENT_VENUE_NAME_MATCH_SKIPPED_TOTAL
 from app.services.instagram_cascade_service import name_similarity
 from app.services.instagram_handle_sources import normalize_handle
 from app.services.venue_eligibility import haversine_km
@@ -250,6 +258,40 @@ def build_handle_index(venue_dao) -> dict[str, str]:
         for venue_id, handle in (venue_dao.list_instagram_handles() or {}).items()
         if handle
     }
+
+
+def _strip_handles_for_name_match(location_text: Optional[str]) -> Optional[str]:
+    """plans/260813_handle-attribution-hardening.md §A: remove every
+    `@handle` token from `location_text` before it is ever fed to rung 4's
+    fuzzy name-similarity scorer. An `@handle` is an exact identifier — it
+    either resolves against `handle_index` (rung 1) or it does not — never a
+    fragment of a venue's NAME. Feeding it to `name_similarity` anyway is
+    how `@mahalilacafe` (nothing left after stripping) scored 0.76 against
+    "Maria Café" and `@espaco.muta` scored 0.73 against "Espaço Tucano": both
+    comfortably clear `DEFAULT_CONFIDENCE_FLOOR` (0.55) on shared characters
+    that mean nothing about the venue's identity.
+
+    Uses the SAME `_MENTION_RE` rung 1/5 already use to find mentions
+    (including the email-address guard, and handles that themselves contain
+    dots or underscores — `@espaco.muta`, `@bar54_` are real production
+    handles), so "what counts as a handle" has exactly one definition in
+    this module.
+
+    Returns `None` — never an empty or punctuation-only string — when
+    nothing with actual alphabetic content survives the strip, which tells
+    `resolve_event_venue` to skip rung 4 entirely for this text rather than
+    name-match on whatever punctuation or digits happened to be left over.
+    `@obarpraia Ponta Negra` strips to "Ponta Negra", a real place name and
+    legitimate rung-4 input; `@mahalilacafe` strips to "", which returns
+    `None`.
+    """
+    if not location_text:
+        return location_text
+    stripped = _MENTION_RE.sub("", location_text)
+    stripped = re.sub(r"\s+", " ", stripped).strip()
+    if not any(ch.isalpha() for ch in stripped):
+        return None
+    return stripped
 
 
 def _name_match_candidates(
@@ -452,7 +494,18 @@ def resolve_event_venue(
         # guessed here.
 
     # ── Rung 4 — name match, proximity tie-break ─────────────────────────
-    candidates = _name_match_candidates(location_text, venues, tag_coords)
+    # §A: strip @handle tokens before this rung ever sees `location_text` —
+    # an @handle is an identity, not a name fragment (see
+    # `_strip_handles_for_name_match`'s own docstring). `None` means nothing
+    # with real alphabetic content survived the strip, so this rung does not
+    # run at all for this text.
+    name_match_text = _strip_handles_for_name_match(location_text)
+    if name_match_text is None:
+        candidates = []
+        if location_text:
+            EVENT_VENUE_NAME_MATCH_SKIPPED_TOTAL.inc()
+    else:
+        candidates = _name_match_candidates(name_match_text, venues, tag_coords)
     if candidates:
         ok, _reason = gate_auto_link(candidates, floor=confidence_floor, margin=margin)
         if ok:

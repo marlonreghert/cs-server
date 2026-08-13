@@ -9,6 +9,7 @@ helpers — so a regression in the arithmetic fails fast and close to the bug.
 """
 import pytest
 
+from app.metrics import EVENT_VENUE_NAME_MATCH_SKIPPED_TOTAL
 from app.services.event_reconciliation import REVIEW_REASON_VENUE_NOT_IN_CATALOG
 from app.services.event_venue_resolution import (
     DEFAULT_CONFIDENCE_FLOOR,
@@ -24,6 +25,7 @@ from app.services.event_venue_resolution import (
     RESOLUTION_UNRESOLVED,
     LinkCandidate,
     VenueLite,
+    _strip_handles_for_name_match,
     extract_mentions,
     gate_auto_link,
     resolve_event_venue,
@@ -488,3 +490,194 @@ class TestVenueNotInCatalog:
         )
         assert result.resolution == RESOLUTION_AUTO
         assert result.venue_id == "v1"
+
+
+# ── §A: handle stripping before rung 4 ────────────────────────────────────
+# plans/260813_handle-attribution-hardening.md
+class TestStripHandlesForNameMatch:
+    def test_handle_only_strips_to_none(self):
+        assert _strip_handles_for_name_match("@mahalilacafe") is None
+
+    def test_handle_plus_a_place_name_keeps_the_place_name(self):
+        assert _strip_handles_for_name_match("@obarpraia Ponta Negra") == "Ponta Negra"
+
+    def test_a_name_with_no_handle_is_untouched(self):
+        assert _strip_handles_for_name_match("Conchittas Bar - Rua da Imperatriz, 218") == (
+            "Conchittas Bar - Rua da Imperatriz, 218"
+        )
+
+    def test_empty_string_stays_empty_not_none(self):
+        """`None` is reserved for "nothing with alphabetic content survived
+        the strip" — a genuinely empty input was never a handle to begin
+        with, so it must not be conflated with that outcome."""
+        assert _strip_handles_for_name_match("") == ""
+
+    def test_none_input_passes_through(self):
+        assert _strip_handles_for_name_match(None) is None
+
+    def test_handle_with_a_dot_strips_to_none(self):
+        """Real production handle — plans/260813_handle-attribution-
+        hardening.md's own Evidence."""
+        assert _strip_handles_for_name_match("@espaco.muta") is None
+
+    def test_handle_with_a_trailing_underscore_strips_to_none(self):
+        """Real production handle."""
+        assert _strip_handles_for_name_match("@bar54_") is None
+
+    def test_handle_with_underscores_throughout_strips_to_none(self):
+        """Real production handle."""
+        assert _strip_handles_for_name_match("@letra_a_") is None
+
+    def test_punctuation_left_after_stripping_is_still_treated_as_nothing(self):
+        """Only PUNCTUATION survives the strip (no letters) -- must not be
+        handed to the fuzzy scorer as if it were a name."""
+        assert _strip_handles_for_name_match("@mahalilacafe - !!!") is None
+
+    def test_an_email_address_is_never_treated_as_a_handle(self):
+        """The same email guard rung 1/5 already rely on
+        (`_MENTION_RE`'s lookbehind) -- an '@' preceded by a letter is not a
+        mention, so nothing is stripped."""
+        text = "Contato: contato@barexample.com"
+        assert _strip_handles_for_name_match(text) == text
+
+
+class TestRungFourSkippedWhenHandleOnly:
+    def test_rung_four_never_runs_when_nothing_alphabetic_remains(self):
+        """plans/260813_handle-attribution-hardening.md §A: an unresolvable
+        handle must never reach the fuzzy scorer at all -- not "score it and
+        reject the result", but never compute a score in the first place.
+        `candidates` stays empty even though "Maria Café" and "Espaço
+        Tucano" are both in the catalog and DO fuzzy-match
+        `@mahalilacafe`'s characters (the live false positive)."""
+        maria = _venue("v_maria", "Maria Café")
+        espaco = _venue("v_espaco", "Espaço Tucano")
+        result = resolve_event_venue(
+            caption="Confira a programação de hoje!", location_text="@mahalilacafe",
+            location_tag=None, promoter_handle="promo",
+            venues=[maria, espaco], handle_index={},
+        )
+        assert result.candidates == []
+
+    def test_skip_metric_increments_when_rung_four_is_skipped(self):
+        before = EVENT_VENUE_NAME_MATCH_SKIPPED_TOTAL._value.get()
+        resolve_event_venue(
+            caption="Confira a programação de hoje!", location_text="@mahalilacafe",
+            location_tag=None, promoter_handle="promo",
+            venues=[_venue("v_maria", "Maria Café")], handle_index={},
+        )
+        after = EVENT_VENUE_NAME_MATCH_SKIPPED_TOTAL._value.get()
+        assert after == before + 1
+
+    def test_skip_metric_does_not_increment_for_a_genuine_name_match(self):
+        before = EVENT_VENUE_NAME_MATCH_SKIPPED_TOTAL._value.get()
+        resolve_event_venue(
+            caption="Ingressos abertos!", location_text="Sempre Rock Bar",
+            location_tag=None, promoter_handle="promo",
+            venues=[_venue("v1", "Sempre Rock Bar")], handle_index={},
+        )
+        after = EVENT_VENUE_NAME_MATCH_SKIPPED_TOTAL._value.get()
+        assert after == before
+
+    def test_skip_metric_does_not_increment_when_location_text_is_absent(self):
+        """No location_text at all is "nothing to work with", not "a handle
+        with nothing left after stripping" -- the two must not be conflated
+        in the metric that is supposed to prove the fix is doing work."""
+        before = EVENT_VENUE_NAME_MATCH_SKIPPED_TOTAL._value.get()
+        resolve_event_venue(
+            caption="Ingressos abertos!", location_text=None,
+            location_tag=None, promoter_handle="promo",
+            venues=[_venue("v1", "Sempre Rock Bar")], handle_index={},
+        )
+        after = EVENT_VENUE_NAME_MATCH_SKIPPED_TOTAL._value.get()
+        assert after == before
+
+    def test_rung_three_is_unaffected_by_handle_stripping(self):
+        """The plan is explicit that rung 3 (neighbourhood/address) is
+        bounded to a caller-supplied candidate set and untouched by §A --
+        asserted here rather than assumed. An @handle-shaped location_text
+        still lets the RAW text (never stripped) win the neighbourhood
+        rung, exactly as an ordinary neighbourhood string would."""
+        boa_viagem = _venue(
+            "v_bv", "BeerDock Boa Viagem",
+            address="Av. Domingos Ferreira, 1000 - @casaforte, Recife",
+        )
+        casa_forte = _venue(
+            "v_cf", "BeerDock Casa Forte",
+            address="Rua Alfredo Lisboa, 200 - Casa Forte, Recife",
+        )
+        result = resolve_event_venue(
+            caption="Confira nossa unidade!", location_text="@casaforte",
+            location_tag=None, promoter_handle="beerdock_recife",
+            venues=[boa_viagem, casa_forte], handle_index={},
+            same_account_venues=[boa_viagem, casa_forte],
+        )
+        # Rung 3 matched on the RAW (unstripped) "@casaforte" against
+        # `boa_viagem`'s own address, which literally contains that
+        # substring -- proof rung 3 never saw a stripped/altered text.
+        assert result.resolution == RESOLUTION_AUTO
+        assert result.method == METHOD_NEIGHBOURHOOD_MATCH
+        assert result.venue_id == "v_bv"
+
+
+# ── the three production false positives, pinned by NAME ──────────────────
+class TestProductionFalsePositivesByName:
+    """plans/260813_handle-attribution-hardening.md Evidence: these two
+    scored 0.76 and 0.73 against DEFAULT_CONFIDENCE_FLOOR=0.55 on the live
+    resolver before this plan -- comfortably auto-linked. Anything that
+    loosens the handle-stripping rule must break one of these first."""
+
+    def test_mahalilacafe_never_links_to_maria_cafe(self):
+        maria = _venue("v_maria", "Maria Café")
+        result = resolve_event_venue(
+            caption="Confira a programação de hoje! Ingressos abertos.",
+            location_text="@mahalilacafe", location_tag=None,
+            promoter_handle="oquetemhojeemnatal", venues=[maria], handle_index={},
+        )
+        assert result.venue_id != "v_maria"
+        assert result.resolution != RESOLUTION_AUTO
+        assert result.method == METHOD_VENUE_NOT_IN_CATALOG
+
+    def test_espaco_muta_never_links_to_espaco_tucano(self):
+        espaco = _venue("v_espaco", "Espaço Tucano")
+        result = resolve_event_venue(
+            caption="Confira a programação de hoje! Ingressos abertos.",
+            location_text="@espaco.muta", location_tag=None,
+            promoter_handle="oquetemhojeemnatal", venues=[espaco], handle_index={},
+        )
+        assert result.venue_id != "v_espaco"
+        assert result.resolution != RESOLUTION_AUTO
+        assert result.method == METHOD_VENUE_NOT_IN_CATALOG
+
+
+# ── the six production links that were already CORRECT — must not regress ─
+class TestProductionCorrectLinksUnaffected:
+    """plans/260813_handle-attribution-hardening.md: the 2026-08-13 live run
+    also produced six links that were already right. A fix for the three
+    wrong ones must not touch these — every one resolves via rung 1
+    (handle_mention), which §A/§C never modify, but pinned here anyway so a
+    future regression fails close to the bug."""
+
+    _VENUES = [
+        ("Seu Chico Botequim", "seuchicobotequim"),
+        ("Sempre Rock Bar", "semprerockbar"),
+        ("Taverna Pub Medieval Bar & Avalon Events", "tavernapubnatal"),
+        ("Ô Bar Restaurante - Ponta Negra", "obarpontanegra"),
+        ("Bar 54", "bar54_"),
+    ]
+
+    def _catalog(self):
+        venues = [_venue(f"v_{handle}", name) for name, handle in self._VENUES]
+        handle_index = {handle: f"v_{handle}" for _name, handle in self._VENUES}
+        return venues, handle_index
+
+    @pytest.mark.parametrize("venue_name,handle", _VENUES)
+    def test_handle_still_links_to_its_venue(self, venue_name, handle):
+        venues, handle_index = self._catalog()
+        result = resolve_event_venue(
+            caption="Roteiro de hoje em Natal! Ingressos abertos.",
+            location_text=f"@{handle}", location_tag=None,
+            promoter_handle="oquetemhojeemnatal", venues=venues, handle_index=handle_index,
+        )
+        assert result.resolution == RESOLUTION_AUTO
+        assert result.venue_id == f"v_{handle}"
+        assert result.method == METHOD_HANDLE_MENTION
