@@ -6,6 +6,8 @@ Feature: Add venue as a pollable background job
   that. Operators must be able to start an add and poll for its outcome
   instead of holding one HTTP request open for the whole duration, without
   losing any of the existing outcome detail the synchronous endpoint reports.
+  Operators must also be able to see recent add attempts and their outcomes —
+  including a failure's reason — without having kept a poll open on them.
 
   Background:
     Given the monthly new venue quota is configured to 500
@@ -80,3 +82,36 @@ Feature: Add venue as a pollable background job
     When the operator starts an add job for a new venue
     Then the add job's start response status must be 202
     And the add job must finish with status "done"
+
+  Scenario: A just-started job appears in the recent-jobs list as running
+    Given the operator has started an add job for a new venue
+    When the operator lists recent add jobs
+    Then the recent-jobs response status must be 200
+    And the recent-jobs list must include that job with status "running"
+
+  Scenario: A finished created job appears in the recent-jobs list with its outcome
+    Given the BestTime account inventory does not contain the submitted address
+    And the operator has started an add job for venue_name "Bar do Joao", venue_address "Rua das Flores 123, Recife - PE", venue_lat -8.05, and venue_lng -34.88
+    And the job has finished
+    When the operator lists recent add jobs
+    Then the recent-jobs list must include that job with status "done" and outcome "created"
+
+  Scenario: A job BestTime rejected appears in the recent-jobs list with the rejection message as its reason
+    Given BestTime rejects a venue create with an explanatory message
+    And the operator has started an add job for a new venue
+    And the job has finished
+    When the operator lists recent add jobs
+    Then the recent-jobs list must include that job showing the BestTime rejection message as its failure reason
+
+  Scenario: A crashed job appears in the recent-jobs list as failed with its error
+    Given the add job's runner crashes unexpectedly
+    And the operator has started an add job for a new venue
+    And the job has finished
+    When the operator lists recent add jobs
+    Then the recent-jobs list must include that job with status "failed" and its error text
+
+  Scenario: The recent-jobs list never exceeds its cap
+    Given more add jobs have been started than the recent-jobs cap allows
+    When the operator lists recent add jobs
+    Then the recent-jobs list must contain at most the capped number of entries
+    And the recent-jobs list must show the most recently started jobs, not the oldest
