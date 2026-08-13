@@ -329,8 +329,15 @@ def step_when_operator_reads_crawl_targets(context):
 
 @then('"{handle}" reports its last failure kind')
 def step_then_reports_last_failure_kind(context, handle):
+    """Asserts only that SOME failure kind was recorded — not which one.
+    plans/260813_crawl-transport-failure-visibility.md reuses this IDENTICAL
+    step text for a scenario whose failure kind is `failed` (a timeout), not
+    `handle_not_found`; Behave dispatches by literal text, so a single
+    function must serve both. The `not_found` scenario THIS feature file
+    covers already pins the specific value via the separate "the posts
+    stream outcome is recorded as a handle-not-found failure" step above."""
     target = context.ic_admin_targets[handle]
-    assert target.last_failure_kind == "handle_not_found", target
+    assert target.last_failure_kind is not None, target
 
 
 @then('"{handle}" reports when that failure was observed')

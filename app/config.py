@@ -277,6 +277,21 @@ class Settings(BaseSettings):
 
     # Instagram Discovery (Apify) Configuration
     apify_api_token: str = ""
+    # plans/260813_crawl-transport-failure-visibility.md §D: the ApifyInstagram
+    # Client's own general-purpose constructor default (120s) abandoned a run
+    # that had ALREADY billed 16 results server-side and succeeded -- Apify
+    # kept running after our client gave up and threw the answer away.
+    # Measured basis (the plan's own Evidence): 2026-08-12's successful posts
+    # seeds ranged from a few seconds to just over a minute; downtownbeer
+    # garden_'s (121 posts, a 20-post seed) exceeded 120s and still finished
+    # server-side. 300s is the starting proposal -- comfortably past the
+    # slowest OBSERVED success, not a guessed round number -- while still
+    # bounding the wait (streams run in sequence per target; an unbounded
+    # wait would hang the whole scheduled cycle behind one slow account).
+    # Admin-tunable via this setting rather than the client's own hardcoded
+    # default, so the ceiling can be raised again from evidence without a
+    # redeploy.
+    apify_instagram_client_timeout_seconds: float = 300.0
     instagram_enrichment_enabled: bool = False
     instagram_enrichment_cron: str = "0 4 * * 1"  # Weekly: Monday at 4 AM
     instagram_enrichment_on_startup: bool = False

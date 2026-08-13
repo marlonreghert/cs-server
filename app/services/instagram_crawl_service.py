@@ -135,13 +135,22 @@ OUTCOME_BOOKKEEPING_FAILED = "bookkeeping_failed"
 # `OUTCOME_HANDLE_NOT_FOUND` is Apify's own `not_found` — PERMANENT, the
 # handle does not exist; `run_target` disables the target rather than
 # retrying a scrape that will never succeed. Both are DISTINCT from
-# `OUTCOME_FAILED` (a transport-level exception, or an unrecognised Apify
-# error code) and from `OUTCOME_EMPTY` (no error item at all, or `no_items`
-# with no request errors — a genuinely empty/private stream): a real empty
-# stream must stay `empty` and must NOT increment `consecutive_failures`;
-# these two, and `OUTCOME_FAILED`, all do. Never reuse `OUTCOME_NOT_FOUND`
-# for this — that constant already means "this handle has no crawl_target
-# row in our own DB at all," an unrelated concept.
+# `OUTCOME_FAILED` — an in-process exception escaping the fetch call (see
+# `_run_stream`'s own `except Exception` below), an unrecognised Apify error
+# code, OR (plans/260813_crawl-transport-failure-visibility.md §A/§B) one of
+# FetchPostsResult's own transport codes (`timeout`/`http_error`/
+# `request_error`, surfaced when the Apify CLIENT itself failed at the HTTP
+# layer rather than Apify ever running) — and from `OUTCOME_EMPTY` (no error
+# item at all, or `no_items` with no request errors — a genuinely empty/
+# private stream): a real empty stream must stay `empty` and must NOT
+# increment `consecutive_failures`; these two, and `OUTCOME_FAILED`, all do.
+# No dedicated branch exists for the three transport codes below (`if not
+# kept:`) — they fall through the SAME "anything else is a failure" `elif
+# error_code is not None` arm an unrecognised Apify code already used, since
+# a timeout and an in-process exception are the same fact: the call did not
+# answer. Never reuse `OUTCOME_NOT_FOUND` for this — that constant already
+# means "this handle has no crawl_target row in our own DB at all," an
+# unrelated concept.
 OUTCOME_BLOCKED = "blocked"
 OUTCOME_HANDLE_NOT_FOUND = "handle_not_found"
 # The set of per-stream outcomes that count as a FAILED fetch — increments
@@ -936,6 +945,33 @@ def reels_skip_reason(target: dict) -> Optional[str]:
     return None
 
 
+def posts_never_seeded(target: dict) -> bool:
+    """Whether this target's posts stream has run at least once and STILL
+    never produced a cursor — `cursor_posts_at IS NULL AND last_run_at IS
+    NOT NULL`, already the "never successfully seeded" signal this codebase
+    uses (see `reels_already_seeded`'s own docstring for why the CURSOR,
+    never a separate flag, is the source of truth: it stays null until a
+    run's bookkeeping write actually succeeds, so a flag would have to be
+    unset by hand on every failure path to keep a failed seed retryable).
+
+    A target that has never run at all (`last_run_at` also null) is NOT
+    reportable — there is nothing yet to be alarmed about, and reporting it
+    would make every freshly-created target read as broken on creation.
+    This is specifically a target that HAS tried, one or more times, and
+    keeps coming back empty-handed — plans/260813_crawl-transport-failure-
+    visibility.md §E: `downtownbeergarden_` sat in exactly this state for
+    months before a timeout finally surfaced the underlying account, and
+    nothing reported the standing condition itself; an operator had to
+    notice two columns by hand. Deliberately reads ONLY the posts cursor —
+    the plan scopes this to the posts stream, which is what every target
+    runs; reels is seed-only and already has its own visibility
+    (`reels_skip_reason`/`effective_reels_seed_results_limit`)."""
+    return (
+        _as_utc_dt(target.get("cursor_posts_at")) is None
+        and target.get("last_run_at") is not None
+    )
+
+
 class ScheduledInstagramCrawlService:
     """Orchestrates one crawl target end to end: gate -> bound -> fetch ->
     pinned-post filtering -> cursor advance (success only) -> chaining. See
@@ -1059,16 +1095,21 @@ class ScheduledInstagramCrawlService:
         kept, dropped = _split_kept_and_dropped(raw_posts or [], bound.cutoff_at)
 
         if not kept:
-            # §A/§B: an error item present (even alongside zero KEPT posts —
-            # e.g. every returned post was pinned-and-dropped is NOT this
-            # branch, since `kept` empty here means raw_posts itself yielded
-            # nothing usable) changes what "nothing came back" MEANS.
-            # `not_found` is permanent; `no_items` with request errors is a
-            # transient block; `no_items` with none is a genuinely empty/
-            # private stream (still OUTCOME_EMPTY); anything else Apify has
-            # never been seen to return is treated as a transient failure,
-            # never silently folded into "empty" (the whole defect this plan
-            # exists to close).
+            # §A/§B (plans/260812_crawl-error-visibility.md): an error item
+            # present (even alongside zero KEPT posts — e.g. every returned
+            # post was pinned-and-dropped is NOT this branch, since `kept`
+            # empty here means raw_posts itself yielded nothing usable)
+            # changes what "nothing came back" MEANS. `not_found` is
+            # permanent; `no_items` with request errors is a transient
+            # block; `no_items` with none is a genuinely empty/private
+            # stream (still OUTCOME_EMPTY); anything else — an Apify code
+            # never seen before, OR (plans/260813_crawl-transport-failure-
+            # visibility.md §A/§B) one of THIS client's own transport codes
+            # (`timeout`/`http_error`/`request_error`) — is treated as a
+            # transient failure, never silently folded into "empty" (the
+            # whole defect 260812 exists to close, and 260813 closes for the
+            # transport layer specifically: a timeout is not an empty
+            # account either).
             if error_code == "not_found":
                 outcome = OUTCOME_HANDLE_NOT_FOUND
             elif error_code == "no_items":

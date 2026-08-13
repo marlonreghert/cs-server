@@ -110,6 +110,33 @@ class ApifyCreditExhaustedError(Exception):
     pass
 
 
+class ApifyTransportFailure(Exception):
+    """Raised INTERNALLY by `_run_actor_sync` when the actor call fails at
+    the HTTP/transport layer (a timeout, a non-2xx response, or a connection
+    error) -- never for an Apify-issued dataset error item, which
+    `_run_actor_sync` never inspects (it only returns the raw decoded JSON
+    body). `code` is one of `"timeout"`/`"http_error"`/`"request_error"` --
+    the values plans/260813_crawl-transport-failure-visibility.md §A defines
+    on `FetchPostsResult.error_code`, chosen so they can never collide with
+    an Apify-issued code (`no_items`, `not_found`, ...) -- see
+    `FetchPostsResult`'s own docstring.
+
+    Caught immediately by BOTH of `_run_actor_sync`'s callers (`search_
+    users`, `fetch_recent_posts`), just below where each already calls it --
+    this exception never escapes this module. Raising here (rather than the
+    OLD contract of returning `None`) is what lets the failure TYPE survive
+    at all: a bare `None` return could not carry which of the three
+    transport failures happened, and every caller's own `if not items:`
+    check could not tell that `None` apart from a genuinely empty dataset
+    (`[]`) either -- both are falsy. `search_users` degrades exactly as it
+    did before (a transport failure yields no search results, same as
+    today); `fetch_recent_posts` is the one caller that now reads `.code`."""
+
+    def __init__(self, code: str):
+        super().__init__(code)
+        self.code = code
+
+
 @dataclass(frozen=True)
 class FetchPostsResult:
     """`fetch_recent_posts`'s return shape (plans/260812_crawl-error-
@@ -123,17 +150,27 @@ class FetchPostsResult:
     `ApifyPromoterPostsClient.fetch_recent_posts`) reads only `.posts` and
     is otherwise unaffected.
 
-    `error_code` is Apify's own `error` value verbatim (e.g. `"not_found"`,
-    `"no_items"`), or None when the dataset carried no error item at all —
-    the common case, and the ONLY thing that means "no error". `error_
-    description` is Apify's own `errorDescription` prose, carried through
-    for logging ONLY: `not_found` and a genuinely-blocked `no_items` can
-    share the exact same description text, so control flow must never
-    branch on it (see the module's `fetch_recent_posts` docstring).
-    `request_error_count` is `len(requestErrorMessages)` on the error item —
-    the one signal, alongside `error_code`, that tells a real Instagram
-    block (a non-empty count) apart from a genuinely empty/private stream
-    (zero) when `error_code == "no_items"`.
+    `error_code` is EITHER Apify's own `error` value verbatim (e.g.
+    `"not_found"`, `"no_items"` — Apify owns these), OR one of
+    `"timeout"`/`"http_error"`/`"request_error"` when `_run_actor_sync`
+    itself failed at the transport layer instead of Apify ever running (this
+    client owns these — plans/260813_crawl-transport-failure-visibility.md
+    §A). The two families can never collide (Apify has never issued, and is
+    not expected to issue, any of the three transport strings). `None` means
+    the dataset carried no error item AND the call itself succeeded — the
+    common case, and the ONLY value that means "no error at all". Before
+    260813, a transport failure collapsed into `posts=[], error_code=None`,
+    indistinguishable from a genuinely empty account.
+    `error_description` is Apify's own `errorDescription` prose (always
+    `None` for a transport failure, which has no Apify dataset item to read
+    one from), carried through for logging ONLY: `not_found` and a
+    genuinely-blocked `no_items` can share the exact same description text,
+    so control flow must never branch on it (see the module's `fetch_
+    recent_posts` docstring). `request_error_count` is `len(requestError
+    Messages)` on the error item (always 0 for a transport failure) — the
+    one signal, alongside `error_code`, that tells a real Instagram block (a
+    non-empty count) apart from a genuinely empty/private stream (zero) when
+    `error_code == "no_items"`.
     """
 
     posts: list = field(default_factory=list)
@@ -145,7 +182,18 @@ class FetchPostsResult:
 class ApifyInstagramClient:
     """Async HTTP client for Apify Instagram scraper actors."""
 
-    def __init__(self, api_token: str, timeout: float = 120.0):
+    # plans/260813_crawl-transport-failure-visibility.md §D: 120s abandoned a
+    # run that had ALREADY billed results server-side and succeeded --
+    # 2026-08-13, downtownbeergarden_ (121 posts, a 20-post seed): Apify's
+    # run succeeded with 16 items, our client gave up two minutes in and
+    # threw the answer away. 300s is the starting proposal, comfortably past
+    # the slowest OBSERVED success on 2026-08-12 (a few seconds to just over
+    # a minute) -- container.py wires the real, admin-tunable value from
+    # `settings.apify_instagram_client_timeout_seconds`; this default only
+    # matters for a caller that constructs the client directly (tests, or a
+    # future script), and must not silently regress back to the value that
+    # caused the incident.
+    def __init__(self, api_token: str, timeout: float = 300.0):
         self.api_token = api_token
         self.timeout = timeout
         self.client = httpx.AsyncClient(
@@ -179,9 +227,16 @@ class ApifyInstagramClient:
             "resultsLimit": results_limit,
         }
 
-        items = await self._run_actor_sync(
-            SEARCH_ACTOR, run_input, endpoint_label="search_users"
-        )
+        try:
+            items = await self._run_actor_sync(
+                SEARCH_ACTOR, run_input, endpoint_label="search_users"
+            )
+        except ApifyTransportFailure:
+            # Degrades exactly as a transport failure always has for this
+            # caller (it never surfaced a distinction to begin with) — only
+            # `fetch_recent_posts` below reads the failure's TYPE (plans/
+            # 260813_crawl-transport-failure-visibility.md §A).
+            return []
 
         if not items:
             return []
@@ -281,10 +336,12 @@ class ApifyInstagramClient:
             error item instead of silently discarding it (plans/260812_
             crawl-error-visibility.md §A) — see FetchPostsResult's own
             docstring for what each means and why control flow must never
-            read `.error_description`'s text. `.posts` is `[]` on a
-            transport-level failure (unchanged from before this dataclass
-            existed — `_run_actor_sync` itself already returns None/[] and
-            logs the transport error).
+            read `.error_description`'s text. `.posts` is ALSO `[]` on a
+            transport-level failure, but as of plans/260813_crawl-transport-
+            failure-visibility.md §A that case is no longer indistinguishable
+            from a genuinely empty dataset: `.error_code` is `"timeout"`/
+            `"http_error"`/`"request_error"` (never `None`) when
+            `_run_actor_sync` raised `ApifyTransportFailure`, caught here.
         """
         run_input = {
             "directUrls": [f"https://www.instagram.com/{username}/"],
@@ -294,9 +351,18 @@ class ApifyInstagramClient:
         if only_posts_newer_than:
             run_input["onlyPostsNewerThan"] = only_posts_newer_than
 
-        items = await self._run_actor_sync(
-            "apify~instagram-scraper", run_input, endpoint_label="instagram_posts"
-        )
+        try:
+            items = await self._run_actor_sync(
+                "apify~instagram-scraper", run_input, endpoint_label="instagram_posts",
+                username=username,
+            )
+        except ApifyTransportFailure as e:
+            # The defect plans/260813_crawl-transport-failure-visibility.md
+            # §A exists to close: before this, `_run_actor_sync` returned
+            # `None` here and fell straight into the SAME `if not items:`
+            # branch below as a genuinely empty dataset, so `.error_code`
+            # stayed `None` and a caller could never tell the two apart.
+            return FetchPostsResult(posts=[], error_code=e.code)
 
         if not items:
             return FetchPostsResult(posts=[])
@@ -359,14 +425,39 @@ class ApifyInstagramClient:
         )
 
     async def _run_actor_sync(
-        self, actor_id: str, run_input: dict, endpoint_label: str
-    ) -> Optional[list[dict]]:
+        self, actor_id: str, run_input: dict, endpoint_label: str,
+        *, username: Optional[str] = None,
+    ) -> list[dict]:
         """Run an Apify actor synchronously and return dataset items.
 
         Uses the run-sync-get-dataset-items endpoint for simplicity.
+
+        Returns the raw dataset items on success (an empty list IS a valid,
+        genuinely-empty success — never confused with failure). Raises
+        `ApifyCreditExhaustedError` on a 402, or `ApifyTransportFailure` for
+        a timeout/non-2xx response/connection error (plans/260813_crawl-
+        transport-failure-visibility.md §A) — before this plan, those three
+        cases returned `None` instead, which every caller's own `if not
+        items:` check could not distinguish from a genuinely empty dataset
+        (`[]`, also falsy). Raising instead of returning a sentinel is what
+        lets the failure's TYPE reach `fetch_recent_posts`.
+
+        `username` (plan §C) is included in the timeout/HTTP-error/request-
+        error log lines below when the caller has one to give — ONLY `fetch_
+        recent_posts` does; `search_users` has no single handle (a search
+        query can match many) and passes nothing, so those log lines stay
+        exactly as they were. Without this, `endpoint_label` alone
+        (`instagram_posts`, identical for every target) cannot be attributed
+        to a handle from logs — the exact gap that cost a full diagnostic
+        round trip on 2026-08-13 (downtownbeergarden_'s timeout was sitting
+        in the logs, unattributable, while grepping by handle returned
+        nothing).
         """
         url = f"{APIFY_API_BASE}/acts/{actor_id}/run-sync-get-dataset-items"
         params = {"token": self.api_token}
+        # Appended verbatim to each transport-error log line below; empty
+        # when the caller has no single handle to name (`search_users`).
+        who = f" (@{username})" if username else ""
 
         start_time = time.perf_counter()
         try:
@@ -403,12 +494,12 @@ class ApifyInstagramClient:
                 endpoint=endpoint_label, error_type="http_error"
             ).inc()
             logger.error(
-                f"[ApifyInstagram] HTTP error for {endpoint_label}: "
+                f"[ApifyInstagram] HTTP error for {endpoint_label}{who}: "
                 f"{e.response.status_code} {e.response.text[:200]}"
             )
-            return None
+            raise ApifyTransportFailure("http_error") from e
 
-        except httpx.TimeoutException:
+        except httpx.TimeoutException as e:
             duration = time.perf_counter() - start_time
             APIFY_API_CALL_DURATION_SECONDS.labels(endpoint=endpoint_label).observe(duration)
             APIFY_API_CALLS_TOTAL.labels(
@@ -417,8 +508,8 @@ class ApifyInstagramClient:
             APIFY_API_ERRORS_TOTAL.labels(
                 endpoint=endpoint_label, error_type="timeout"
             ).inc()
-            logger.error(f"[ApifyInstagram] Timeout for {endpoint_label}")
-            return None
+            logger.error(f"[ApifyInstagram] Timeout for {endpoint_label}{who}")
+            raise ApifyTransportFailure("timeout") from e
 
         except httpx.RequestError as e:
             duration = time.perf_counter() - start_time
@@ -429,5 +520,5 @@ class ApifyInstagramClient:
             APIFY_API_ERRORS_TOTAL.labels(
                 endpoint=endpoint_label, error_type="connection_error"
             ).inc()
-            logger.error(f"[ApifyInstagram] Request error for {endpoint_label}: {e}")
-            return None
+            logger.error(f"[ApifyInstagram] Request error for {endpoint_label}{who}: {e}")
+            raise ApifyTransportFailure("request_error") from e
