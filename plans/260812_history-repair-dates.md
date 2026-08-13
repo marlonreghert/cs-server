@@ -23,7 +23,7 @@ re-extraction.
 ## Evidence
 
 ### The forward fix leaves the wrong dates in place
-`260812_event-attribution-and-dates.md` §C/§D teaches the resolver `É HOJE`,
+`260812_event-attribution-and-dates.md` §C/§D teaches the resolver
 `de X a Y`, three-letter months, weekday-plus-day, and a grace window on the
 year roll. It changes nothing already stored. Known-wrong rows as of the
 2026-08-12 snapshot:
@@ -44,6 +44,40 @@ rows have been crawled since; the forward fix will have corrected some of them
 at the source; and the 2027 rows may have been superseded. The dry run is the
 measurement — see §E. Do not carry these numbers into the PR as expected
 results.
+
+**Correction, 2026-08-13: `É HOJE` was never taught to the deterministic
+resolver.** An earlier revision of this plan claimed
+`260812_event-attribution-and-dates.md` §C did so. It did not. §C added the
+model's optional `date_interpretation` as a *fallback*, which resolves `É HOJE`
+only when the model volunteers a `{"kind": "relative", "relative": "hoje"}`
+reading — and the model returned null for the Rodolpho post. The deterministic
+path still matches five exact literals by whole-string equality, so `É HOJE`
+resolves to nothing today. Verified by replaying that row's own stored model
+output through the current resolver.
+
+The deterministic gap is closed by **`260813_review-gate-and-date-vocabulary.md`
+§A**, which is now a hard prerequisite of this plan: running the repair before
+it would leave `É HOJE`, `Hoje!` and `É AMANHÃ` unresolved and would have to be
+run a second time.
+
+### The queue is showing defects that were already fixed
+Replaying all ten queued rows through the current resolver on 2026-08-13 found
+three whose stored value is wrong and whose correct value is already computable:
+
+| row | `date_text` | stored | resolver today |
+|---|---|---|---|
+| `SÁBADO DO CONCHITTAS` | `08/08` | 2027-08-08 | **2026**-08-08 21:00 |
+| `Casa BeerDock 2027` | `De 06 a 09 de fevereiro` | 2027-02-**09** | 2027-02-**06**, range flagged |
+| `Especial do dia` | — (`de segunda a sexta`) | no date | 2026-07-09 11:00, recurring |
+
+This is the operator-visible cost of not running this plan: a forward fix leaves
+its own evidence sitting in the review queue, which reads as the same bug
+recurring.
+
+### The prerequisite anchor is now complete
+`source_uploaded_at` — called out below as a hard prerequisite — was back-filled
+on 2026-08-13 and is now present on **114 of 114** venue-sourced rows
+(promoter-sourced rows reached 564/587). The anchor this plan needs exists.
 
 ### The inputs are already in RDS, or will be
 `post_item_source.raw_extraction` carries the model's verbatim `date_text` and
