@@ -44,6 +44,7 @@ from app.api.openai_event_extraction_client import (
     parse_multi_event_extraction_response,
 )
 from app.metrics import (
+    EVENT_DATE_RESOLUTION_TOTAL,
     EVENT_EXTRACTION_CAP_TRUNCATED_POSTS_TOTAL,
     EVENT_EXTRACTION_MALFORMED_ATTRACTIONS_TOTAL,
     EVENT_EXTRACTION_MALFORMED_EVENTS_TOTAL,
@@ -576,17 +577,27 @@ class PromoterCrawlService:
         # `EventExtractionService._extract_one` exactly — the two paths must
         # not drift on how a post's dates are resolved.
         interpretations_used: list = []
+        reused_interpretation_flags: list = []
         resolved_dates = []
         for parsed in kept_events:
             existing_row = existing_by_title.get(normalize_title(parsed.get("title")))
             stored_raw = (existing_row or {}).get("raw_extraction") or {}
+            stored_date_text = stored_raw.get("date_text")
+            stored_interpretation = (existing_row or {}).get("date_interpretation")
             interpretation_to_use = select_date_interpretation_for_reuse(
                 fresh_date_text=parsed["date_text"],
                 fresh_interpretation=parsed.get("date_interpretation"),
-                stored_date_text=stored_raw.get("date_text"),
-                stored_interpretation=(existing_row or {}).get("date_interpretation"),
+                stored_date_text=stored_date_text,
+                stored_interpretation=stored_interpretation,
             )
             interpretations_used.append(interpretation_to_use)
+            # Mirrors select_date_interpretation_for_reuse's OWN reuse
+            # condition — see EventExtractionService's identical wiring.
+            reused_interpretation_flags.append(
+                stored_interpretation is not None
+                and parsed["date_text"] == stored_date_text
+                and parsed["date_text"] is not None
+            )
             resolved_dates.append(resolve_event_datetime(
                 date_text=parsed["date_text"], time_text=parsed["time_text"],
                 post_timestamp=post_ts,
@@ -597,9 +608,19 @@ class PromoterCrawlService:
         resolved_dates = vote_on_sibling_years(resolved_dates)
 
         prepared_events: list[dict] = []
-        for parsed, resolved_date, interpretation_used in zip(
-            kept_events, resolved_dates, interpretations_used,
+        for parsed, resolved_date, interpretation_used, reused_interpretation in zip(
+            kept_events, resolved_dates, interpretations_used, reused_interpretation_flags,
         ):
+            # plans/260812_event-attribution-and-dates.md Error Handling:
+            # "the fallback rate is the signal that matters".
+            if resolved_date.date_source == "structured_fallback":
+                date_resolution_path = (
+                    "stored_interpretation_reuse" if reused_interpretation else "structured_fallback"
+                )
+            else:
+                date_resolution_path = resolved_date.date_source
+            EVENT_DATE_RESOLUTION_TOTAL.labels(path=date_resolution_path).inc()
+
             reasons: list[str] = []
             if resolved_date.review_reason:
                 # Use the resolver's OWN reason rather than assuming

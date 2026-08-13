@@ -49,6 +49,7 @@ them.
 """
 from __future__ import annotations
 
+import logging
 import re
 import unicodedata
 from dataclasses import dataclass, field
@@ -59,6 +60,8 @@ from app.metrics import EVENT_VENUE_LINK_TOTAL
 from app.services.instagram_cascade_service import name_similarity
 from app.services.instagram_handle_sources import normalize_handle
 from app.services.venue_eligibility import haversine_km
+
+logger = logging.getLogger(__name__)
 
 # Rung 1 (event's own location_text) AND rung 5 (post caption, demoted) both
 # resolve via an exact @-mention identity — the SAME method value the ladder
@@ -483,6 +486,18 @@ def resolve_event_venue(
         # method SENTINEL (never persisted to linked_by — see its own
         # docstring) so the metric can tell this refusal apart from a
         # genuine no-evidence unresolved.
+        #
+        # Logged with the mention count (plans/260812_event-attribution-
+        # and-dates.md Error Handling): "a promoter whose EVERY post
+        # refuses is a target that needs a different strategy, not a bug"
+        # — an operator grepping logs needs the count to tell "one chatty
+        # roundup" from "this account's captions are systematically
+        # unusable as evidence."
+        logger.info(
+            "[EventVenueResolution] ambiguous caption refusal: caption names "
+            f"{len(distinct_caption_venues)} known venues, event's own text "
+            "gave nothing conclusive"
+        )
         return ResolutionResult(
             RESOLUTION_UNRESOLVED, None, METHOD_AMBIGUOUS_CAPTION_REFUSAL, None, [],
         )

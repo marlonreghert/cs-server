@@ -615,6 +615,16 @@ class ResolvedDate:
     # §B: several dates were stated for one event ("01, 02 e 03 de julho")
     # and only the FIRST was kept as `starts_at`.
     date_range: bool = False
+    # plans/260812_event-attribution-and-dates.md §C/Error Handling: how
+    # THIS date was actually reached — "deterministic" (a regex finder in
+    # this module resolved it, recurrence included — the model's
+    # `date_interpretation` was never even consulted), "structured_fallback"
+    # (the deterministic finders found nothing and `date_interpretation`
+    # resolved it), or "unresolved" (nothing resolved it). The caller
+    # (EVENT_DATE_RESOLUTION_TOTAL) is what further splits a fallback into
+    # "fresh" vs "reused" — this module has no notion of "stored", so it
+    # cannot make that distinction itself.
+    date_source: str = "unresolved"
 
 
 # ── §C: the model interprets, Python computes ───────────────────────────────
@@ -816,6 +826,7 @@ def resolve_event_datetime(
     review_reason: Optional[str] = None
     year_inferred = False
     date_range = False
+    date_source = "deterministic"
     if recurring:
         # The recurrence path never reaches _resolve_explicit_date, so it can
         # never trip the weekday-corroboration guard above — there is no
@@ -845,6 +856,7 @@ def resolve_event_datetime(
             review_reason = fallback_reason
             year_inferred = fallback_year_inferred
             date_range = fallback_range
+            date_source = "structured_fallback"
 
     if resolved_date is None:
         return ResolvedDate(
@@ -855,7 +867,7 @@ def resolve_event_datetime(
             # covers it, and "the year was inferred"/"a range was collapsed"
             # mean nothing without a resolved date to have inferred or
             # collapsed.
-            year_inferred=False, date_range=date_range,
+            year_inferred=False, date_range=date_range, date_source="unresolved",
         )
 
     start_time, end_time = _parse_time_text(time_text)
@@ -891,7 +903,7 @@ def resolve_event_datetime(
         # None (no OTHER problem) — see `year_inferred`'s own docstring.
         needs_review=review_reason is not None or year_inferred,
         review_reason=review_reason, time_known=time_known,
-        year_inferred=year_inferred, date_range=date_range,
+        year_inferred=year_inferred, date_range=date_range, date_source=date_source,
     )
 
 

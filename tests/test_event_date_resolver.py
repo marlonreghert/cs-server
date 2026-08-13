@@ -996,6 +996,7 @@ class TestStructuredInterpretationFallback:
         assert resolved.starts_at is not None, resolved
         assert resolved.starts_at.date().isoformat() == "2026-08-07", resolved
         assert resolved.needs_review is False, resolved
+        assert resolved.date_source == "structured_fallback", resolved
 
     def test_the_fallback_is_never_consulted_when_the_deterministic_path_resolves(self):
         """Loud proof the fallback is a fallback: a deterministic date_text
@@ -1092,6 +1093,43 @@ class TestStructuredInterpretationFallback:
         )
         assert resolved.starts_at is not None, resolved
         assert resolved.starts_at.date().isoformat() == "2026-08-07", resolved
+
+
+# ── §C/Error Handling: date_source (deterministic / fallback / unresolved) ──
+class TestDateSource:
+    """`ResolvedDate.date_source` is what
+    app.metrics.EVENT_DATE_RESOLUTION_TOTAL is built from — "the fallback
+    rate is the signal that matters" per the plan's own Error Handling
+    section."""
+
+    def test_a_deterministic_numeric_date_reports_deterministic(self):
+        post_ts = _post_at(2026, 8, 12)
+        resolved = resolve_event_datetime(
+            date_text="15/08", time_text=None, post_timestamp=post_ts,
+        )
+        assert resolved.date_source == "deterministic", resolved
+
+    def test_a_recurring_post_reports_deterministic(self):
+        post_ts = _post_at(2026, 7, 16)
+        resolved = resolve_event_datetime(
+            date_text="toda quinta", time_text=None, post_timestamp=post_ts,
+        )
+        assert resolved.date_source == "deterministic", resolved
+
+    def test_an_unresolved_date_reports_unresolved(self):
+        post_ts = _post_at(2026, 8, 12)
+        resolved = resolve_event_datetime(
+            date_text="algo ilegivel", time_text=None, post_timestamp=post_ts,
+        )
+        assert resolved.date_source == "unresolved", resolved
+
+    def test_a_fallback_resolved_date_reports_structured_fallback(self):
+        post_ts = _post_at(2026, 8, 7)
+        resolved = resolve_event_datetime(
+            date_text="É HOJE", time_text=None, post_timestamp=post_ts,
+            date_interpretation={"kind": "relative", "relative": "hoje"},
+        )
+        assert resolved.date_source == "structured_fallback", resolved
 
 
 # ── §C: determinism guard ─────────────────────────────────────────────────────

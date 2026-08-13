@@ -1327,6 +1327,25 @@ EVENT_VENUE_LINK_TOTAL = Counter(
     ["method", "result"],
 )
 
+# plans/260812_event-attribution-and-dates.md §C/Error Handling: how each
+# event's date was actually reached — `deterministic` (the proven regex
+# finders in event_date_resolver.py resolved it on their own, no model
+# fallback consulted), `structured_fallback` (the deterministic finders
+# found nothing and the model's date_interpretation resolved it),
+# `stored_interpretation_reuse` (the determinism guard reused a PREVIOUSLY
+# stored interpretation rather than trusting a fresh, possibly-different
+# model answer), or `unresolved` (nothing resolved it at all). The
+# FALLBACK rate is the signal that matters here: if it climbs, the
+# deterministic finders are decaying against real flyer text and nobody
+# would otherwise notice — a dashboard should watch it, not just today's
+# raw count.
+EVENT_DATE_RESOLUTION_TOTAL = Counter(
+    "event_date_resolution_total",
+    "How an event's date was reached: deterministic finder, structured "
+    "model fallback, stored-interpretation reuse, or unresolved",
+    ["path"],
+)
+
 # The operator-load signal. Widened by plans/260807_review-queue-
 # completeness-and-venue-names.md: this NO LONGER means "ambiguous promoter
 # links" — it is every event awaiting a human decision (anything
