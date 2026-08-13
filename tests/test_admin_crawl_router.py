@@ -207,6 +207,52 @@ def test_effective_reels_caps_are_zero_once_reels_have_already_seeded():
     assert body2["effective_seed_results_limit"] == 90
 
 
+# ── plans/260813_crawl-transport-failure-visibility.md §E ───────────────────
+def test_posts_never_seeded_is_false_for_a_brand_new_target():
+    client, _ = _client()
+    resp = client.post("/admin/crawl-targets", json={
+        "handle": "brandnew", "kind": "venue", "cron": "0 22 * * *",
+    })
+    assert resp.status_code == 201, resp.text
+    assert resp.json()["posts_never_seeded"] is False
+
+
+def test_posts_never_seeded_is_true_once_a_run_leaves_the_cursor_unset():
+    """The exact shape downtownbeergarden_ sat in for months: at least one
+    run recorded, still no posts cursor."""
+    client, dao = _client()
+    resp = client.post("/admin/crawl-targets", json={
+        "handle": "nevergotone", "kind": "venue", "cron": "0 22 * * *",
+    })
+    assert resp.status_code == 201, resp.text
+
+    dao.update_crawl_target("nevergotone", {
+        "last_run_at": datetime(2026, 8, 13, 1, 18, tzinfo=timezone.utc),
+    })
+    resp2 = client.get("/admin/crawl-targets/nevergotone")
+    assert resp2.status_code == 200, resp2.text
+    assert resp2.json()["posts_never_seeded"] is True
+
+
+def test_posts_never_seeded_clears_once_the_cursor_is_set():
+    client, dao = _client()
+    resp = client.post("/admin/crawl-targets", json={
+        "handle": "eventuallyseeded", "kind": "venue", "cron": "0 22 * * *",
+    })
+    assert resp.status_code == 201, resp.text
+
+    dao.update_crawl_target("eventuallyseeded", {
+        "last_run_at": datetime(2026, 8, 13, 1, 18, tzinfo=timezone.utc),
+    })
+    assert client.get("/admin/crawl-targets/eventuallyseeded").json()["posts_never_seeded"] is True
+
+    dao.update_crawl_target("eventuallyseeded", {
+        "cursor_posts_at": datetime(2026, 8, 14, tzinfo=timezone.utc),
+    })
+    resp2 = client.get("/admin/crawl-targets/eventuallyseeded")
+    assert resp2.json()["posts_never_seeded"] is False
+
+
 def test_patch_missing_target_is_404():
     client, _ = _client()
     resp = client.patch("/admin/crawl-targets/nosuch", json={"enabled": False})

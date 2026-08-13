@@ -12,7 +12,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.api.apify_instagram_client import ApifyCreditExhaustedError
+from app.api.apify_instagram_client import ApifyCreditExhaustedError, FetchPostsResult
 from app.services.archive_sources import (
     ARCHIVE_SOURCES,
     ArchiveCreditExhausted,
@@ -696,7 +696,7 @@ class _FakeIgSourceClient:
         self.calls.append((username, results_limit))
         if self.no_credit:
             raise ApifyCreditExhaustedError("Apify credits exhausted (402)")
-        return list(self.posts)[:results_limit]
+        return FetchPostsResult(posts=list(self.posts)[:results_limit])
 
 
 class TestInstagramSource:

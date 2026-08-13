@@ -73,6 +73,7 @@ from app.services.instagram_crawl_service import (
     InvalidCrawlTargetConfig,
     build_cron_trigger,
     group_venue_ids_by_handle,
+    posts_never_seeded,
     reels_already_seeded,
     resolve_results_limit,
     validate_crontab,
@@ -185,6 +186,25 @@ class CrawlTargetOut(BaseModel):
     last_run_reels_fetched: Optional[int] = None
     last_run_reels_new: Optional[int] = None
     consecutive_failures: int = 0
+    # plans/260812_crawl-error-visibility.md §B: which outcome (`blocked`,
+    # `handle_not_found`, or `failed`) this target's last FAILED run hit, and
+    # when — so an operator can see WHY a target stopped producing without
+    # reading logs. Both null until a run actually fails; never cleared by a
+    # later SUCCESSFUL run, so they always answer "what was the last failure
+    # and when," even if that failure was several runs ago.
+    last_failure_kind: Optional[str] = None
+    last_failure_at: Optional[datetime] = None
+    # plans/260813_crawl-transport-failure-visibility.md §E: DERIVED (never
+    # stored — see `posts_never_seeded`'s own docstring for why the CURSOR,
+    # never a separate flag, is the source of truth), true only for a target
+    # that has run at least once and STILL has no posts cursor —
+    # `downtownbeergarden_` sat in exactly this state for months with
+    # nothing reporting it; an operator had to notice `cursor_posts_at`
+    # NULL and `last_run_at` NOT NULL by hand across two columns. False for
+    # a brand-new target that has never run at all (nothing yet to be
+    # alarmed about) and false again from the first run that DOES produce a
+    # cursor.
+    posts_never_seeded: bool = False
     notes: Optional[str] = None
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
@@ -272,6 +292,7 @@ def _to_out(dao, row: dict) -> dict:
         out["next_run_at"] = None
     out["venues"] = _venue_coverage(dao, row["handle"])
     out["running"] = _is_running(row["handle"])
+    out["posts_never_seeded"] = posts_never_seeded(row)
     config = _resolved_config()
     out["effective_results_limit"] = resolve_results_limit(row, STREAM_POSTS, is_seed=False, config=config)
     out["effective_seed_results_limit"] = resolve_results_limit(row, STREAM_POSTS, is_seed=True, config=config)

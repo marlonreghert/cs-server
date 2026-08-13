@@ -1286,6 +1286,19 @@ EVENT_EXTRACTION_MALFORMED_ATTRACTIONS_TOTAL = Counter(
     "Individual malformed attraction entries skipped within an otherwise-valid extraction",
 )
 
+# plans/260812_crawl-error-visibility.md §D: a post whose model response
+# named MORE events than `max_events_per_post` kept — the model already
+# generated (and was already paid for) every event; the cap only decides how
+# many are kept. Distinct from OUTCOME_TRUNCATED (a truncated OUTPUT TOKEN
+# BUDGET, where nothing is persisted at all) — this counts a post that WAS
+# fully persisted, just capped. An operator can also query which specific
+# posts were truncated via `events.post_item_source.source_events_
+# truncated` (migration 0036); this counter is the "how often" trend view.
+EVENT_EXTRACTION_CAP_TRUNCATED_POSTS_TOTAL = Counter(
+    "event_extraction_cap_truncated_posts_total",
+    "Posts whose event list exceeded the per-post event cap and was truncated",
+)
+
 # plans/260811_post-items-and-categories.md §C/§Error Handling: `category`
 # is free text steered toward app.models.post_category's admin-configurable
 # vocabulary but never confined to it — this counts every answer that did
@@ -1312,6 +1325,37 @@ EVENT_VENUE_LINK_TOTAL = Counter(
     "event_venue_link_total",
     "Promoter event venue resolution outcomes, by method and result",
     ["method", "result"],
+)
+
+# plans/260813_handle-attribution-hardening.md §A/Error Handling: rung 4
+# (name match) invocations skipped because `location_text` was an @handle
+# with nothing else usable after stripping it — the expected steady state
+# for promoter roundups (`@mahalilacafe`, `@espaco.muta`, ...). A high rate
+# here is the fix doing its job, not a fault; it is the counterpart to
+# EVENT_VENUE_LINK_TOTAL's `method="venue_not_in_catalog"` series, which is
+# what those skipped events should resolve to instead.
+EVENT_VENUE_NAME_MATCH_SKIPPED_TOTAL = Counter(
+    "event_venue_name_match_skipped_total",
+    "Rung-4 name-match invocations skipped because location_text was handle-only",
+)
+
+# plans/260812_event-attribution-and-dates.md §C/Error Handling: how each
+# event's date was actually reached — `deterministic` (the proven regex
+# finders in event_date_resolver.py resolved it on their own, no model
+# fallback consulted), `structured_fallback` (the deterministic finders
+# found nothing and the model's date_interpretation resolved it),
+# `stored_interpretation_reuse` (the determinism guard reused a PREVIOUSLY
+# stored interpretation rather than trusting a fresh, possibly-different
+# model answer), or `unresolved` (nothing resolved it at all). The
+# FALLBACK rate is the signal that matters here: if it climbs, the
+# deterministic finders are decaying against real flyer text and nobody
+# would otherwise notice — a dashboard should watch it, not just today's
+# raw count.
+EVENT_DATE_RESOLUTION_TOTAL = Counter(
+    "event_date_resolution_total",
+    "How an event's date was reached: deterministic finder, structured "
+    "model fallback, stored-interpretation reuse, or unresolved",
+    ["path"],
 )
 
 # The operator-load signal. Widened by plans/260807_review-queue-
@@ -1434,8 +1478,16 @@ CRAWL_RUNS_TOTAL = Counter(
     "Scheduled Instagram crawl attempts, by handle kind, result type, and outcome",
     ["handle_kind", "result_type", "outcome"],
     # result_type: posts, reels
-    # outcome: success, empty, failed, skipped_disabled, skipped_failures,
-    #          skipped_budget, credit_exhausted
+    # outcome: success, empty, failed, blocked, handle_not_found,
+    #          skipped_disabled, skipped_failures, skipped_budget,
+    #          credit_exhausted
+    # plans/260812_crawl-error-visibility.md §Error Handling: `blocked` and
+    # `handle_not_found` are ADDITIVE labels on this SAME counter — a
+    # Prometheus series only exists after its first increment, so the
+    # ABSENCE of a `blocked` series is itself the evidence that no target
+    # was blocked this window. Watch the BLOCKED rate across many targets at
+    # once: a rise there means Instagram is rate-limiting the whole account,
+    # not that individual venues went quiet.
 )
 
 # The number that maps to money: every BILLED result the actor returned,

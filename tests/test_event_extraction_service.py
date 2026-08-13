@@ -411,7 +411,13 @@ class TestSingleEventVenuePostIsByteIdenticalToTheOldPath:
         assert stored["raw_extraction"] == {
             "kind": None,
             "title": "Festa da Casa", "description": "Uma noite especial",
-            "date_text": "15/08", "time_text": "22h", "is_recurring": False,
+            "date_text": "15/08", "time_text": "22h",
+            # plans/260812_event-attribution-and-dates.md §C: the model's
+            # optional structured date fallback -- absent from this
+            # fixture's raw JSON, so it takes the same genuinely-absent
+            # None every other unstated field here does.
+            "date_interpretation": None,
+            "is_recurring": False,
             "recurrence_text": None, "lineup": ["DJ A", "DJ B"],
             "attractions": [], "ticket_url": "https://tickets.example/x",
             "ticket_info": None, "price_text": "R$30",
@@ -469,6 +475,16 @@ class TestSingleEventVenuePostIsByteIdenticalToTheOldPath:
             # plans/260811_expose-time-known.md: unconditional key of every
             # prepared_events entry, like post_type/category above.
             "time_known",
+            # plans/260812_crawl-error-visibility.md §C/§D: unconditional
+            # keys of every prepared_events entry, like post_type/category/
+            # time_known above — present on every insert, not just once a
+            # media type or a truncation is known.
+            "source_media_type", "source_uploaded_at", "source_events_truncated",
+            # plans/260812_event-attribution-and-dates.md §C: unconditional
+            # key of every prepared_events entry, like the crawl-error-
+            # visibility columns above — present on every insert, not just
+            # once a structured date interpretation is actually stored.
+            "date_interpretation",
         }
         assert set(stored.keys()) == expected_keys, set(stored.keys())
 

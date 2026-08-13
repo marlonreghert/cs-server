@@ -44,12 +44,15 @@ from app.api.openai_event_extraction_client import (
     parse_multi_event_extraction_response,
 )
 from app.metrics import (
+    EVENT_DATE_RESOLUTION_TOTAL,
+    EVENT_EXTRACTION_CAP_TRUNCATED_POSTS_TOTAL,
     EVENT_EXTRACTION_MALFORMED_ATTRACTIONS_TOTAL,
     EVENT_EXTRACTION_MALFORMED_EVENTS_TOTAL,
     EVENT_EXTRACTION_POSTS_TOTAL,
     EVENT_REVIEW_QUEUE_DEPTH,
     PROMOTER_CRAWL_POSTS_TOTAL,
 )
+from app.models.date_resolution_config import load_date_year_roll_grace_days
 from app.models.event_kind import resolve_post_type
 from app.models.post_category import (
     canonicalize_category,
@@ -63,6 +66,7 @@ from app.services.event_date_resolver import (
     REASON_DATE_RANGE,
     REASON_YEAR_INFERRED,
     resolve_event_datetime,
+    select_date_interpretation_for_reuse,
     vote_on_sibling_years,
 )
 from app.services.event_extraction_service import (
@@ -70,6 +74,7 @@ from app.services.event_extraction_service import (
     KIND_LABEL_NOT_APPLICABLE,
     KIND_LABEL_UNKNOWN,
 )
+from app.services.event_identity import normalize_title
 from app.services.event_merge import merge_touched_events
 from app.services.event_reconciliation import (
     STATUS_CONFIRMED,
@@ -133,22 +138,24 @@ class ApifyPromoterPostsClient:
     promoter accounts.
 
     Detecting a private/missing account from Apify's own response is
-    UNVERIFIED against live data (see the plan's Open Questions):
-    `fetch_recent_posts` already drops any per-item `error` entry before
-    this adapter ever sees a result, and an account with zero recent posts
-    is a legitimate empty crawl, not evidence of unavailability. So this
-    adapter never raises `PromoterAccountUnavailable` today — the
-    skip-and-continue path it exists to trigger is proven at the
-    orchestration level (BDD, with a fake posts client) and must be
-    re-armed here once a live crawl shows what an unavailable account's
-    payload actually looks like.
+    UNVERIFIED against live data (see the plan's Open Questions): this
+    adapter reads only `.posts` off `fetch_recent_posts`'s FetchPostsResult
+    (plans/260812_crawl-error-visibility.md §A gave the client edge visibility
+    into `.error_code`, but nothing here interprets it yet — the promoter path
+    is not in that plan's scope), and an account with zero recent posts is a
+    legitimate empty crawl, not evidence of unavailability. So this adapter
+    never raises `PromoterAccountUnavailable` today — the skip-and-continue
+    path it exists to trigger is proven at the orchestration level (BDD, with
+    a fake posts client) and must be re-armed here once a live crawl shows
+    what an unavailable account's payload actually looks like.
     """
 
     def __init__(self, apify_client):
         self.apify_client = apify_client
 
     async def fetch_recent_posts(self, handle: str, *, results_limit: int) -> list[dict]:
-        return await self.apify_client.fetch_recent_posts(handle, results_limit=results_limit)
+        result = await self.apify_client.fetch_recent_posts(handle, results_limit=results_limit)
+        return result.posts
 
 
 def parse_promoter_crawl_config(
@@ -498,7 +505,7 @@ class PromoterCrawlService:
             return 0
 
         try:
-            events_data, malformed_count, malformed_attractions_count = (
+            events_data, malformed_count, malformed_attractions_count, truncated_by_cap = (
                 parse_multi_event_extraction_response(
                     raw_text, max_events=self.max_events_per_post,
                 )
@@ -512,6 +519,19 @@ class PromoterCrawlService:
             PROMOTER_CRAWL_POSTS_TOTAL.labels(outcome=OUTCOME_EXTRACTION_FAILED).inc()
             _bump_kind_metric(OUTCOME_EXTRACTION_FAILED)
             return 0
+
+        if truncated_by_cap:
+            # plans/260812_crawl-error-visibility.md §D: not in that plan's
+            # own BDD/pytest scope (venue posts only), wired here too for
+            # parity — the shared parser makes this a promoter post's own
+            # fact just as much as a venue post's, and leaving it unset
+            # would read as a silent (and wrong) "never truncated."
+            EVENT_EXTRACTION_CAP_TRUNCATED_POSTS_TOTAL.inc()
+            logger.warning(
+                f"[PromoterCrawl] {handle}/{shortcode}: event list truncated "
+                f"to the per-post cap ({self.max_events_per_post}) -- the "
+                "model's response was complete, only the tail was dropped"
+            )
 
         if malformed_count:
             EVENT_EXTRACTION_MALFORMED_EVENTS_TOTAL.inc(malformed_count)
@@ -534,6 +554,20 @@ class PromoterCrawlService:
             self.redis_client,
         )
 
+        # plans/260812_event-attribution-and-dates.md §D: the year-roll
+        # grace window, read once per post — mirrors EventExtractionService.
+        year_roll_grace_days, _grace_fallback_reason = load_date_year_roll_grace_days(
+            self.redis_client,
+        )
+
+        # §C's determinism guard: match each fresh event to the EXISTING
+        # source row (if any) sharing its title, BEFORE any date is
+        # resolved. Mirrors EventExtractionService._extract_one exactly.
+        existing_by_title = {
+            normalize_title(row.get("title")): row
+            for row in existing_events if row.get("title")
+        }
+
         # Each event resolves its OWN date independently, against the post's
         # timestamp — never a sibling's raw text — then
         # `vote_on_sibling_years` (plans/260810_date-correctness-review-
@@ -542,18 +576,51 @@ class PromoterCrawlService:
         # outlier back onto the year the rest of the post agrees on. Mirrors
         # `EventExtractionService._extract_one` exactly — the two paths must
         # not drift on how a post's dates are resolved.
-        resolved_dates = [
-            resolve_event_datetime(
+        interpretations_used: list = []
+        reused_interpretation_flags: list = []
+        resolved_dates = []
+        for parsed in kept_events:
+            existing_row = existing_by_title.get(normalize_title(parsed.get("title")))
+            stored_raw = (existing_row or {}).get("raw_extraction") or {}
+            stored_date_text = stored_raw.get("date_text")
+            stored_interpretation = (existing_row or {}).get("date_interpretation")
+            interpretation_to_use = select_date_interpretation_for_reuse(
+                fresh_date_text=parsed["date_text"],
+                fresh_interpretation=parsed.get("date_interpretation"),
+                stored_date_text=stored_date_text,
+                stored_interpretation=stored_interpretation,
+            )
+            interpretations_used.append(interpretation_to_use)
+            # Mirrors select_date_interpretation_for_reuse's OWN reuse
+            # condition — see EventExtractionService's identical wiring.
+            reused_interpretation_flags.append(
+                stored_interpretation is not None
+                and parsed["date_text"] == stored_date_text
+                and parsed["date_text"] is not None
+            )
+            resolved_dates.append(resolve_event_datetime(
                 date_text=parsed["date_text"], time_text=parsed["time_text"],
                 post_timestamp=post_ts,
                 is_recurring=parsed["is_recurring"], recurrence_text=parsed["recurrence_text"],
-            )
-            for parsed in kept_events
-        ]
+                date_interpretation=interpretation_to_use,
+                year_roll_grace_days=year_roll_grace_days,
+            ))
         resolved_dates = vote_on_sibling_years(resolved_dates)
 
         prepared_events: list[dict] = []
-        for parsed, resolved_date in zip(kept_events, resolved_dates):
+        for parsed, resolved_date, interpretation_used, reused_interpretation in zip(
+            kept_events, resolved_dates, interpretations_used, reused_interpretation_flags,
+        ):
+            # plans/260812_event-attribution-and-dates.md Error Handling:
+            # "the fallback rate is the signal that matters".
+            if resolved_date.date_source == "structured_fallback":
+                date_resolution_path = (
+                    "stored_interpretation_reuse" if reused_interpretation else "structured_fallback"
+                )
+            else:
+                date_resolution_path = resolved_date.date_source
+            EVENT_DATE_RESOLUTION_TOTAL.labels(path=date_resolution_path).inc()
+
             reasons: list[str] = []
             if resolved_date.review_reason:
                 # Use the resolver's OWN reason rather than assuming
@@ -596,6 +663,19 @@ class PromoterCrawlService:
                 "confidence": parsed["confidence"],
                 "review_reason": review_reason,
                 "raw_extraction": parsed,
+                # plans/260812_crawl-error-visibility.md §D: same value for
+                # every event this post yields — a fact about the PARSE, not
+                # any one event. `source_media_type`/`source_uploaded_at`
+                # (§C) are NOT set here: that plan's own scope is venue
+                # posts, and this path has no `ArchivedPost.media_type`/
+                # `.timestamp` equivalent wired to it (`post` here is the
+                # raw, just-fetched Apify dict, not an archived-and-read-back
+                # ArchivedPost) — left for a follow-up, not silently guessed.
+                "source_events_truncated": truncated_by_cap,
+                # plans/260812_event-attribution-and-dates.md §C: the
+                # interpretation ACTUALLY USED to resolve this event's date
+                # — see EventExtractionService's identical wiring.
+                "date_interpretation": interpretation_used,
             })
 
         # plans/260810_date-correctness-review-reasons-and-path-parity.md

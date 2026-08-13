@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 
+import httpx
 import pytest
 
 from app.api.apify_instagram_client import ApifyInstagramClient
@@ -20,7 +21,7 @@ from app.api.apify_instagram_client import ApifyInstagramClient
 def _client_with_items(items):
     client = ApifyInstagramClient(api_token="t")
 
-    async def _fake_run_actor_sync(actor_id, run_input, endpoint_label):
+    async def _fake_run_actor_sync(actor_id, run_input, endpoint_label, username=None):
         return items
 
     client._run_actor_sync = _fake_run_actor_sync
@@ -29,7 +30,8 @@ def _client_with_items(items):
 
 def _fetch(items, results_limit=10):
     client = _client_with_items(items)
-    return asyncio.run(client.fetch_recent_posts("somehandle", results_limit=results_limit))
+    result = asyncio.run(client.fetch_recent_posts("somehandle", results_limit=results_limit))
+    return result.posts
 
 
 class TestSingleImagePost:
@@ -133,7 +135,7 @@ class TestResultsLimit:
 
         client = ApifyInstagramClient(api_token="t")
 
-        async def _fake_run_actor_sync(actor_id, run_input, endpoint_label):
+        async def _fake_run_actor_sync(actor_id, run_input, endpoint_label, username=None):
             seen["resultsLimit"] = run_input.get("resultsLimit")
             return []
 
@@ -153,7 +155,7 @@ class TestScheduledCrawlParameters:
 
         client = ApifyInstagramClient(api_token="t")
 
-        async def _fake_run_actor_sync(actor_id, run_input, endpoint_label):
+        async def _fake_run_actor_sync(actor_id, run_input, endpoint_label, username=None):
             seen["run_input"] = run_input
             return []
 
@@ -167,7 +169,7 @@ class TestScheduledCrawlParameters:
 
         client = ApifyInstagramClient(api_token="t")
 
-        async def _fake_run_actor_sync(actor_id, run_input, endpoint_label):
+        async def _fake_run_actor_sync(actor_id, run_input, endpoint_label, username=None):
             seen["run_input"] = run_input
             return []
 
@@ -182,7 +184,7 @@ class TestScheduledCrawlParameters:
 
         client = ApifyInstagramClient(api_token="t")
 
-        async def _fake_run_actor_sync(actor_id, run_input, endpoint_label):
+        async def _fake_run_actor_sync(actor_id, run_input, endpoint_label, username=None):
             seen["run_input"] = run_input
             return []
 
@@ -197,3 +199,252 @@ class TestScheduledCrawlParameters:
         ])
         assert posts[0]["is_pinned"] is True
         assert posts[1]["is_pinned"] is False
+
+
+class TestErrorItemClassification:
+    """plans/260812_crawl-error-visibility.md §A: the client no longer just
+    drops an error item — it surfaces the fields a caller needs to tell a
+    permanently-wrong handle, a transient block, and a genuinely empty
+    stream apart. Classification itself (which of those three a given
+    code/count combination MEANS) is `instagram_crawl_service._run_stream`'s
+    job, not this client's — these tests pin only what the client reports."""
+
+    def _fetch_result(self, items, results_limit=10):
+        client = _client_with_items(items)
+        return asyncio.run(client.fetch_recent_posts("somehandle", results_limit=results_limit))
+
+    def test_not_found_error_item_is_reported(self):
+        result = self._fetch_result([
+            {"error": "not_found", "errorDescription": "Post does not exist"},
+        ])
+        assert result.posts == []
+        assert result.error_code == "not_found"
+        assert result.error_description == "Post does not exist"
+        assert result.request_error_count == 0
+
+    def test_no_items_with_request_errors_reports_the_count(self):
+        result = self._fetch_result([{
+            "error": "no_items",
+            "errorDescription": "Empty or private data for provided input",
+            "requestErrorMessages": [
+                "Request blocked, retrying it again with different session",
+            ] * 11,
+        }])
+        assert result.posts == []
+        assert result.error_code == "no_items"
+        assert result.request_error_count == 11
+
+    def test_no_items_with_no_request_errors_reports_zero(self):
+        result = self._fetch_result([{
+            "error": "no_items",
+            "errorDescription": "Empty or private data for provided input",
+        }])
+        assert result.posts == []
+        assert result.error_code == "no_items"
+        assert result.request_error_count == 0
+
+    def test_an_unrecognised_error_code_is_still_reported_verbatim(self):
+        """A future Apify error this client has never seen must not be
+        silently swallowed — the caller decides what an unknown code means
+        (transient failure, never success); this client's only job is to
+        not lose it."""
+        result = self._fetch_result([{"error": "some_new_code"}])
+        assert result.posts == []
+        assert result.error_code == "some_new_code"
+
+    def test_a_dataset_with_no_error_item_reports_none(self):
+        result = self._fetch_result([
+            {"shortCode": "ok1", "displayUrl": "https://x/ok1.jpg"},
+        ])
+        assert result.error_code is None
+        assert result.request_error_count == 0
+
+    def test_a_mixed_dataset_keeps_both_the_posts_and_the_error(self):
+        """The evidence this plan is built on: a dataset can carry real
+        posts AND an error item together in the same response."""
+        result = self._fetch_result([
+            {"shortCode": "ok1", "displayUrl": "https://x/ok1.jpg"},
+            {"shortCode": "ok2", "displayUrl": "https://x/ok2.jpg"},
+            {"shortCode": "ok3", "displayUrl": "https://x/ok3.jpg"},
+            {"error": "no_items"},
+        ])
+        assert len(result.posts) == 3
+        assert {p["shortcode"] for p in result.posts} == {"ok1", "ok2", "ok3"}
+
+
+class TestTransportFailureClassification:
+    """plans/260813_crawl-transport-failure-visibility.md §A: the production
+    defect this plan fixes lives entirely inside `_run_actor_sync`/`fetch_
+    recent_posts` — before this plan, a timeout/HTTP error/connection error
+    collapsed into `FetchPostsResult(posts=[], error_code=None)`,
+    indistinguishable from a genuinely empty account (verified in production
+    2026-08-13: downtownbeergarden_, 121 posts, Apify succeeded server-side
+    with 16 results, our client timed out and the target read as healthy and
+    empty).
+
+    Unlike `TestErrorItemClassification` above (which monkeypatches `_run_
+    actor_sync` itself and so can never exercise this bug), these tests
+    mock only `self.client.post` — the TRUE external boundary — so the REAL
+    `_run_actor_sync` exception handling actually runs. This is the layer
+    that proves the fix; the BDD feature (crawl-transport-failure-
+    visibility.feature) exercises `instagram_crawl_service`'s classification
+    of whatever `.error_code` this client reports, one layer up, through a
+    fake that can't see this bug either (see that feature's own step-module
+    docstring)."""
+
+    def _client(self) -> ApifyInstagramClient:
+        return ApifyInstagramClient(api_token="t")
+
+    def _fetch_with_post_raising(self, exc: Exception):
+        client = self._client()
+
+        async def _raising_post(*args, **kwargs):
+            raise exc
+
+        client.client.post = _raising_post
+        return asyncio.run(client.fetch_recent_posts("somehandle", results_limit=10))
+
+    def test_a_timeout_is_reported_as_a_transport_failure_not_an_empty_dataset(self):
+        result = self._fetch_with_post_raising(httpx.TimeoutException("timed out"))
+        assert result.posts == []
+        assert result.error_code == "timeout"
+        assert result.error_description is None
+        assert result.request_error_count == 0
+
+    def test_a_connection_error_is_reported_as_a_transport_failure(self):
+        result = self._fetch_with_post_raising(httpx.ConnectError("connection refused"))
+        assert result.posts == []
+        assert result.error_code == "request_error"
+
+    def test_an_http_error_is_reported_as_a_transport_failure(self):
+        client = self._client()
+        request = httpx.Request("POST", "https://api.apify.com/v2/acts/x/run-sync-get-dataset-items")
+
+        async def _post_500(*args, **kwargs):
+            return httpx.Response(500, text="internal error", request=request)
+
+        client.client.post = _post_500
+        result = asyncio.run(client.fetch_recent_posts("somehandle", results_limit=10))
+        assert result.posts == []
+        assert result.error_code == "http_error"
+
+    def test_a_credit_exhausted_response_still_raises_and_is_not_reclassified(self):
+        """402 must keep propagating as ApifyCreditExhaustedError -- §A only
+        touches the three transport-exception branches, never the existing
+        credit-exhaustion contract `InstagramPostsEnrichmentService` and
+        others already depend on."""
+        from app.api.apify_instagram_client import ApifyCreditExhaustedError
+
+        client = self._client()
+        request = httpx.Request("POST", "https://api.apify.com/v2/acts/x/run-sync-get-dataset-items")
+
+        async def _post_402(*args, **kwargs):
+            return httpx.Response(402, text="payment required", request=request)
+
+        client.client.post = _post_402
+        with pytest.raises(ApifyCreditExhaustedError):
+            asyncio.run(client.fetch_recent_posts("somehandle", results_limit=10))
+
+    def test_a_transport_failure_on_search_users_still_degrades_to_no_results(self):
+        """search_users has no per-caller use for the failure TYPE (it never
+        surfaced one before this plan either) -- only its degrade-to-empty
+        behavior on a transport failure must survive §A's contract change
+        from `_run_actor_sync` returning `None` to raising."""
+        client = self._client()
+
+        async def _raising_post(*args, **kwargs):
+            raise httpx.TimeoutException("timed out")
+
+        client.client.post = _raising_post
+        results = asyncio.run(client.search_users("some query"))
+        assert results == []
+
+
+class TestTransportFailureLogNamesTheHandle:
+    """plans/260813_crawl-transport-failure-visibility.md §C: `_run_actor_
+    sync` used to log only `endpoint_label` (`instagram_posts`, identical
+    for every target), so a timeout could not be attributed to a handle from
+    logs alone -- verbatim from the production incident this closes:
+    `2026-08-13 01:18:46 ERROR [ApifyInstagram] Timeout for instagram_posts`
+    carried no handle at all. `fetch_recent_posts` now passes `username`
+    through to `_run_actor_sync`, which appends it to the timeout/HTTP-
+    error/request-error log lines."""
+
+    def _log_messages(self, exc: Exception, caplog) -> list[str]:
+        import logging
+
+        client = ApifyInstagramClient(api_token="t")
+
+        async def _raising_post(*args, **kwargs):
+            raise exc
+
+        client.client.post = _raising_post
+        with caplog.at_level(logging.ERROR, logger="app.api.apify_instagram_client"):
+            asyncio.run(client.fetch_recent_posts("downtownbeergarden_", results_limit=10))
+        return [r.getMessage() for r in caplog.records]
+
+    def test_a_timeout_log_line_names_the_handle(self, caplog):
+        messages = self._log_messages(httpx.TimeoutException("timed out"), caplog)
+        assert any("downtownbeergarden_" in m for m in messages), messages
+
+    def test_an_http_error_log_line_names_the_handle(self, caplog):
+        import logging
+
+        client = ApifyInstagramClient(api_token="t")
+        request = httpx.Request("POST", "https://api.apify.com/v2/acts/x/run-sync-get-dataset-items")
+
+        async def _post_500(*args, **kwargs):
+            return httpx.Response(500, text="boom", request=request)
+
+        client.client.post = _post_500
+        with caplog.at_level(logging.ERROR, logger="app.api.apify_instagram_client"):
+            asyncio.run(client.fetch_recent_posts("downtownbeergarden_", results_limit=10))
+        messages = [r.getMessage() for r in caplog.records]
+        assert any("downtownbeergarden_" in m for m in messages), messages
+
+    def test_a_connection_error_log_line_names_the_handle(self, caplog):
+        messages = self._log_messages(httpx.ConnectError("refused"), caplog)
+        assert any("downtownbeergarden_" in m for m in messages), messages
+
+    def test_search_users_has_no_handle_to_name_and_the_log_line_is_unchanged(self, caplog):
+        """search_users passes no username (a search query is not a single
+        handle) -- the log line must degrade to exactly its pre-260813 text,
+        not print a stray "(@None)"."""
+        import logging
+
+        client = ApifyInstagramClient(api_token="t")
+
+        async def _raising_post(*args, **kwargs):
+            raise httpx.TimeoutException("timed out")
+
+        client.client.post = _raising_post
+        with caplog.at_level(logging.ERROR, logger="app.api.apify_instagram_client"):
+            asyncio.run(client.search_users("some query"))
+        messages = [r.getMessage() for r in caplog.records]
+        assert any(m == "[ApifyInstagram] Timeout for search_users" for m in messages), messages
+
+
+class TestTransportFailureTimeoutRaised:
+    """plans/260813_crawl-transport-failure-visibility.md §D: a 120s
+    constructor default abandoned a run that had ALREADY billed results
+    server-side and succeeded (2026-08-13, downtownbeergarden_). 300s is the
+    measured starting point -- comfortably past the slowest observed
+    2026-08-12 success. Pinned at both layers this value now lives:
+    `ApifyInstagramClient`'s own constructor default (for a caller that
+    builds one directly, e.g. a script or a test), and `Settings`' new field
+    (what `app/container.py` actually wires the real client from)."""
+
+    def test_the_client_constructor_default_is_300_seconds(self):
+        client = ApifyInstagramClient(api_token="t")
+        assert client.timeout == 300.0
+
+    def test_the_settings_default_is_300_seconds(self):
+        from app.config import Settings
+
+        assert Settings(_env_file=None).apify_instagram_client_timeout_seconds == 300.0
+
+    def test_the_timeout_is_still_overridable(self):
+        """A configurable value must still be a real constructor parameter,
+        not a value hardcoded past the point of being overridden."""
+        client = ApifyInstagramClient(api_token="t", timeout=45.0)
+        assert client.timeout == 45.0
