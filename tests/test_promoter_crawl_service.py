@@ -594,13 +594,20 @@ class TestAttributionBehaviourPinnedAcrossExtraction:
         after = self._metric("none", "unresolved")
         assert after - before == 1.0, (before, after)
 
-    def test_an_at_mention_of_a_known_venue_handle_auto_links_by_identity(self, dao):
+    def test_a_caption_at_mention_auto_links_when_the_event_has_no_location_text(self, dao):
+        """plans/260812_event-attribution-and-dates.md §A demoted a CAPTION
+        mention below every per-event signal: with `location_text=None`
+        (the event's own text says nothing), the caption's single, known-
+        venue mention is still good evidence and auto-links — but now
+        through the distinct `caption_handle_mention` method, not
+        `handle_mention` (that value is reserved for a mention found in the
+        EVENT's own location_text — see the next test)."""
         dao.set_venue_instagram(VenueInstagram(venue_id="v1", instagram_handle="zettalounge", status="found"))
         venues, handle_index = self._venues(dao)
         openai_client = _FakeOpenAIClient()
         openai_client.program(_extraction_json(date_text="15/08", time_text="20h", location_text=None))
         service = PromoterCrawlService(venue_dao=dao, posts_client=None, openai_client=openai_client)
-        before = self._metric("handle_mention", "auto")
+        before = self._metric("caption_handle_mention", "auto")
 
         _run(service._process_post(
             handle="promo", post=self._post("pin_mention", "Hoje é no @zettalounge! Ingressos abertos!"),
@@ -608,6 +615,32 @@ class TestAttributionBehaviourPinnedAcrossExtraction:
         ))
 
         row = dao.get_event_by_source("promo", "pin_mention")
+        assert row["venue_id"] == "v1", row
+        assert row["linked_by"] == "caption_handle_mention", row
+        assert row["location_confidence"] == 1.0, row
+        after = self._metric("caption_handle_mention", "auto")
+        assert after - before == 1.0, (before, after)
+
+    def test_an_at_mention_in_the_events_own_location_text_auto_links_by_identity(self, dao):
+        """The TOP rung: an @-mention found in the event's OWN
+        `location_text` auto-links via `handle_mention`, outranking
+        anything the post's caption says (plans/260812_event-attribution-
+        and-dates.md §A)."""
+        dao.set_venue_instagram(VenueInstagram(venue_id="v1", instagram_handle="zettalounge", status="found"))
+        venues, handle_index = self._venues(dao)
+        openai_client = _FakeOpenAIClient()
+        openai_client.program(_extraction_json(
+            date_text="15/08", time_text="20h", location_text="@zettalounge",
+        ))
+        service = PromoterCrawlService(venue_dao=dao, posts_client=None, openai_client=openai_client)
+        before = self._metric("handle_mention", "auto")
+
+        _run(service._process_post(
+            handle="promo", post=self._post("pin_mention_own", "Ingressos abertos!"),
+            venues=venues, handle_index=handle_index, now=datetime.now(timezone.utc),
+        ))
+
+        row = dao.get_event_by_source("promo", "pin_mention_own")
         assert row["venue_id"] == "v1", row
         assert row["linked_by"] == "handle_mention", row
         assert row["location_confidence"] == 1.0, row

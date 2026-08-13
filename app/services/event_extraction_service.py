@@ -54,12 +54,14 @@ from app.api.openai_event_extraction_client import (
     parse_multi_event_extraction_response,
 )
 from app.metrics import (
+    EVENT_DATE_RESOLUTION_TOTAL,
     EVENT_EXTRACTION_CAP_TRUNCATED_POSTS_TOTAL,
     EVENT_EXTRACTION_MALFORMED_ATTRACTIONS_TOTAL,
     EVENT_EXTRACTION_MALFORMED_EVENTS_TOTAL,
     EVENT_EXTRACTION_POSTS_TOTAL,
     EVENT_EXTRACTION_SUPERSEDED_TOTAL,
 )
+from app.models.date_resolution_config import load_date_year_roll_grace_days
 from app.models.event_kind import resolve_post_type
 from app.models.photo_taxonomy import CATEGORY_FLYER
 from app.models.post_category import (
@@ -74,8 +76,10 @@ from app.services.event_date_resolver import (
     REASON_WEEKDAY_MISMATCH,
     REASON_YEAR_INFERRED,
     resolve_event_datetime,
+    select_date_interpretation_for_reuse,
     vote_on_sibling_years,
 )
+from app.services.event_identity import normalize_title
 from app.services.event_merge import merge_touched_events
 from app.services.event_reconciliation import (
     ALL_STATUSES,
@@ -894,6 +898,25 @@ class EventExtractionService:
             self.redis_client,
         )
 
+        # plans/260812_event-attribution-and-dates.md §D: the year-roll
+        # grace window, read once per post (like the category vocabulary
+        # above) so an admin-config edit reaches the very next run.
+        year_roll_grace_days, _grace_fallback_reason = load_date_year_roll_grace_days(
+            self.redis_client,
+        )
+
+        # §C's determinism guard: match each fresh event to the EXISTING
+        # source row (if any) sharing its title, BEFORE any date is
+        # resolved — matching on title only, never position (the model does
+        # not guarantee stable list order between runs, the same reasoning
+        # event_identity's own docstring gives for the content-derived key
+        # itself). Built once per post from `existing_events` (already
+        # fetched above), never a second DAO read.
+        existing_by_title = {
+            normalize_title(row.get("title")): row
+            for row in existing_events if row.get("title")
+        }
+
         # Each event resolves its OWN date independently, against the post's
         # timestamp — never a sibling's raw text. `vote_on_sibling_years`
         # (plans/260810_date-correctness-review-reasons-and-path-parity.md
@@ -902,17 +925,54 @@ class EventExtractionService:
         # back onto the year the rest of the post already agrees on, still
         # flagged as an inference either way. Scoped to this post's
         # `kept_events` alone; never called across posts.
-        resolved_dates = [
-            resolve_event_datetime(
+        interpretations_used: list = []
+        reused_interpretation_flags: list = []
+        resolved_dates = []
+        for parsed in kept_events:
+            existing_row = existing_by_title.get(normalize_title(parsed.get("title")))
+            stored_raw = (existing_row or {}).get("raw_extraction") or {}
+            stored_date_text = stored_raw.get("date_text")
+            stored_interpretation = (existing_row or {}).get("date_interpretation")
+            interpretation_to_use = select_date_interpretation_for_reuse(
+                fresh_date_text=parsed["date_text"],
+                fresh_interpretation=parsed.get("date_interpretation"),
+                stored_date_text=stored_date_text,
+                stored_interpretation=stored_interpretation,
+            )
+            interpretations_used.append(interpretation_to_use)
+            # Mirrors select_date_interpretation_for_reuse's OWN reuse
+            # condition — recomputed here (never returned by that function,
+            # whose contract is a single value) purely so
+            # EVENT_DATE_RESOLUTION_TOTAL can tell "the fresh model answer
+            # resolved this" apart from "a stored answer was reused".
+            reused_interpretation_flags.append(
+                stored_interpretation is not None
+                and parsed["date_text"] == stored_date_text
+                and parsed["date_text"] is not None
+            )
+            resolved_dates.append(resolve_event_datetime(
                 date_text=parsed["date_text"], time_text=parsed["time_text"],
                 post_timestamp=post_timestamp,
                 is_recurring=parsed["is_recurring"], recurrence_text=parsed["recurrence_text"],
-            )
-            for parsed in kept_events
-        ]
+                date_interpretation=interpretation_to_use,
+                year_roll_grace_days=year_roll_grace_days,
+            ))
         resolved_dates = vote_on_sibling_years(resolved_dates)
 
-        for parsed, resolved in zip(kept_events, resolved_dates):
+        for parsed, resolved, interpretation_used, reused_interpretation in zip(
+            kept_events, resolved_dates, interpretations_used, reused_interpretation_flags,
+        ):
+            # plans/260812_event-attribution-and-dates.md Error Handling:
+            # "the fallback rate is the signal that matters" — counted
+            # once per event, independent of everything else this loop
+            # does with `resolved`.
+            if resolved.date_source == "structured_fallback":
+                date_resolution_path = (
+                    "stored_interpretation_reuse" if reused_interpretation else "structured_fallback"
+                )
+            else:
+                date_resolution_path = resolved.date_source
+            EVENT_DATE_RESOLUTION_TOTAL.labels(path=date_resolution_path).inc()
             # A time is an extraction MISS (worth an operator's eye) only
             # when the flyer itself said one was there and none was read; a
             # flyer that names no time, or a caption-only post with no flyer
@@ -998,6 +1058,13 @@ class EventExtractionService:
                 # for every event this post yields, since truncation is a
                 # fact about the PARSE, not about any one event.
                 "source_events_truncated": truncated_by_cap,
+                # plans/260812_event-attribution-and-dates.md §C: the
+                # interpretation ACTUALLY USED to resolve this event's date
+                # (the fresh model answer, or the reused stored one — see
+                # `select_date_interpretation_for_reuse` above), persisted
+                # next to raw_extraction so a LATER re-extraction with the
+                # SAME verbatim date_text can reuse it too.
+                "date_interpretation": interpretation_used,
             })
 
             if len(events_data) == 1:

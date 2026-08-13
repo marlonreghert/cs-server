@@ -9,11 +9,16 @@ helpers — so a regression in the arithmetic fails fast and close to the bug.
 """
 import pytest
 
+from app.services.event_reconciliation import REVIEW_REASON_VENUE_NOT_IN_CATALOG
 from app.services.event_venue_resolution import (
     DEFAULT_CONFIDENCE_FLOOR,
+    METHOD_AMBIGUOUS_CAPTION_REFUSAL,
+    METHOD_CAPTION_HANDLE_MENTION,
     METHOD_HANDLE_MENTION,
     METHOD_LOCATION_TAG,
     METHOD_NAME_MATCH,
+    METHOD_NEIGHBOURHOOD_MATCH,
+    METHOD_VENUE_NOT_IN_CATALOG,
     RESOLUTION_AUTO,
     RESOLUTION_QUEUED,
     RESOLUTION_UNRESOLVED,
@@ -25,8 +30,8 @@ from app.services.event_venue_resolution import (
 )
 
 
-def _venue(vid, name, lat=-8.05, lng=-34.88):
-    return VenueLite(venue_id=vid, venue_name=name, lat=lat, lng=lng)
+def _venue(vid, name, lat=-8.05, lng=-34.88, address=None):
+    return VenueLite(venue_id=vid, venue_name=name, lat=lat, lng=lng, address=address)
 
 
 class TestExtractMentions:
@@ -104,18 +109,21 @@ class TestGateAutoLink:
 
 
 class TestLadderOrdering:
-    def test_handle_mention_wins_even_when_a_name_match_scores_higher(self):
-        """Certainty beats score: rung 1 resolves before rung 3 is even
-        computed, so a mentioned venue wins regardless of how well (or
-        badly) its OWN name matches location_text, and regardless of how
-        perfectly a DIFFERENT venue's name matches it."""
+    def test_per_event_name_match_wins_over_a_caption_mention(self):
+        """plans/260812_event-attribution-and-dates.md §A reordered the
+        ladder: per-event evidence (here, a location_text NAME match, rung
+        4) now outranks a post-level caption @-mention (rung 5, demoted).
+        This is the precedence bug measured at 487/494 wrong links in
+        production — a caption mentioning some OTHER venue first must never
+        win over what the event's own text says, even when that per-event
+        signal is a fuzzy name match rather than an exact @-mention."""
         mentioned = _venue("v_mentioned", "Totally Unrelated Name")
         name_match_target = _venue("v_name_match", "Casa Rosa Exata")
         handle_index = {"casarosaexata": "v_name_match", "mentionedvenue": "v_mentioned"}
 
         result = resolve_event_venue(
             caption="Bora pro @mentionedvenue hoje!",
-            location_text="Casa Rosa Exata",  # would score ~1.0 on its own
+            location_text="Casa Rosa Exata",  # the event's OWN evidence
             location_tag=None,
             promoter_handle="somepromoter",
             venues=[mentioned, name_match_target],
@@ -123,9 +131,110 @@ class TestLadderOrdering:
             confidence_floor=0.55, margin=0.08,
         )
         assert result.resolution == RESOLUTION_AUTO
-        assert result.venue_id == "v_mentioned"
+        assert result.venue_id == "v_name_match"
+        assert result.method == METHOD_NAME_MATCH
+
+    def test_event_own_handle_mention_wins_over_a_different_caption_mention(self):
+        """The sharpest version of §A's fix: the event's own location_text
+        names ONE venue by @-handle, the caption's FIRST mention names a
+        DIFFERENT one — the event's own text must win, and `linked_by` must
+        say so via `METHOD_HANDLE_MENTION` (not the demoted
+        `METHOD_CAPTION_HANDLE_MENTION`)."""
+        caption_first_venue = _venue("v_caption", "Sempre Rock Bar")
+        event_own_venue = _venue("v_event", "Taverna Pub")
+        handle_index = {"semprerockbar": "v_caption", "tavernapubnatal": "v_event"}
+
+        result = resolve_event_venue(
+            caption="Confira o roteiro: @semprerockbar tem festa hoje!",
+            location_text="@tavernapubnatal",
+            location_tag=None,
+            promoter_handle="oquetemhojeemnatal",
+            venues=[caption_first_venue, event_own_venue],
+            handle_index=handle_index,
+        )
+        assert result.resolution == RESOLUTION_AUTO
+        assert result.venue_id == "v_event"
         assert result.method == METHOD_HANDLE_MENTION
-        assert result.confidence == 1.0
+
+    def test_mixed_case_handle_in_location_text_still_resolves(self):
+        """Handle-case parity guard (plan's own test discipline note): every
+        OTHER fixture in this file seeds a lowercase handle, which makes the
+        single-venue `_handle_for`-style lookup and the shared-handle
+        `target["handle"]` normalization coincide by accident and would hide
+        a real case-handling bug. This fixture's handle_index key is
+        deliberately mixed-case-normalized (as `build_handle_index` always
+        produces via `normalize_handle`), while the event's OWN
+        location_text uses a differently-cased mention."""
+        venue = _venue("v1", "Taverna Pub")
+        handle_index = {"tavernapubnatal": "v1"}  # normalize_handle output
+        result = resolve_event_venue(
+            caption="Ingressos abertos!",
+            location_text="@TavernaPubNatal",  # mixed case, as a flyer might read
+            location_tag=None,
+            promoter_handle="promo",
+            venues=[venue],
+            handle_index=handle_index,
+        )
+        assert result.resolution == RESOLUTION_AUTO
+        assert result.venue_id == "v1"
+        assert result.method == METHOD_HANDLE_MENTION
+
+    def test_caption_mention_still_resolves_when_unambiguous_and_event_has_nothing(self):
+        """Rung 5 is demoted, not removed: a caption naming EXACTLY one
+        known venue is still good evidence when the event's own text gives
+        nothing at all."""
+        venue = _venue("v1", "Sempre Rock Bar")
+        handle_index = {"semprerockbar": "v1"}
+        result = resolve_event_venue(
+            caption="Hoje: @semprerockbar com festa!",
+            location_text=None, location_tag=None,
+            promoter_handle="promo", venues=[venue], handle_index=handle_index,
+        )
+        assert result.resolution == RESOLUTION_AUTO
+        assert result.venue_id == "v1"
+        assert result.method == METHOD_CAPTION_HANDLE_MENTION
+
+    def test_ambiguous_caption_with_no_event_evidence_refuses_to_link(self):
+        """A caption naming several known venues is worthless as evidence
+        for one event with nothing of its own to say — refuse rather than
+        guess, the precedence bug's exact shape (487/494 wrong links all
+        inherited the caption's FIRST mention)."""
+        v1 = _venue("v1", "Sempre Rock Bar")
+        v2 = _venue("v2", "Taverna Pub")
+        handle_index = {"semprerockbar": "v1", "tavernapubnatal": "v2"}
+        result = resolve_event_venue(
+            caption="Roteiro: @semprerockbar, @tavernapubnatal e muito mais!",
+            location_text=None, location_tag=None,
+            promoter_handle="promo", venues=[v1, v2], handle_index=handle_index,
+        )
+        assert result.resolution == RESOLUTION_UNRESOLVED
+        assert result.venue_id is None
+        assert result.method == METHOD_AMBIGUOUS_CAPTION_REFUSAL
+
+    def test_twenty_events_one_roundup_resolve_to_twenty_distinct_venues(self):
+        """The roundup shape from the plan's own Evidence section: one
+        promoter post lists 20 events at 20 different venues under one
+        caption. Every event must resolve to the venue ITS OWN
+        location_text names, never all inheriting the caption's first
+        mention."""
+        venues = [_venue(f"v{i}", f"Venue {i}") for i in range(20)]
+        handle_index = {f"venue{i}handle": f"v{i}" for i in range(20)}
+        caption = "Roteiro da noite: " + ", ".join(f"@venue{i}handle" for i in range(20))
+
+        resolved_ids = []
+        for i in range(20):
+            result = resolve_event_venue(
+                caption=caption,
+                location_text=f"@venue{i}handle",
+                location_tag=None,
+                promoter_handle="oquetemhojeemnatal",
+                venues=venues, handle_index=handle_index,
+            )
+            assert result.resolution == RESOLUTION_AUTO, (i, result)
+            resolved_ids.append(result.venue_id)
+
+        assert resolved_ids == [f"v{i}" for i in range(20)]
+        assert len(set(resolved_ids)) == 20  # no two events collapsed onto one venue
 
     def test_own_handle_mention_is_never_used(self):
         """A promoter mentioning itself must not resolve a venue, even when
@@ -255,3 +364,127 @@ class TestReverseHandleLookup:
             handle_index=self._index(),
         )
         assert result.venue_id == "v_known"
+
+
+# ── §B: two venues behind one account ────────────────────────────────────
+class TestNeighbourhoodMatching:
+    def _two_branches(self):
+        boa_viagem = _venue("v_bv", "BeerDock Boa Viagem", address="Av. Domingos Ferreira, 1000 - Boa Viagem, Recife")
+        casa_forte = _venue("v_cf", "BeerDock Casa Forte", address="Rua Alfredo Lisboa, 200 - Casa Forte, Recife")
+        return boa_viagem, casa_forte
+
+    def test_neighbourhood_text_routes_to_the_matching_branch(self):
+        boa_viagem, casa_forte = self._two_branches()
+        result = resolve_event_venue(
+            caption="Confira nossa unidade!", location_text="CASA FORTE",
+            location_tag=None, promoter_handle="beerdock_recife",
+            venues=[boa_viagem, casa_forte], handle_index={},
+            same_account_venues=[boa_viagem, casa_forte],
+        )
+        assert result.resolution == RESOLUTION_AUTO
+        assert result.venue_id == "v_cf"
+        assert result.method == METHOD_NEIGHBOURHOOD_MATCH
+
+    def test_the_other_branch_keeps_its_own_event(self):
+        boa_viagem, casa_forte = self._two_branches()
+        result = resolve_event_venue(
+            caption="Confira nossa unidade!", location_text="BOA VIAGEM",
+            location_tag=None, promoter_handle="beerdock_recife",
+            venues=[boa_viagem, casa_forte], handle_index={},
+            same_account_venues=[boa_viagem, casa_forte],
+        )
+        assert result.resolution == RESOLUTION_AUTO
+        assert result.venue_id == "v_bv"
+
+    def test_neither_neighbourhood_named_falls_through_to_queue_or_unresolved(self):
+        boa_viagem, casa_forte = self._two_branches()
+        result = resolve_event_venue(
+            caption="Confira nossa unidade!", location_text="alguma coisa qualquer",
+            location_tag=None, promoter_handle="beerdock_recife",
+            venues=[boa_viagem, casa_forte], handle_index={},
+            same_account_venues=[boa_viagem, casa_forte],
+        )
+        assert result.resolution != RESOLUTION_AUTO
+        assert result.venue_id is None
+
+    def test_a_single_member_same_account_set_never_triggers_the_rung(self):
+        """Restricted to venues that share the target's handle/brand — a
+        SINGLE-venue account has no branch question at all, so the rung is
+        skipped entirely (falling straight to name-match on the FULL
+        `venues` set) rather than trivially "matching" its own one member
+        regardless of text."""
+        unrelated = _venue("v_unrelated", "Unrelated Bar", address="Rua X, 50 - Casa Forte, Recife")
+        conchittas = _venue("v_conchittas", "Conchittas Bar", address="Rua Y, 10 - Boa Vista, Recife")
+        result = resolve_event_venue(
+            caption="Bora!", location_text="CASA FORTE",
+            location_tag=None, promoter_handle="conchittasbar",
+            venues=[unrelated, conchittas], handle_index={},
+            same_account_venues=[conchittas],  # only ONE member — no branch question
+        )
+        assert result.venue_id != "v_unrelated"
+
+    def test_a_neighbourhood_string_never_drags_an_unrelated_venue_across_town(self):
+        """The full `venues` catalog can contain an unrelated venue whose
+        ADDRESS also happens to sit in the same neighbourhood — but the
+        neighbourhood rung only ever consults `same_account_venues`, never
+        the whole catalog, so an unrelated venue is safe by construction
+        even when its address would otherwise match."""
+        unrelated = _venue("v_unrelated", "Unrelated Bar", address="Rua X, 50 - Casa Forte, Recife")
+        conchittas = _venue("v_conchittas", "Conchittas Bar", address="Rua Y, 10 - Boa Vista, Recife")
+        result = resolve_event_venue(
+            caption="Bora!", location_text="CASA FORTE",
+            location_tag=None, promoter_handle="conchittasbar",
+            venues=[unrelated, conchittas], handle_index={},
+            same_account_venues=None,
+        )
+        assert result.venue_id != "v_unrelated"
+
+    def test_more_than_one_address_match_falls_through_rather_than_guessing(self):
+        v1 = _venue("v1", "Branch One", address="Rua A, 1 - Boa Viagem, Recife")
+        v2 = _venue("v2", "Branch Two", address="Rua B, 2 - Boa Viagem, Recife")
+        result = resolve_event_venue(
+            caption="Bora!", location_text="BOA VIAGEM",
+            location_tag=None, promoter_handle="brandhandle",
+            venues=[v1, v2], handle_index={},
+            same_account_venues=[v1, v2],
+        )
+        # Two equally-good address matches -- not a rung-3 auto-link; falls
+        # through to name-match, which also cannot pick a winner from a bare
+        # neighbourhood string, so this must not silently resolve.
+        assert result.resolution != RESOLUTION_AUTO
+
+
+# ── §A: venue_not_in_catalog ──────────────────────────────────────────────
+class TestVenueNotInCatalog:
+    def test_literal_value_matches_the_review_reason_constant(self):
+        """The two constants live in different modules (to avoid an import
+        cycle — see each one's own docstring) and MUST stay byte-identical,
+        or a freshly-crawled row and a backfilled row would describe the
+        same situation in two different words."""
+        assert METHOD_VENUE_NOT_IN_CATALOG == REVIEW_REASON_VENUE_NOT_IN_CATALOG
+
+    def test_an_unrecognized_handle_in_location_text_is_reported_distinctly(self):
+        """The event's own location_text names a SPECIFIC @-handle that is
+        not in handle_index at all -- concrete evidence of exactly where
+        this is, never confused with a genuine no-evidence unresolved."""
+        known = _venue("v1", "Known Venue")
+        result = resolve_event_venue(
+            caption="Ingressos abertos!", location_text="@somehandlewedontcarry",
+            location_tag=None, promoter_handle="promo",
+            venues=[known], handle_index={"knownvenue": "v1"},
+        )
+        assert result.resolution == RESOLUTION_UNRESOLVED
+        assert result.venue_id is None
+        assert result.method == METHOD_VENUE_NOT_IN_CATALOG
+
+    def test_an_unrecognized_handle_still_yields_to_a_resolving_rung(self):
+        """The unrecognized-handle signal is remembered but never short-
+        circuits the ladder -- a LATER rung that DOES resolve still wins."""
+        known = _venue("v1", "Sempre Rock Bar")
+        result = resolve_event_venue(
+            caption="Hoje: @semprerockbar com festa! Chama tambem @naocatalogado",
+            location_text=None, location_tag=None,
+            promoter_handle="promo", venues=[known], handle_index={"semprerockbar": "v1"},
+        )
+        assert result.resolution == RESOLUTION_AUTO
+        assert result.venue_id == "v1"
