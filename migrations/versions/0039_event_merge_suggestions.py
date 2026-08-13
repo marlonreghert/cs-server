@@ -50,13 +50,13 @@ table holds is DERIVED (recomputable from `events.post_item`/
 `superseded_by` itself, which the downgrade also drops; nothing outside this
 feature reads either.
 
-Revision ID: 0038_event_merge_suggestions
-Revises: 0037_date_interpretation
+Revision ID: 0039_event_merge_suggestions
+Revises: 0038_crawl_target_posts_dormant
 """
 from alembic import op
 
-revision = "0038_event_merge_suggestions"
-down_revision = "0037_date_interpretation"
+revision = "0039_event_merge_suggestions"
+down_revision = "0038_crawl_target_posts_dormant"
 branch_labels = None
 depends_on = None
 

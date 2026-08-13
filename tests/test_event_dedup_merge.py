@@ -288,19 +288,19 @@ class TestMigrationOfflineGuard:
 
     _PATH = (
         Path(__file__).resolve().parent.parent
-        / "migrations" / "versions" / "0038_event_merge_suggestions.py"
+        / "migrations" / "versions" / "0039_event_merge_suggestions.py"
     )
 
     def _load(self):
-        spec = importlib.util.spec_from_file_location("m0038_event_merge_suggestions", self._PATH)
+        spec = importlib.util.spec_from_file_location("m0039_event_merge_suggestions", self._PATH)
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
         return module
 
     def test_revision_chain(self):
         m = self._load()
-        assert m.revision == "0038_event_merge_suggestions"
-        assert m.down_revision == "0037_date_interpretation"
+        assert m.revision == "0039_event_merge_suggestions"
+        assert m.down_revision == "0038_crawl_target_posts_dormant"
         assert len(m.revision) <= 32
 
     def test_upgrade_creates_the_suggestion_table_and_the_superseded_by_column(self):
