@@ -783,7 +783,7 @@ class PromoterCrawlService:
         # leaving it to a later migration. See
         # plans/260807_one-event-many-posts.md.
         if touched_event_ids:
-            merge_touched_events(self.venue_dao, touched_event_ids, now)
+            merge_touched_events(self.venue_dao, touched_event_ids, now, redis_like=self.redis_client)
 
         PROMOTER_CRAWL_POSTS_TOTAL.labels(outcome=OUTCOME_EXTRACTED).inc()
         # plans/260811_post-items-and-categories.md §B: every parsed event is
