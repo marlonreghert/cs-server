@@ -51,6 +51,7 @@ from typing import Optional
 from app.config import settings
 from app.dao.rds_venue_store import RdsVenueStore
 from app.dao.venue_repository import VenueRepository
+from app.models.event_kind import KIND_EVENT
 from app.services.event_merge import (
     _fold_review_reason,  # plan §C: "import it" — see _fold_no_venue_reason below for the one extension it needs.
     compute_event_identity,
@@ -322,10 +323,15 @@ def decide_one(
     new_review_reason = _fold_no_venue_reason(old_review_reason, no_venue_reason)
 
     # ── plan §C: status restoration goes through is_clean_extraction, never asserted ──
+    # plans/260813_review-gate-and-date-vocabulary.md §C: `post_type` is a
+    # real, NOT-NULL column on every already-persisted row this script
+    # reads, so `event.get("post_type")` should always resolve — the
+    # `or KIND_EVENT` fallback mirrors event_reconciliation.
+    # reconcile_post_events' own defensive default for the same call.
     clean = is_clean_extraction(
         review_reason=new_review_reason, starts_at=event.get("starts_at"),
         venue_id=new_venue_id, confidence=event.get("confidence"),
-        min_confidence=min_confidence,
+        min_confidence=min_confidence, post_type=event.get("post_type") or KIND_EVENT,
     )
     new_status = STATUS_ACCEPTED if clean else STATUS_PENDING_REVIEW
     if new_status == STATUS_PENDING_REVIEW and not new_review_reason:

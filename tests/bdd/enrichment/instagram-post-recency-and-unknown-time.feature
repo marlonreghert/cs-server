@@ -38,11 +38,15 @@ Feature: Instagram post recency and unknown event time
     When the archive runs for the source "instagram_posts"
     Then both images are archived
 
-  Scenario: Queue an event whose stated time could not be read
+  # plans/260813_review-gate-and-date-vocabulary.md §D superseded queueing
+  # here: an event whose DATE resolved is no longer held up by a clock time
+  # alone. The outcome/counter this scenario also pins is UNCHANGED — see
+  # that plan's own Error Handling section ("keep an unread_time counter").
+  Scenario: Count an event whose stated time could not be read without queueing it
     Given a qualifying post whose flyer reports that it names a time
     And the extractor returns no time
     When event extraction runs
-    Then the event is queued for review with the reason "unread_time"
+    Then the event is not queued for an unread time
     And the outcome "unread_time" is counted
 
   Scenario: Store a date-only event at midnight without queueing it
