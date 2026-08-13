@@ -144,22 +144,30 @@ an EDITED field holds and gets flagged only when it genuinely disagrees.
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
+import logging
+from datetime import datetime, timedelta, timezone
+from itertools import combinations
 from typing import Optional
 
 from app.metrics import EVENT_MERGE_TOTAL, EVENT_SOURCES_PER_EVENT
-from app.models.event_kind import KIND_MENU
+from app.models.event_kind import KIND_EVENT, KIND_MENU
+from app.services import event_dedup
 from app.services.event_identity import normalize_title
 from app.services.event_reconciliation import (
     PROTECTABLE_EVENT_FIELDS as _SCALAR_MERGE_FIELDS,
     REVIEW_REASON_DIVERGES_FROM_CONFIRMED,
     REVIEW_REASON_UNRESOLVED_VENUE,
+    STATUS_PENDING_REVIEW,
+    STATUS_SUPERSEDED,
     apply_operator_field_protection,
     event_field_is_absent as _is_empty,
     union_attractions as _union_attractions,
     union_lineup as _union_lineup,
 )
 from app.services.event_venue_resolution import METHOD_SIBLING_MERGE, RESOLUTION_AUTO
+from app.services.pipeline_run_registry import new_run_id
+
+logger = logging.getLogger(__name__)
 
 # Flagged on a (non-confirmed) canonical event when the fold hit a genuine,
 # unresolvable scalar disagreement between two sources — never silently
@@ -424,17 +432,43 @@ def _fold_review_reason(canonical_reason: Optional[str], duplicate_reason: Optio
     return "; ".join(reasons) if reasons else None
 
 
-def _finish_absorption(venue_dao, duplicate_id: str, canonical_id: str, absorbed: set[str]) -> None:
-    """Step 3+4 of any merge, venue-identity or handle-identity alike: re-
-    point the duplicate's sources at the canonical event, drop its now-stale
-    link candidates (ephemeral scoring evidence, recomputed on the next
-    crawl — never provenance, so clearing rather than reattaching is
-    correct, not lossy), and hard-delete the now-sourceless duplicate row.
-    Factored out so the two merge directions can never drift on what
-    "absorbed" means."""
+MERGE_MODE_DELETE = "delete"
+MERGE_MODE_SUPERSEDE = "supersede"
+
+
+def _finish_absorption(
+    venue_dao, duplicate_id: str, canonical_id: str, absorbed: set[str], *, mode: str = MERGE_MODE_DELETE,
+) -> None:
+    """Step 3+4 of any merge: re-point the duplicate's sources at the
+    canonical event, drop its now-stale link candidates (ephemeral scoring
+    evidence, recomputed on the next crawl — never provenance, so clearing
+    rather than reattaching is correct, not lossy), then dispose of the
+    now-sourceless duplicate row per `mode`. Factored out so every merge
+    direction can never drift on what "absorbed" means.
+
+    plans/260812_event-dedup-fuzzy-title.md §E: an EXACT-identity merge
+    (same venue, same date, byte-identical normalized title — there was
+    nothing to be WRONG about) keeps `mode="delete"` — the ORIGINAL,
+    UNCHANGED behaviour every existing caller still passes implicitly via
+    the default, and the one migration 0026's historical replay depends on.
+    A TITLE-SIMILARITY merge (this plan's own auto band) uses
+    `mode="supersede"` instead: the row is never destroyed, only moved to
+    `STATUS_SUPERSEDED` with `superseded_by` recording who absorbed it — the
+    SAME vocabulary `event_reconciliation.py` already uses for "an item the
+    pipeline retired but did not destroy" (already excluded from the review
+    queue and every served path), reused rather than invented. That the two
+    modes differ is a wart, not an oversight — unifying them is a follow-up,
+    not smuggled in here (see the plan's own §E)."""
     venue_dao.reattach_event_sources(duplicate_id, canonical_id)
     venue_dao.replace_event_venue_link_candidates(duplicate_id, [])
-    venue_dao.delete_event(duplicate_id)
+    if mode == MERGE_MODE_DELETE:
+        venue_dao.delete_event(duplicate_id)
+    elif mode == MERGE_MODE_SUPERSEDE:
+        venue_dao.update_event(duplicate_id, {
+            "status": STATUS_SUPERSEDED, "superseded_by": canonical_id,
+        })
+    else:
+        raise ValueError(f"_finish_absorption: unknown mode {mode!r}")
     absorbed.add(duplicate_id)
 
 
@@ -603,7 +637,9 @@ def _merge_menu_item(venue_dao, item: dict, absorbed: set[str], now: datetime) -
     EVENT_SOURCES_PER_EVENT.observe(len(venue_dao.list_event_sources(canonical_id)))
 
 
-def merge_touched_events(venue_dao, event_ids: list[str], now: datetime) -> None:
+def merge_touched_events(
+    venue_dao, event_ids: list[str], now: datetime, *, redis_like=None,
+) -> None:
     """Called once per post, immediately after
     `event_reconciliation.reconcile_post_events` persists it, with every
     event id that call touched (inserted or updated). For each, looks for
@@ -627,18 +663,36 @@ def merge_touched_events(venue_dao, event_ids: list[str], now: datetime) -> None
     handle merge adopts a venue — the merge decision itself is still driven
     entirely by each event's own already-stored `last_seen_at`
     (`_recency`), never by `now`.
+
+    plans/260812_event-dedup-fuzzy-title.md §A/§C: AFTER the exact-identity
+    pass above has run for every touched event (never before — this is a
+    SECOND pass over what that one leaves behind, never a replacement for
+    it), `run_title_similarity_pass` runs once per DISTINCT venue_id this
+    call touched — never once per event, so a batch of several events at
+    the SAME venue examines that venue's live cluster exactly once, and
+    never for a touched event with no venue_id (title/lineup similarity
+    needs `venue_id` for its own candidate window, same as the exact pass
+    needs it for identity). `redis_like` is the caller's Redis client (or
+    `None`, for a caller with none wired), read-through to
+    `app.services.event_dedup.load_dedup_config`.
     """
     absorbed: set[str] = set()
+    touched_venue_ids: set[str] = set()
     for event_id in event_ids:
         if event_id in absorbed:
             continue
         item = venue_dao.get_event(event_id)
         if item is None:
             continue  # already absorbed by an earlier event_id in this same call
+        if item.get("venue_id"):
+            touched_venue_ids.add(item["venue_id"])
         if item.get("post_type") == KIND_MENU:
             _merge_menu_item(venue_dao, item, absorbed, now)
         else:
             _merge_one(venue_dao, event_id, absorbed, now)
+
+    for venue_id in touched_venue_ids:
+        run_title_similarity_pass(venue_dao, venue_id, now, redis_like=redis_like)
 
 
 def _merge_one(venue_dao, event_id: str, absorbed: set[str], now: datetime) -> None:
@@ -702,8 +756,546 @@ def _merge_one(venue_dao, event_id: str, absorbed: set[str], now: datetime) -> N
     _merge_handle_group(venue_dao, canonical, absorbed, now)
 
 
+# ── plans/260812_event-dedup-fuzzy-title.md: title containment (§B) and
+# shared lineup (§B2), a SECOND pass over what the exact-identity pass above
+# leaves behind. See app.services.event_dedup for the pure predicate this
+# section applies — the SAME predicate `scripts/measure_event_dedup.py`
+# imports, so the measurement and this runtime/sweep path can never
+# disagree about a single pair (plan §C2's own requirement). Nothing below
+# this line ever changes `compute_event_identity` or
+# `compute_source_event_key`; it only decides whether two rows that ALREADY
+# have their own separate identities describe one night. ──────────────────
+
+# §F's own signal — not §B's title-containment and not §B2's shared-lineup,
+# so it gets its own reason token, distinct from
+# app.services.event_dedup.REASON_TITLE/REASON_LINEUP.
+REASON_UNDATED_TWIN = "undated_twin"
+
+
+def _venue_name_of(venue_dao, venue_id: Optional[str]) -> Optional[str]:
+    """`venue_dao.get_venue` returns a plain dict from a bare DAO
+    (`tests.rds_fake.InMemoryRdsVenueStore`/`RdsVenueStore` used directly,
+    as this repo's own BDD steps do) but a `Venue` PYDANTIC MODEL when
+    called through `app.dao.venue_repository.VenueRepository` (the real
+    production wiring, and what several existing unit-test fixtures build
+    too) — `venue_from_row` converts on the way out. Both shapes carry
+    `venue_name`; this reads it either way rather than assuming one."""
+    if not venue_id:
+        return None
+    venue = venue_dao.get_venue(venue_id)
+    if venue is None:
+        return None
+    if isinstance(venue, dict):
+        return venue.get("venue_name")
+    return getattr(venue, "venue_name", None)
+
+
+def _dedup_candidate_events(venue_dao, venue_id: str) -> list[dict]:
+    """The live candidate pool for BOTH the pairwise pass and the undated-
+    absorption pass at one venue: `post_type == KIND_EVENT` (plan §B2's
+    non-event guard) AND `status != STATUS_SUPERSEDED` — a row this
+    feature (or the exact-identity pass) has already absorbed must never
+    re-enter consideration on a LATER call (a fresh crawl at the same
+    venue, or a resumed sweep), or it could be evaluated against its own
+    canonical again, or a stale row wrongly picked as some OTHER row's
+    canonical. `venue_dao.list_events(venue_id=...)` itself applies no
+    status filter (by design — callers with different needs read
+    different subsets), so this repo's convention is that each caller
+    filters for its own purpose; this is this feature's one, shared
+    filter, so the pairwise pass and the undated pass can never quietly
+    diverge on what counts as "still live" either."""
+    return [
+        e for e in venue_dao.list_events(venue_id=venue_id)
+        if e.get("post_type") == KIND_EVENT and e.get("status") != STATUS_SUPERSEDED
+    ]
+
+
+_DECISION_PENDING = "pending"
+_DECISION_AUTO_MERGED = "auto_merged"
+_DECISION_APPLIED = "applied"
+_DECISION_REJECTED = "rejected"
+_DECISION_REVERSED = "reversed"
+
+
+def _suggestion_id() -> str:
+    return f"mrg_{new_run_id()}"
+
+
+def _title_edited(row: dict) -> bool:
+    return "title" in (row.get("operator_edited_fields") or [])
+
+
+def _venue_edited(row: dict) -> bool:
+    return "venue_id" in (row.get("operator_edited_fields") or [])
+
+
+def _edge_blocked_for_absorption(canonical: dict, other: dict, reasons: tuple) -> bool:
+    """plan §E: "a row whose operator_edited_fields names title is never
+    absorbed by title similarity — the operator wrote that title... It may
+    still be a suggestion." Extended here, by the same reasoning, to a row
+    whose operator_edited_fields names venue_id — an operator who corrected
+    a row's venue attribution made a decision a fuzzy merge must not
+    override (the same "operator outranks the model" posture
+    `_merge_handle_group`'s own venue_id-edited refusal already takes for
+    the handle-identity path).
+
+    Checked on BOTH members of the pair, not only the one that would end up
+    absorbed: `choose_canonical`'s oldest-ULID rule can just as easily make
+    the OPERATOR-EDITED row the survivor, and merging its title-alone
+    partner into it would fold the OTHER side's content into the very row
+    the operator corrected — using their edit as leverage for a merge they
+    never asked for, exactly what this guard exists to prevent, regardless
+    of which side happens to keep the row. The venue_id guard blocks
+    absorption via EITHER signal; the title guard blocks absorption ONLY
+    when title-containment is the ONLY reason this edge reached auto — a
+    lineup-backed edge is untouched by an operator's title correction."""
+    if _venue_edited(other) or _venue_edited(canonical):
+        return True
+    if reasons == (event_dedup.REASON_TITLE,) and (_title_edited(other) or _title_edited(canonical)):
+        return True
+    return False
+
+
+def _pair_key(id_a: str, id_b: str) -> tuple:
+    return (id_a, id_b) if id_a <= id_b else (id_b, id_a)
+
+
+def _upsert_pending_suggestion(
+    venue_dao, event_a: dict, event_b: dict, decision: "event_dedup.PairDecision", now: datetime,
+) -> None:
+    """Persist one SUGGEST-band pair as a pending `event_merge_suggestion`
+    row — idempotent across repeated passes (a pair already surfaced as
+    pending is never re-inserted). `event_id`/`candidate_event_id` are
+    ordered by plain string comparison (never "which is canonical" — a
+    pending suggestion has not decided that yet) purely so the SAME pair
+    dedupes regardless of which order a caller happened to evaluate it in."""
+    lo_id, hi_id = _pair_key(event_a["event_id"], event_b["event_id"])
+    already_pending = any(
+        s["event_id"] == lo_id and s["candidate_event_id"] == hi_id
+        for s in venue_dao.list_event_merge_suggestions(candidate_event_id=hi_id, decision=_DECISION_PENDING)
+    )
+    if already_pending:
+        return
+    lo, hi = (event_a, event_b) if event_a["event_id"] == lo_id else (event_b, event_a)
+    lo_words = decision.event_distinctive_words if lo is event_a else decision.candidate_distinctive_words
+    hi_words = decision.candidate_distinctive_words if lo is event_a else decision.event_distinctive_words
+    venue_dao.create_event_merge_suggestion({
+        "suggestion_id": _suggestion_id(),
+        "event_id": lo_id, "candidate_event_id": hi_id,
+        "band": decision.band, "reasons": list(decision.reasons),
+        "event_distinctive_words": list(lo_words), "candidate_distinctive_words": list(hi_words),
+        "shared_lineup_names": list(decision.shared_lineup_names),
+        "decision": _DECISION_PENDING, "created_at": now,
+    })
+
+
+def _observe_title_refusal(event_a: dict, event_b: dict, venue_name, config: "event_dedup.DedupConfig") -> None:
+    """`EVENT_MERGE_TOTAL{identity="title"}` refusal outcomes (plan Error
+    Handling And Observability) — computed independently of whether lineup
+    also refused, since these two labels are specifically about the TITLE
+    signal's own refusal reason."""
+    venue_tokens = event_dedup.venue_name_tokens(venue_name)
+    set_a = event_dedup.distinctive_set(
+        event_a.get("title"), venue_tokens=venue_tokens,
+        generic_vocabulary=config.generic_vocabulary, stopwords=config.stopwords,
+    )
+    set_b = event_dedup.distinctive_set(
+        event_b.get("title"), venue_tokens=venue_tokens,
+        generic_vocabulary=config.generic_vocabulary, stopwords=config.stopwords,
+    )
+    outcome = "refused_no_distinctive_tokens" if (not set_a or not set_b) else "refused_disjoint"
+    EVENT_MERGE_TOTAL.labels(identity="title", outcome=outcome).inc()
+
+
+def _absorb_title_similarity(
+    venue_dao, canonical: dict, duplicate: dict, decision: "event_dedup.PairDecision",
+    absorbed: set[str], now: datetime,
+) -> dict:
+    """Absorb `duplicate` into `canonical` via title/lineup similarity —
+    the SAME `merge_event_fields` fold every other merge in this module
+    uses, `_finish_absorption(mode="supersede")` instead of the exact-
+    identity path's `mode="delete"` (plan §E), and one
+    `event_merge_suggestion` audit row recording exactly which source ids
+    moved and what the duplicate's status was before, so a reversal is
+    mechanical (`reverse_title_similarity_merge`, below). Logs the merge at
+    info with both titles, both distinctive sets and the canonical's id
+    (plan Error Handling: "the record an operator reads when they ask why
+    two listings became one, and it must be readable without a database").
+    """
+    moved_source_ids = [s["id"] for s in venue_dao.list_event_sources(duplicate["event_id"])]
+    absorbed_status_before = duplicate.get("status")
+
+    changed_fields, review_reason = merge_event_fields(canonical, duplicate)
+    update: dict = dict(changed_fields)
+    if review_reason != canonical.get("review_reason"):
+        update["review_reason"] = review_reason
+    if update:
+        venue_dao.update_event(canonical["event_id"], update)
+        canonical = venue_dao.get_event(canonical["event_id"])
+
+    _finish_absorption(
+        venue_dao, duplicate["event_id"], canonical["event_id"], absorbed, mode=MERGE_MODE_SUPERSEDE,
+    )
+    venue_dao.create_event_merge_suggestion({
+        "suggestion_id": _suggestion_id(),
+        "event_id": canonical["event_id"], "candidate_event_id": duplicate["event_id"],
+        "band": event_dedup.BAND_AUTO, "reasons": list(decision.reasons),
+        "event_distinctive_words": list(decision.event_distinctive_words),
+        "candidate_distinctive_words": list(decision.candidate_distinctive_words),
+        "shared_lineup_names": list(decision.shared_lineup_names),
+        "decision": _DECISION_AUTO_MERGED, "moved_source_ids": moved_source_ids,
+        "absorbed_status_before": absorbed_status_before, "created_at": now, "decided_at": now,
+    })
+
+    canonical = venue_dao.get_event(canonical["event_id"])
+    EVENT_MERGE_TOTAL.labels(identity="title", outcome="merged").inc()
+    EVENT_SOURCES_PER_EVENT.observe(len(venue_dao.list_event_sources(canonical["event_id"])))
+    logger.info(
+        "[EventMerge] title-similarity merge: canonical=%s title=%r <- absorbed=%s title=%r "
+        "reasons=%s event_words=%s candidate_words=%s shared_lineup=%s",
+        canonical["event_id"], canonical.get("title"), duplicate["event_id"], duplicate.get("title"),
+        decision.reasons, decision.event_distinctive_words, decision.candidate_distinctive_words,
+        decision.shared_lineup_names,
+    )
+    return canonical
+
+
+def _run_pairwise_pass(
+    venue_dao, events: list[dict], venue_name, config: "event_dedup.DedupConfig", now: datetime,
+    *, record_suggestions: bool = True,
+) -> None:
+    """§B/§B2/§D over ONE venue's live `post_type == "event"` rows: build
+    the auto-band graph (union-find), always surface every suggest-band
+    edge, then (only when `config.auto_merge_enabled`) absorb every auto
+    component via `choose_canonical` — REUSED, not re-derived, so a
+    component with two protected members is left entirely alone exactly as
+    an exact-identity group already is.
+
+    `record_suggestions=False` (plan §C2: "Only the auto band sweeps ... a
+    historical backlog of suggestions nobody asked for is queue landfill")
+    is `scripts/measure_event_dedup.py --apply`'s ONE deliberate divergence
+    from the runtime pipeline's own call — it still walks the identical
+    graph and applies the identical auto absorptions, it just never writes
+    a `event_merge_suggestion` row for a suggest-band or blocked-auto edge.
+    The runtime pipeline (`merge_touched_events`) never passes this — every
+    real crawl call keeps recording suggestions, exactly as before."""
+    n = len(events)
+    parent = list(range(n))
+
+    def find(x: int) -> int:
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(x: int, y: int) -> None:
+        rx, ry = find(x), find(y)
+        if rx != ry:
+            parent[rx] = ry
+
+    edges: dict[tuple, "event_dedup.PairDecision"] = {}
+    for i, j in combinations(range(n), 2):
+        a, b = events[i], events[j]
+        if not event_dedup.in_candidate_window(
+            a.get("starts_at"), b.get("starts_at"), window_hours=config.candidate_window_hours,
+        ):
+            continue
+        decision = event_dedup.evaluate_pair(a, b, venue_name=venue_name, config=config)
+        if decision is None:
+            _observe_title_refusal(a, b, venue_name, config)
+            continue
+        edges[(i, j)] = decision
+        if decision.band == event_dedup.BAND_AUTO:
+            union(i, j)
+
+    # Suggest-band evidence is ALWAYS surfaced — independent of
+    # `auto_merge_enabled` (plan §C: "the suggest band may ship enabled: it
+    # writes only derived rows and applies nothing").
+    for (i, j), decision in edges.items():
+        if decision.band == event_dedup.BAND_SUGGEST:
+            if record_suggestions:
+                _upsert_pending_suggestion(venue_dao, events[i], events[j], decision, now)
+            EVENT_MERGE_TOTAL.labels(identity="title", outcome="suggested").inc()
+
+    if not config.auto_merge_enabled:
+        return
+
+    groups: dict[int, list[int]] = {}
+    for i in range(n):
+        groups.setdefault(find(i), []).append(i)
+
+    absorbed_ids: set[str] = set()
+    for idxs in groups.values():
+        if len(idxs) < 2:
+            continue
+        _absorb_component(
+            venue_dao, events, idxs, edges, absorbed_ids, now, record_suggestions=record_suggestions,
+        )
+
+
+def _absorb_component(
+    venue_dao, events: list[dict], idxs: list[int], edges: dict, absorbed_ids: set[str], now: datetime,
+    *, record_suggestions: bool = True,
+) -> None:
+    members = []
+    for i in idxs:
+        row = venue_dao.get_event(events[i]["event_id"])
+        if row is not None and row["event_id"] not in absorbed_ids:
+            members.append((i, row))
+    if len(members) < 2:
+        return
+
+    canonical = choose_canonical([row for _, row in members])
+    if canonical is None:
+        # Plan §E: "choose_canonical returning None for a group with two
+        # protected members still means leave everything alone" — reused
+        # unchanged. The whole component's auto edges are still surfaced as
+        # suggestions rather than silently dropped: an operator confirming
+        # two rows did not also ask never to be told they might be the
+        # same night.
+        EVENT_MERGE_TOTAL.labels(identity="title", outcome="refused_protected").inc()
+        if record_suggestions:
+            for (i, j), decision in edges.items():
+                if decision.band == event_dedup.BAND_AUTO and i in idxs and j in idxs:
+                    _upsert_pending_suggestion(venue_dao, events[i], events[j], decision, now)
+        return
+
+    for i, other in members:
+        if other["event_id"] == canonical["event_id"] or other["event_id"] in absorbed_ids:
+            continue
+        incident = [
+            decision for (x, y), decision in edges.items()
+            if decision.band == event_dedup.BAND_AUTO and i in (x, y) and x in idxs and y in idxs
+        ]
+        unblocked = [d for d in incident if not _edge_blocked_for_absorption(canonical, other, d.reasons)]
+        if unblocked:
+            canonical = _absorb_title_similarity(venue_dao, canonical, other, unblocked[0], absorbed_ids, now)
+        else:
+            for decision in incident:
+                if record_suggestions:
+                    _upsert_pending_suggestion(venue_dao, canonical, other, decision, now)
+                outcome = (
+                    "refused_operator_title"
+                    if decision.reasons == (event_dedup.REASON_TITLE,) and _title_edited(other)
+                    else "refused_protected"
+                )
+                EVENT_MERGE_TOTAL.labels(identity="title", outcome=outcome).inc()
+
+
+def _undated_absorption_pass(
+    venue_dao, venue_id: str, now: datetime, config: "event_dedup.DedupConfig",
+) -> None:
+    """§F: the mirror of `_absorb_unresolved_sibling`, for a DATED gap
+    instead of a venue gap. An undated row may be absorbed by a dated
+    sibling, at the auto bar only, when they share `venue_id` AND
+    `source_handle`, their distinctive sets are EQUAL (not merely a
+    subset), and the undated row's `first_seen_at` is within `config.
+    undated_window_days` of the dated sibling's `starts_at`. The dated row
+    is ALWAYS canonical — direction is structural, never incidental, the
+    same rule `_merge_handle_group`'s own docstring insists on. Restricted
+    to `post_type == "event"` rows by the caller (`run_title_similarity_
+    pass` already filters its `events` list before either pass runs), so
+    the "never crosses `compute_menu_identity`'s dateless identity" gate
+    (plan §F) holds by construction, not by a redundant check here."""
+    events = _dedup_candidate_events(venue_dao, venue_id)
+    venue_tokens = event_dedup.venue_name_tokens(_venue_name_of(venue_dao, venue_id))
+
+    undated = [e for e in events if e.get("starts_at") is None]
+    dated = [e for e in events if e.get("starts_at") is not None]
+    if not undated or not dated:
+        return
+
+    window = timedelta(days=config.undated_window_days)
+    absorbed_ids: set[str] = set()
+    for u in undated:
+        if u["event_id"] in absorbed_ids:
+            continue
+        if not u.get("source_handle"):
+            continue
+        if _is_protected(u) or _title_edited(u) or _venue_edited(u):
+            continue
+        first_seen = u.get("first_seen_at")
+        if first_seen is None:
+            continue
+        u_set = event_dedup.distinctive_set(
+            u.get("title"), venue_tokens=venue_tokens,
+            generic_vocabulary=config.generic_vocabulary, stopwords=config.stopwords,
+        )
+        if not u_set:
+            continue
+        for d in dated:
+            if d["event_id"] in absorbed_ids or d["event_id"] == u["event_id"]:
+                continue
+            if d.get("source_handle") != u.get("source_handle"):
+                continue
+            d_set = event_dedup.distinctive_set(
+                d.get("title"), venue_tokens=venue_tokens,
+                generic_vocabulary=config.generic_vocabulary, stopwords=config.stopwords,
+            )
+            if d_set != u_set:
+                continue
+            if abs(first_seen - d["starts_at"]) > window:
+                continue
+            decision = event_dedup.PairDecision(
+                band=event_dedup.BAND_AUTO, reasons=(REASON_UNDATED_TWIN,),
+                event_distinctive_words=tuple(sorted(d_set)),
+                candidate_distinctive_words=tuple(sorted(u_set)), shared_lineup_names=(),
+            )
+            _absorb_title_similarity(venue_dao, d, u, decision, absorbed_ids, now)
+            break
+
+
+def run_title_similarity_pass(
+    venue_dao, venue_id: Optional[str], now: datetime, *, redis_like=None,
+    config: Optional["event_dedup.DedupConfig"] = None, record_suggestions: bool = True,
+) -> None:
+    """plans/260812_event-dedup-fuzzy-title.md §C/§D: the fuzzy-title/
+    shared-lineup merge pass for ONE venue's currently-live event rows.
+    Always computes and records SUGGEST-band evidence. Only APPLIES the
+    auto band (title-containment §B, shared-lineup §B2, and the undated-
+    twin absorption §F) when `event_dedup_auto_merge_enabled` reads true
+    (plan §C, "the six things most likely to go wrong" #1) — while it reads
+    false an auto-eligible pair is left completely untouched and
+    UNRECORDED, never written as a 'pending' suggestion either: recording
+    it would misrepresent an auto-only candidate as something an operator
+    is meant to action by hand, when the flag's whole point is that turning
+    it on is the operator's own deliberate act.
+
+    Never a candidate at all: any row whose `post_type` is not
+    `app.models.event_kind.KIND_EVENT` (plan §B2's non-event guard — `'31
+    Anos'`/a promotion/a menu item never enters either pass's candidate
+    pool, so it can neither absorb nor be absorbed, and there is no edge
+    for it to appear on even as a suggestion).
+
+    `config`, when given, is used AS-IS instead of reading `redis_like` —
+    `scripts/measure_event_dedup.py --apply` uses this to force
+    `auto_merge_enabled=True` for its own one-time historical sweep without
+    touching the LIVE admin-config flag the ongoing pipeline reads (turning
+    the sweep on is a separate, explicit decision from turning the ongoing
+    pipeline's auto band on). `record_suggestions=False` is that same
+    script's other divergence — see `_run_pairwise_pass`'s own docstring.
+    Every other caller (the real crawl paths, via `merge_touched_events`)
+    passes neither, reading the live config and always recording
+    suggestions, exactly as before. Reused (never reimplemented) by that
+    same script for its `--apply` sweep, so the measurement and the sweep
+    can never disagree about a pair.
+    """
+    if not venue_id:
+        return
+    if config is None:
+        config = event_dedup.load_dedup_config(redis_like)
+    events = _dedup_candidate_events(venue_dao, venue_id)
+    venue_name = _venue_name_of(venue_dao, venue_id)
+
+    if len(events) >= 2:
+        _run_pairwise_pass(venue_dao, events, venue_name, config, now, record_suggestions=record_suggestions)
+
+    if config.auto_merge_enabled:
+        _undated_absorption_pass(venue_dao, venue_id, now, config)
+
+
+def apply_merge_suggestion(
+    venue_dao, suggestion_id: str, now: datetime, *, decided_by: Optional[str] = None,
+) -> dict:
+    """plan §C: applying a SUGGEST-band pair is an explicit operator action
+    — NEVER performed by the pipeline. Reuses the SAME `choose_canonical`/
+    `merge_event_fields`/`_finish_absorption(mode="supersede")` path an
+    auto-band merge uses, so a suggestion applied by hand is reversible and
+    audited identically to one the pipeline applied itself."""
+    suggestion = venue_dao.get_event_merge_suggestion(suggestion_id)
+    if suggestion is None:
+        raise ValueError(f"apply_merge_suggestion: no suggestion {suggestion_id!r}")
+    if suggestion["decision"] != _DECISION_PENDING:
+        raise ValueError(
+            f"apply_merge_suggestion: suggestion {suggestion_id!r} is not pending "
+            f"(decision={suggestion['decision']!r})"
+        )
+    a = venue_dao.get_event(suggestion["event_id"])
+    b = venue_dao.get_event(suggestion["candidate_event_id"])
+    if a is None or b is None:
+        raise ValueError(f"apply_merge_suggestion: {suggestion_id!r} references a missing event")
+
+    canonical = choose_canonical([a, b])
+    if canonical is None:
+        raise ValueError(
+            f"apply_merge_suggestion: {suggestion_id!r} has two protected members — leave it alone"
+        )
+    duplicate = b if canonical["event_id"] == a["event_id"] else a
+
+    moved_source_ids = [s["id"] for s in venue_dao.list_event_sources(duplicate["event_id"])]
+    absorbed_status_before = duplicate.get("status")
+    changed_fields, review_reason = merge_event_fields(canonical, duplicate)
+    update: dict = dict(changed_fields)
+    if review_reason != canonical.get("review_reason"):
+        update["review_reason"] = review_reason
+    if update:
+        venue_dao.update_event(canonical["event_id"], update)
+        canonical = venue_dao.get_event(canonical["event_id"])
+
+    absorbed: set[str] = set()
+    _finish_absorption(venue_dao, duplicate["event_id"], canonical["event_id"], absorbed, mode=MERGE_MODE_SUPERSEDE)
+    venue_dao.update_event_merge_suggestion(suggestion_id, {
+        "decision": _DECISION_APPLIED, "decided_at": now, "decided_by": decided_by,
+        "moved_source_ids": moved_source_ids, "absorbed_status_before": absorbed_status_before,
+        # The pending row's event_id/candidate_event_id ordering was
+        # arbitrary (`_pair_key`'s plain string order) — overwritten here
+        # with the ACTUAL canonical/duplicate roles `choose_canonical` just
+        # decided, since reversal reads `candidate_event_id` as "the row to
+        # restore" and must find the correct one.
+        "event_id": canonical["event_id"], "candidate_event_id": duplicate["event_id"],
+    })
+    EVENT_MERGE_TOTAL.labels(identity="title", outcome="merged").inc()
+    return venue_dao.get_event(canonical["event_id"])
+
+
+def reject_merge_suggestion(
+    venue_dao, suggestion_id: str, now: datetime, *, decided_by: Optional[str] = None,
+) -> dict:
+    """An operator's explicit "no" — the suggestion stops being surfaced as
+    pending; neither event row is touched."""
+    suggestion = venue_dao.get_event_merge_suggestion(suggestion_id)
+    if suggestion is None:
+        raise ValueError(f"reject_merge_suggestion: no suggestion {suggestion_id!r}")
+    return venue_dao.update_event_merge_suggestion(suggestion_id, {
+        "decision": _DECISION_REJECTED, "decided_at": now, "decided_by": decided_by,
+    })
+
+
+def reverse_title_similarity_merge(
+    venue_dao, absorbed_event_id: str, now: datetime, *, decided_by: Optional[str] = None,
+) -> dict:
+    """plan §E: mechanical reversal — flip the superseded row back, detach
+    EXACTLY the sources this specific merge moved (never the canonical's
+    own, and never a source a LATER, unrelated merge subsequently attached
+    to the canonical too — `moved_source_ids`, recorded at merge time, is
+    what makes this precise rather than a guess)."""
+    matches = [
+        s for s in venue_dao.list_event_merge_suggestions(candidate_event_id=absorbed_event_id)
+        if s["decision"] in (_DECISION_AUTO_MERGED, _DECISION_APPLIED)
+    ]
+    if not matches:
+        raise ValueError(
+            f"reverse_title_similarity_merge: no applied title-similarity merge found "
+            f"for {absorbed_event_id!r}"
+        )
+    record = max(matches, key=lambda s: (s.get("decided_at") or s.get("created_at")))
+    for source_id in (record.get("moved_source_ids") or []):
+        venue_dao.reattach_event_source_by_id(source_id, absorbed_event_id)
+    venue_dao.update_event(absorbed_event_id, {
+        "status": record.get("absorbed_status_before") or STATUS_PENDING_REVIEW,
+        "superseded_by": None,
+    })
+    venue_dao.update_event_merge_suggestion(record["suggestion_id"], {
+        "decision": _DECISION_REVERSED, "decided_at": now, "decided_by": decided_by,
+    })
+    return venue_dao.get_event(absorbed_event_id)
+
+
 __all__ = [
     "compute_event_identity", "compute_menu_identity", "compute_handle_identity",
     "choose_canonical", "merge_event_fields", "merge_touched_events",
     "REVIEW_REASON_SOURCES_DISAGREE",
+    "MERGE_MODE_DELETE", "MERGE_MODE_SUPERSEDE", "REASON_UNDATED_TWIN",
+    "run_title_similarity_pass", "apply_merge_suggestion", "reject_merge_suggestion",
+    "reverse_title_similarity_merge",
 ]

@@ -1482,6 +1482,16 @@ EVENT_MERGE_TOTAL = Counter(
     # identity=handle: merged, no_identity, no_match, ambiguous_venue,
     #                  confirmed_member, operator_edited
     # identity=menu: merged, no_identity, no_match, two_confirmed
+    # identity=title (plans/260812_event-dedup-fuzzy-title.md — title
+    #                 containment + shared lineup, a SECOND pass over what
+    #                 identity=venue leaves behind): merged, suggested,
+    #                 refused_disjoint, refused_no_distinctive_tokens,
+    #                 refused_protected, refused_operator_title. Watch
+    #                 refused_no_distinctive_tokens (plan Error Handling: a
+    #                 climb means the generic-event vocabulary has grown too
+    #                 greedy) and the suggested-to-merged ratio (unactioned
+    #                 suggestions piling up means the suggest band is
+    #                 producing landfill, not decisions).
 )
 
 # Snapshot of events.post_item (post_type="menu" only) by current-vs-expired

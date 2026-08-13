@@ -482,6 +482,13 @@ class RdsVenueStore:
         # a merge/re-extraction decision lands on (see that module's
         # _confirmed_update_fields docstring).
         "time_known",
+        # plans/260812_event-dedup-fuzzy-title.md §E (migration 0038) — the
+        # event that absorbed THIS row via title/lineup similarity, when its
+        # status is 'superseded' for that reason. NULL for every row an
+        # exact-identity merge deleted instead (that path never sets this —
+        # the row is simply gone) and for every row that has never been
+        # absorbed at all.
+        "superseded_by",
     )
     _EVENT_JSONB_COLUMNS = ("lineup", "operator_edited_fields", "attractions")
     # Python dict key -> real SQL column name, for the one column whose
@@ -545,7 +552,7 @@ class RdsVenueStore:
         "e.price_text, e.location_text, e.confidence, e.status, e.review_reason, "
         "e.location_resolution, e.location_confidence, e.linked_by, e.linked_at, "
         "e.operator_edited_fields, e.ticket_info, e.attractions, "
-        "e.post_type, e.category, e.time_known, "
+        "e.post_type, e.category, e.time_known, e.superseded_by, "
         "e.updated_at, v.venue_name, "
         "ps.source_kind, ps.source_handle, ps.source_shortcode, ps.source_permalink, "
         "ps.source_event_key, ps.source_event_index, ps.cover_photo_key, ps.raw_extraction, "
@@ -578,7 +585,7 @@ class RdsVenueStore:
         "e.price_text, e.location_text, e.confidence, e.status, e.review_reason, "
         "e.location_resolution, e.location_confidence, e.linked_by, e.linked_at, "
         "e.operator_edited_fields, e.ticket_info, e.attractions, "
-        "e.post_type, e.category, e.time_known, "
+        "e.post_type, e.category, e.time_known, e.superseded_by, "
         "e.updated_at, v.venue_name, "
         "es.source_kind, es.source_handle, es.source_shortcode, es.source_permalink, "
         "es.source_event_key, es.source_event_index, es.cover_photo_key, "
@@ -719,6 +726,23 @@ class RdsVenueStore:
                     "UPDATE events.post_item_source SET post_item_id=:to_id WHERE post_item_id=:from_id"
                 ),
                 {"to_id": to_event_id, "from_id": from_event_id},
+            )
+
+    def reattach_event_source_by_id(self, source_id: str, to_event_id: str) -> None:
+        """Re-point ONE specific `events.post_item_source` row (by its own
+        `id`, never by `from_event_id`) at `to_event_id` —
+        plans/260812_event-dedup-fuzzy-title.md §E's reversal primitive.
+        `reattach_event_sources` above moves EVERY source currently on one
+        event, which is correct for an absorption but wrong for a reversal:
+        the canonical may have gained sources of its own (or from an
+        earlier, unrelated merge) since the absorption this call is
+        undoing, and only the SPECIFIC source ids that moved during THAT
+        merge (`events.event_merge_suggestion.moved_source_ids`) may move
+        back."""
+        with self.engine.begin() as conn:
+            conn.execute(
+                text("UPDATE events.post_item_source SET post_item_id=:to_id WHERE id=:id"),
+                {"to_id": to_event_id, "id": source_id},
             )
 
     def delete_event(self, event_id: str) -> None:
@@ -1073,6 +1097,110 @@ class RdsVenueStore:
                 {"e": event_id},
             ).mappings()
             return [dict(r) for r in rows]
+
+    # ── events.event_merge_suggestion (plans/260812_event-dedup-fuzzy-title.md
+    # §C/§E, migration 0038) ────────────────────────────────────────────────
+    _MERGE_SUGGESTION_COLUMNS = (
+        "suggestion_id", "event_id", "candidate_event_id", "band", "reasons",
+        "event_distinctive_words", "candidate_distinctive_words", "shared_lineup_names",
+        "decision", "moved_source_ids", "absorbed_status_before", "created_at",
+        "decided_at", "decided_by",
+    )
+    _MERGE_SUGGESTION_JSONB_COLUMNS = (
+        "reasons", "event_distinctive_words", "candidate_distinctive_words",
+        "shared_lineup_names", "moved_source_ids",
+    )
+    _MERGE_SUGGESTION_SELECT = (
+        "SELECT suggestion_id, event_id, candidate_event_id, band, reasons, "
+        "event_distinctive_words, candidate_distinctive_words, shared_lineup_names, "
+        "decision, moved_source_ids, absorbed_status_before, created_at, decided_at, "
+        "decided_by FROM events.event_merge_suggestion"
+    )
+
+    def create_event_merge_suggestion(self, fields: dict) -> dict:
+        """Insert one `events.event_merge_suggestion` row — written both for
+        a SUGGEST-band pair awaiting an operator (`decision='pending'`) and,
+        in the SAME shape, for every AUTO-band absorption this feature
+        itself performs (`decision='auto_merged'`) — see the migration's own
+        docstring for why one table serves both."""
+        cols = [c for c in self._MERGE_SUGGESTION_COLUMNS if c in fields]
+        assign = {c: fields[c] for c in cols}
+        for c in self._MERGE_SUGGESTION_JSONB_COLUMNS:
+            if c in assign and assign[c] is not None:
+                assign[c] = json.dumps(assign[c])
+        col_list = ", ".join(cols)
+        val_list = ", ".join(
+            f"CAST(:{c} AS jsonb)" if c in self._MERGE_SUGGESTION_JSONB_COLUMNS else f":{c}"
+            for c in cols
+        )
+        with self.engine.begin() as conn:
+            conn.execute(
+                text(f"INSERT INTO events.event_merge_suggestion ({col_list}) VALUES ({val_list})"),
+                assign,
+            )
+        return self.get_event_merge_suggestion(fields["suggestion_id"])
+
+    def get_event_merge_suggestion(self, suggestion_id: str) -> Optional[dict]:
+        with self.engine.connect() as conn:
+            row = conn.execute(
+                text(f"{self._MERGE_SUGGESTION_SELECT} WHERE suggestion_id=:id"),
+                {"id": suggestion_id},
+            ).mappings().first()
+            return dict(row) if row else None
+
+    def list_event_merge_suggestions(
+        self, *, event_id: Optional[str] = None, candidate_event_id: Optional[str] = None,
+        decision: Optional[str] = None,
+    ) -> list[dict]:
+        """Every suggestion touching `event_id` on EITHER side (surviving or
+        candidate) — the review queue needs both directions on one event, and
+        a reversal looks a row up by `candidate_event_id` alone (the absorbed
+        side, which no longer knows its own canonical any other way)."""
+        sql = self._MERGE_SUGGESTION_SELECT
+        clauses = []
+        params: dict = {}
+        if event_id is not None:
+            clauses.append("(event_id=:event_id OR candidate_event_id=:event_id)")
+            params["event_id"] = event_id
+        if candidate_event_id is not None:
+            clauses.append("candidate_event_id=:candidate_event_id")
+            params["candidate_event_id"] = candidate_event_id
+        if decision is not None:
+            clauses.append("decision=:decision")
+            params["decision"] = decision
+        if clauses:
+            sql += " WHERE " + " AND ".join(clauses)
+        sql += " ORDER BY created_at, suggestion_id"
+        with self.engine.connect() as conn:
+            return [dict(r) for r in conn.execute(text(sql), params).mappings()]
+
+    def update_event_merge_suggestion(self, suggestion_id: str, fields: dict) -> Optional[dict]:
+        """Partial update — used to move a suggestion's `decision` (pending
+        -> applied/rejected/reversed) and to record `moved_source_ids`/
+        `absorbed_status_before` once a merge actually applies."""
+        if not fields:
+            return self.get_event_merge_suggestion(suggestion_id)
+        cols = [c for c in self._MERGE_SUGGESTION_COLUMNS if c in fields and c != "suggestion_id"]
+        assign = {c: fields[c] for c in cols}
+        for c in self._MERGE_SUGGESTION_JSONB_COLUMNS:
+            if c in assign and assign[c] is not None:
+                assign[c] = json.dumps(assign[c])
+        set_clauses = [
+            f"{c}=CAST(:{c} AS jsonb)" if c in self._MERGE_SUGGESTION_JSONB_COLUMNS else f"{c}=:{c}"
+            for c in cols
+        ]
+        assign["suggestion_id"] = suggestion_id
+        with self.engine.begin() as conn:
+            result = conn.execute(
+                text(
+                    f"UPDATE events.event_merge_suggestion SET {', '.join(set_clauses)} "
+                    "WHERE suggestion_id=:suggestion_id"
+                ),
+                assign,
+            )
+            if result.rowcount == 0:
+                return None
+        return self.get_event_merge_suggestion(suggestion_id)
 
     # ── bulk per-table readers (projector rebuild, P1) ─────────────────────────
     # Replace the projector's former per-venue read loop (~18 SQL queries per

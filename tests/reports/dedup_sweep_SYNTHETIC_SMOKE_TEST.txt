@@ -1,0 +1,17 @@
+[EventMerge] title-similarity merge: canonical=evt_01KZY7JCM2ZVMNB5ZSHV3EM510 title='31º Rodolpho Produções' <- absorbed=evt_01KZY7JCM2ZVMNB5ZSHV3EM511 title='31º Rodolpho Produções' reasons=('title_containment',) event_words=('producoes', 'rodolpho') candidate_words=('31o', 'producoes', 'rodolpho') shared_lineup=()
+[EventMerge] title-similarity merge: canonical=evt_01KZY7JCM2ZVMNB5ZSHV3EM510 title='Rodolpho' <- absorbed=evt_01KZY7JCM2ZVMNB5ZSHV3EM512 title='Rodolpho' reasons=('title_containment',) event_words=('producoes', 'rodolpho') candidate_words=('rodolpho',) shared_lineup=()
+[EventMerge] title-similarity merge: canonical=evt_01KZY7JCM2ZVMNB5ZSHV3EM510 title='Rodolpho Produções' <- absorbed=evt_01KZY7JCM2ZVMNB5ZSHV3EM513 title='Rodolpho Produções' reasons=('title_containment',) event_words=('producoes', 'rodolpho') candidate_words=('producoes', 'rodolpho') shared_lineup=()
+[EventMerge] title-similarity merge: canonical=evt_01KZY7JCM2ZVMNB5ZSHV3EM510 title='SEXTOU NO CONCHITTAS BAR!' <- absorbed=evt_01KZY7JCM2ZVMNB5ZSHV3EM514 title='SEXTOU NO CONCHITTAS BAR!' reasons=('shared_lineup',) event_words=('producoes', 'rodolpho') candidate_words=() shared_lineup=('performer 1', 'performer 10', 'performer 11', 'performer 2', 'performer 3', 'performer 4', 'performer 5', 'performer 6', 'performer 7', 'performer 8', 'performer 9')
+[EventMerge] title-similarity merge: canonical=evt_01KZY7JCM2ZVMNB5ZSHV3EM510 title='Aniversário do Rodolpho Produções' <- absorbed=evt_01KZY7JCM2ZVMNB5ZSHV3EM515 title='Aniversário do Rodolpho Produções' reasons=('title_containment',) event_words=('producoes', 'rodolpho') candidate_words=('producoes', 'rodolpho') shared_lineup=()
+[EventMerge] title-similarity merge: canonical=evt_01KZY7JCM2ZVMNB5ZSHV3EM510 title='Aniversário do Rodolpho Produções' <- absorbed=evt_01KZY7JCM2ZVMNB5ZSHV3EM50Z title='Aniversário do RODOLPHO Produções' reasons=('undated_twin',) event_words=('producoes', 'rodolpho') candidate_words=('producoes', 'rodolpho') shared_lineup=()
+[EventMerge] title-similarity merge: canonical=evt_01KZY7JCM3YBKKK1MH81HMRV8W title='Homenagem aos 98 anos de Onildo Almeida' <- absorbed=evt_01KZY7JCM3YBKKK1MH81HMRV8X title='Homenagem aos 98 anos de Onildo Almeida' reasons=('shared_lineup',) event_words=('almeida', 'convidados', 'onildo') candidate_words=('98', 'almeida', 'homenagem', 'onildo') shared_lineup=('cezzinha', 'josildo sa', 'silverio pessoa')
+[EventMerge] title-similarity merge: canonical=evt_01KZY7JCM3YBKKK1MH81HMRV8Y title='Show do DJ Teste Extended' <- absorbed=evt_01KZY7JCM3YBKKK1MH81HMRV8Z title='Show do DJ Teste Extended' reasons=('title_containment',) event_words=('dj', 'teste') candidate_words=('dj', 'extended', 'teste') shared_lineup=()
+=== BEFORE sweep ===
+auto: 13 suggest: 8
+swept venues: 5
+=== AFTER sweep (should be 0 auto pairs) ===
+auto: 0 suggest: 8
+second sweep -> auto: 0 suggest: 8 (must equal first AFTER)
+suggestion table: auto_merged rows = 8 | pending rows = 0
+Conchittas alive rows: [('Aniversário do Rodolpho Produções', 'accepted'), ('31 Anos', 'accepted')]
+ALL ASSERTIONS PASSED

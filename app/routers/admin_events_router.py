@@ -25,6 +25,7 @@ from app.metrics import (
 from app.models.event_kind import KIND_MENU
 from app.models.menu_lifecycle import is_menu_item_current, load_menu_expiry_days
 from app.models.promoter_event_visibility import is_promoter_only_item, load_hide_promoter_events
+from app.services.event_merge import apply_merge_suggestion, reject_merge_suggestion, reverse_title_similarity_merge
 from app.services.promoter_registry_service import InvalidPromoterAccount, PromoterRegistryService
 
 logger = logging.getLogger(__name__)
@@ -434,8 +435,29 @@ class LinkCandidateOut(BaseModel):
     evidence: dict = Field(default_factory=dict)
 
 
+# plans/260812_event-dedup-fuzzy-title.md §C/§Data-Config-And-API-Impact:
+# "GET /admin/events/review items gain a merge_suggestions list (additive;
+# the console is a released client and nothing may be removed)." One entry
+# per PENDING suggestion touching this item, from either side — the other
+# item's own id/title are surfaced directly so the console never has to make
+# a second round-trip to say what it is proposing to merge with.
+class MergeSuggestionOut(BaseModel):
+    suggestion_id: str
+    other_event_id: str
+    other_title: Optional[str] = None
+    band: str
+    reasons: list[str] = Field(default_factory=list)
+    event_distinctive_words: list[str] = Field(default_factory=list)
+    candidate_distinctive_words: list[str] = Field(default_factory=list)
+    shared_lineup_names: list[str] = Field(default_factory=list)
+    decision: str
+    created_at: Optional[datetime] = None
+    decided_at: Optional[datetime] = None
+
+
 class ReviewQueueItemOut(EventOut):
     candidates: list[LinkCandidateOut] = Field(default_factory=list)
+    merge_suggestions: list[MergeSuggestionOut] = Field(default_factory=list)
 
 
 class LinkRequest(BaseModel):
@@ -444,6 +466,23 @@ class LinkRequest(BaseModel):
     venue_id: Optional[str] = None
     candidate_rank: Optional[int] = None
     linked_by: str
+
+
+def _merge_suggestions_for(dao, event_id: str) -> list[MergeSuggestionOut]:
+    out = []
+    for s in dao.list_event_merge_suggestions(event_id=event_id, decision="pending"):
+        other_id = s["candidate_event_id"] if s["event_id"] == event_id else s["event_id"]
+        other = dao.get_event(other_id)
+        out.append(MergeSuggestionOut(
+            suggestion_id=s["suggestion_id"], other_event_id=other_id,
+            other_title=other.get("title") if other else None,
+            band=s["band"], reasons=s.get("reasons") or [],
+            event_distinctive_words=s.get("event_distinctive_words") or [],
+            candidate_distinctive_words=s.get("candidate_distinctive_words") or [],
+            shared_lineup_names=s.get("shared_lineup_names") or [],
+            decision=s["decision"], created_at=s.get("created_at"), decided_at=s.get("decided_at"),
+        ))
+    return out
 
 
 @router.get("/review", response_model=list[ReviewQueueItemOut])
@@ -468,8 +507,40 @@ def review_queue():
                 "is_current": _menu_is_current(row),
             },
             candidates=candidates, sources=source_outs,
+            merge_suggestions=_merge_suggestions_for(dao, row["event_id"]),
         ))
     return out
+
+
+# ── event-dedup merge suggestions (plans/260812_event-dedup-fuzzy-title.md
+# §C/§E) — registered before "/{event_id}" for the same reason as /promoters
+# and /review above: "/merge-suggestions/..." has three path segments after
+# the router prefix, so it can never collide with the single-segment
+# "/{event_id}" pattern regardless of registration order, but the pattern is
+# kept for a consistent, easy-to-audit convention. ──────────────────────────
+@router.post("/merge-suggestions/{suggestion_id}/apply", response_model=EventOut)
+def apply_merge_suggestion_route(suggestion_id: str, decided_by: Optional[str] = None):
+    """An operator's explicit "yes" — the ONLY way a SUGGEST-band pair ever
+    merges (plan §C: "Applying it is an explicit admin action. Never applied
+    by the pipeline.")."""
+    dao = _dao()
+    try:
+        updated = apply_merge_suggestion(dao, suggestion_id, datetime.now(timezone.utc), decided_by=decided_by)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return _to_out(dao, updated)
+
+
+@router.post("/merge-suggestions/{suggestion_id}/reject", response_model=dict)
+def reject_merge_suggestion_route(suggestion_id: str, decided_by: Optional[str] = None):
+    dao = _dao()
+    try:
+        row = reject_merge_suggestion(dao, suggestion_id, datetime.now(timezone.utc), decided_by=decided_by)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    if row is None:
+        raise HTTPException(status_code=404, detail="Merge suggestion not found")
+    return row
 
 
 # ── promoter-visibility config read (plans/260813_hide-promoter-events.md,
@@ -639,9 +710,28 @@ def unlink_event(event_id: str):
     return _to_out(dao, updated)
 
 
+@router.post("/{event_id}/reverse-merge", response_model=EventOut)
+def reverse_merge_event(event_id: str, decided_by: Optional[str] = None):
+    """plans/260812_event-dedup-fuzzy-title.md §E: undo a title/lineup-
+    similarity merge — `event_id` is the ABSORBED (superseded) row, not the
+    survivor. Restores its status, clears `superseded_by`, and detaches
+    exactly the source posts that merge moved. Never applies to an
+    exact-identity merge, which hard-deleted its duplicate and so has
+    nothing left to restore (`reverse_title_similarity_merge` raises for a
+    row with no recorded title-similarity merge)."""
+    dao = _dao()
+    try:
+        updated = reverse_title_similarity_merge(
+            dao, event_id, datetime.now(timezone.utc), decided_by=decided_by,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return _to_out(dao, updated)
+
+
 __all__ = [
     "router", "set_container", "EventOut", "EventSourceOut", "EventPatch",
     "PromoterAccountOut", "PromoterAccountCreate", "PromoterAccountPatch",
     "LinkCandidateOut", "ReviewQueueItemOut", "LinkRequest", "EventCoverOut",
-    "PromoterVisibilityConfigOut",
+    "PromoterVisibilityConfigOut", "MergeSuggestionOut",
 ]

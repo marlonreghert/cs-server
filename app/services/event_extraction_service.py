@@ -1127,7 +1127,7 @@ class EventExtractionService:
         # later post never re-fragments an identity this or an earlier post
         # already established. See plans/260807_one-event-many-posts.md.
         if touched_event_ids:
-            merge_touched_events(self.venue_dao, touched_event_ids, now)
+            merge_touched_events(self.venue_dao, touched_event_ids, now, redis_like=self.redis_client)
 
         # plans/260811_extract-by-handle.md §Error Handling: count a row THIS
         # call's own reconciliation moved to superseded, labeled by what
