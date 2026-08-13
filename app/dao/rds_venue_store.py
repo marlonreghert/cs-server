@@ -1595,6 +1595,12 @@ class RdsVenueStore:
         # "what was the last failure and when." NULL means no failure has
         # ever been recorded.
         "last_failure_kind", "last_failure_at",
+        # plans/260813_dormant-vs-broken-targets.md §A (migration 0038):
+        # whether the posts stream's most recent answer was the DORMANT
+        # signature — recomputed and overwritten on every run, never
+        # sticky like `last_failure_kind` (see the migration's own
+        # docstring for why neither existing column could carry this).
+        "posts_dormant",
     )
     _CRAWL_TARGET_SELECT = (
         "SELECT handle, kind, enabled, cron, timezone, crawl_reels, "
@@ -1603,7 +1609,7 @@ class RdsVenueStore:
         "cursor_posts_at, cursor_reels_at, last_run_at, last_run_results, "
         "last_run_cost_usd, consecutive_failures, notes, "
         "last_run_reels_fetched, last_run_reels_new, "
-        "last_failure_kind, last_failure_at, created_at, updated_at "
+        "last_failure_kind, last_failure_at, posts_dormant, created_at, updated_at "
         "FROM events.crawl_target"
     )
 

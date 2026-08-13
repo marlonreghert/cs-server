@@ -1,4 +1,3 @@
-@wip
 Feature: Dormant versus broken targets
   An account that answers but has posted nothing inside the lookback window is
   dormant, not broken. It must be reported as such, must never count as a
