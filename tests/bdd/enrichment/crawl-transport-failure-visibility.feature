@@ -1,4 +1,3 @@
-@wip
 Feature: Crawl transport failure visibility
   A crawl that fails at the HTTP layer must be reported as a failure, exactly as
   a dataset error item already is. A timed-out call returns no posts, and that

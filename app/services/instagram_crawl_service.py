@@ -945,6 +945,33 @@ def reels_skip_reason(target: dict) -> Optional[str]:
     return None
 
 
+def posts_never_seeded(target: dict) -> bool:
+    """Whether this target's posts stream has run at least once and STILL
+    never produced a cursor — `cursor_posts_at IS NULL AND last_run_at IS
+    NOT NULL`, already the "never successfully seeded" signal this codebase
+    uses (see `reels_already_seeded`'s own docstring for why the CURSOR,
+    never a separate flag, is the source of truth: it stays null until a
+    run's bookkeeping write actually succeeds, so a flag would have to be
+    unset by hand on every failure path to keep a failed seed retryable).
+
+    A target that has never run at all (`last_run_at` also null) is NOT
+    reportable — there is nothing yet to be alarmed about, and reporting it
+    would make every freshly-created target read as broken on creation.
+    This is specifically a target that HAS tried, one or more times, and
+    keeps coming back empty-handed — plans/260813_crawl-transport-failure-
+    visibility.md §E: `downtownbeergarden_` sat in exactly this state for
+    months before a timeout finally surfaced the underlying account, and
+    nothing reported the standing condition itself; an operator had to
+    notice two columns by hand. Deliberately reads ONLY the posts cursor —
+    the plan scopes this to the posts stream, which is what every target
+    runs; reels is seed-only and already has its own visibility
+    (`reels_skip_reason`/`effective_reels_seed_results_limit`)."""
+    return (
+        _as_utc_dt(target.get("cursor_posts_at")) is None
+        and target.get("last_run_at") is not None
+    )
+
+
 class ScheduledInstagramCrawlService:
     """Orchestrates one crawl target end to end: gate -> bound -> fetch ->
     pinned-post filtering -> cursor advance (success only) -> chaining. See
