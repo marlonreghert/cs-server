@@ -21,7 +21,7 @@ from app.api.apify_instagram_client import ApifyInstagramClient
 def _client_with_items(items):
     client = ApifyInstagramClient(api_token="t")
 
-    async def _fake_run_actor_sync(actor_id, run_input, endpoint_label):
+    async def _fake_run_actor_sync(actor_id, run_input, endpoint_label, username=None):
         return items
 
     client._run_actor_sync = _fake_run_actor_sync
@@ -135,7 +135,7 @@ class TestResultsLimit:
 
         client = ApifyInstagramClient(api_token="t")
 
-        async def _fake_run_actor_sync(actor_id, run_input, endpoint_label):
+        async def _fake_run_actor_sync(actor_id, run_input, endpoint_label, username=None):
             seen["resultsLimit"] = run_input.get("resultsLimit")
             return []
 
@@ -155,7 +155,7 @@ class TestScheduledCrawlParameters:
 
         client = ApifyInstagramClient(api_token="t")
 
-        async def _fake_run_actor_sync(actor_id, run_input, endpoint_label):
+        async def _fake_run_actor_sync(actor_id, run_input, endpoint_label, username=None):
             seen["run_input"] = run_input
             return []
 
@@ -169,7 +169,7 @@ class TestScheduledCrawlParameters:
 
         client = ApifyInstagramClient(api_token="t")
 
-        async def _fake_run_actor_sync(actor_id, run_input, endpoint_label):
+        async def _fake_run_actor_sync(actor_id, run_input, endpoint_label, username=None):
             seen["run_input"] = run_input
             return []
 
@@ -184,7 +184,7 @@ class TestScheduledCrawlParameters:
 
         client = ApifyInstagramClient(api_token="t")
 
-        async def _fake_run_actor_sync(actor_id, run_input, endpoint_label):
+        async def _fake_run_actor_sync(actor_id, run_input, endpoint_label, username=None):
             seen["run_input"] = run_input
             return []
 
@@ -358,3 +358,67 @@ class TestTransportFailureClassification:
         client.client.post = _raising_post
         results = asyncio.run(client.search_users("some query"))
         assert results == []
+
+
+class TestTransportFailureLogNamesTheHandle:
+    """plans/260813_crawl-transport-failure-visibility.md §C: `_run_actor_
+    sync` used to log only `endpoint_label` (`instagram_posts`, identical
+    for every target), so a timeout could not be attributed to a handle from
+    logs alone -- verbatim from the production incident this closes:
+    `2026-08-13 01:18:46 ERROR [ApifyInstagram] Timeout for instagram_posts`
+    carried no handle at all. `fetch_recent_posts` now passes `username`
+    through to `_run_actor_sync`, which appends it to the timeout/HTTP-
+    error/request-error log lines."""
+
+    def _log_messages(self, exc: Exception, caplog) -> list[str]:
+        import logging
+
+        client = ApifyInstagramClient(api_token="t")
+
+        async def _raising_post(*args, **kwargs):
+            raise exc
+
+        client.client.post = _raising_post
+        with caplog.at_level(logging.ERROR, logger="app.api.apify_instagram_client"):
+            asyncio.run(client.fetch_recent_posts("downtownbeergarden_", results_limit=10))
+        return [r.getMessage() for r in caplog.records]
+
+    def test_a_timeout_log_line_names_the_handle(self, caplog):
+        messages = self._log_messages(httpx.TimeoutException("timed out"), caplog)
+        assert any("downtownbeergarden_" in m for m in messages), messages
+
+    def test_an_http_error_log_line_names_the_handle(self, caplog):
+        import logging
+
+        client = ApifyInstagramClient(api_token="t")
+        request = httpx.Request("POST", "https://api.apify.com/v2/acts/x/run-sync-get-dataset-items")
+
+        async def _post_500(*args, **kwargs):
+            return httpx.Response(500, text="boom", request=request)
+
+        client.client.post = _post_500
+        with caplog.at_level(logging.ERROR, logger="app.api.apify_instagram_client"):
+            asyncio.run(client.fetch_recent_posts("downtownbeergarden_", results_limit=10))
+        messages = [r.getMessage() for r in caplog.records]
+        assert any("downtownbeergarden_" in m for m in messages), messages
+
+    def test_a_connection_error_log_line_names_the_handle(self, caplog):
+        messages = self._log_messages(httpx.ConnectError("refused"), caplog)
+        assert any("downtownbeergarden_" in m for m in messages), messages
+
+    def test_search_users_has_no_handle_to_name_and_the_log_line_is_unchanged(self, caplog):
+        """search_users passes no username (a search query is not a single
+        handle) -- the log line must degrade to exactly its pre-260813 text,
+        not print a stray "(@None)"."""
+        import logging
+
+        client = ApifyInstagramClient(api_token="t")
+
+        async def _raising_post(*args, **kwargs):
+            raise httpx.TimeoutException("timed out")
+
+        client.client.post = _raising_post
+        with caplog.at_level(logging.ERROR, logger="app.api.apify_instagram_client"):
+            asyncio.run(client.search_users("some query"))
+        messages = [r.getMessage() for r in caplog.records]
+        assert any(m == "[ApifyInstagram] Timeout for search_users" for m in messages), messages

@@ -342,7 +342,8 @@ class ApifyInstagramClient:
 
         try:
             items = await self._run_actor_sync(
-                "apify~instagram-scraper", run_input, endpoint_label="instagram_posts"
+                "apify~instagram-scraper", run_input, endpoint_label="instagram_posts",
+                username=username,
             )
         except ApifyTransportFailure as e:
             # The defect plans/260813_crawl-transport-failure-visibility.md
@@ -413,7 +414,8 @@ class ApifyInstagramClient:
         )
 
     async def _run_actor_sync(
-        self, actor_id: str, run_input: dict, endpoint_label: str
+        self, actor_id: str, run_input: dict, endpoint_label: str,
+        *, username: Optional[str] = None,
     ) -> list[dict]:
         """Run an Apify actor synchronously and return dataset items.
 
@@ -428,9 +430,23 @@ class ApifyInstagramClient:
         items:` check could not distinguish from a genuinely empty dataset
         (`[]`, also falsy). Raising instead of returning a sentinel is what
         lets the failure's TYPE reach `fetch_recent_posts`.
+
+        `username` (plan §C) is included in the timeout/HTTP-error/request-
+        error log lines below when the caller has one to give — ONLY `fetch_
+        recent_posts` does; `search_users` has no single handle (a search
+        query can match many) and passes nothing, so those log lines stay
+        exactly as they were. Without this, `endpoint_label` alone
+        (`instagram_posts`, identical for every target) cannot be attributed
+        to a handle from logs — the exact gap that cost a full diagnostic
+        round trip on 2026-08-13 (downtownbeergarden_'s timeout was sitting
+        in the logs, unattributable, while grepping by handle returned
+        nothing).
         """
         url = f"{APIFY_API_BASE}/acts/{actor_id}/run-sync-get-dataset-items"
         params = {"token": self.api_token}
+        # Appended verbatim to each transport-error log line below; empty
+        # when the caller has no single handle to name (`search_users`).
+        who = f" (@{username})" if username else ""
 
         start_time = time.perf_counter()
         try:
@@ -467,7 +483,7 @@ class ApifyInstagramClient:
                 endpoint=endpoint_label, error_type="http_error"
             ).inc()
             logger.error(
-                f"[ApifyInstagram] HTTP error for {endpoint_label}: "
+                f"[ApifyInstagram] HTTP error for {endpoint_label}{who}: "
                 f"{e.response.status_code} {e.response.text[:200]}"
             )
             raise ApifyTransportFailure("http_error") from e
@@ -481,7 +497,7 @@ class ApifyInstagramClient:
             APIFY_API_ERRORS_TOTAL.labels(
                 endpoint=endpoint_label, error_type="timeout"
             ).inc()
-            logger.error(f"[ApifyInstagram] Timeout for {endpoint_label}")
+            logger.error(f"[ApifyInstagram] Timeout for {endpoint_label}{who}")
             raise ApifyTransportFailure("timeout") from e
 
         except httpx.RequestError as e:
@@ -493,5 +509,5 @@ class ApifyInstagramClient:
             APIFY_API_ERRORS_TOTAL.labels(
                 endpoint=endpoint_label, error_type="connection_error"
             ).inc()
-            logger.error(f"[ApifyInstagram] Request error for {endpoint_label}: {e}")
+            logger.error(f"[ApifyInstagram] Request error for {endpoint_label}{who}: {e}")
             raise ApifyTransportFailure("request_error") from e
