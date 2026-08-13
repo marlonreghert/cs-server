@@ -106,6 +106,9 @@ class InMemoryRdsVenueStore:
         # events.crawl_target: handle -> row (see plans/260809_scheduled-
         # incremental-instagram-crawl.md, migration 0030_crawl_target).
         self.crawl_targets: dict[str, dict] = {}
+        # events.event_merge_suggestion: suggestion_id -> row (plans/260812_
+        # event-dedup-fuzzy-title.md §C/§E, migration 0038).
+        self.event_merge_suggestions: dict[str, dict] = {}
         self._down = False
 
     # ── test controls ────────────────────────────────────────────────────────
@@ -582,6 +585,15 @@ class InMemoryRdsVenueStore:
             if s["event_id"] == from_event_id:
                 s["event_id"] = to_event_id
 
+    def reattach_event_source_by_id(self, source_id: str, to_event_id: str) -> None:
+        """Re-point ONE specific source row (by its own `id`) at
+        `to_event_id` — mirrors RdsVenueStore.reattach_event_source_by_id,
+        plans/260812_event-dedup-fuzzy-title.md §E's reversal primitive."""
+        self._guard()
+        source = self.event_sources.get(source_id)
+        if source is not None:
+            source["event_id"] = to_event_id
+
     def delete_event(self, event_id: str) -> None:
         """Hard delete — ONLY ever correct for a now-SOURCELESS duplicate
         collapsed into a canonical event (reattach_event_sources must run
@@ -1008,6 +1020,45 @@ class InMemoryRdsVenueStore:
     def list_event_venue_link_candidates(self, event_id: str) -> list[dict]:
         rows = self.event_link_candidates.get(event_id, [])
         return [copy.deepcopy(r) for r in sorted(rows, key=lambda r: r["rank"])]
+
+    # ── events.event_merge_suggestion (plans/260812_event-dedup-fuzzy-title.md
+    # §C/§E, migration 0038) ────────────────────────────────────────────────
+    def create_event_merge_suggestion(self, fields: dict) -> dict:
+        row = copy.deepcopy(fields)
+        row.setdefault("decision", "pending")
+        row.setdefault("moved_source_ids", None)
+        row.setdefault("absorbed_status_before", None)
+        row.setdefault("decided_at", None)
+        row.setdefault("decided_by", None)
+        self.event_merge_suggestions[row["suggestion_id"]] = row
+        return copy.deepcopy(row)
+
+    def get_event_merge_suggestion(self, suggestion_id: str) -> Optional[dict]:
+        row = self.event_merge_suggestions.get(suggestion_id)
+        return copy.deepcopy(row) if row else None
+
+    def list_event_merge_suggestions(
+        self, *, event_id: Optional[str] = None, candidate_event_id: Optional[str] = None,
+        decision: Optional[str] = None,
+    ) -> list[dict]:
+        out = []
+        for row in self.event_merge_suggestions.values():
+            if event_id is not None and event_id not in (row.get("event_id"), row.get("candidate_event_id")):
+                continue
+            if candidate_event_id is not None and row.get("candidate_event_id") != candidate_event_id:
+                continue
+            if decision is not None and row.get("decision") != decision:
+                continue
+            out.append(copy.deepcopy(row))
+        out.sort(key=lambda r: (r.get("created_at") or "", r["suggestion_id"]))
+        return out
+
+    def update_event_merge_suggestion(self, suggestion_id: str, fields: dict) -> Optional[dict]:
+        row = self.event_merge_suggestions.get(suggestion_id)
+        if row is None:
+            return None
+        row.update(fields)
+        return copy.deepcopy(row)
 
     def list_all_venue_rows(self) -> list[dict]:
         return [self._row_with_address(row) for row in self.venues.values()]
