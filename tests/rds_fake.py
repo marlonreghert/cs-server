@@ -552,6 +552,32 @@ class InMemoryRdsVenueStore:
         rows.sort(key=lambda s: (self._sort_dt(s.get("first_seen_at")), s["id"]))
         return rows
 
+    def list_all_event_sources(self) -> list[dict]:
+        """Every `events.post_item_source` row, mirroring RdsVenueStore's
+        whole-table listing — `list_event_sources(event_id)` only ever
+        returns one event's rows, which `scripts.backfill_source_provenance`
+        cannot use (plans/260813_backfill-source-provenance.md)."""
+        rows = [copy.deepcopy(s) for s in self.event_sources.values()]
+        rows.sort(key=lambda s: (self._sort_dt(s.get("first_seen_at")), s["id"]))
+        return rows
+
+    def update_event_source_provenance(
+        self, source_id: str, *, source_uploaded_at=None, source_media_type: Optional[str] = None,
+    ) -> bool:
+        """Mirrors the real store's COALESCE-guarded UPDATE: fills only a
+        currently-NULL column, on the ONE source row named by `source_id` —
+        never overwrites a value already present, regardless of what the
+        caller passes."""
+        self._guard()
+        row = self.event_sources.get(source_id)
+        if row is None:
+            return False
+        if row.get("source_uploaded_at") is None:
+            row["source_uploaded_at"] = source_uploaded_at
+        if row.get("source_media_type") is None:
+            row["source_media_type"] = source_media_type
+        return True
+
     def list_events_by_handle(self, source_handle: str) -> list[dict]:
         """Every event with AT LEAST ONE source posted under `source_handle`
         — plans/260811_merge-unresolved-into-resolved-sibling.md's handle

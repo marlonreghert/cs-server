@@ -1,4 +1,3 @@
-@wip
 Feature: Backfill source provenance
   Every archived post recorded when it was posted and what medium it was. Copy
   those facts onto the stored source rows that predate the columns, without

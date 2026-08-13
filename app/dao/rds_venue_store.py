@@ -636,6 +636,58 @@ class RdsVenueStore:
             ).mappings()
             return [dict(r) for r in rows]
 
+    def list_all_event_sources(self) -> list[dict]:
+        """Every `events.post_item_source` row in the table, oldest
+        first-seen first — the whole-table view `list_event_sources(event_id)`
+        cannot give (that one is scoped to a single event). Exists for
+        `scripts.backfill_source_provenance`, which must consider every
+        source row exactly once regardless of how many share a `post_item_id`
+        (plans/260813_backfill-source-provenance.md)."""
+        with self.engine.connect() as conn:
+            rows = conn.execute(
+                text(
+                    "SELECT id, post_item_id AS event_id, source_kind, source_handle, "
+                    "source_shortcode, source_permalink, source_event_key, source_event_index, "
+                    "cover_photo_key, first_seen_at, last_seen_at, "
+                    "source_media_type, source_uploaded_at "
+                    "FROM events.post_item_source ORDER BY first_seen_at, id"
+                )
+            ).mappings()
+            return [dict(r) for r in rows]
+
+    def update_event_source_provenance(
+        self, source_id: str, *, source_uploaded_at=None, source_media_type: Optional[str] = None,
+    ) -> bool:
+        """Fill `source_uploaded_at`/`source_media_type` on ONE
+        `events.post_item_source` row, identified by its own `id` (never by
+        `event_id`+`source_handle`+`source_shortcode` — the caller already
+        has the exact row from `list_all_event_sources`, and re-deriving the
+        ambiguity-prone lookup `update_event` uses would be the wrong tool
+        here).
+
+        `COALESCE(existing, :new)` is the never-overwrite guarantee enforced
+        AT THE SQL LEVEL, independent of whatever the caller's own dry-run
+        decision logic already computed — a row written since the forward
+        fixes keeps its live value even if a caller bug ever passed one in.
+        Returns whether the row still exists (True) or vanished (False);
+        never raises on a no-op write (both columns already set is a normal,
+        expected outcome, not an error).
+        """
+        with self.engine.begin() as conn:
+            result = conn.execute(
+                text(
+                    "UPDATE events.post_item_source SET "
+                    "source_uploaded_at = COALESCE(source_uploaded_at, :source_uploaded_at), "
+                    "source_media_type = COALESCE(source_media_type, :source_media_type) "
+                    "WHERE id=:id"
+                ),
+                {
+                    "id": source_id, "source_uploaded_at": source_uploaded_at,
+                    "source_media_type": source_media_type,
+                },
+            )
+            return result.rowcount > 0
+
     def list_events_by_handle(self, source_handle: str) -> list[dict]:
         """Every event with AT LEAST ONE source posted under `source_handle`
         — plans/260811_merge-unresolved-into-resolved-sibling.md's handle
