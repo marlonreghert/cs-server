@@ -26,8 +26,12 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from app.api.apify_instagram_client import ApifyCreditExhaustedError
+from app.api.apify_instagram_client import ApifyCreditExhaustedError, FetchPostsResult
 from app.dao.venue_repository import VenueRepository
+from app.models.crawl_seed_lookback import (
+    ADMIN_CONFIG_CRAWL_SEED_LOOKBACK_KEY,
+    DEFAULT_CRAWL_SEED_LOOKBACK,
+)
 from app.models.instagram import VenueInstagram
 from app.models.venue import Venue
 from app.services import job_lock
@@ -46,7 +50,9 @@ from app.services.instagram_crawl_service import (
     compute_bound,
     dedupe_posts_by_shortcode,
     group_venue_ids_by_handle,
+    is_posts_dormant,
     lock_name_for,
+    posts_never_seeded,
     reels_already_seeded,
     reels_skip_reason,
     resolve_results_limit,
@@ -278,12 +284,23 @@ class _FakeApifyClient:
         self.calls: list[dict] = []
         self._posts: dict[tuple[str, str], list[dict]] = {}
         self._next_error: dict[tuple[str, str], Exception] = {}
+        # plans/260812_crawl-error-visibility.md §A: an Apify error item,
+        # programmed per (handle, results_type) — distinct from
+        # `_next_error` above (a transport-level EXCEPTION `fetch_recent_
+        # posts` itself raises), this is the STRUCTURED item the real client
+        # now surfaces via FetchPostsResult instead of silently dropping.
+        self._error_items: dict[tuple[str, str], dict] = {}
 
     def program(self, handle, results_type, posts):
         self._posts[(handle, results_type)] = posts
 
     def fail_next(self, handle, results_type, exc):
         self._next_error[(handle, results_type)] = exc
+
+    def program_error(self, handle, results_type, *, code, request_error_count=0, description=None):
+        self._error_items[(handle, results_type)] = {
+            "code": code, "request_error_count": request_error_count, "description": description,
+        }
 
     async def fetch_recent_posts(
         self, handle, results_limit=10, *, only_posts_newer_than=None, results_type="posts",
@@ -295,7 +312,13 @@ class _FakeApifyClient:
         key = (handle, results_type)
         if key in self._next_error:
             raise self._next_error.pop(key)
-        return list(self._posts.get(key, []))
+        error = self._error_items.get(key)
+        return FetchPostsResult(
+            posts=list(self._posts.get(key, [])),
+            error_code=error.get("code") if error else None,
+            error_description=error.get("description") if error else None,
+            request_error_count=error.get("request_error_count", 0) if error else 0,
+        )
 
 
 class _FakeBudgetDao:
@@ -318,7 +341,23 @@ def _venue_dao():
     return VenueRepository(client=None, rds_store=InMemoryRdsVenueStore())
 
 
-def _service(venue_dao, apify_client, budget_dao, **config_overrides):
+class _FakeAdminConfigService:
+    """Minimal `.get(key)`/`.set(key, value, updated_by=None)` double for the
+    real `AdminConfigService` — bare keys (no `admin_config:` prefix, added
+    by the real service internally), already-decoded Python values."""
+
+    def __init__(self):
+        self._store: dict = {}
+
+    def get(self, key):
+        return self._store.get(key)
+
+    def set(self, key, value, updated_by=None):
+        self._store[key] = value
+        return value
+
+
+def _service(venue_dao, apify_client, budget_dao, *, admin_config_service=None, **config_overrides):
     config = CrawlServiceConfig(
         overlap_hours=6.0, default_initial_lookback="3 months", default_results_limit=10,
         monthly_result_budget=1000, max_consecutive_failures=5, result_cost_usd=0.0027,
@@ -328,6 +367,7 @@ def _service(venue_dao, apify_client, budget_dao, **config_overrides):
     return ScheduledInstagramCrawlService(
         venue_dao=venue_dao, apify_client=apify_client, budget_dao=budget_dao,
         config=config, chainer=None, now_provider=lambda: NOW,
+        admin_config_service=admin_config_service,
     )
 
 
@@ -362,6 +402,181 @@ def test_budget_gate_refuses_before_the_client_is_called():
 
     assert apify.calls == []
     assert report["streams"]["posts"]["outcome"] == "skipped_budget"
+
+
+# ── plans/260812_crawl-error-visibility.md: outcomes that mean what they
+# say, billing that excludes an error item, and consecutive_failures
+# arithmetic across a failed run then a successful one ──────────────────────
+class TestCrawlErrorVisibility:
+    def test_blocked_no_items_with_request_errors_is_recorded_as_blocked(self):
+        dao = _venue_dao()
+        dao.upsert_crawl_target("blockedtarget", {"kind": "venue", "cron": "0 22 * * 5,6"})
+        apify = _FakeApifyClient()
+        apify.program_error("blockedtarget", "posts", code="no_items", request_error_count=11)
+        service = _service(dao, apify, _FakeBudgetDao())
+
+        report = _run(service.run_target("blockedtarget"))
+
+        assert report["streams"]["posts"]["outcome"] == "blocked"
+
+    def test_no_items_with_no_request_errors_stays_empty(self):
+        dao = _venue_dao()
+        dao.upsert_crawl_target("emptytarget", {"kind": "venue", "cron": "0 22 * * 5,6"})
+        apify = _FakeApifyClient()
+        apify.program_error("emptytarget", "posts", code="no_items", request_error_count=0)
+        service = _service(dao, apify, _FakeBudgetDao())
+
+        report = _run(service.run_target("emptytarget"))
+
+        assert report["streams"]["posts"]["outcome"] == "empty"
+        row = dao.get_crawl_target("emptytarget")
+        assert row["consecutive_failures"] == 0, row
+
+    def test_not_found_is_recorded_as_handle_not_found_and_disables_the_target(self):
+        dao = _venue_dao()
+        dao.upsert_crawl_target("deadtarget", {"kind": "venue", "cron": "0 22 * * 5,6"})
+        apify = _FakeApifyClient()
+        apify.program_error("deadtarget", "posts", code="not_found")
+        service = _service(dao, apify, _FakeBudgetDao())
+
+        report = _run(service.run_target("deadtarget"))
+
+        assert report["streams"]["posts"]["outcome"] == "handle_not_found"
+        row = dao.get_crawl_target("deadtarget")
+        assert row["enabled"] is False, row
+        assert row["last_failure_kind"] == "handle_not_found", row
+        assert row["last_failure_at"] is not None, row
+
+    def test_an_unrecognised_error_code_is_a_transient_failure_not_empty(self):
+        dao = _venue_dao()
+        dao.upsert_crawl_target("weirdtarget", {"kind": "venue", "cron": "0 22 * * 5,6"})
+        apify = _FakeApifyClient()
+        apify.program_error("weirdtarget", "posts", code="some_new_code")
+        service = _service(dao, apify, _FakeBudgetDao())
+
+        report = _run(service.run_target("weirdtarget"))
+
+        assert report["streams"]["posts"]["outcome"] == "failed"
+        row = dao.get_crawl_target("weirdtarget")
+        assert row["consecutive_failures"] == 1, row
+
+    def test_an_error_item_is_never_billed(self):
+        """The number of KEPT/billed results comes from `.posts`, which the
+        client never populates with an error item — this is the fix for
+        'an error item currently costs money' verified end to end through
+        run_target's own bookkeeping write."""
+        dao = _venue_dao()
+        dao.upsert_crawl_target("freetarget", {"kind": "venue", "cron": "0 22 * * 5,6"})
+        apify = _FakeApifyClient()
+        apify.program_error("freetarget", "posts", code="no_items", request_error_count=5)
+        budget = _FakeBudgetDao()
+        service = _service(dao, apify, budget)
+
+        _run(service.run_target("freetarget"))
+
+        assert budget.get_month_count(budget.current_year_month_utc(NOW)) == 0
+        row = dao.get_crawl_target("freetarget")
+        assert row["last_run_results"] == 0, row
+        assert row["last_run_cost_usd"] == 0, row
+
+    def test_consecutive_failures_increments_on_a_failed_run_then_resets_on_success(self):
+        dao = _venue_dao()
+        dao.upsert_crawl_target("flappingtarget", {"kind": "venue", "cron": "0 22 * * 5,6"})
+        apify = _FakeApifyClient()
+        apify.program_error("flappingtarget", "posts", code="no_items", request_error_count=3)
+        service = _service(dao, apify, _FakeBudgetDao())
+
+        _run(service.run_target("flappingtarget"))
+        row = dao.get_crawl_target("flappingtarget")
+        assert row["consecutive_failures"] == 1, row
+
+        apify.program("flappingtarget", "posts", [
+            {
+                "caption": "post", "likes_count": 0, "comments_count": 0,
+                "timestamp": "2026-08-07T10:00:00.000Z", "post_type": "image",
+                "shortcode": "recov1", "permalink": "https://instagram.com/p/recov1",
+                "image_urls": [], "is_pinned": False,
+            },
+        ])
+        _run(service.run_target("flappingtarget"))
+        row = dao.get_crawl_target("flappingtarget")
+        assert row["consecutive_failures"] == 0, row
+
+    def test_cursor_does_not_advance_on_a_blocked_stream(self):
+        dao = _venue_dao()
+        dao.upsert_crawl_target("nocursortarget", {"kind": "venue", "cron": "0 22 * * 5,6"})
+        apify = _FakeApifyClient()
+        apify.program_error("nocursortarget", "posts", code="no_items", request_error_count=11)
+        service = _service(dao, apify, _FakeBudgetDao())
+
+        _run(service.run_target("nocursortarget"))
+
+        row = dao.get_crawl_target("nocursortarget")
+        assert row["cursor_posts_at"] is None, row
+
+
+# ── plans/260813_crawl-transport-failure-visibility.md §B: a transport
+# failure (FetchPostsResult.error_code == "timeout"/"http_error"/
+# "request_error", plan §A) reaches _run_stream through the SAME generic
+# "any non-Apify, non-None error_code is a failure" branch 260812 already
+# shipped for an unrecognised Apify code -- no new branch, no new outcome
+# label. These tests pin that the wiring genuinely reaches consecutive_
+# failures/last_failure_kind/cursor exactly like every other FAILURE_
+# OUTCOMES member, for each of the three transport codes specifically (not
+# just "some unrecognised string", which TestCrawlErrorVisibility already
+# covers) -- protecting against a future change to _run_stream's
+# classification accidentally special-casing these three strings out of the
+# failure path.
+class TestCrawlTransportFailureVisibility:
+    @pytest.mark.parametrize("code", ["timeout", "http_error", "request_error"])
+    def test_a_transport_code_is_recorded_as_a_failure_not_empty(self, code):
+        dao = _venue_dao()
+        dao.upsert_crawl_target("transporttarget", {"kind": "venue", "cron": "0 22 * * 5,6"})
+        apify = _FakeApifyClient()
+        apify.program_error("transporttarget", "posts", code=code, request_error_count=0)
+        service = _service(dao, apify, _FakeBudgetDao())
+
+        report = _run(service.run_target("transporttarget"))
+
+        assert report["streams"]["posts"]["outcome"] == "failed", report
+        row = dao.get_crawl_target("transporttarget")
+        assert row["consecutive_failures"] == 1, row
+        assert row["last_failure_kind"] == "failed", row
+        assert row["last_failure_at"] is not None, row
+        assert row["cursor_posts_at"] is None, row
+
+    def test_a_timeout_increments_an_existing_failure_streak(self):
+        dao = _venue_dao()
+        dao.upsert_crawl_target(
+            "streaktarget", {"kind": "venue", "cron": "0 22 * * 5,6", "consecutive_failures": 1},
+        )
+        apify = _FakeApifyClient()
+        apify.program_error("streaktarget", "posts", code="timeout", request_error_count=0)
+        service = _service(dao, apify, _FakeBudgetDao())
+
+        _run(service.run_target("streaktarget"))
+
+        row = dao.get_crawl_target("streaktarget")
+        assert row["consecutive_failures"] == 2, row
+
+    def test_a_timeout_never_bills_and_never_disables_the_target(self):
+        """Unlike handle_not_found (permanent -- disables the target), a
+        transport failure is transient: the target must stay enabled and
+        retryable on the next scheduled fire, and nothing is billed since
+        `.posts` is empty."""
+        dao = _venue_dao()
+        dao.upsert_crawl_target("transienttarget", {"kind": "venue", "cron": "0 22 * * 5,6"})
+        apify = _FakeApifyClient()
+        apify.program_error("transienttarget", "posts", code="timeout", request_error_count=0)
+        budget = _FakeBudgetDao()
+        service = _service(dao, apify, budget)
+
+        _run(service.run_target("transienttarget"))
+
+        row = dao.get_crawl_target("transienttarget")
+        assert row["enabled"] is True, row
+        assert row["last_run_results"] == 0, row
+        assert budget.get_month_count(budget.current_year_month_utc(NOW)) == 0
 
 
 # ── §C split in two: the seed cap vs the steady-state cap ───────────────────
@@ -724,6 +939,46 @@ class TestReelsOnSeedOnlyGate:
         forever."""
         target = {"crawl_reels": True, "cursor_reels_at": "not-a-date"}
         assert reels_skip_reason(target) is None
+
+
+# ── plans/260813_crawl-transport-failure-visibility.md §E: a stream that has
+# never worked is louder than one that failed today. `posts_never_seeded` is
+# a pure function over a target dict — the plan's own unit test plan asks
+# for exactly the three cases below: cursor null with no runs (not yet
+# reportable), cursor null with runs (reportable), cursor set (never
+# reportable).
+class TestPostsNeverSeededPredicate:
+    def test_cursor_null_with_no_runs_is_not_yet_reportable(self):
+        """A brand-new target that has never run must not read as broken on
+        creation — there is nothing yet to be alarmed about."""
+        target = {"cursor_posts_at": None, "last_run_at": None}
+        assert posts_never_seeded(target) is False
+
+    def test_cursor_null_with_runs_is_reportable(self):
+        """The exact shape downtownbeergarden_ sat in for months: tried at
+        least once, never once produced a cursor."""
+        target = {
+            "cursor_posts_at": None,
+            "last_run_at": datetime(2026, 8, 13, 1, 18, tzinfo=timezone.utc),
+        }
+        assert posts_never_seeded(target) is True
+
+    def test_cursor_set_is_never_reportable(self):
+        target = {
+            "cursor_posts_at": datetime(2026, 8, 1, tzinfo=timezone.utc),
+            "last_run_at": datetime(2026, 8, 13, tzinfo=timezone.utc),
+        }
+        assert posts_never_seeded(target) is False
+
+    def test_an_unparseable_cursor_string_is_treated_as_unset(self):
+        """Mirrors `reels_already_seeded`'s own convention: a target read
+        back through a JSON boundary (e.g. the admin API) with a garbled
+        `cursor_posts_at` must still be reportable, not silently hidden."""
+        target = {
+            "cursor_posts_at": "not-a-date",
+            "last_run_at": datetime(2026, 8, 13, tzinfo=timezone.utc),
+        }
+        assert posts_never_seeded(target) is True
 
 
 def test_a_failed_seeds_bookkeeping_write_leaves_the_reels_cursor_null_and_the_retry_seeds_reels_again():
@@ -1184,7 +1439,7 @@ class _GatedApifyClient:
     ):
         self.calls += 1
         await self._gate.wait()
-        return []
+        return FetchPostsResult(posts=[])
 
 
 async def test_start_run_returns_immediately_and_running_flips_true_then_false():
@@ -1769,3 +2024,226 @@ class TestSharedHandleMetricsParity:
         row = dao.get_event_by_source("shared1", "ambiguouspost1")
         assert row["venue_id"] is None, row
         assert "unresolved_venue" in (row["review_reason"] or ""), row
+
+
+# =============================================================================
+# plans/260813_dormant-vs-broken-targets.md
+# =============================================================================
+
+# ── §A: the dormancy predicate, standalone and unit-testable exactly like
+# `posts_never_seeded` — the plan's own test plan bullet: "error item present
+# + empty + cursor unset; error item present + cursor set; no error item; a
+# blocked error item (must not be dormant)." ────────────────────────────────
+class TestDormancyPredicate:
+    def test_no_items_no_blocked_requests_cursor_unset_is_dormant(self):
+        assert is_posts_dormant(error_code="no_items", request_error_count=0, cursor=None) is True
+
+    def test_no_items_no_blocked_requests_cursor_set_is_not_dormant(self):
+        """The SAME error-item signature as the dormant case above, but the
+        stream has already seeded — an ordinary steady-state 'nothing new
+        since last check,' not a standing account condition worth
+        reporting (pairs with `posts_never_seeded`'s own cursor gating)."""
+        cursor = datetime(2026, 8, 1, tzinfo=timezone.utc)
+        assert is_posts_dormant(error_code="no_items", request_error_count=0, cursor=cursor) is False
+
+    def test_no_error_item_is_not_dormant(self):
+        """`error_code is None` carries no positive evidence the account was
+        even reached — stays plain `empty`, never dormant."""
+        assert is_posts_dormant(error_code=None, request_error_count=0, cursor=None) is False
+
+    def test_blocked_error_item_is_not_dormant(self):
+        """The exact signature `no_items` shares with dormancy, EXCEPT for
+        blocked requests present — must never be dormant; it is
+        OUTCOME_BLOCKED, a transient fault."""
+        assert is_posts_dormant(error_code="no_items", request_error_count=11, cursor=None) is False
+
+    def test_not_found_is_not_dormant(self):
+        """A permanent handle-not-found is a different code entirely and
+        must never read as dormant regardless of cursor state."""
+        assert is_posts_dormant(error_code="not_found", request_error_count=0, cursor=None) is False
+
+
+class TestDormancyWiredThroughRunTarget:
+    def test_a_dormant_run_writes_posts_dormant_true_and_leaves_failures_at_zero(self):
+        """plans/260813_dormant-vs-broken-targets.md's own unit test plan:
+        `consecutive_failures` is untouched by a dormant run — DAO-level,
+        not just the outcome label BDD already covers."""
+        dao = _venue_dao()
+        dao.upsert_crawl_target("dormanttarget", {"kind": "venue", "cron": "0 22 * * 5,6"})
+        apify = _FakeApifyClient()
+        apify.program_error("dormanttarget", "posts", code="no_items", request_error_count=0)
+        service = _service(dao, apify, _FakeBudgetDao())
+
+        report = _run(service.run_target("dormanttarget"))
+
+        assert report["streams"]["posts"]["dormant"] is True, report
+        row = dao.get_crawl_target("dormanttarget")
+        assert row["posts_dormant"] is True, row
+        assert row["consecutive_failures"] == 0, row
+        assert row["enabled"] is True, row
+
+    def test_dormancy_clears_the_moment_the_target_produces_a_post(self):
+        dao = _venue_dao()
+        dao.upsert_crawl_target(
+            "recoveredtarget", {"kind": "venue", "cron": "0 22 * * 5,6", "posts_dormant": True},
+        )
+        apify = _FakeApifyClient()
+        apify.program("recoveredtarget", "posts", [
+            {
+                "caption": "post", "likes_count": 0, "comments_count": 0,
+                "timestamp": "2026-08-07T10:00:00.000Z", "post_type": "image",
+                "shortcode": "recoveredpost1", "permalink": "https://instagram.com/p/recoveredpost1",
+                "image_urls": [], "is_pinned": False,
+            },
+        ])
+        service = _service(dao, apify, _FakeBudgetDao())
+
+        _run(service.run_target("recoveredtarget"))
+
+        row = dao.get_crawl_target("recoveredtarget")
+        assert row["posts_dormant"] is False, row
+
+    def test_a_blocked_run_is_not_recorded_as_dormant(self):
+        dao = _venue_dao()
+        dao.upsert_crawl_target("blockednotdormant", {"kind": "venue", "cron": "0 22 * * 5,6"})
+        apify = _FakeApifyClient()
+        apify.program_error("blockednotdormant", "posts", code="no_items", request_error_count=11)
+        service = _service(dao, apify, _FakeBudgetDao())
+
+        report = _run(service.run_target("blockednotdormant"))
+
+        assert report["streams"]["posts"]["dormant"] is False, report
+        row = dao.get_crawl_target("blockednotdormant")
+        assert row["posts_dormant"] is False, row
+
+
+# ── §B: the seed lookback, admin-config-driven with a per-target override
+# and a Settings-level degrade path when no admin-config collaborator is
+# wired ───────────────────────────────────────────────────────────────────
+class TestSeedLookbackAdminConfig:
+    def test_no_admin_config_service_falls_back_to_the_settings_default(self):
+        """The pre-existing behavior every OTHER test in this file relies on
+        (`_service()` never passes `admin_config_service`) — this pins that
+        default explicitly as a regression guard for this plan's change."""
+        dao = _venue_dao()
+        dao.upsert_crawl_target("nolookbacksvc", {"kind": "venue", "cron": "0 22 * * *"})
+        apify = _FakeApifyClient()
+        service = _service(dao, apify, _FakeBudgetDao(), default_initial_lookback="3 months")
+
+        _run(service.run_target("nolookbacksvc"))
+
+        assert apify.calls[0]["only_posts_newer_than"] == "3 months", apify.calls
+
+    def test_admin_config_value_is_used_for_a_seed_with_no_target_override(self):
+        dao = _venue_dao()
+        dao.upsert_crawl_target("adminlookback", {"kind": "venue", "cron": "0 22 * * *"})
+        apify = _FakeApifyClient()
+        admin_config = _FakeAdminConfigService()
+        admin_config.set(ADMIN_CONFIG_CRAWL_SEED_LOOKBACK_KEY, "12 months")
+        service = _service(dao, apify, _FakeBudgetDao(), admin_config_service=admin_config)
+
+        _run(service.run_target("adminlookback"))
+
+        assert apify.calls[0]["only_posts_newer_than"] == "12 months", apify.calls
+
+    def test_admin_config_key_unset_falls_back_to_the_module_default(self):
+        """`admin_config_service` IS wired but has never been written to —
+        the loader's own default (`DEFAULT_CRAWL_SEED_LOOKBACK`), not the
+        Settings-level `config.default_initial_lookback`."""
+        dao = _venue_dao()
+        dao.upsert_crawl_target("unsetlookback", {"kind": "venue", "cron": "0 22 * * *"})
+        apify = _FakeApifyClient()
+        service = _service(
+            dao, apify, _FakeBudgetDao(), admin_config_service=_FakeAdminConfigService(),
+        )
+
+        _run(service.run_target("unsetlookback"))
+
+        assert apify.calls[0]["only_posts_newer_than"] == DEFAULT_CRAWL_SEED_LOOKBACK, apify.calls
+
+    def test_a_targets_own_override_wins_over_the_admin_config_value(self):
+        dao = _venue_dao()
+        dao.upsert_crawl_target(
+            "ownlookbackwins",
+            {"kind": "venue", "cron": "0 22 * * *", "initial_lookback": "6 months"},
+        )
+        apify = _FakeApifyClient()
+        admin_config = _FakeAdminConfigService()
+        admin_config.set(ADMIN_CONFIG_CRAWL_SEED_LOOKBACK_KEY, "12 months")
+        service = _service(dao, apify, _FakeBudgetDao(), admin_config_service=admin_config)
+
+        _run(service.run_target("ownlookbackwins"))
+
+        assert apify.calls[0]["only_posts_newer_than"] == "6 months", apify.calls
+
+    def test_a_set_cursor_never_consults_the_admin_config_seed_lookback(self):
+        """§B: the seed lookback is read only when a stream's cursor is
+        null — `compute_bound` sends `cursor - overlap` once it is set,
+        never a lookback string at all. Pins that `_resolve_seed_lookback`
+        is not even reached on a steady-state run."""
+        dao = _venue_dao()
+        dao.upsert_crawl_target("steadyneverasks", {
+            "kind": "venue", "cron": "0 22 * * *",
+            "cursor_posts_at": datetime(2026, 8, 1, tzinfo=timezone.utc),
+        })
+        apify = _FakeApifyClient()
+        admin_config = _FakeAdminConfigService()
+        admin_config.set(ADMIN_CONFIG_CRAWL_SEED_LOOKBACK_KEY, "12 months")
+        service = _service(dao, apify, _FakeBudgetDao(), admin_config_service=admin_config)
+
+        _run(service.run_target("steadyneverasks"))
+
+        assert apify.calls[0]["only_posts_newer_than"] != "12 months", apify.calls
+
+    def test_an_invalid_stored_value_degrades_to_the_module_default(self):
+        """A hand-edited/corrupt RDS row must never crash a scheduled crawl
+        — degrades exactly like `load_menu_expiry_days` does for its own
+        admin-config key."""
+        dao = _venue_dao()
+        dao.upsert_crawl_target("badlookback", {"kind": "venue", "cron": "0 22 * * *"})
+        apify = _FakeApifyClient()
+        admin_config = _FakeAdminConfigService()
+        admin_config.set(ADMIN_CONFIG_CRAWL_SEED_LOOKBACK_KEY, "not a real lookback")
+        service = _service(dao, apify, _FakeBudgetDao(), admin_config_service=admin_config)
+
+        _run(service.run_target("badlookback"))
+
+        assert apify.calls[0]["only_posts_newer_than"] == DEFAULT_CRAWL_SEED_LOOKBACK, apify.calls
+
+    def test_an_admin_config_read_failure_degrades_to_the_settings_default(self):
+        dao = _venue_dao()
+        dao.upsert_crawl_target("readfails", {"kind": "venue", "cron": "0 22 * * *"})
+        apify = _FakeApifyClient()
+
+        class _BoomAdminConfigService:
+            def get(self, key):
+                raise RuntimeError("admin config read failed (simulated)")
+
+        service = _service(
+            dao, apify, _FakeBudgetDao(), admin_config_service=_BoomAdminConfigService(),
+            default_initial_lookback="3 months",
+        )
+
+        _run(service.run_target("readfails"))
+
+        assert apify.calls[0]["only_posts_newer_than"] == "3 months", apify.calls
+
+    def test_cost_is_bounded_by_the_results_cap_not_the_lookback_window(self):
+        """The PR's own explicit claim, pinned as a test: a longer window
+        changes WHICH posts are eligible, never how many are fetched —
+        `seed_results_limit` still caps the count regardless of the
+        lookback string sent."""
+        dao = _venue_dao()
+        dao.upsert_crawl_target("boundedbycap", {"kind": "venue", "cron": "0 22 * * *"})
+        apify = _FakeApifyClient()
+        admin_config = _FakeAdminConfigService()
+        admin_config.set(ADMIN_CONFIG_CRAWL_SEED_LOOKBACK_KEY, "12 months")
+        service = _service(
+            dao, apify, _FakeBudgetDao(), admin_config_service=admin_config,
+            default_seed_results_limit=200,
+        )
+
+        _run(service.run_target("boundedbycap"))
+
+        assert apify.calls[0]["only_posts_newer_than"] == "12 months", apify.calls
+        assert apify.calls[0]["results_limit"] == 200, apify.calls

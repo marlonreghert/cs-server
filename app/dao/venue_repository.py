@@ -175,6 +175,22 @@ class VenueRepository(RedisVenueDAO):
         API's `sources[]`."""
         return self.rds_store.list_event_sources(event_id)
 
+    def list_all_event_sources(self):
+        """Every `events.post_item_source` row across the whole table —
+        `scripts.backfill_source_provenance`'s candidate set
+        (plans/260813_backfill-source-provenance.md)."""
+        return self.rds_store.list_all_event_sources()
+
+    def update_event_source_provenance(
+        self, source_id: str, *, source_uploaded_at=None, source_media_type=None,
+    ):
+        """Fill `source_uploaded_at`/`source_media_type` on one source row,
+        never overwriting a value already present — see
+        RdsVenueStore.update_event_source_provenance."""
+        return self.rds_store.update_event_source_provenance(
+            source_id, source_uploaded_at=source_uploaded_at, source_media_type=source_media_type,
+        )
+
     def list_events_by_handle(self, source_handle: str):
         """Every event with at least one source posted under `source_handle`
         — plans/260811_merge-unresolved-into-resolved-sibling.md's handle-
@@ -190,6 +206,26 @@ class VenueRepository(RedisVenueDAO):
         """Hard delete — only ever correct for a now-sourceless duplicate a
         merge has already reattached every source away from."""
         return self.rds_store.delete_event(event_id)
+
+    def reattach_event_source_by_id(self, source_id: str, to_event_id: str) -> None:
+        """Re-point ONE specific source row — plans/260812_event-dedup-
+        fuzzy-title.md §E's reversal primitive."""
+        return self.rds_store.reattach_event_source_by_id(source_id, to_event_id)
+
+    # ── events.event_merge_suggestion (plans/260812_event-dedup-fuzzy-title.md) ──
+    def create_event_merge_suggestion(self, fields: dict) -> dict:
+        return self.rds_store.create_event_merge_suggestion(fields)
+
+    def get_event_merge_suggestion(self, suggestion_id: str):
+        return self.rds_store.get_event_merge_suggestion(suggestion_id)
+
+    def list_event_merge_suggestions(self, *, event_id=None, candidate_event_id=None, decision=None):
+        return self.rds_store.list_event_merge_suggestions(
+            event_id=event_id, candidate_event_id=candidate_event_id, decision=decision,
+        )
+
+    def update_event_merge_suggestion(self, suggestion_id: str, fields: dict):
+        return self.rds_store.update_event_merge_suggestion(suggestion_id, fields)
 
     # ── instagram.handle reverse index (plans/260804_instagram-promoter-events.md) ─
     def list_instagram_handles(self):

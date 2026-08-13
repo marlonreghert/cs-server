@@ -343,6 +343,10 @@ class Container:
         if settings.apify_api_token:
             self.apify_instagram_client = ApifyInstagramClient(
                 api_token=settings.apify_api_token,
+                # plans/260813_crawl-transport-failure-visibility.md §D --
+                # settings.py's own comment on this field carries the
+                # measured basis for the value.
+                timeout=settings.apify_instagram_client_timeout_seconds,
             )
             logger.info("[Container] Apify Instagram client initialized")
 
@@ -586,10 +590,15 @@ class Container:
         from app.models.venue_category import validate_category_map_config
         from app.models.post_category import validate_post_category_vocabulary_config
         from app.models.menu_lifecycle import validate_menu_expiry_days_config
+        from app.models.date_resolution_config import (
+            validate_date_year_roll_grace_days_config,
+        )
         from app.services.config_validation import validate_instagram_discovery_config
         from app.services.event_venue_targeting import (
             validate_event_candidate_categories_config,
         )
+        from app.models.promoter_event_visibility import validate_hide_promoter_events_config
+        from app.models.crawl_seed_lookback import validate_crawl_seed_lookback_config
 
         def _validate_eligibility_config(value):
             EligibilityConfig.from_dict(value, from_admin_override=True)  # raises on invalid
@@ -615,12 +624,33 @@ class Container:
                 # admin-config CRUD route every key here uses, no dedicated
                 # endpoint.
                 "menu_expiry_days": validate_menu_expiry_days_config,
+                # plans/260812_event-attribution-and-dates.md §D: the year-
+                # roll grace window (app.services.event_date_resolver.
+                # _roll_forward) — the SAME generic admin-config CRUD route
+                # every key here uses, no dedicated endpoint.
+                "date_year_roll_grace_days": validate_date_year_roll_grace_days_config,
                 # plans/260811_instagram-discovery-admin-flags.md: the two
                 # add-time Instagram discovery spend switches — the SAME
                 # generic admin-config CRUD route every key here uses, no
                 # dedicated endpoint. Resolved fresh per add by
                 # AddVenueHandler._resolve_instagram_discovery_flags.
                 "instagram_discovery": validate_instagram_discovery_config,
+                # plans/260813_hide-promoter-events.md §B: whether admin
+                # event reads exclude all-promoter items — the SAME generic
+                # admin-config CRUD route every key here uses for a write; a
+                # dedicated GET /admin/events/config reports the live,
+                # default-applied value (app.routers.admin_events_router.
+                # get_events_config) since the generic GET 404s on an unset
+                # key, which is wrong for a flag whose default IS the
+                # answer most of the time.
+                "hide_promoter_events": validate_hide_promoter_events_config,
+                # plans/260813_dormant-vs-broken-targets.md §B: the default
+                # a scheduled crawl's SEED run falls back to when a target
+                # sets no `initial_lookback` of its own — the SAME generic
+                # admin-config CRUD route every key here uses, no dedicated
+                # endpoint. Resolved fresh per run by
+                # ScheduledInstagramCrawlService._resolve_seed_lookback.
+                "crawl_seed_lookback": validate_crawl_seed_lookback_config,
             },
         )
 
@@ -808,6 +838,13 @@ class Container:
                     result_cost_usd=settings.apify_instagram_post_cost_usd,
                 ),
                 chainer=crawl_chainer,
+                # plans/260813_dormant-vs-broken-targets.md §B: the real
+                # AdminConfigService — already built above, unconditionally
+                # — so the seed lookback default is runtime-editable
+                # (admin_config:crawl_seed_lookback) with no redeploy,
+                # exactly like every other admin-config key in this
+                # container.
+                admin_config_service=self.admin_config_service,
             )
             logger.info("[Container] Scheduled Instagram crawl service initialized")
         else:

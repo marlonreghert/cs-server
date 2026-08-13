@@ -1,0 +1,117 @@
+.venv/bin/python -m behave "tests/bdd/api/hide-promoter-events.feature"
+USING RUNNER: behave.runner:Runner
+Feature: Hide promoter events # tests/bdd/api/hide-promoter-events.feature:1
+  Promoter-sourced items are out of scope for now, so the admin console shows
+  only venue-sourced coverage. Nothing is deleted or re-statused — the filter is
+  a runtime flag, and every promoter row stays queryable for the day promoters
+  come back.
+  Feature: Hide promoter events  # tests/bdd/api/hide-promoter-events.feature:1
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: Hide a promoter-sourced item from the events list  # tests/bdd/api/hide-promoter-events.feature:10
+    Given promoter events are hidden                           # tests/bdd/steps/hide_promoter_events_steps.py:95
+    Given an item whose only source is a promoter post         # tests/bdd/steps/hide_promoter_events_steps.py:109
+    When an operator reads the events list                     # tests/bdd/steps/hide_promoter_events_steps.py:148
+LOG_INFO:httpx: HTTP Request: GET http://testserver/admin/events "HTTP/1.1 200 OK"
+    Then that item is not listed                               # tests/bdd/steps/hide_promoter_events_steps.py:174
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: Hide a promoter-sourced item from the review queue                    # tests/bdd/api/hide-promoter-events.feature:15
+    Given promoter events are hidden                                              # tests/bdd/steps/hide_promoter_events_steps.py:95
+    Given an item whose only source is a promoter post and which needs a decision # tests/bdd/steps/hide_promoter_events_steps.py:115
+    When an operator reads the review queue                                       # tests/bdd/steps/hide_promoter_events_steps.py:155
+LOG_INFO:httpx: HTTP Request: GET http://testserver/admin/events/review "HTTP/1.1 200 OK"
+    Then that item is not queued                                                  # tests/bdd/steps/hide_promoter_events_steps.py:184
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: Show a venue-sourced item in both                                  # tests/bdd/api/hide-promoter-events.feature:20
+    Given promoter events are hidden                                           # tests/bdd/steps/hide_promoter_events_steps.py:95
+    Given an item whose only source is a venue post and which needs a decision # tests/bdd/steps/hide_promoter_events_steps.py:121
+    When an operator reads the events list                                     # tests/bdd/steps/hide_promoter_events_steps.py:148
+LOG_INFO:httpx: HTTP Request: GET http://testserver/admin/events "HTTP/1.1 200 OK"
+    Then that item is listed                                                   # tests/bdd/steps/hide_promoter_events_steps.py:179
+    When an operator reads the review queue                                    # tests/bdd/steps/hide_promoter_events_steps.py:155
+LOG_INFO:httpx: HTTP Request: GET http://testserver/admin/events/review "HTTP/1.1 200 OK"
+    Then that item is queued                                                   # tests/bdd/steps/hide_promoter_events_steps.py:189
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: Show an item that has one promoter source and one venue source  # tests/bdd/api/hide-promoter-events.feature:27
+    Given promoter events are hidden                                        # tests/bdd/steps/hide_promoter_events_steps.py:95
+    Given an item with one promoter source and one venue source             # tests/bdd/steps/hide_promoter_events_steps.py:127
+    When an operator reads the events list                                  # tests/bdd/steps/hide_promoter_events_steps.py:148
+LOG_INFO:httpx: HTTP Request: GET http://testserver/admin/events "HTTP/1.1 200 OK"
+    Then that item is listed                                                # tests/bdd/steps/hide_promoter_events_steps.py:179
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: Show an item with no sources at all  # tests/bdd/api/hide-promoter-events.feature:32
+    Given promoter events are hidden             # tests/bdd/steps/hide_promoter_events_steps.py:95
+    Given an item with no sources                # tests/bdd/steps/hide_promoter_events_steps.py:133
+    When an operator reads the events list       # tests/bdd/steps/hide_promoter_events_steps.py:148
+LOG_INFO:httpx: HTTP Request: GET http://testserver/admin/events "HTTP/1.1 200 OK"
+    Then that item is listed                     # tests/bdd/steps/hide_promoter_events_steps.py:179
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: Make the counts agree with the filtered list     # tests/bdd/api/hide-promoter-events.feature:37
+    Given promoter events are hidden                         # tests/bdd/steps/hide_promoter_events_steps.py:95
+    Given 3 venue-sourced items and 7 promoter-sourced items # tests/bdd/steps/hide_promoter_events_steps.py:139
+    When an operator reads the events list                   # tests/bdd/steps/hide_promoter_events_steps.py:148
+LOG_INFO:httpx: HTTP Request: GET http://testserver/admin/events "HTTP/1.1 200 OK"
+    Then 3 items are listed                                  # tests/bdd/steps/hide_promoter_events_steps.py:194
+    And the reported total is 3                              # tests/bdd/steps/hide_promoter_events_steps.py:200
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: Show promoter items again when the flag is turned off  # tests/bdd/api/hide-promoter-events.feature:43
+    Given promoter events are hidden                               # tests/bdd/steps/hide_promoter_events_steps.py:95
+    Given 3 venue-sourced items and 7 promoter-sourced items       # tests/bdd/steps/hide_promoter_events_steps.py:139
+    And promoter events are not hidden                             # tests/bdd/steps/hide_promoter_events_steps.py:103
+    When an operator reads the events list                         # tests/bdd/steps/hide_promoter_events_steps.py:148
+LOG_INFO:httpx: HTTP Request: GET http://testserver/admin/events "HTTP/1.1 200 OK"
+    Then 10 items are listed                                       # tests/bdd/steps/hide_promoter_events_steps.py:194
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: Report the flag's current value on the admin API  # tests/bdd/api/hide-promoter-events.feature:49
+    Given promoter events are hidden                          # tests/bdd/steps/hide_promoter_events_steps.py:95
+    When an operator reads the admin configuration            # tests/bdd/steps/hide_promoter_events_steps.py:162
+LOG_INFO:httpx: HTTP Request: GET http://testserver/admin/events/config "HTTP/1.1 200 OK"
+    Then it reports that promoter events are hidden           # tests/bdd/steps/hide_promoter_events_steps.py:210
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: Leave stored promoter rows unchanged               # tests/bdd/api/hide-promoter-events.feature:53
+    Given promoter events are hidden                           # tests/bdd/steps/hide_promoter_events_steps.py:95
+    Given an item whose only source is a promoter post         # tests/bdd/steps/hide_promoter_events_steps.py:109
+    When an operator reads the events list                     # tests/bdd/steps/hide_promoter_events_steps.py:148
+LOG_INFO:httpx: HTTP Request: GET http://testserver/admin/events "HTTP/1.1 200 OK"
+    Then the stored item still exists with its original status # tests/bdd/steps/hide_promoter_events_steps.py:216
+    And the stored item still carries its promoter source      # tests/bdd/steps/hide_promoter_events_steps.py:223
+
+1 feature passed, 0 failed, 0 skipped
+9 scenarios passed, 0 failed, 0 skipped
+40 steps passed, 0 failed, 0 skipped
+Took 0min 0.190s

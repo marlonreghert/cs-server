@@ -1,0 +1,8 @@
+LOG_WARNING:app.services.instagram_crawl_service: [InstagramCrawl] somebar: archived without image classification (skipped_no_classifier) — extraction for this crawl can only qualify posts by caption; an image-only flyer with no event-marker caption text will be missed, not correctly judged not-an-event
+    Then 4 events are stored for that post                         # tests/bdd/steps/crawl_error_visibility_steps.py:407
+    And the stored sources do not record a cap truncation          # tests/bdd/steps/crawl_error_visibility_steps.py:420
+
+1 feature passed, 0 failed, 0 skipped
+13 scenarios passed, 0 failed, 0 skipped
+75 steps passed, 0 failed, 0 skipped
+Took 0min 0.093s

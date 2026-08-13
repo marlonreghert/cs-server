@@ -72,8 +72,13 @@ import logging
 from datetime import datetime, timezone
 from typing import Callable, Optional
 
-from app.metrics import EVENT_EXTRACTION_EVENTS_PER_POST, EVENTS_TOTAL, MENU_ITEM_FRESHNESS_TOTAL
-from app.models.event_kind import KIND_MENU
+from app.metrics import (
+    EVENT_EXTRACTION_EVENTS_PER_POST,
+    EVENT_SOURCE_UPLOADED_AT_TOTAL,
+    EVENTS_TOTAL,
+    MENU_ITEM_FRESHNESS_TOTAL,
+)
+from app.models.event_kind import KIND_EVENT, KIND_FOOD, KIND_MENU, KIND_OTHER, KIND_PROMOTION
 from app.models.menu_lifecycle import DEFAULT_MENU_EXPIRY_DAYS, is_menu_item_current
 from app.services.event_identity import compute_source_event_key, normalize_title
 from app.services.event_venue_resolution import RESOLUTION_MANUAL
@@ -121,6 +126,19 @@ ALL_STATUSES = (
 # the event, since a review reason has been forgotten at least once at every
 # call site that could set one.
 REVIEW_REASON_UNRESOLVED_VENUE = "unresolved_venue"
+# plans/260812_event-attribution-and-dates.md §A: the SECOND, distinct
+# outcome that appears once per-event evidence is honoured — "we can tell
+# EXACTLY where this is, and it is not a venue we carry", as opposed to "we
+# cannot tell where this is at all". An operator can action the first
+# (crawl the missing venue) and cannot action the second in the same way; it
+# doubles as a ranked venue-acquisition backlog. Shared with
+# `260812_backfill-misattributed-links.md`, which imports this constant.
+# Its literal value MUST equal
+# `app.services.event_venue_resolution.METHOD_VENUE_NOT_IN_CATALOG` — not
+# imported (event_venue_resolution already imports RESOLUTION_MANUAL FROM
+# this module; importing back would cycle) — kept in lockstep by
+# tests/test_event_venue_resolution.py's own literal-equality guard.
+REVIEW_REASON_VENUE_NOT_IN_CATALOG = "venue_not_in_catalog"
 # The fallback reason for the residual case: a fresh row landed on
 # `pending_review` for some OTHER combination `is_clean_extraction` checks
 # (e.g. confidence recorded as None) with no venue_id gap and no reason any
@@ -165,6 +183,33 @@ def new_event_id() -> str:
     return f"evt_{new_run_id()}"
 
 
+# plans/260813_review-gate-and-date-vocabulary.md §C: the ONE place that
+# decides whether a post_type needs a start date at all — consulted both by
+# `is_clean_extraction`'s own gate below AND by event_extraction_service.py,
+# which must stop WRITING `missing_date` into `review_reason` for a type this
+# function says does not need one (a reason recorded but not acted on is how
+# the console and the queue count come apart — this repo has shipped that
+# once already, plans/260813_hide-promoter-events.md §B).
+#
+# Exempts exactly the FOUR model-recognised non-event kinds the plan's own
+# Evidence section names (a promotion's meaningful date is its own upload
+# date, a different field entirely; a menu/food/other item never had one to
+# find) — deliberately NOT "every post_type string that is not literally
+# 'event'". An UNRECOGNISED kind (app.models.event_kind.resolve_post_type
+# stores one VERBATIM rather than coercing it) still REQUIRES a date, the
+# same fail-toward-the-reviewed-assumption posture that module's own missing-
+# kind default already takes, and the same invariant
+# tests/bdd/enrichment/post-kind-and-post-extraction-attribution.feature's
+# "Treat an unrecognised kind as still needing review like any other" already
+# pins: a kind this pipeline does not know is exactly the case that must NOT
+# get an optimistic free pass.
+_DATE_EXEMPT_POST_TYPES = frozenset({KIND_PROMOTION, KIND_MENU, KIND_FOOD, KIND_OTHER})
+
+
+def date_required_for_post_type(post_type: Optional[str]) -> bool:
+    return post_type not in _DATE_EXEMPT_POST_TYPES
+
+
 def is_clean_extraction(
     *,
     review_reason: Optional[str],
@@ -172,19 +217,28 @@ def is_clean_extraction(
     venue_id: Optional[str],
     confidence: Optional[float],
     min_confidence: float,
+    post_type: str,
 ) -> bool:
     """True when a freshly persisted extraction needs no human action at
-    all: no review reason, a resolved start date, a linked venue, and
-    confidence at or above the floor. See plans/260807_auto-accept-and-
-    field-level-protection.md §A — the four conditions are independent
-    (e.g. `confidence >= min_confidence` is checked even though both real
-    callers already fold a low-confidence reading into `review_reason`
-    themselves, so this predicate stays correct on its own even if that
-    ever stops being true) and ALL must hold; anything short of clean stays
-    `pending_review`."""
+    all: no review reason, a resolved start date (§C: ONLY required when
+    `date_required_for_post_type(post_type)` — every other type is clean
+    without one), a linked venue, and confidence at or above the floor. See
+    plans/260807_auto-accept-and-field-level-protection.md §A — the
+    conditions are independent (e.g. `confidence >= min_confidence` is
+    checked even though both real callers already fold a low-confidence
+    reading into `review_reason` themselves, so this predicate stays correct
+    on its own even if that ever stops being true) and ALL must hold;
+    anything short of clean stays `pending_review`.
+
+    `post_type` is required, not defaulted — every caller must say what kind
+    of post this is rather than silently inheriting a guess; the two real
+    callers (`reconcile_post_events` below) always have one to hand from
+    `prepared_events`, and a direct test that wants the ORIGINAL
+    unconditional "every post needs a date" behaviour says so explicitly
+    with `post_type=KIND_EVENT`."""
     return (
         not review_reason
-        and starts_at is not None
+        and (starts_at is not None or not date_required_for_post_type(post_type))
         and venue_id is not None
         and confidence is not None
         and confidence >= min_confidence
@@ -248,6 +302,25 @@ def event_time_known(event: dict) -> bool:
     if not isinstance(raw, dict) or "time_known" not in raw:
         return True
     return bool(raw["time_known"])
+
+
+def event_unread_time(event: dict) -> bool:
+    """Whether this event's flyer named a clock time the extractor did not
+    read — plans/260813_review-gate-and-date-vocabulary.md §D. Computed once,
+    at extraction time (event_extraction_service.py), from a fact (the flyer
+    classifier's own `names_time` attribute) that lives on the SOURCE POST,
+    never on the stored row itself — so, exactly like `event_time_known`
+    above, it rides in `raw_extraction` rather than a new column. No longer
+    contributes to `review_reason` (an unread clock time on an otherwise-
+    resolved date is not queue-worthy on its own); this is how the admin API
+    surfaces it instead, as an ADDITIVE flag (app.routers.admin_events_
+    router.EventOut). Defaults False (never invented) when the flag is
+    absent — every row that predates this field, and every row for which the
+    condition was simply never true."""
+    raw = event.get("raw_extraction")
+    if not isinstance(raw, dict):
+        return False
+    return bool(raw.get("unread_time"))
 
 
 def event_field_is_absent(field: str, value, event: dict) -> bool:
@@ -677,6 +750,19 @@ def reconcile_post_events(
         }
         fields.update(prepared)
 
+        # plans/260813_promoter-source-provenance-parity.md Error Handling:
+        # the readiness-gate metric for plans/260813_history-repair-dates.md
+        # — every row this branch freshly writes (insert or an ordinary,
+        # non-confirmed re-extraction), counted once, here, so both callers
+        # (EventExtractionService, PromoterCrawlService) are covered without
+        # a second, duplicated increment in each. See EVENT_SOURCE_UPLOADED_
+        # AT_TOTAL's own docstring for why the confirmed branch above is
+        # deliberately excluded.
+        EVENT_SOURCE_UPLOADED_AT_TOTAL.labels(
+            source_kind=source_kind,
+            outcome="present" if fields.get("source_uploaded_at") is not None else "null",
+        ).inc()
+
         if existing is None:
             event_id = new_event_id()
             fields["event_id"] = event_id
@@ -723,7 +809,16 @@ def reconcile_post_events(
         # reasons already say (both can be true at once: a low-confidence
         # extraction with no venue either), never in place of them.
         reasons = [fields["review_reason"]] if fields.get("review_reason") else []
-        if effective_venue_id is None:
+        # §A: `venue_not_in_catalog` is already a complete, more specific
+        # answer to "why no venue" than the generic `unresolved_venue` —
+        # layering the generic one on top would read as "we both cannot
+        # tell AND can tell exactly", which is never true at once. Skip the
+        # generic append only when the specific one is already present;
+        # every other no-venue path is completely unaffected.
+        if (
+            effective_venue_id is None
+            and REVIEW_REASON_VENUE_NOT_IN_CATALOG not in reasons
+        ):
             reasons.append(REVIEW_REASON_UNRESOLVED_VENUE)
         fields["review_reason"] = "; ".join(reasons) if reasons else None
 
@@ -735,6 +830,13 @@ def reconcile_post_events(
                 venue_id=effective_venue_id,
                 confidence=fields.get("confidence"),
                 min_confidence=min_confidence,
+                # §C: both real callers always set this on every
+                # prepared_events entry; the `or KIND_EVENT` fallback is for
+                # a caller (or an older direct test) that predates post_type
+                # entirely — it must see the ORIGINAL "every post needs a
+                # date" behaviour, the same fail-toward-the-safe-assumption
+                # posture `resolve_post_type` itself uses for a missing kind.
+                post_type=fields.get("post_type") or KIND_EVENT,
             )
             else STATUS_PENDING_REVIEW
         )
@@ -925,12 +1027,15 @@ def update_events_gauge(venue_dao, now: Optional[datetime] = None) -> None:
 
 __all__ = [
     "reconcile_post_events", "new_event_id", "is_clean_extraction",
+    "date_required_for_post_type",
     "STATUS_PENDING_REVIEW", "STATUS_CONFIRMED", "STATUS_SUPERSEDED", "STATUS_ACCEPTED",
     "ALL_STATUSES", "update_events_gauge",
     "REVIEW_REASON_UNRESOLVED_VENUE", "REVIEW_REASON_NEEDS_REVIEW",
     "REVIEW_REASON_DIVERGES_FROM_CONFIRMED", "REVIEW_REASON_ABSENT_FROM_LATEST_EXTRACTION",
+    "REVIEW_REASON_VENUE_NOT_IN_CATALOG",
     # Shared with app.services.event_merge's confirmed-canonical branch — see
     # the coordination note beside PROTECTABLE_EVENT_FIELDS above.
     "PROTECTABLE_EVENT_FIELDS", "event_field_is_absent", "event_time_known",
+    "event_unread_time",
     "union_lineup", "union_attractions", "apply_operator_field_protection",
 ]

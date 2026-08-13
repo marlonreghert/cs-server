@@ -411,12 +411,24 @@ class TestSingleEventVenuePostIsByteIdenticalToTheOldPath:
         assert stored["raw_extraction"] == {
             "kind": None,
             "title": "Festa da Casa", "description": "Uma noite especial",
-            "date_text": "15/08", "time_text": "22h", "is_recurring": False,
+            "date_text": "15/08", "time_text": "22h",
+            # plans/260812_event-attribution-and-dates.md §C: the model's
+            # optional structured date fallback -- absent from this
+            # fixture's raw JSON, so it takes the same genuinely-absent
+            # None every other unstated field here does.
+            "date_interpretation": None,
+            "is_recurring": False,
             "recurrence_text": None, "lineup": ["DJ A", "DJ B"],
             "attractions": [], "ticket_url": "https://tickets.example/x",
             "ticket_info": None, "price_text": "R$30",
             "location_text": "Rua das Flores, 123", "confidence": 0.87,
             "category": None, "time_known": True,
+            # plans/260813_review-gate-and-date-vocabulary.md §D: additive,
+            # rides alongside time_known the same way -- this fixture's post
+            # carries no flyer_names_time attribute at all, so it takes the
+            # same genuinely-absent False every other unstated signal here
+            # does.
+            "unread_time": False,
         }
         assert stored["first_seen_at"] is not None
         assert stored["last_seen_at"] is not None
@@ -469,6 +481,16 @@ class TestSingleEventVenuePostIsByteIdenticalToTheOldPath:
             # plans/260811_expose-time-known.md: unconditional key of every
             # prepared_events entry, like post_type/category above.
             "time_known",
+            # plans/260812_crawl-error-visibility.md §C/§D: unconditional
+            # keys of every prepared_events entry, like post_type/category/
+            # time_known above — present on every insert, not just once a
+            # media type or a truncation is known.
+            "source_media_type", "source_uploaded_at", "source_events_truncated",
+            # plans/260812_event-attribution-and-dates.md §C: unconditional
+            # key of every prepared_events entry, like the crawl-error-
+            # visibility columns above — present on every insert, not just
+            # once a structured date interpretation is actually stored.
+            "date_interpretation",
         }
         assert set(stored.keys()) == expected_keys, set(stored.keys())
 
@@ -622,8 +644,14 @@ class TestDryRunSpendsNothing:
 class TestUnreadTimeReviewReason:
     """plans/260806_instagram-post-recency-and-unknown-time.md: the four
     combinations of (time parsed / not) x (names_time yes / not present).
-    Only "time not parsed AND flyer said yes" is an extraction defect worth
-    queueing; the other three are either fine (time parsed) or a genuinely
+
+    plans/260813_review-gate-and-date-vocabulary.md §D: "time not parsed AND
+    flyer said yes" stays worth COUNTING (the OUTCOME_UNREAD_TIME outcome,
+    and the additive `raw_extraction["unread_time"]` flag the admin API
+    reads — app.services.event_reconciliation.event_unread_time) but is no
+    longer worth QUEUEING — an event whose date resolved must not be held up
+    by a clock time alone. The other three combinations were never queued
+    either way: they are genuinely fine (time parsed) or a genuinely
     date-only event (no flyer signal, or the flyer said no)."""
 
     def _run_one(self, *, flyer_names_time, time_text):
@@ -644,17 +672,20 @@ class TestUnreadTimeReviewReason:
         stored = dao.get_event_by_source("v1_handle", "s1")
         return result, stored
 
-    def test_time_unread_and_flyer_names_a_time_is_queued(self):
+    def test_time_unread_and_flyer_names_a_time_is_counted_but_not_queued(self):
         result, stored = self._run_one(flyer_names_time="yes", time_text=None)
         assert result["outcomes"].get(OUTCOME_UNREAD_TIME) == 1
-        assert "unread_time" in stored["review_reason"]
+        assert not (stored["review_reason"] or ""), stored["review_reason"]
         assert stored["raw_extraction"]["time_known"] is False
+        assert stored["raw_extraction"]["unread_time"] is True
+        assert stored["status"] == "accepted", stored
 
     def test_time_unread_and_flyer_names_no_time_is_not_queued(self):
         result, stored = self._run_one(flyer_names_time="no", time_text=None)
         assert result["outcomes"].get(OUTCOME_UNREAD_TIME, 0) == 0
         assert not (stored["review_reason"] or "")
         assert stored["raw_extraction"]["time_known"] is False
+        assert stored["raw_extraction"]["unread_time"] is False
 
     def test_time_unread_and_no_flyer_signal_is_not_queued(self):
         # An absent signal (no flyer attribute at all) must never be read as
@@ -663,18 +694,21 @@ class TestUnreadTimeReviewReason:
         assert result["outcomes"].get(OUTCOME_UNREAD_TIME, 0) == 0
         assert not (stored["review_reason"] or "")
         assert stored["raw_extraction"]["time_known"] is False
+        assert stored["raw_extraction"]["unread_time"] is False
 
     def test_time_parsed_and_flyer_names_a_time_is_not_queued(self):
         result, stored = self._run_one(flyer_names_time="yes", time_text="22h")
         assert result["outcomes"].get(OUTCOME_UNREAD_TIME, 0) == 0
         assert not (stored["review_reason"] or "")
         assert stored["raw_extraction"]["time_known"] is True
+        assert stored["raw_extraction"]["unread_time"] is False
 
     def test_time_parsed_and_no_flyer_signal_is_not_queued(self):
         result, stored = self._run_one(flyer_names_time=None, time_text="22h")
         assert result["outcomes"].get(OUTCOME_UNREAD_TIME, 0) == 0
         assert not (stored["review_reason"] or "")
         assert stored["raw_extraction"]["time_known"] is True
+        assert stored["raw_extraction"]["unread_time"] is False
 
     def test_a_stated_00h_is_known_and_never_queued(self):
         # THE TRAP pinned at the service level too: "00h" is a real stated
@@ -683,6 +717,7 @@ class TestUnreadTimeReviewReason:
         assert result["outcomes"].get(OUTCOME_UNREAD_TIME, 0) == 0
         assert stored["starts_at"].hour == 0
         assert stored["raw_extraction"]["time_known"] is True
+        assert stored["raw_extraction"]["unread_time"] is False
 
 
 class _FakeMediaStoreForPostGrouping:

@@ -1,0 +1,582 @@
+.venv/bin/python -m behave "tests/bdd/enrichment/backfill-misattributed-links.feature"
+USING RUNNER: behave.runner:Runner
+Feature: Backfill mis-attributed venue links # tests/bdd/enrichment/backfill-misattributed-links.feature:1
+  As an operator
+  I want every item whose venue came from a post-level caption mention re-decided
+  from the event's own stored location text
+  So that a roundup post's events stop being attributed to a venue that is not
+  hosting them, without any operator decision being overwritten
+  Feature: Backfill mis-attributed venue links  # tests/bdd/enrichment/backfill-misattributed-links.feature:1
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: Re-point an item to the venue named in its own stated location                      # tests/bdd/enrichment/backfill-misattributed-links.feature:14
+    Given the per-event venue attribution fix has landed                                        # tests/bdd/steps/backfill_misattributed_links_steps.py:133
+    And the venue catalog holds "Sempre Rock Bar" with Instagram handle "semprerockbar"         # tests/bdd/steps/backfill_misattributed_links_steps.py:140
+    And the venue catalog holds "Casa do Matuto" with Instagram handle "casadomatutonatal"      # tests/bdd/steps/backfill_misattributed_links_steps.py:140
+    And the venue catalog holds "Teatro Riachuelo" with Instagram handle "teatroriachuelonatal" # tests/bdd/steps/backfill_misattributed_links_steps.py:140
+    Given an accepted item linked to "Teatro Riachuelo" by a caption mention                    # tests/bdd/steps/backfill_misattributed_links_steps.py:146
+    And its stored extraction states the location "@semprerockbar"                              # tests/bdd/steps/backfill_misattributed_links_steps.py:215
+    When the backfill runs with apply                                                           # tests/bdd/steps/backfill_misattributed_links_steps.py:387
+    Then the item is linked to "Sempre Rock Bar"                                                # tests/bdd/steps/backfill_misattributed_links_steps.py:462
+      ASSERT FAILED: ('Sempre Rock Bar', {'event_id': 'evt_bfl_0001', 'venue_id': 'v_teatroriachuelonatal', 'starts_at': datetime.datetime(2026, 8, 20, 22, 0, tzinfo=datetime.timezone.utc), 'title': 'Festa 1', 'status': 'accepted', 'review_reason': None, 'location_resolution': 'auto', 'location_confidence': 1.0, 'linked_by': 'handle_mention', 'linked_at': datetime.datetime(2026, 8, 13, 15, 21, 3, 259898, tzinfo=datetime.timezone.utc), 'operator_edited_fields': None, 'confidence': 0.9, 'location_text': None, 'updated_at': '2026-08-13T15:21:03.260184+00:00', 'post_type': 'event', 'time_known': False, 'venue_name': 'Teatro Riachuelo', 'source_kind': 'promoter_post', 'source_handle': 'oquetemhojeemnatal', 'source_shortcode': 'bfl_post_1', 'source_permalink': 'https://instagram.com/p/bfl_post_1', 'source_event_key': '58042d6a7525e207786e84a41968a7d3', 'source_event_index': 1, 'cover_photo_key': None, 'raw_extraction': {'location_text': '@semprerockbar'}, 'source_media_type': None, 'source_uploaded_at': None, 'source_events_truncated': False, 'date_interpretation': None, 'first_seen_at': datetime.datetime(2026, 8, 13, 15, 21, 3, 259900, tzinfo=datetime.timezone.utc), 'last_seen_at': datetime.datetime(2026, 8, 13, 15, 21, 3, 259900, tzinfo=datetime.timezone.utc)})
+
+    And the item is not linked to "Teatro Riachuelo"                                            # None
+    And the item records that the link came from its own stated location                        # None
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+----
+CAPTURED LOG: before_scenario
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+---- CAPTURED_SCENARIO_OUTPUT_END ----
+
+  Scenario: Re-point every event of one roundup post to its own venue                                 # tests/bdd/enrichment/backfill-misattributed-links.feature:22
+    Given the per-event venue attribution fix has landed                                              # tests/bdd/steps/backfill_misattributed_links_steps.py:133
+    And the venue catalog holds "Sempre Rock Bar" with Instagram handle "semprerockbar"               # tests/bdd/steps/backfill_misattributed_links_steps.py:140
+    And the venue catalog holds "Casa do Matuto" with Instagram handle "casadomatutonatal"            # tests/bdd/steps/backfill_misattributed_links_steps.py:140
+    And the venue catalog holds "Teatro Riachuelo" with Instagram handle "teatroriachuelonatal"       # tests/bdd/steps/backfill_misattributed_links_steps.py:140
+    Given a roundup post whose twenty items are all linked to "Teatro Riachuelo" by a caption mention # tests/bdd/steps/backfill_misattributed_links_steps.py:319
+    And each item's stored extraction states a different venue handle                                 # tests/bdd/steps/backfill_misattributed_links_steps.py:337
+    When the backfill runs with apply                                                                 # tests/bdd/steps/backfill_misattributed_links_steps.py:387
+    Then each item is linked to the venue its own stored location names                               # tests/bdd/steps/backfill_misattributed_links_steps.py:487
+      ASSERT FAILED: ('Roundup Venue 0', {'event_id': 'evt_bfl_0001', 'venue_id': 'v_teatroriachuelonatal', 'starts_at': datetime.datetime(2026, 8, 20, 22, 0, tzinfo=datetime.timezone.utc), 'title': 'Evento 0', 'status': 'accepted', 'review_reason': None, 'location_resolution': 'auto', 'location_confidence': 1.0, 'linked_by': 'handle_mention', 'linked_at': datetime.datetime(2026, 8, 13, 15, 21, 3, 310686, tzinfo=datetime.timezone.utc), 'operator_edited_fields': None, 'confidence': 0.9, 'location_text': None, 'updated_at': '2026-08-13T15:21:03.315323+00:00', 'post_type': 'event', 'time_known': False, 'venue_name': 'Teatro Riachuelo', 'source_kind': 'promoter_post', 'source_handle': 'oquetemhojeemnatal', 'source_shortcode': 'bfl_roundup_post', 'source_permalink': 'https://instagram.com/p/bfl_roundup_post', 'source_event_key': 'f38408cbb76568e2cd0dfa4353d36cf1', 'source_event_index': 1, 'cover_photo_key': None, 'raw_extraction': {'location_text': '@roundupvenue0'}, 'source_media_type': None, 'source_uploaded_at': None, 'source_events_truncated': False, 'date_interpretation': None, 'first_seen_at': datetime.datetime(2026, 8, 13, 15, 21, 3, 310688, tzinfo=datetime.timezone.utc), 'last_seen_at': datetime.datetime(2026, 8, 13, 15, 21, 3, 310688, tzinfo=datetime.timezone.utc)})
+
+    And no two of those items share a venue unless their stored locations agree                       # None
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+----
+CAPTURED LOG: before_scenario
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+---- CAPTURED_SCENARIO_OUTPUT_END ----
+
+  Scenario: Detach an item whose stated venue is not in the catalog                             # tests/bdd/enrichment/backfill-misattributed-links.feature:29
+    Given the per-event venue attribution fix has landed                                        # tests/bdd/steps/backfill_misattributed_links_steps.py:133
+    And the venue catalog holds "Sempre Rock Bar" with Instagram handle "semprerockbar"         # tests/bdd/steps/backfill_misattributed_links_steps.py:140
+    And the venue catalog holds "Casa do Matuto" with Instagram handle "casadomatutonatal"      # tests/bdd/steps/backfill_misattributed_links_steps.py:140
+    And the venue catalog holds "Teatro Riachuelo" with Instagram handle "teatroriachuelonatal" # tests/bdd/steps/backfill_misattributed_links_steps.py:140
+    Given an accepted item linked to "Sempre Rock Bar" by a caption mention                     # tests/bdd/steps/backfill_misattributed_links_steps.py:146
+    And its stored extraction states the location "@donanapubnatal"                             # tests/bdd/steps/backfill_misattributed_links_steps.py:215
+    And no venue in the catalog has the handle "donanapubnatal"                                 # tests/bdd/steps/backfill_misattributed_links_steps.py:230
+    When the backfill runs with apply                                                           # tests/bdd/steps/backfill_misattributed_links_steps.py:387
+    Then the item has no venue                                                                  # tests/bdd/steps/backfill_misattributed_links_steps.py:501
+      ASSERT FAILED: {'event_id': 'evt_bfl_0001', 'venue_id': 'v_semprerockbar', 'starts_at': datetime.datetime(2026, 8, 20, 22, 0, tzinfo=datetime.timezone.utc), 'title': 'Festa 1', 'status': 'accepted', 'review_reason': None, 'location_resolution': 'auto', 'location_confidence': 1.0, 'linked_by': 'handle_mention', 'linked_at': datetime.datetime(2026, 8, 13, 15, 21, 3, 364944, tzinfo=datetime.timezone.utc), 'operator_edited_fields': None, 'confidence': 0.9, 'location_text': None, 'updated_at': '2026-08-13T15:21:03.365215+00:00', 'post_type': 'event', 'time_known': False, 'venue_name': 'Sempre Rock Bar', 'source_kind': 'promoter_post', 'source_handle': 'oquetemhojeemnatal', 'source_shortcode': 'bfl_post_1', 'source_permalink': 'https://instagram.com/p/bfl_post_1', 'source_event_key': '58042d6a7525e207786e84a41968a7d3', 'source_event_index': 1, 'cover_photo_key': None, 'raw_extraction': {'location_text': '@donanapubnatal'}, 'source_media_type': None, 'source_uploaded_at': None, 'source_events_truncated': False, 'date_interpretation': None, 'first_seen_at': datetime.datetime(2026, 8, 13, 15, 21, 3, 364946, tzinfo=datetime.timezone.utc), 'last_seen_at': datetime.datetime(2026, 8, 13, 15, 21, 3, 364946, tzinfo=datetime.timezone.utc)}
+
+    And the item is queued with the reason that its venue is not in the catalog                 # None
+    And the item is not queued with the reason that its venue could not be resolved             # None
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+----
+CAPTURED LOG: before_scenario
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+---- CAPTURED_SCENARIO_OUTPUT_END ----
+
+  Scenario: Report an item with no stated location as unresolved, not as absent from the catalog  # tests/bdd/enrichment/backfill-misattributed-links.feature:38
+    Given the per-event venue attribution fix has landed                                          # tests/bdd/steps/backfill_misattributed_links_steps.py:133
+    And the venue catalog holds "Sempre Rock Bar" with Instagram handle "semprerockbar"           # tests/bdd/steps/backfill_misattributed_links_steps.py:140
+    And the venue catalog holds "Casa do Matuto" with Instagram handle "casadomatutonatal"        # tests/bdd/steps/backfill_misattributed_links_steps.py:140
+    And the venue catalog holds "Teatro Riachuelo" with Instagram handle "teatroriachuelonatal"   # tests/bdd/steps/backfill_misattributed_links_steps.py:140
+    Given an accepted item linked to "Sempre Rock Bar" by a caption mention                       # tests/bdd/steps/backfill_misattributed_links_steps.py:146
+    And its stored extraction states no location at all                                           # tests/bdd/steps/backfill_misattributed_links_steps.py:220
+    When the backfill runs with apply                                                             # tests/bdd/steps/backfill_misattributed_links_steps.py:387
+    Then the item has no venue                                                                    # tests/bdd/steps/backfill_misattributed_links_steps.py:501
+      ASSERT FAILED: {'event_id': 'evt_bfl_0001', 'venue_id': 'v_semprerockbar', 'starts_at': datetime.datetime(2026, 8, 20, 22, 0, tzinfo=datetime.timezone.utc), 'title': 'Festa 1', 'status': 'accepted', 'review_reason': None, 'location_resolution': 'auto', 'location_confidence': 1.0, 'linked_by': 'handle_mention', 'linked_at': datetime.datetime(2026, 8, 13, 15, 21, 3, 415695, tzinfo=datetime.timezone.utc), 'operator_edited_fields': None, 'confidence': 0.9, 'location_text': None, 'updated_at': '2026-08-13T15:21:03.415963+00:00', 'post_type': 'event', 'time_known': False, 'venue_name': 'Sempre Rock Bar', 'source_kind': 'promoter_post', 'source_handle': 'oquetemhojeemnatal', 'source_shortcode': 'bfl_post_1', 'source_permalink': 'https://instagram.com/p/bfl_post_1', 'source_event_key': '58042d6a7525e207786e84a41968a7d3', 'source_event_index': 1, 'cover_photo_key': None, 'raw_extraction': {'location_text': None}, 'source_media_type': None, 'source_uploaded_at': None, 'source_events_truncated': False, 'date_interpretation': None, 'first_seen_at': datetime.datetime(2026, 8, 13, 15, 21, 3, 415697, tzinfo=datetime.timezone.utc), 'last_seen_at': datetime.datetime(2026, 8, 13, 15, 21, 3, 415698, tzinfo=datetime.timezone.utc)}
+
+    And the item is queued with the reason that its venue could not be resolved                   # None
+    And the item is not queued with the reason that its venue is not in the catalog               # None
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+----
+CAPTURED LOG: before_scenario
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+---- CAPTURED_SCENARIO_OUTPUT_END ----
+
+  Scenario: Leave a confirmed item untouched                                                    # tests/bdd/enrichment/backfill-misattributed-links.feature:46
+    Given the per-event venue attribution fix has landed                                        # tests/bdd/steps/backfill_misattributed_links_steps.py:133
+    And the venue catalog holds "Sempre Rock Bar" with Instagram handle "semprerockbar"         # tests/bdd/steps/backfill_misattributed_links_steps.py:140
+    And the venue catalog holds "Casa do Matuto" with Instagram handle "casadomatutonatal"      # tests/bdd/steps/backfill_misattributed_links_steps.py:140
+    And the venue catalog holds "Teatro Riachuelo" with Instagram handle "teatroriachuelonatal" # tests/bdd/steps/backfill_misattributed_links_steps.py:140
+    Given a confirmed item linked to "Teatro Riachuelo" by a caption mention                    # tests/bdd/steps/backfill_misattributed_links_steps.py:151
+    And its stored extraction states the location "@semprerockbar"                              # tests/bdd/steps/backfill_misattributed_links_steps.py:215
+    When the backfill runs with apply                                                           # tests/bdd/steps/backfill_misattributed_links_steps.py:387
+    Then the item is still linked to "Teatro Riachuelo"                                         # tests/bdd/steps/backfill_misattributed_links_steps.py:476
+    And the item is still confirmed                                                             # tests/bdd/steps/backfill_misattributed_links_steps.py:537
+    And the report counts the item as skipped because an operator confirmed it                  # tests/bdd/steps/backfill_misattributed_links_steps.py:586
+      ASSERT FAILED: Counter()
+
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+----
+CAPTURED LOG: before_scenario
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+---- CAPTURED_SCENARIO_OUTPUT_END ----
+
+  Scenario: Leave a manually linked item untouched                                              # tests/bdd/enrichment/backfill-misattributed-links.feature:54
+    Given the per-event venue attribution fix has landed                                        # tests/bdd/steps/backfill_misattributed_links_steps.py:133
+    And the venue catalog holds "Sempre Rock Bar" with Instagram handle "semprerockbar"         # tests/bdd/steps/backfill_misattributed_links_steps.py:140
+    And the venue catalog holds "Casa do Matuto" with Instagram handle "casadomatutonatal"      # tests/bdd/steps/backfill_misattributed_links_steps.py:140
+    And the venue catalog holds "Teatro Riachuelo" with Instagram handle "teatroriachuelonatal" # tests/bdd/steps/backfill_misattributed_links_steps.py:140
+    Given a manually linked item linked to "Teatro Riachuelo"                                   # tests/bdd/steps/backfill_misattributed_links_steps.py:156
+    And its stored extraction states the location "@semprerockbar"                              # tests/bdd/steps/backfill_misattributed_links_steps.py:215
+    When the backfill runs with apply                                                           # tests/bdd/steps/backfill_misattributed_links_steps.py:387
+    Then the item is still linked to "Teatro Riachuelo"                                         # tests/bdd/steps/backfill_misattributed_links_steps.py:476
+    And the item's location resolution is still manual                                          # tests/bdd/steps/backfill_misattributed_links_steps.py:542
+    And the report counts the item as skipped because an operator linked it                     # tests/bdd/steps/backfill_misattributed_links_steps.py:586
+      ASSERT FAILED: Counter()
+
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+----
+CAPTURED LOG: before_scenario
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+---- CAPTURED_SCENARIO_OUTPUT_END ----
+
+  Scenario: Leave an item whose operator edited its venue untouched                             # tests/bdd/enrichment/backfill-misattributed-links.feature:62
+    Given the per-event venue attribution fix has landed                                        # tests/bdd/steps/backfill_misattributed_links_steps.py:133
+    And the venue catalog holds "Sempre Rock Bar" with Instagram handle "semprerockbar"         # tests/bdd/steps/backfill_misattributed_links_steps.py:140
+    And the venue catalog holds "Casa do Matuto" with Instagram handle "casadomatutonatal"      # tests/bdd/steps/backfill_misattributed_links_steps.py:140
+    And the venue catalog holds "Teatro Riachuelo" with Instagram handle "teatroriachuelonatal" # tests/bdd/steps/backfill_misattributed_links_steps.py:140
+    Given an accepted item linked to "Teatro Riachuelo" by a caption mention                    # tests/bdd/steps/backfill_misattributed_links_steps.py:146
+    And an operator has edited the item's venue                                                 # tests/bdd/steps/backfill_misattributed_links_steps.py:236
+    And its stored extraction states the location "@semprerockbar"                              # tests/bdd/steps/backfill_misattributed_links_steps.py:215
+    When the backfill runs with apply                                                           # tests/bdd/steps/backfill_misattributed_links_steps.py:387
+    Then the item is still linked to "Teatro Riachuelo"                                         # tests/bdd/steps/backfill_misattributed_links_steps.py:476
+    And the report counts the item as skipped because an operator edited its venue              # tests/bdd/steps/backfill_misattributed_links_steps.py:586
+      ASSERT FAILED: Counter()
+
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+----
+CAPTURED LOG: before_scenario
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+---- CAPTURED_SCENARIO_OUTPUT_END ----
+
+  Scenario: Re-resolve from an operator-corrected location text                                 # tests/bdd/enrichment/backfill-misattributed-links.feature:70
+    Given the per-event venue attribution fix has landed                                        # tests/bdd/steps/backfill_misattributed_links_steps.py:133
+    And the venue catalog holds "Sempre Rock Bar" with Instagram handle "semprerockbar"         # tests/bdd/steps/backfill_misattributed_links_steps.py:140
+    And the venue catalog holds "Casa do Matuto" with Instagram handle "casadomatutonatal"      # tests/bdd/steps/backfill_misattributed_links_steps.py:140
+    And the venue catalog holds "Teatro Riachuelo" with Instagram handle "teatroriachuelonatal" # tests/bdd/steps/backfill_misattributed_links_steps.py:140
+    Given an accepted item linked to "Teatro Riachuelo" by a caption mention                    # tests/bdd/steps/backfill_misattributed_links_steps.py:146
+    And an operator has corrected the item's location text to "@casadomatutonatal"              # tests/bdd/steps/backfill_misattributed_links_steps.py:241
+    When the backfill runs with apply                                                           # tests/bdd/steps/backfill_misattributed_links_steps.py:387
+    Then the item is linked to "Casa do Matuto"                                                 # tests/bdd/steps/backfill_misattributed_links_steps.py:462
+      ASSERT FAILED: ('Casa do Matuto', {'event_id': 'evt_bfl_0001', 'venue_id': 'v_teatroriachuelonatal', 'starts_at': datetime.datetime(2026, 8, 20, 22, 0, tzinfo=datetime.timezone.utc), 'title': 'Festa 1', 'status': 'accepted', 'review_reason': None, 'location_resolution': 'auto', 'location_confidence': 1.0, 'linked_by': 'handle_mention', 'linked_at': datetime.datetime(2026, 8, 13, 15, 21, 3, 619701, tzinfo=datetime.timezone.utc), 'operator_edited_fields': ['location_text'], 'confidence': 0.9, 'location_text': '@casadomatutonatal', 'updated_at': '2026-08-13T15:21:03.619980+00:00', 'post_type': 'event', 'time_known': False, 'venue_name': 'Teatro Riachuelo', 'source_kind': 'promoter_post', 'source_handle': 'oquetemhojeemnatal', 'source_shortcode': 'bfl_post_1', 'source_permalink': 'https://instagram.com/p/bfl_post_1', 'source_event_key': '58042d6a7525e207786e84a41968a7d3', 'source_event_index': 1, 'cover_photo_key': None, 'raw_extraction': {'location_text': None}, 'source_media_type': None, 'source_uploaded_at': None, 'source_events_truncated': False, 'date_interpretation': None, 'first_seen_at': datetime.datetime(2026, 8, 13, 15, 21, 3, 619703, tzinfo=datetime.timezone.utc), 'last_seen_at': datetime.datetime(2026, 8, 13, 15, 21, 3, 619703, tzinfo=datetime.timezone.utc)})
+
+    And the item's location resolution is automatic                                             # None
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+----
+CAPTURED LOG: before_scenario
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+---- CAPTURED_SCENARIO_OUTPUT_END ----
+
+  Scenario: Leave a superseded item untouched                                                   # tests/bdd/enrichment/backfill-misattributed-links.feature:77
+    Given the per-event venue attribution fix has landed                                        # tests/bdd/steps/backfill_misattributed_links_steps.py:133
+    And the venue catalog holds "Sempre Rock Bar" with Instagram handle "semprerockbar"         # tests/bdd/steps/backfill_misattributed_links_steps.py:140
+    And the venue catalog holds "Casa do Matuto" with Instagram handle "casadomatutonatal"      # tests/bdd/steps/backfill_misattributed_links_steps.py:140
+    And the venue catalog holds "Teatro Riachuelo" with Instagram handle "teatroriachuelonatal" # tests/bdd/steps/backfill_misattributed_links_steps.py:140
+    Given a superseded item linked to "Teatro Riachuelo" by a caption mention                   # tests/bdd/steps/backfill_misattributed_links_steps.py:176
+    And its stored extraction states the location "@semprerockbar"                              # tests/bdd/steps/backfill_misattributed_links_steps.py:215
+    When the backfill runs with apply                                                           # tests/bdd/steps/backfill_misattributed_links_steps.py:387
+    Then the item is still linked to "Teatro Riachuelo"                                         # tests/bdd/steps/backfill_misattributed_links_steps.py:476
+    And the item is still superseded                                                            # tests/bdd/steps/backfill_misattributed_links_steps.py:552
+    And the report counts the item as skipped because it was superseded                         # tests/bdd/steps/backfill_misattributed_links_steps.py:586
+      ASSERT FAILED: Counter()
+
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+----
+CAPTURED LOG: before_scenario
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+---- CAPTURED_SCENARIO_OUTPUT_END ----
+
+  Scenario: Leave an extraction-failed placeholder untouched                                    # tests/bdd/enrichment/backfill-misattributed-links.feature:85
+    Given the per-event venue attribution fix has landed                                        # tests/bdd/steps/backfill_misattributed_links_steps.py:133
+    And the venue catalog holds "Sempre Rock Bar" with Instagram handle "semprerockbar"         # tests/bdd/steps/backfill_misattributed_links_steps.py:140
+    And the venue catalog holds "Casa do Matuto" with Instagram handle "casadomatutonatal"      # tests/bdd/steps/backfill_misattributed_links_steps.py:140
+    And the venue catalog holds "Teatro Riachuelo" with Instagram handle "teatroriachuelonatal" # tests/bdd/steps/backfill_misattributed_links_steps.py:140
+    Given an extraction-failed item with no content identity                                    # tests/bdd/steps/backfill_misattributed_links_steps.py:181
+    When the backfill runs with apply                                                           # tests/bdd/steps/backfill_misattributed_links_steps.py:387
+    Then the item is unchanged                                                                  # tests/bdd/steps/backfill_misattributed_links_steps.py:557
+    And the report counts the item as skipped because its extraction failed                     # tests/bdd/steps/backfill_misattributed_links_steps.py:586
+      ASSERT FAILED: Counter()
+
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+----
+CAPTURED LOG: before_scenario
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+---- CAPTURED_SCENARIO_OUTPUT_END ----
+
+  Scenario: Keep an item queued for a date problem queued after its venue is fixed              # tests/bdd/enrichment/backfill-misattributed-links.feature:91
+    Given the per-event venue attribution fix has landed                                        # tests/bdd/steps/backfill_misattributed_links_steps.py:133
+    And the venue catalog holds "Sempre Rock Bar" with Instagram handle "semprerockbar"         # tests/bdd/steps/backfill_misattributed_links_steps.py:140
+    And the venue catalog holds "Casa do Matuto" with Instagram handle "casadomatutonatal"      # tests/bdd/steps/backfill_misattributed_links_steps.py:140
+    And the venue catalog holds "Teatro Riachuelo" with Instagram handle "teatroriachuelonatal" # tests/bdd/steps/backfill_misattributed_links_steps.py:140
+    Given a pending item linked to "Teatro Riachuelo" by a caption mention                      # tests/bdd/steps/backfill_misattributed_links_steps.py:209
+    And the item is queued because its date could not be read                                   # tests/bdd/steps/backfill_misattributed_links_steps.py:248
+    And its stored extraction states the location "@semprerockbar"                              # tests/bdd/steps/backfill_misattributed_links_steps.py:215
+    When the backfill runs with apply                                                           # tests/bdd/steps/backfill_misattributed_links_steps.py:387
+    Then the item is linked to "Sempre Rock Bar"                                                # tests/bdd/steps/backfill_misattributed_links_steps.py:462
+      ASSERT FAILED: ('Sempre Rock Bar', {'event_id': 'evt_bfl_0001', 'venue_id': 'v_teatroriachuelonatal', 'starts_at': None, 'title': 'Festa 1', 'status': 'pending_review', 'review_reason': 'missing_date', 'location_resolution': 'auto', 'location_confidence': 1.0, 'linked_by': 'handle_mention', 'linked_at': datetime.datetime(2026, 8, 13, 15, 21, 3, 773168, tzinfo=datetime.timezone.utc), 'operator_edited_fields': None, 'confidence': 0.9, 'location_text': None, 'updated_at': '2026-08-13T15:21:03.773657+00:00', 'post_type': 'event', 'time_known': False, 'venue_name': 'Teatro Riachuelo', 'source_kind': 'promoter_post', 'source_handle': 'oquetemhojeemnatal', 'source_shortcode': 'bfl_post_1', 'source_permalink': 'https://instagram.com/p/bfl_post_1', 'source_event_key': '58042d6a7525e207786e84a41968a7d3', 'source_event_index': 1, 'cover_photo_key': None, 'raw_extraction': {'location_text': '@semprerockbar'}, 'source_media_type': None, 'source_uploaded_at': None, 'source_events_truncated': False, 'date_interpretation': None, 'first_seen_at': datetime.datetime(2026, 8, 13, 15, 21, 3, 773169, tzinfo=datetime.timezone.utc), 'last_seen_at': datetime.datetime(2026, 8, 13, 15, 21, 3, 773170, tzinfo=datetime.timezone.utc)})
+
+    And the item is still pending review                                                        # None
+    And the item is still queued because its date could not be read                             # None
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+----
+CAPTURED LOG: before_scenario
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+---- CAPTURED_SCENARIO_OUTPUT_END ----
+
+  Scenario: Return a repaired item to accepted only when the extraction is otherwise clean      # tests/bdd/enrichment/backfill-misattributed-links.feature:100
+    Given the per-event venue attribution fix has landed                                        # tests/bdd/steps/backfill_misattributed_links_steps.py:133
+    And the venue catalog holds "Sempre Rock Bar" with Instagram handle "semprerockbar"         # tests/bdd/steps/backfill_misattributed_links_steps.py:140
+    And the venue catalog holds "Casa do Matuto" with Instagram handle "casadomatutonatal"      # tests/bdd/steps/backfill_misattributed_links_steps.py:140
+    And the venue catalog holds "Teatro Riachuelo" with Instagram handle "teatroriachuelonatal" # tests/bdd/steps/backfill_misattributed_links_steps.py:140
+    Given a pending item linked to "Teatro Riachuelo" by a caption mention                      # tests/bdd/steps/backfill_misattributed_links_steps.py:209
+    And the item is queued only because its venue could not be resolved                         # tests/bdd/steps/backfill_misattributed_links_steps.py:255
+    And the item has a resolved date and confidence above the floor                             # tests/bdd/steps/backfill_misattributed_links_steps.py:260
+    And its stored extraction states the location "@semprerockbar"                              # tests/bdd/steps/backfill_misattributed_links_steps.py:215
+    When the backfill runs with apply                                                           # tests/bdd/steps/backfill_misattributed_links_steps.py:387
+    Then the item is linked to "Sempre Rock Bar"                                                # tests/bdd/steps/backfill_misattributed_links_steps.py:462
+      ASSERT FAILED: ('Sempre Rock Bar', {'event_id': 'evt_bfl_0001', 'venue_id': 'v_teatroriachuelonatal', 'starts_at': datetime.datetime(2026, 8, 20, 22, 0, tzinfo=datetime.timezone.utc), 'title': 'Festa 1', 'status': 'pending_review', 'review_reason': 'unresolved_venue', 'location_resolution': 'auto', 'location_confidence': 1.0, 'linked_by': 'handle_mention', 'linked_at': datetime.datetime(2026, 8, 13, 15, 21, 3, 824795, tzinfo=datetime.timezone.utc), 'operator_edited_fields': None, 'confidence': 0.9, 'location_text': None, 'updated_at': '2026-08-13T15:21:03.825530+00:00', 'post_type': 'event', 'time_known': False, 'venue_name': 'Teatro Riachuelo', 'source_kind': 'promoter_post', 'source_handle': 'oquetemhojeemnatal', 'source_shortcode': 'bfl_post_1', 'source_permalink': 'https://instagram.com/p/bfl_post_1', 'source_event_key': '58042d6a7525e207786e84a41968a7d3', 'source_event_index': 1, 'cover_photo_key': None, 'raw_extraction': {'location_text': '@semprerockbar'}, 'source_media_type': None, 'source_uploaded_at': None, 'source_events_truncated': False, 'date_interpretation': None, 'first_seen_at': datetime.datetime(2026, 8, 13, 15, 21, 3, 824797, tzinfo=datetime.timezone.utc), 'last_seen_at': datetime.datetime(2026, 8, 13, 15, 21, 3, 824797, tzinfo=datetime.timezone.utc)})
+
+    And the item is accepted                                                                    # None
+    And the item has no review reason                                                           # None
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+----
+CAPTURED LOG: before_scenario
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+---- CAPTURED_SCENARIO_OUTPUT_END ----
+
+  Scenario: Keep a repaired low-confidence item queued                                          # tests/bdd/enrichment/backfill-misattributed-links.feature:110
+    Given the per-event venue attribution fix has landed                                        # tests/bdd/steps/backfill_misattributed_links_steps.py:133
+    And the venue catalog holds "Sempre Rock Bar" with Instagram handle "semprerockbar"         # tests/bdd/steps/backfill_misattributed_links_steps.py:140
+    And the venue catalog holds "Casa do Matuto" with Instagram handle "casadomatutonatal"      # tests/bdd/steps/backfill_misattributed_links_steps.py:140
+    And the venue catalog holds "Teatro Riachuelo" with Instagram handle "teatroriachuelonatal" # tests/bdd/steps/backfill_misattributed_links_steps.py:140
+    Given a pending item linked to "Teatro Riachuelo" by a caption mention                      # tests/bdd/steps/backfill_misattributed_links_steps.py:209
+    And the item has confidence below the floor                                                 # tests/bdd/steps/backfill_misattributed_links_steps.py:267
+    And its stored extraction states the location "@semprerockbar"                              # tests/bdd/steps/backfill_misattributed_links_steps.py:215
+    When the backfill runs with apply                                                           # tests/bdd/steps/backfill_misattributed_links_steps.py:387
+    Then the item is linked to "Sempre Rock Bar"                                                # tests/bdd/steps/backfill_misattributed_links_steps.py:462
+      ASSERT FAILED: ('Sempre Rock Bar', {'event_id': 'evt_bfl_0001', 'venue_id': 'v_teatroriachuelonatal', 'starts_at': datetime.datetime(2026, 8, 20, 22, 0, tzinfo=datetime.timezone.utc), 'title': 'Festa 1', 'status': 'pending_review', 'review_reason': 'needs_review', 'location_resolution': 'auto', 'location_confidence': 1.0, 'linked_by': 'handle_mention', 'linked_at': datetime.datetime(2026, 8, 13, 15, 21, 3, 928981, tzinfo=datetime.timezone.utc), 'operator_edited_fields': None, 'confidence': 0.1, 'location_text': None, 'updated_at': '2026-08-13T15:21:03.929499+00:00', 'post_type': 'event', 'time_known': False, 'venue_name': 'Teatro Riachuelo', 'source_kind': 'promoter_post', 'source_handle': 'oquetemhojeemnatal', 'source_shortcode': 'bfl_post_1', 'source_permalink': 'https://instagram.com/p/bfl_post_1', 'source_event_key': '58042d6a7525e207786e84a41968a7d3', 'source_event_index': 1, 'cover_photo_key': None, 'raw_extraction': {'location_text': '@semprerockbar'}, 'source_media_type': None, 'source_uploaded_at': None, 'source_events_truncated': False, 'date_interpretation': None, 'first_seen_at': datetime.datetime(2026, 8, 13, 15, 21, 3, 928982, tzinfo=datetime.timezone.utc), 'last_seen_at': datetime.datetime(2026, 8, 13, 15, 21, 3, 928983, tzinfo=datetime.timezone.utc)})
+
+    And the item is still pending review                                                        # None
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+----
+CAPTURED LOG: before_scenario
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+---- CAPTURED_SCENARIO_OUTPUT_END ----
+
+  Scenario: Report every change and write nothing on a dry run                                  # tests/bdd/enrichment/backfill-misattributed-links.feature:118
+    Given the per-event venue attribution fix has landed                                        # tests/bdd/steps/backfill_misattributed_links_steps.py:133
+    And the venue catalog holds "Sempre Rock Bar" with Instagram handle "semprerockbar"         # tests/bdd/steps/backfill_misattributed_links_steps.py:140
+    And the venue catalog holds "Casa do Matuto" with Instagram handle "casadomatutonatal"      # tests/bdd/steps/backfill_misattributed_links_steps.py:140
+    And the venue catalog holds "Teatro Riachuelo" with Instagram handle "teatroriachuelonatal" # tests/bdd/steps/backfill_misattributed_links_steps.py:140
+    Given an accepted item linked to "Teatro Riachuelo" by a caption mention                    # tests/bdd/steps/backfill_misattributed_links_steps.py:146
+    And its stored extraction states the location "@semprerockbar"                              # tests/bdd/steps/backfill_misattributed_links_steps.py:215
+    When the backfill runs without apply                                                        # tests/bdd/steps/backfill_misattributed_links_steps.py:392
+    Then the item is still linked to "Teatro Riachuelo"                                         # tests/bdd/steps/backfill_misattributed_links_steps.py:476
+    And the report names the item, its current venue and the venue it would move to             # tests/bdd/steps/backfill_misattributed_links_steps.py:601
+      Traceback (most recent call last):
+        File "/media/mario/ssd/projects/vibesense_wrapper/cs-server/.venv/lib/python3.12/site-packages/behave/model.py", line 1991, in run
+          match.run(runner.context)
+        File "/media/mario/ssd/projects/vibesense_wrapper/cs-server/.venv/lib/python3.12/site-packages/behave/matchers.py", line 105, in run
+          self.func(context, *args, **kwargs)
+        File "tests/bdd/steps/backfill_misattributed_links_steps.py", line 605, in step_then_report_names_item_and_venues
+          decision = next(d for d in report.rows if d.event_id == item_id)
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+      StopIteration
+
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+----
+CAPTURED LOG: before_scenario
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+---- CAPTURED_SCENARIO_OUTPUT_END ----
+
+  Scenario: Change nothing on a second apply run                                                # tests/bdd/enrichment/backfill-misattributed-links.feature:125
+    Given the per-event venue attribution fix has landed                                        # tests/bdd/steps/backfill_misattributed_links_steps.py:133
+    And the venue catalog holds "Sempre Rock Bar" with Instagram handle "semprerockbar"         # tests/bdd/steps/backfill_misattributed_links_steps.py:140
+    And the venue catalog holds "Casa do Matuto" with Instagram handle "casadomatutonatal"      # tests/bdd/steps/backfill_misattributed_links_steps.py:140
+    And the venue catalog holds "Teatro Riachuelo" with Instagram handle "teatroriachuelonatal" # tests/bdd/steps/backfill_misattributed_links_steps.py:140
+    Given an accepted item linked to "Teatro Riachuelo" by a caption mention                    # tests/bdd/steps/backfill_misattributed_links_steps.py:146
+    And its stored extraction states the location "@semprerockbar"                              # tests/bdd/steps/backfill_misattributed_links_steps.py:215
+    And the backfill has already run with apply                                                 # tests/bdd/steps/backfill_misattributed_links_steps.py:397
+    When the backfill runs with apply again                                                     # tests/bdd/steps/backfill_misattributed_links_steps.py:403
+    Then the item is linked to "Sempre Rock Bar"                                                # tests/bdd/steps/backfill_misattributed_links_steps.py:462
+      ASSERT FAILED: ('Sempre Rock Bar', {'event_id': 'evt_bfl_0001', 'venue_id': 'v_teatroriachuelonatal', 'starts_at': datetime.datetime(2026, 8, 20, 22, 0, tzinfo=datetime.timezone.utc), 'title': 'Festa 1', 'status': 'accepted', 'review_reason': None, 'location_resolution': 'auto', 'location_confidence': 1.0, 'linked_by': 'handle_mention', 'linked_at': datetime.datetime(2026, 8, 13, 15, 21, 4, 28260, tzinfo=datetime.timezone.utc), 'operator_edited_fields': None, 'confidence': 0.9, 'location_text': None, 'updated_at': '2026-08-13T15:21:04.028556+00:00', 'post_type': 'event', 'time_known': False, 'venue_name': 'Teatro Riachuelo', 'source_kind': 'promoter_post', 'source_handle': 'oquetemhojeemnatal', 'source_shortcode': 'bfl_post_1', 'source_permalink': 'https://instagram.com/p/bfl_post_1', 'source_event_key': '58042d6a7525e207786e84a41968a7d3', 'source_event_index': 1, 'cover_photo_key': None, 'raw_extraction': {'location_text': '@semprerockbar'}, 'source_media_type': None, 'source_uploaded_at': None, 'source_events_truncated': False, 'date_interpretation': None, 'first_seen_at': datetime.datetime(2026, 8, 13, 15, 21, 4, 28262, tzinfo=datetime.timezone.utc), 'last_seen_at': datetime.datetime(2026, 8, 13, 15, 21, 4, 28262, tzinfo=datetime.timezone.utc)})
+
+    And the report counts no changes                                                            # None
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+----
+CAPTURED LOG: before_scenario
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+---- CAPTURED_SCENARIO_OUTPUT_END ----
+
+  Scenario: Refuse to spend anything on external services                                       # tests/bdd/enrichment/backfill-misattributed-links.feature:133
+    Given the per-event venue attribution fix has landed                                        # tests/bdd/steps/backfill_misattributed_links_steps.py:133
+    And the venue catalog holds "Sempre Rock Bar" with Instagram handle "semprerockbar"         # tests/bdd/steps/backfill_misattributed_links_steps.py:140
+    And the venue catalog holds "Casa do Matuto" with Instagram handle "casadomatutonatal"      # tests/bdd/steps/backfill_misattributed_links_steps.py:140
+    And the venue catalog holds "Teatro Riachuelo" with Instagram handle "teatroriachuelonatal" # tests/bdd/steps/backfill_misattributed_links_steps.py:140
+    Given a roundup post whose items are all linked by a caption mention                        # tests/bdd/steps/backfill_misattributed_links_steps.py:343
+    When the backfill runs with apply                                                           # tests/bdd/steps/backfill_misattributed_links_steps.py:387
+    Then no Apify request is made                                                               # tests/bdd/steps/backfill_misattributed_links_steps.py:693
+    And no OpenAI request is made                                                               # tests/bdd/steps/backfill_misattributed_links_steps.py:698
+    And no archived post is read from storage                                                   # tests/bdd/steps/backfill_misattributed_links_steps.py:703
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: Report an identity collision created by a repair without merging                    # tests/bdd/enrichment/backfill-misattributed-links.feature:140
+    Given the per-event venue attribution fix has landed                                        # tests/bdd/steps/backfill_misattributed_links_steps.py:133
+    And the venue catalog holds "Sempre Rock Bar" with Instagram handle "semprerockbar"         # tests/bdd/steps/backfill_misattributed_links_steps.py:140
+    And the venue catalog holds "Casa do Matuto" with Instagram handle "casadomatutonatal"      # tests/bdd/steps/backfill_misattributed_links_steps.py:140
+    And the venue catalog holds "Teatro Riachuelo" with Instagram handle "teatroriachuelonatal" # tests/bdd/steps/backfill_misattributed_links_steps.py:140
+    Given two accepted items linked to "Teatro Riachuelo" by a caption mention                  # tests/bdd/steps/backfill_misattributed_links_steps.py:170
+    And both stored extractions state the location "@semprerockbar"                             # tests/bdd/steps/backfill_misattributed_links_steps.py:272
+    And both items share a date and a title                                                     # tests/bdd/steps/backfill_misattributed_links_steps.py:278
+    When the backfill runs with apply                                                           # tests/bdd/steps/backfill_misattributed_links_steps.py:387
+    Then both items are linked to "Sempre Rock Bar"                                             # tests/bdd/steps/backfill_misattributed_links_steps.py:616
+      ASSERT FAILED: ('evt_bfl_0001', {'event_id': 'evt_bfl_0001', 'venue_id': 'v_teatroriachuelonatal', 'starts_at': datetime.datetime(2026, 8, 20, 22, 0, tzinfo=datetime.timezone.utc), 'title': 'Noite Compartilhada', 'status': 'accepted', 'review_reason': None, 'location_resolution': 'auto', 'location_confidence': 1.0, 'linked_by': 'handle_mention', 'linked_at': datetime.datetime(2026, 8, 13, 15, 21, 4, 129215, tzinfo=datetime.timezone.utc), 'operator_edited_fields': None, 'confidence': 0.9, 'location_text': None, 'updated_at': '2026-08-13T15:21:04.129845+00:00', 'post_type': 'event', 'time_known': False, 'venue_name': 'Teatro Riachuelo', 'source_kind': 'promoter_post', 'source_handle': 'oquetemhojeemnatal', 'source_shortcode': 'bfl_post_1', 'source_permalink': 'https://instagram.com/p/bfl_post_1', 'source_event_key': 'd405df1c7275b84ca15ec99e614dea0e', 'source_event_index': 1, 'cover_photo_key': None, 'raw_extraction': {'location_text': '@semprerockbar'}, 'source_media_type': None, 'source_uploaded_at': None, 'source_events_truncated': False, 'date_interpretation': None, 'first_seen_at': datetime.datetime(2026, 8, 13, 15, 21, 4, 129217, tzinfo=datetime.timezone.utc), 'last_seen_at': datetime.datetime(2026, 8, 13, 15, 21, 4, 129217, tzinfo=datetime.timezone.utc)})
+
+    And both items still exist                                                                  # None
+    And the report names the pair as a venue identity collision                                 # None
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+----
+CAPTURED LOG: before_scenario
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+---- CAPTURED_SCENARIO_OUTPUT_END ----
+
+  Scenario: Report a detached item that a resolved sibling could later absorb                   # tests/bdd/enrichment/backfill-misattributed-links.feature:149
+    Given the per-event venue attribution fix has landed                                        # tests/bdd/steps/backfill_misattributed_links_steps.py:133
+    And the venue catalog holds "Sempre Rock Bar" with Instagram handle "semprerockbar"         # tests/bdd/steps/backfill_misattributed_links_steps.py:140
+    And the venue catalog holds "Casa do Matuto" with Instagram handle "casadomatutonatal"      # tests/bdd/steps/backfill_misattributed_links_steps.py:140
+    And the venue catalog holds "Teatro Riachuelo" with Instagram handle "teatroriachuelonatal" # tests/bdd/steps/backfill_misattributed_links_steps.py:140
+    Given an accepted item linked to "Teatro Riachuelo" by a caption mention                    # tests/bdd/steps/backfill_misattributed_links_steps.py:146
+    And its stored extraction states a venue that is not in the catalog                         # tests/bdd/steps/backfill_misattributed_links_steps.py:225
+    And another item from the same account shares its date and title and is linked to a venue   # tests/bdd/steps/backfill_misattributed_links_steps.py:291
+    When the backfill runs with apply                                                           # tests/bdd/steps/backfill_misattributed_links_steps.py:387
+    Then the detached item has no venue                                                         # tests/bdd/steps/backfill_misattributed_links_steps.py:507
+      ASSERT FAILED: {'event_id': 'evt_bfl_0001', 'venue_id': 'v_teatroriachuelonatal', 'starts_at': datetime.datetime(2026, 8, 20, 22, 0, tzinfo=datetime.timezone.utc), 'title': 'Festa 1', 'status': 'accepted', 'review_reason': None, 'location_resolution': 'auto', 'location_confidence': 1.0, 'linked_by': 'handle_mention', 'linked_at': datetime.datetime(2026, 8, 13, 15, 21, 4, 179500, tzinfo=datetime.timezone.utc), 'operator_edited_fields': None, 'confidence': 0.9, 'location_text': None, 'updated_at': '2026-08-13T15:21:04.179752+00:00', 'post_type': 'event', 'time_known': False, 'venue_name': 'Teatro Riachuelo', 'source_kind': 'promoter_post', 'source_handle': 'oquetemhojeemnatal', 'source_shortcode': 'bfl_post_1', 'source_permalink': 'https://instagram.com/p/bfl_post_1', 'source_event_key': '58042d6a7525e207786e84a41968a7d3', 'source_event_index': 1, 'cover_photo_key': None, 'raw_extraction': {'location_text': '@donanapubnatal'}, 'source_media_type': None, 'source_uploaded_at': None, 'source_events_truncated': False, 'date_interpretation': None, 'first_seen_at': datetime.datetime(2026, 8, 13, 15, 21, 4, 179502, tzinfo=datetime.timezone.utc), 'last_seen_at': datetime.datetime(2026, 8, 13, 15, 21, 4, 179502, tzinfo=datetime.timezone.utc)}
+
+    And the report names the pair as a handle identity collision                                # None
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+----
+CAPTURED LOG: before_scenario
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+---- CAPTURED_SCENARIO_OUTPUT_END ----
+
+  Scenario: Report the handles that detached items point at                                            # tests/bdd/enrichment/backfill-misattributed-links.feature:157
+    Given the per-event venue attribution fix has landed                                               # tests/bdd/steps/backfill_misattributed_links_steps.py:133
+    And the venue catalog holds "Sempre Rock Bar" with Instagram handle "semprerockbar"                # tests/bdd/steps/backfill_misattributed_links_steps.py:140
+    And the venue catalog holds "Casa do Matuto" with Instagram handle "casadomatutonatal"             # tests/bdd/steps/backfill_misattributed_links_steps.py:140
+    And the venue catalog holds "Teatro Riachuelo" with Instagram handle "teatroriachuelonatal"        # tests/bdd/steps/backfill_misattributed_links_steps.py:140
+    Given twelve accepted items linked by a caption mention whose stated venues are not in the catalog # tests/bdd/steps/backfill_misattributed_links_steps.py:356
+    When the backfill runs without apply                                                               # tests/bdd/steps/backfill_misattributed_links_steps.py:392
+    Then the report lists each stated handle with the number of items it would recover                 # tests/bdd/steps/backfill_misattributed_links_steps.py:648
+      ASSERT FAILED: {}
+
+    And the list is ordered by that number                                                             # None
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+----
+CAPTURED LOG: before_scenario
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+---- CAPTURED_SCENARIO_OUTPUT_END ----
+
+  Scenario: Fail loudly when the reported totals do not balance                                 # tests/bdd/enrichment/backfill-misattributed-links.feature:163
+    Given the per-event venue attribution fix has landed                                        # tests/bdd/steps/backfill_misattributed_links_steps.py:133
+    And the venue catalog holds "Sempre Rock Bar" with Instagram handle "semprerockbar"         # tests/bdd/steps/backfill_misattributed_links_steps.py:140
+    And the venue catalog holds "Casa do Matuto" with Instagram handle "casadomatutonatal"      # tests/bdd/steps/backfill_misattributed_links_steps.py:140
+    And the venue catalog holds "Teatro Riachuelo" with Instagram handle "teatroriachuelonatal" # tests/bdd/steps/backfill_misattributed_links_steps.py:140
+    Given a backfill run whose per-outcome counts do not sum to the rows it selected            # tests/bdd/steps/backfill_misattributed_links_steps.py:413
+    When the backfill finishes                                                                  # tests/bdd/steps/backfill_misattributed_links_steps.py:419
+    Then the backfill exits with a failure                                                      # tests/bdd/steps/backfill_misattributed_links_steps.py:663
+      ASSERT FAILED: expected the backfill to raise
+
+    And the report says the totals did not balance                                              # None
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+----
+CAPTURED LOG: before_scenario
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+---- CAPTURED_SCENARIO_OUTPUT_END ----
+
+  Scenario: Fail loudly when a write affects no rows                                            # tests/bdd/enrichment/backfill-misattributed-links.feature:169
+    Given the per-event venue attribution fix has landed                                        # tests/bdd/steps/backfill_misattributed_links_steps.py:133
+    And the venue catalog holds "Sempre Rock Bar" with Instagram handle "semprerockbar"         # tests/bdd/steps/backfill_misattributed_links_steps.py:140
+    And the venue catalog holds "Casa do Matuto" with Instagram handle "casadomatutonatal"      # tests/bdd/steps/backfill_misattributed_links_steps.py:140
+    And the venue catalog holds "Teatro Riachuelo" with Instagram handle "teatroriachuelonatal" # tests/bdd/steps/backfill_misattributed_links_steps.py:140
+    Given an accepted item linked to "Teatro Riachuelo" by a caption mention                    # tests/bdd/steps/backfill_misattributed_links_steps.py:146
+    And the update of that item affects no rows                                                 # tests/bdd/steps/backfill_misattributed_links_steps.py:428
+    When the backfill runs with apply                                                           # tests/bdd/steps/backfill_misattributed_links_steps.py:387
+    Then the backfill exits with a failure                                                      # tests/bdd/steps/backfill_misattributed_links_steps.py:663
+      ASSERT FAILED: expected the backfill to raise
+
+    And the report names the item whose write did nothing                                       # None
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+----
+CAPTURED LOG: before_scenario
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+---- CAPTURED_SCENARIO_OUTPUT_END ----
+
+  Scenario: Refuse to run against a build without the per-event attribution fix                 # tests/bdd/enrichment/backfill-misattributed-links.feature:176
+    Given the per-event venue attribution fix has landed                                        # tests/bdd/steps/backfill_misattributed_links_steps.py:133
+    And the venue catalog holds "Sempre Rock Bar" with Instagram handle "semprerockbar"         # tests/bdd/steps/backfill_misattributed_links_steps.py:140
+    And the venue catalog holds "Casa do Matuto" with Instagram handle "casadomatutonatal"      # tests/bdd/steps/backfill_misattributed_links_steps.py:140
+    And the venue catalog holds "Teatro Riachuelo" with Instagram handle "teatroriachuelonatal" # tests/bdd/steps/backfill_misattributed_links_steps.py:140
+    Given the per-event venue attribution fix has not landed                                    # tests/bdd/steps/backfill_misattributed_links_steps.py:440
+    When the backfill is started                                                                # tests/bdd/steps/backfill_misattributed_links_steps.py:408
+    Then the backfill exits with a failure before reading any item                              # tests/bdd/steps/backfill_misattributed_links_steps.py:679
+      ASSERT FAILED: None
+
+    And no item is changed                                                                      # None
+----
+CAPTURED LOG: before_scenario
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+---- CAPTURED_SCENARIO_OUTPUT_END ----
+
+
+Failing scenarios:
+  tests/bdd/enrichment/backfill-misattributed-links.feature:14  Re-point an item to the venue named in its own stated location
+  tests/bdd/enrichment/backfill-misattributed-links.feature:22  Re-point every event of one roundup post to its own venue
+  tests/bdd/enrichment/backfill-misattributed-links.feature:29  Detach an item whose stated venue is not in the catalog
+  tests/bdd/enrichment/backfill-misattributed-links.feature:38  Report an item with no stated location as unresolved, not as absent from the catalog
+  tests/bdd/enrichment/backfill-misattributed-links.feature:46  Leave a confirmed item untouched
+  tests/bdd/enrichment/backfill-misattributed-links.feature:54  Leave a manually linked item untouched
+  tests/bdd/enrichment/backfill-misattributed-links.feature:62  Leave an item whose operator edited its venue untouched
+  tests/bdd/enrichment/backfill-misattributed-links.feature:70  Re-resolve from an operator-corrected location text
+  tests/bdd/enrichment/backfill-misattributed-links.feature:77  Leave a superseded item untouched
+  tests/bdd/enrichment/backfill-misattributed-links.feature:85  Leave an extraction-failed placeholder untouched
+  tests/bdd/enrichment/backfill-misattributed-links.feature:91  Keep an item queued for a date problem queued after its venue is fixed
+  tests/bdd/enrichment/backfill-misattributed-links.feature:100  Return a repaired item to accepted only when the extraction is otherwise clean
+  tests/bdd/enrichment/backfill-misattributed-links.feature:110  Keep a repaired low-confidence item queued
+  tests/bdd/enrichment/backfill-misattributed-links.feature:125  Change nothing on a second apply run
+  tests/bdd/enrichment/backfill-misattributed-links.feature:140  Report an identity collision created by a repair without merging
+  tests/bdd/enrichment/backfill-misattributed-links.feature:149  Report a detached item that a resolved sibling could later absorb
+  tests/bdd/enrichment/backfill-misattributed-links.feature:157  Report the handles that detached items point at
+  tests/bdd/enrichment/backfill-misattributed-links.feature:163  Fail loudly when the reported totals do not balance
+  tests/bdd/enrichment/backfill-misattributed-links.feature:169  Fail loudly when a write affects no rows
+  tests/bdd/enrichment/backfill-misattributed-links.feature:176  Refuse to run against a build without the per-event attribution fix
+
+Errored scenarios:
+  tests/bdd/enrichment/backfill-misattributed-links.feature:118  Report every change and write nothing on a dry run
+
+0 features passed, 1 failed, 0 skipped
+1 scenario passed, 20 failed, 1 error, 0 skipped
+170 steps passed, 20 failed, 1 error, 21 skipped
+Took 0min 0.034s
+make: *** [Makefile:150: test-feature] Error 1

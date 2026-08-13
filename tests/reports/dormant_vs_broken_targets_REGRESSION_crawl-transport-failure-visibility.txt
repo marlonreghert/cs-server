@@ -1,0 +1,8 @@
+LOG_WARNING:app.services.instagram_crawl_service: [InstagramCrawl] somebar: archived without image classification (skipped_no_classifier) — extraction for this crawl can only qualify posts by caption; an image-only flyer with no event-marker caption text will be missed, not correctly judged not-an-event
+    And an operator reads the crawl targets from the admin API            # tests/bdd/steps/crawl_error_visibility_steps.py:309
+    Then "somebar" does not report that its posts stream has never seeded # tests/bdd/steps/crawl_transport_failure_visibility_steps.py:135
+
+1 feature passed, 0 failed, 0 skipped
+13 scenarios passed, 0 failed, 0 skipped
+61 steps passed, 0 failed, 0 skipped
+Took 0min 0.029s

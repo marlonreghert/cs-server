@@ -101,6 +101,10 @@ test-unit:
 		tests/test_event_reconciliation.py \
 		tests/test_event_merge.py \
 		tests/test_event_merge_handle_identity.py \
+		tests/test_event_dedup.py \
+		tests/test_event_dedup_merge.py \
+		tests/test_backfill_event_venue_links.py \
+		tests/test_backfill_source_provenance.py \
 		tests/test_event_sources_migration.py \
 		tests/test_post_items_migration.py \
 		tests/test_post_category.py \
@@ -117,6 +121,7 @@ test-unit:
 		tests/test_crawl_target_seed_cap_migration.py \
 		tests/test_crawl_target_reels_caps_migration.py \
 		tests/test_crawl_target_reels_overlap_migration.py \
+		tests/test_crawl_target_posts_dormant_migration.py \
 		tests/test_crawl_target_dao.py \
 		tests/test_instagram_crawl_service.py \
 		tests/test_extract_by_handle.py \
@@ -126,6 +131,8 @@ test-unit:
 		tests/test_time_known_migration.py \
 		tests/test_expose_time_known.py \
 		tests/test_menu_item_lifecycle.py \
+		tests/test_source_media_type_migration.py \
+		tests/test_promoter_event_visibility.py \
 		-v
 
 test-integration:

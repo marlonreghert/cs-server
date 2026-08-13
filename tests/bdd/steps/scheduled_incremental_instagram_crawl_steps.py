@@ -28,7 +28,7 @@ from datetime import datetime, timedelta, timezone
 
 from behave import given, then, when  # type: ignore[import-untyped]
 
-from app.api.apify_instagram_client import ApifyCreditExhaustedError
+from app.api.apify_instagram_client import ApifyCreditExhaustedError, FetchPostsResult
 from app.dao.venue_repository import VenueRepository
 from app.models.instagram import VenueInstagram
 from app.models.venue import Venue
@@ -65,6 +65,15 @@ class _FakeApifyClient:
     def __init__(self):
         self._posts: dict[tuple[str, str], list[dict]] = {}
         self._next_error: dict[tuple[str, str], Exception] = {}
+        # plans/260812_crawl-error-visibility.md §A: an Apify error item,
+        # programmed per (handle, results_type) — distinct from
+        # `_next_error` above (a transport-level EXCEPTION `fetch_recent_
+        # posts` itself raises). This is the STRUCTURED item the real
+        # client now surfaces via FetchPostsResult instead of dropping —
+        # can coexist with programmed posts for the SAME key (Apify's own
+        # evidence: a dataset can carry real posts and an error item
+        # together).
+        self._errors: dict[tuple[str, str], dict] = {}
         self.calls: list[dict] = []
 
     def program_posts(self, handle: str, results_type: str, posts: list[dict]) -> None:
@@ -73,9 +82,18 @@ class _FakeApifyClient:
     def fail_next(self, handle: str, results_type: str, exc: Exception) -> None:
         self._next_error[(handle, results_type)] = exc
 
+    def program_error(
+        self, handle: str, results_type: str, *,
+        code: str, request_error_count: int = 0, description: str | None = None,
+    ) -> None:
+        self._errors[(handle, results_type)] = {
+            "code": code, "request_error_count": request_error_count,
+            "description": description or "Empty or private data for provided input",
+        }
+
     async def fetch_recent_posts(
         self, handle, results_limit=10, *, only_posts_newer_than=None, results_type="posts",
-    ) -> list[dict]:
+    ) -> FetchPostsResult:
         self.calls.append({
             "handle": handle, "results_limit": results_limit,
             "only_posts_newer_than": only_posts_newer_than, "results_type": results_type,
@@ -83,7 +101,13 @@ class _FakeApifyClient:
         key = (handle, results_type)
         if key in self._next_error:
             raise self._next_error.pop(key)
-        return list(self._posts.get(key, []))
+        error = self._errors.get(key)
+        return FetchPostsResult(
+            posts=list(self._posts.get(key, [])),
+            error_code=error.get("code") if error else None,
+            error_description=error.get("description") if error else None,
+            request_error_count=error.get("request_error_count", 0) if error else 0,
+        )
 
 
 class _FakeBudgetDao:
@@ -167,6 +191,15 @@ class _FakeOpenAIClient:
     def program(self, response) -> None:
         self._responses.append(response)
 
+    def program_multi(self, raw_json: str) -> None:
+        """Push an ALREADY-WRAPPED `{"events": [...]}` JSON string — unlike
+        `program()` (which wraps a single event dict, the common case).
+        Sentinel-tagged tuple, mirroring multi_event_posts_steps.py's
+        `_FakeMultiEventOpenAIClient.program_truncated`'s identical trick,
+        so `extract_events` can tell the two apart without guessing from
+        shape."""
+        self._responses.append(("__multi__", raw_json))
+
     async def extract_events(self, *, caption, image_data_uri=None, max_events):
         self.calls += 1
         if not self._responses:
@@ -174,6 +207,8 @@ class _FakeOpenAIClient:
         item = self._responses.pop(0)
         if isinstance(item, Exception):
             raise item
+        if isinstance(item, tuple) and item and item[0] == "__multi__":
+            return item[1], False
         wrapped = json.dumps({"events": [json.loads(item)]})
         return wrapped, False
 

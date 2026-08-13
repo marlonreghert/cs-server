@@ -9,18 +9,27 @@ plan's non-goal: "No serving impact").
 """
 from __future__ import annotations
 
+import logging
 import secrets
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Query
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response
 from pydantic import BaseModel, Field
 
 from app.config import settings
-from app.metrics import EVENT_COVER_PRESIGN_TOTAL, EVENT_VENUE_LINK_TOTAL
+from app.metrics import (
+    ADMIN_EVENTS_PROMOTER_HIDDEN_TOTAL, ADMIN_EVENTS_READ_TOTAL,
+    EVENT_COVER_PRESIGN_TOTAL, EVENT_VENUE_LINK_TOTAL,
+)
 from app.models.event_kind import KIND_MENU
 from app.models.menu_lifecycle import is_menu_item_current, load_menu_expiry_days
+from app.models.promoter_event_visibility import is_promoter_only_item, load_hide_promoter_events
+from app.services.event_merge import apply_merge_suggestion, reject_merge_suggestion, reverse_title_similarity_merge
+from app.services.event_reconciliation import event_unread_time
 from app.services.promoter_registry_service import InvalidPromoterAccount, PromoterRegistryService
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/admin/events", tags=["admin", "events"])
 
@@ -107,9 +116,18 @@ class EventOut(BaseModel):
     # venue row that no longer exists (a dangling reference must not fail
     # the listing).
     venue_name: Optional[str] = None
-    source_kind: str = "venue_post"
-    source_handle: str
-    source_shortcode: str
+    # plans/260813_hide-promoter-events.md: Optional, not required — a
+    # sourceless item (no `post_item_source` row at all) is a real, if rare,
+    # shape this repo already anticipates elsewhere (see
+    # app.models.menu_lifecycle's own "should not occur in practice, but
+    # never assumed" comment) and must stay visible (plan §A: no sources is
+    # not promoter-sourced). Before this plan these three were required
+    # `str` fields and the DAO's own `None` for an unsourced row's primary
+    # source would 500 the endpoint — a latent defect this plan's own "item
+    # with no sources" scenario is the first thing to exercise.
+    source_kind: Optional[str] = "venue_post"
+    source_handle: Optional[str] = None
+    source_shortcode: Optional[str] = None
     source_permalink: Optional[str] = None
     starts_at: Optional[datetime] = None
     ends_at: Optional[datetime] = None
@@ -124,6 +142,15 @@ class EventOut(BaseModel):
     # asserting a start that was never read would be the exact mislabelling
     # this field exists to prevent.
     time_known: bool = False
+    # plans/260813_review-gate-and-date-vocabulary.md §D: whether the
+    # flyer's own classification said a clock time was printed on it and the
+    # extractor did not read one — no longer a review reason (an event whose
+    # DATE resolved is not held up by a clock time alone), so this is how
+    # the console can still show "the flyer named a time we did not read" as
+    # an annotation. Defaults False, never invented, for every row that
+    # predates this field. Additive — the admin console is a released N-1
+    # client, and this only ever GAINS a field, never removes or narrows one.
+    unread_time: bool = False
     is_recurring: bool = False
     recurrence_text: Optional[str] = None
     title: Optional[str] = None
@@ -230,13 +257,57 @@ def _menu_is_current(row: dict) -> Optional[bool]:
     )
 
 
-def _to_out(dao, row: dict) -> EventOut:
-    sources = [EventSourceOut(**s) for s in dao.list_event_sources(row["event_id"])]
+def _to_out(dao, row: dict, sources: Optional[list[dict]] = None) -> EventOut:
+    """`sources` is the row's raw `list_event_sources(event_id)` result.
+    Accepted as an optional pre-fetched param (rather than always fetching
+    again here) so a caller that already pulled sources to run the
+    promoter-visibility predicate (plans/260813_hide-promoter-events.md)
+    does not pay for a second identical DAO round-trip per row."""
+    if sources is None:
+        sources = dao.list_event_sources(row["event_id"])
+    source_outs = [EventSourceOut(**s) for s in sources]
     return EventOut(**{
         **row, "lineup": row.get("lineup") or [],
-        "attractions": row.get("attractions") or [], "sources": sources,
+        "attractions": row.get("attractions") or [], "sources": source_outs,
         "is_current": _menu_is_current(row),
+        "unread_time": event_unread_time(row),
     })
+
+
+# ── promoter-event visibility (plans/260813_hide-promoter-events.md) ────────
+# One function backs EVERY admin events read path (list, review queue, and
+# their counts) so a count and its list can never disagree — the plan's own
+# named failure mode: "a queue badge that counts hidden rows is a stranding
+# bug this project has already shipped once."
+def _visible_rows(dao, rows: list[dict], *, path: str) -> list[tuple[dict, list[dict]]]:
+    """Pairs each row with its sources, dropping promoter-only rows (plan
+    §A's unanimity predicate) when the live admin-config flag says to hide
+    them. Observes `ADMIN_EVENTS_READ_TOTAL` (one read, labelled by whether
+    the filter was applied) and `ADMIN_EVENTS_PROMOTER_HIDDEN_TOTAL`
+    (however many rows this read actually hid) — plan's own Error Handling
+    ask: 'If the hidden count ever reaches zero while promoter rows exist,
+    the unanimity rule in §A has broken.'"""
+    hide_promoter, _fallback_reason = load_hide_promoter_events(_admin_config_redis())
+    kept: list[tuple[dict, list[dict]]] = []
+    hidden = 0
+    for row in rows:
+        sources = dao.list_event_sources(row["event_id"])
+        if hide_promoter and is_promoter_only_item(sources):
+            hidden += 1
+            continue
+        kept.append((row, sources))
+    ADMIN_EVENTS_READ_TOTAL.labels(path=path, filter_applied=str(hide_promoter).lower()).inc()
+    if hidden:
+        ADMIN_EVENTS_PROMOTER_HIDDEN_TOTAL.labels(path=path).inc(hidden)
+    logger.debug(
+        f"[AdminEvents] path={path} hide_promoter_events={hide_promoter} "
+        f"total={len(rows)} kept={len(kept)} hidden={hidden}"
+    )
+    return kept
+
+
+class PromoterVisibilityConfigOut(BaseModel):
+    hide_promoter_events: bool
 
 
 class EventPatch(BaseModel):
@@ -264,6 +335,7 @@ class EventPatch(BaseModel):
 
 @router.get("", response_model=list[EventOut])
 def list_events(
+    response: Response,
     venue_id: Optional[str] = Query(None),
     status: Optional[str] = Query(None),
     since: Optional[datetime] = Query(None),
@@ -271,7 +343,14 @@ def list_events(
 ):
     dao = _dao()
     rows = dao.list_events(venue_id=venue_id, status=status, since=since, until=until)
-    return [_to_out(dao, r) for r in rows]
+    kept = _visible_rows(dao, rows, path="list")
+    out = [_to_out(dao, row, sources=sources) for row, sources in kept]
+    # plans/260813_hide-promoter-events.md: additive response header, never a
+    # body-shape change — the admin console is a released client reading
+    # this endpoint's body as a bare JSON array, and `len(out)` IS the
+    # filtered count this header reports, so the two cannot disagree.
+    response.headers["X-Total-Count"] = str(len(out))
+    return out
 
 
 # ── promoter registry (plans/260804_instagram-promoter-events.md) ───────────
@@ -367,8 +446,29 @@ class LinkCandidateOut(BaseModel):
     evidence: dict = Field(default_factory=dict)
 
 
+# plans/260812_event-dedup-fuzzy-title.md §C/§Data-Config-And-API-Impact:
+# "GET /admin/events/review items gain a merge_suggestions list (additive;
+# the console is a released client and nothing may be removed)." One entry
+# per PENDING suggestion touching this item, from either side — the other
+# item's own id/title are surfaced directly so the console never has to make
+# a second round-trip to say what it is proposing to merge with.
+class MergeSuggestionOut(BaseModel):
+    suggestion_id: str
+    other_event_id: str
+    other_title: Optional[str] = None
+    band: str
+    reasons: list[str] = Field(default_factory=list)
+    event_distinctive_words: list[str] = Field(default_factory=list)
+    candidate_distinctive_words: list[str] = Field(default_factory=list)
+    shared_lineup_names: list[str] = Field(default_factory=list)
+    decision: str
+    created_at: Optional[datetime] = None
+    decided_at: Optional[datetime] = None
+
+
 class ReviewQueueItemOut(EventOut):
     candidates: list[LinkCandidateOut] = Field(default_factory=list)
+    merge_suggestions: list[MergeSuggestionOut] = Field(default_factory=list)
 
 
 class LinkRequest(BaseModel):
@@ -377,6 +477,23 @@ class LinkRequest(BaseModel):
     venue_id: Optional[str] = None
     candidate_rank: Optional[int] = None
     linked_by: str
+
+
+def _merge_suggestions_for(dao, event_id: str) -> list[MergeSuggestionOut]:
+    out = []
+    for s in dao.list_event_merge_suggestions(event_id=event_id, decision="pending"):
+        other_id = s["candidate_event_id"] if s["event_id"] == event_id else s["event_id"]
+        other = dao.get_event(other_id)
+        out.append(MergeSuggestionOut(
+            suggestion_id=s["suggestion_id"], other_event_id=other_id,
+            other_title=other.get("title") if other else None,
+            band=s["band"], reasons=s.get("reasons") or [],
+            event_distinctive_words=s.get("event_distinctive_words") or [],
+            candidate_distinctive_words=s.get("candidate_distinctive_words") or [],
+            shared_lineup_names=s.get("shared_lineup_names") or [],
+            decision=s["decision"], created_at=s.get("created_at"), decided_at=s.get("decided_at"),
+        ))
+    return out
 
 
 @router.get("/review", response_model=list[ReviewQueueItemOut])
@@ -388,19 +505,70 @@ def review_queue():
     for the population (wider than "promoter events awaiting a venue" — see
     plans/260807_review-queue-completeness-and-venue-names.md)."""
     dao = _dao()
+    rows = dao.list_events_awaiting_decision()
+    kept = _visible_rows(dao, rows, path="review")
     out = []
-    for row in dao.list_events_awaiting_decision():
+    for row, sources in kept:
         candidates = dao.list_event_venue_link_candidates(row["event_id"])
-        sources = [EventSourceOut(**s) for s in dao.list_event_sources(row["event_id"])]
+        source_outs = [EventSourceOut(**s) for s in sources]
         out.append(ReviewQueueItemOut(
             **{
                 **row, "lineup": row.get("lineup") or [],
                 "attractions": row.get("attractions") or [],
                 "is_current": _menu_is_current(row),
+                "unread_time": event_unread_time(row),
             },
-            candidates=candidates, sources=sources,
+            candidates=candidates, sources=source_outs,
+            merge_suggestions=_merge_suggestions_for(dao, row["event_id"]),
         ))
     return out
+
+
+# ── event-dedup merge suggestions (plans/260812_event-dedup-fuzzy-title.md
+# §C/§E) — registered before "/{event_id}" for the same reason as /promoters
+# and /review above: "/merge-suggestions/..." has three path segments after
+# the router prefix, so it can never collide with the single-segment
+# "/{event_id}" pattern regardless of registration order, but the pattern is
+# kept for a consistent, easy-to-audit convention. ──────────────────────────
+@router.post("/merge-suggestions/{suggestion_id}/apply", response_model=EventOut)
+def apply_merge_suggestion_route(suggestion_id: str, decided_by: Optional[str] = None):
+    """An operator's explicit "yes" — the ONLY way a SUGGEST-band pair ever
+    merges (plan §C: "Applying it is an explicit admin action. Never applied
+    by the pipeline.")."""
+    dao = _dao()
+    try:
+        updated = apply_merge_suggestion(dao, suggestion_id, datetime.now(timezone.utc), decided_by=decided_by)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return _to_out(dao, updated)
+
+
+@router.post("/merge-suggestions/{suggestion_id}/reject", response_model=dict)
+def reject_merge_suggestion_route(suggestion_id: str, decided_by: Optional[str] = None):
+    dao = _dao()
+    try:
+        row = reject_merge_suggestion(dao, suggestion_id, datetime.now(timezone.utc), decided_by=decided_by)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    if row is None:
+        raise HTTPException(status_code=404, detail="Merge suggestion not found")
+    return row
+
+
+# ── promoter-visibility config read (plans/260813_hide-promoter-events.md,
+# also registered before "/{event_id}" for the same reason as /promoters and
+# /review above). A DEDICATED read, not the generic GET /admin/config/{key}
+# (app.routers.admin_trigger_router): that route 404s on an unset key, which
+# is exactly wrong for a flag whose whole point is that an operator reading
+# an unexpectedly short list can always learn WHY — the effective,
+# default-applied value, not "whatever has been explicitly written so far".
+# Runtime edits still go through the ordinary admin-config mechanism
+# (`AdminConfigService.set("hide_promoter_events", ...)`, the same Redis
+# mirror this reads) — this endpoint is read-only. ───────────────────────────
+@router.get("/config", response_model=PromoterVisibilityConfigOut)
+def get_events_config():
+    hide_promoter, _fallback_reason = load_hide_promoter_events(_admin_config_redis())
+    return PromoterVisibilityConfigOut(hide_promoter_events=hide_promoter)
 
 
 class EventCoverOut(BaseModel):
@@ -554,8 +722,28 @@ def unlink_event(event_id: str):
     return _to_out(dao, updated)
 
 
+@router.post("/{event_id}/reverse-merge", response_model=EventOut)
+def reverse_merge_event(event_id: str, decided_by: Optional[str] = None):
+    """plans/260812_event-dedup-fuzzy-title.md §E: undo a title/lineup-
+    similarity merge — `event_id` is the ABSORBED (superseded) row, not the
+    survivor. Restores its status, clears `superseded_by`, and detaches
+    exactly the source posts that merge moved. Never applies to an
+    exact-identity merge, which hard-deleted its duplicate and so has
+    nothing left to restore (`reverse_title_similarity_merge` raises for a
+    row with no recorded title-similarity merge)."""
+    dao = _dao()
+    try:
+        updated = reverse_title_similarity_merge(
+            dao, event_id, datetime.now(timezone.utc), decided_by=decided_by,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return _to_out(dao, updated)
+
+
 __all__ = [
     "router", "set_container", "EventOut", "EventSourceOut", "EventPatch",
     "PromoterAccountOut", "PromoterAccountCreate", "PromoterAccountPatch",
     "LinkCandidateOut", "ReviewQueueItemOut", "LinkRequest", "EventCoverOut",
+    "PromoterVisibilityConfigOut", "MergeSuggestionOut",
 ]

@@ -16,6 +16,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 from app.dao.venue_repository import VenueRepository
+from app.models.event_kind import KIND_EVENT, KIND_FOOD, KIND_MENU, KIND_OTHER, KIND_PROMOTION
 from app.services.event_reconciliation import (
     PROTECTABLE_EVENT_FIELDS,
     REVIEW_REASON_ABSENT_FROM_LATEST_EXTRACTION,
@@ -27,6 +28,7 @@ from app.services.event_reconciliation import (
     STATUS_PENDING_REVIEW,
     STATUS_SUPERSEDED,
     _TEXT_FIELDS,
+    date_required_for_post_type,
     is_clean_extraction,
     reconcile_post_events,
 )
@@ -696,7 +698,13 @@ class TestCleanPredicateTruthTable:
     extraction` is the SOLE gate between `accepted` and `pending_review`,
     so its truth table is pinned directly, independent of reconcile_post_
     events' plumbing — every one of the four conditions must be
-    independently necessary, and all four together must be sufficient."""
+    independently necessary, and all four together must be sufficient.
+    `post_type=KIND_EVENT` throughout this class: plans/260813_review-gate-
+    and-date-vocabulary.md §C makes the start-date requirement conditional
+    on post_type, so every test below that means to exercise "a missing
+    start date alone" needs a post_type the predicate actually requires one
+    for — see TestCleanPredicatePostTypeGate below for the post_type
+    dimension itself."""
 
     _CLEAN_KWARGS = dict(
         review_reason=None,
@@ -704,6 +712,7 @@ class TestCleanPredicateTruthTable:
         venue_id="v1",
         confidence=0.9,
         min_confidence=0.5,
+        post_type=KIND_EVENT,
     )
 
     def test_all_four_conditions_together_are_clean(self):
@@ -759,10 +768,77 @@ class TestCleanPredicateTruthTable:
                         actual = is_clean_extraction(
                             review_reason=review_reason, starts_at=starts_at,
                             venue_id=venue_id, confidence=confidence, min_confidence=0.5,
+                            post_type=KIND_EVENT,
                         )
                         assert actual == expected, (
                             review_reason, starts_at, venue_id, confidence, actual, expected,
                         )
+
+
+class TestCleanPredicatePostTypeGate:
+    """plans/260813_review-gate-and-date-vocabulary.md §C: `is_clean_
+    extraction` gains the item's `post_type`, and a missing start date only
+    blocks acceptance for `event` — but ONLY the four model-recognised
+    non-event kinds the plan's own Evidence section names (promotion, menu,
+    food, other) are exempt, never "anything that is not literally 'event'".
+    An UNRECOGNISED kind still requires a date — the same fail-toward-the-
+    reviewed-assumption posture app.models.event_kind.resolve_post_type
+    already takes for a MISSING kind, and the exact invariant
+    tests/bdd/enrichment/post-kind-and-post-extraction-attribution.feature's
+    "Treat an unrecognised kind as still needing review like any other"
+    already pins end to end — this class is the pure-predicate mirror of
+    that same scenario."""
+
+    _BASE = dict(
+        review_reason=None, venue_id="v1", confidence=0.9, min_confidence=0.5,
+    )
+
+    def test_date_required_for_post_type_is_true_for_event_and_for_the_unrecognised(self):
+        for post_type in (KIND_PROMOTION, KIND_MENU, KIND_FOOD, KIND_OTHER):
+            assert date_required_for_post_type(post_type) is False, post_type
+        for post_type in (KIND_EVENT, "giveaway", None):
+            assert date_required_for_post_type(post_type) is True, post_type
+
+    def test_an_event_with_no_start_date_is_not_clean(self):
+        kwargs = {**self._BASE, "starts_at": None, "post_type": KIND_EVENT}
+        assert is_clean_extraction(**kwargs) is False
+
+    def test_an_unrecognised_kind_with_no_start_date_is_not_clean(self):
+        """The exact case the BDD scenario above pins: an unrecognised kind
+        gets NO optimistic free pass — it is gated exactly like an event."""
+        kwargs = {**self._BASE, "starts_at": None, "post_type": "giveaway"}
+        assert is_clean_extraction(**kwargs) is False
+
+    def test_every_known_non_event_post_type_matrix_row(self):
+        """The exhaustive matrix: every KNOWN non-event `post_type`, crossed
+        with `starts_at` present/absent, is clean either way — never gated
+        by a date it was never required to carry."""
+        for post_type in (KIND_PROMOTION, KIND_MENU, KIND_FOOD, KIND_OTHER):
+            for starts_at in (datetime(2026, 8, 10, tzinfo=timezone.utc), None):
+                kwargs = {**self._BASE, "starts_at": starts_at, "post_type": post_type}
+                assert is_clean_extraction(**kwargs) is True, (post_type, starts_at)
+
+    def test_an_event_with_a_start_date_is_still_clean(self):
+        """The control case: §C only RELAXES the requirement for the four
+        known non-event types — an event with a real date is unaffected."""
+        kwargs = {
+            **self._BASE, "starts_at": datetime(2026, 8, 10, tzinfo=timezone.utc),
+            "post_type": KIND_EVENT,
+        }
+        assert is_clean_extraction(**kwargs) is True
+
+    def test_a_missing_venue_or_review_reason_still_blocks_a_dateless_promotion(self):
+        """§C relaxes ONLY the start-date clause — the other three
+        conditions (no review reason, a linked venue, confidence at/above
+        the floor) still apply to every post_type, event or not."""
+        no_venue = {**self._BASE, "starts_at": None, "post_type": KIND_PROMOTION, "venue_id": None}
+        assert is_clean_extraction(**no_venue) is False
+
+        has_reason = {
+            **self._BASE, "starts_at": None, "post_type": KIND_PROMOTION,
+            "review_reason": "low_confidence",
+        }
+        assert is_clean_extraction(**has_reason) is False
 
 
 class TestAutoAcceptWiring:
@@ -1332,3 +1408,95 @@ class TestPostTypeAndCategoryFieldProtection:
         after = dao.get_event(event_id)
         assert after["category"] == "samba"
         assert after["review_reason"] is None
+
+
+class TestSourceUploadedAtMetric:
+    """plans/260813_promoter-source-provenance-parity.md Error Handling: the
+    readiness-gate metric for plans/260813_history-repair-dates.md. Tested
+    here, driven directly against `reconcile_post_events`, rather than once
+    per caller — this module is the ONE place both `EventExtractionService`
+    and `PromoterCrawlService` persist through, so a single suite here
+    covers both without a second, duplicated increment in either."""
+
+    def _snapshot(self, source_kind: str, outcome: str) -> float:
+        from prometheus_client import REGISTRY
+
+        return REGISTRY.get_sample_value(
+            "event_source_uploaded_at_total",
+            {"source_kind": source_kind, "outcome": outcome},
+        ) or 0.0
+
+    def test_a_fresh_row_with_an_upload_time_counts_as_present(self):
+        dao = _dao()
+        before = self._snapshot("promoter_post", "present")
+        events = [_event(
+            "Event A", datetime(2026, 8, 10, tzinfo=timezone.utc),
+            source_uploaded_at=datetime(2026, 8, 9, 20, 0, tzinfo=timezone.utc),
+        )]
+        reconcile_post_events(
+            venue_dao=dao, source_kind="promoter_post", source_handle="h1",
+            source_shortcode="s_metric_present", source_permalink=None,
+            prepared_events=events, now=NOW, attribute=_venue_attribute("v1"),
+        )
+        assert self._snapshot("promoter_post", "present") == before + 1
+
+    def test_a_fresh_row_with_no_upload_time_counts_as_null(self):
+        dao = _dao()
+        before = self._snapshot("promoter_post", "null")
+        events = [_event(
+            "Event A", datetime(2026, 8, 10, tzinfo=timezone.utc), source_uploaded_at=None,
+        )]
+        reconcile_post_events(
+            venue_dao=dao, source_kind="promoter_post", source_handle="h1",
+            source_shortcode="s_metric_null", source_permalink=None,
+            prepared_events=events, now=NOW, attribute=_venue_attribute("v1"),
+        )
+        assert self._snapshot("promoter_post", "null") == before + 1
+
+    def test_both_writing_paths_are_labelled_distinctly(self):
+        dao = _dao()
+        before_promoter = self._snapshot("promoter_post", "null")
+        before_venue = self._snapshot("venue_post", "null")
+        events = [_event(
+            "Event A", datetime(2026, 8, 10, tzinfo=timezone.utc), source_uploaded_at=None,
+        )]
+        reconcile_post_events(
+            venue_dao=dao, source_kind="venue_post", source_handle="h1",
+            source_shortcode="s_metric_venue", source_permalink=None,
+            prepared_events=events, now=NOW, attribute=_venue_attribute("v1"),
+        )
+        assert self._snapshot("venue_post", "null") == before_venue + 1
+        assert self._snapshot("promoter_post", "null") == before_promoter  # unchanged
+
+    def test_a_confirmed_rows_re_extraction_is_not_counted(self):
+        """source_uploaded_at is not in PROTECTABLE_EVENT_FIELDS -- a
+        confirmed row's re-extraction never touches it, so it must not be
+        counted as a fresh write either way (see EVENT_SOURCE_UPLOADED_AT_
+        TOTAL's own docstring)."""
+        dao = _dao()
+        events = [_event(
+            "Event A", datetime(2026, 8, 10, tzinfo=timezone.utc),
+            source_uploaded_at=datetime(2026, 8, 9, 20, 0, tzinfo=timezone.utc),
+        )]
+        reconcile_post_events(
+            venue_dao=dao, source_kind="promoter_post", source_handle="h1",
+            source_shortcode="s_metric_confirmed", source_permalink=None,
+            prepared_events=events, now=NOW, attribute=_venue_attribute("v1"),
+        )
+        row = _rows(dao, "h1", "s_metric_confirmed")[0]
+        dao.update_event(row["event_id"], {
+            "status": STATUS_CONFIRMED, "operator_edited_fields": ["title"],
+        })
+
+        before_present = self._snapshot("promoter_post", "present")
+        before_null = self._snapshot("promoter_post", "null")
+        later = [_event(
+            "Event A", datetime(2026, 8, 10, tzinfo=timezone.utc), source_uploaded_at=None,
+        )]
+        reconcile_post_events(
+            venue_dao=dao, source_kind="promoter_post", source_handle="h1",
+            source_shortcode="s_metric_confirmed", source_permalink=None,
+            prepared_events=later, now=NOW, attribute=_venue_attribute("v1"),
+        )
+        assert self._snapshot("promoter_post", "present") == before_present
+        assert self._snapshot("promoter_post", "null") == before_null

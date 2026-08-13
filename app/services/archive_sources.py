@@ -367,12 +367,18 @@ async def _fetch_instagram(client, venue, cfg):
     cap = cfg["max_photos_per_venue"]
 
     try:
-        posts = await client.fetch_recent_posts(handle, results_limit=posts_per_venue)
+        result = await client.fetch_recent_posts(handle, results_limit=posts_per_venue)
     except ApifyCreditExhaustedError as e:
         # Same translation the Maps source needed: without it this exception
         # falls through as one venue's failure and the run keeps calling into
         # an exhausted balance for every venue that remains.
         raise ArchiveCreditExhausted(str(e)) from e
+    # `fetch_recent_posts` now returns a FetchPostsResult (plans/260812_
+    # crawl-error-visibility.md §A) — only the scheduled crawl
+    # (instagram_crawl_service._run_stream) interprets `.error_code`; this
+    # manual archive path only ever needed the posts and stays that way. The
+    # client itself already logs a blocked/not-found error at warning.
+    posts = result.posts
 
     # The actor makes no ordering promise (see the module-level docstring
     # above `_sort_posts_newest_first`), so the cap below must not be left to

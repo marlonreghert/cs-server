@@ -54,7 +54,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Optional
@@ -64,10 +63,17 @@ from app.metrics import (
     CRAWL_BUDGET_REMAINING,
     CRAWL_CHAIN_CLASSIFICATION_TOTAL,
     CRAWL_CURSOR_AGE_SECONDS,
+    CRAWL_DORMANT_TOTAL,
     CRAWL_RESULTS_TOTAL,
     CRAWL_RUNS_TOTAL,
     CRAWL_STREAM_OVERLAP_TOTAL,
     CRAWL_VENUE_ATTRIBUTION_TOTAL,
+)
+from app.models.crawl_seed_lookback import (
+    ADMIN_CONFIG_CRAWL_SEED_LOOKBACK_KEY,
+    DEFAULT_CRAWL_SEED_LOOKBACK,
+    RELATIVE_LOOKBACK_RE as _RELATIVE_LOOKBACK_RE,
+    validate_crawl_seed_lookback_config,
 )
 from app.services import job_lock
 from app.services.archive_sources import SOURCE_INSTAGRAM_POSTS, _parse_post_timestamp
@@ -129,6 +135,35 @@ OUTCOME_NOT_FOUND = "not_found"
 # `consecutive_failures` alone would hide until an operator happened to
 # notice `last_run_at` had stopped advancing.
 OUTCOME_BOOKKEEPING_FAILED = "bookkeeping_failed"
+# plans/260812_crawl-error-visibility.md §A/§B: Apify's own error item, read
+# instead of discarded. `OUTCOME_BLOCKED` is Instagram rate-limiting/blocking
+# the scrape — TRANSIENT, worth retrying on the next scheduled fire.
+# `OUTCOME_HANDLE_NOT_FOUND` is Apify's own `not_found` — PERMANENT, the
+# handle does not exist; `run_target` disables the target rather than
+# retrying a scrape that will never succeed. Both are DISTINCT from
+# `OUTCOME_FAILED` — an in-process exception escaping the fetch call (see
+# `_run_stream`'s own `except Exception` below), an unrecognised Apify error
+# code, OR (plans/260813_crawl-transport-failure-visibility.md §A/§B) one of
+# FetchPostsResult's own transport codes (`timeout`/`http_error`/
+# `request_error`, surfaced when the Apify CLIENT itself failed at the HTTP
+# layer rather than Apify ever running) — and from `OUTCOME_EMPTY` (no error
+# item at all, or `no_items` with no request errors — a genuinely empty/
+# private stream): a real empty stream must stay `empty` and must NOT
+# increment `consecutive_failures`; these two, and `OUTCOME_FAILED`, all do.
+# No dedicated branch exists for the three transport codes below (`if not
+# kept:`) — they fall through the SAME "anything else is a failure" `elif
+# error_code is not None` arm an unrecognised Apify code already used, since
+# a timeout and an in-process exception are the same fact: the call did not
+# answer. Never reuse `OUTCOME_NOT_FOUND` for this — that constant already
+# means "this handle has no crawl_target row in our own DB at all," an
+# unrelated concept.
+OUTCOME_BLOCKED = "blocked"
+OUTCOME_HANDLE_NOT_FOUND = "handle_not_found"
+# The set of per-stream outcomes that count as a FAILED fetch — increments
+# `consecutive_failures` in `run_target`, unlike OUTCOME_EMPTY (a real empty
+# stream, not a failure) or a skip/credit-exhaustion outcome (never even
+# attempted, or stopped before an answer was known).
+FAILURE_OUTCOMES = (OUTCOME_FAILED, OUTCOME_BLOCKED, OUTCOME_HANDLE_NOT_FOUND)
 # `start_run`-only reason: the admin run-now endpoint's fast refusal when
 # the per-handle lock (`lock_name_for`) is already held — by a scheduled
 # fire or by another run-now call for the same handle. Never an `OUTCOME_*`
@@ -306,9 +341,10 @@ def _format_utc(dt: datetime) -> str:
     return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-_RELATIVE_LOOKBACK_RE = re.compile(
-    r"^\s*(\d+)\s*(day|days|month|months|year|years)\s*$", re.IGNORECASE
-)
+# The grammar itself (`_RELATIVE_LOOKBACK_RE`) now lives in
+# app.models.crawl_seed_lookback (imported above) so the seed-lookback
+# admin-config validator and this best-effort local-cutoff parser can never
+# drift apart on what counts as a valid lookback string.
 _RELATIVE_LOOKBACK_UNIT_DAYS = {"day": 1, "month": 30, "year": 365}
 
 
@@ -916,6 +952,65 @@ def reels_skip_reason(target: dict) -> Optional[str]:
     return None
 
 
+def posts_never_seeded(target: dict) -> bool:
+    """Whether this target's posts stream has run at least once and STILL
+    never produced a cursor — `cursor_posts_at IS NULL AND last_run_at IS
+    NOT NULL`, already the "never successfully seeded" signal this codebase
+    uses (see `reels_already_seeded`'s own docstring for why the CURSOR,
+    never a separate flag, is the source of truth: it stays null until a
+    run's bookkeeping write actually succeeds, so a flag would have to be
+    unset by hand on every failure path to keep a failed seed retryable).
+
+    A target that has never run at all (`last_run_at` also null) is NOT
+    reportable — there is nothing yet to be alarmed about, and reporting it
+    would make every freshly-created target read as broken on creation.
+    This is specifically a target that HAS tried, one or more times, and
+    keeps coming back empty-handed — plans/260813_crawl-transport-failure-
+    visibility.md §E: `downtownbeergarden_` sat in exactly this state for
+    months before a timeout finally surfaced the underlying account, and
+    nothing reported the standing condition itself; an operator had to
+    notice two columns by hand. Deliberately reads ONLY the posts cursor —
+    the plan scopes this to the posts stream, which is what every target
+    runs; reels is seed-only and already has its own visibility
+    (`reels_skip_reason`/`effective_reels_seed_results_limit`)."""
+    return (
+        _as_utc_dt(target.get("cursor_posts_at")) is None
+        and target.get("last_run_at") is not None
+    )
+
+
+def is_posts_dormant(
+    *, error_code: Optional[str], request_error_count: int, cursor: Optional[datetime],
+) -> bool:
+    """plans/260813_dormant-vs-broken-targets.md §A: the DORMANT signature —
+    an account that ANSWERED (Apify returned its own `no_items` error item,
+    not silence) with NOTHING in the window, on a stream whose cursor has
+    NEVER advanced (still seeding). All three conditions are required:
+
+    - `error_code == "no_items"` — Apify's own classification for "the
+      account exists and answered, there is simply nothing to return."
+      `not_found` (the handle does not exist) and every other error code
+      are handled by `_run_stream`'s existing HANDLE_NOT_FOUND/FAILED
+      branches and never reach here; `error_code is None` (no error item at
+      all) is also excluded — that shape carries no positive evidence the
+      account was reached, so it stays plain `empty`, not dormant.
+    - `request_error_count == 0` — a `no_items` answer WITH blocked
+      requests is `OUTCOME_BLOCKED` (Instagram rate-limiting the scrape),
+      a transient fault this predicate must never call dormant.
+    - `cursor is None` — the target has never successfully produced a
+      cursor. Once a cursor is set, an empty answer just means "nothing
+      NEW since last time," the ordinary steady-state case, not a standing
+      account condition worth reporting; pairs with `posts_never_seeded`'s
+      own cursor-based signal by design (plan §A: "pair it with dormancy
+      so the console can say 'never seeded — account dormant'").
+
+    Deliberately takes plain values, not a `target`/`FetchPostsResult`
+    object, so it stays independently unit-testable exactly like
+    `posts_never_seeded` — see tests/test_instagram_crawl_service.py's own
+    `TestDormancyPredicate`."""
+    return error_code == "no_items" and request_error_count == 0 and cursor is None
+
+
 class ScheduledInstagramCrawlService:
     """Orchestrates one crawl target end to end: gate -> bound -> fetch ->
     pinned-post filtering -> cursor advance (success only) -> chaining. See
@@ -932,6 +1027,7 @@ class ScheduledInstagramCrawlService:
         config: CrawlServiceConfig,
         chainer: Optional[InstagramCrawlChainer] = None,
         now_provider=None,
+        admin_config_service=None,
     ):
         self.venue_dao = venue_dao
         self.apify_client = apify_client
@@ -939,6 +1035,16 @@ class ScheduledInstagramCrawlService:
         self.config = config
         self.chainer = chainer
         self._now = now_provider or (lambda: datetime.now(timezone.utc))
+        # plans/260813_dormant-vs-broken-targets.md §B: OPTIONAL, the SAME
+        # "None degrades to the Settings-level default" shape
+        # `ClosureDetectionService`/`EligibilityRuleService` already use for
+        # their own admin-config collaborator — never a hard dependency
+        # (CLAUDE.md: "Keep enrichment paths optional and dependency-aware").
+        # In production this is always the container's real
+        # `AdminConfigService`; existing tests that build this service
+        # directly (and never pass this kwarg) keep resolving the seed
+        # lookback from `config.default_initial_lookback`, unchanged.
+        self.admin_config_service = admin_config_service
         # `asyncio.create_task`'s return value is the ONLY strong reference
         # the event loop gives you — the loop itself holds a weak one, and
         # CPython's own asyncio docs warn that an unreferenced task "can
@@ -955,13 +1061,55 @@ class ScheduledInstagramCrawlService:
         # moment it finishes so the set cannot grow unbounded.
         self._background_tasks: set[asyncio.Task] = set()
 
+    def _resolve_seed_lookback(self) -> str:
+        """plans/260813_dormant-vs-broken-targets.md §B: the DEFAULT a
+        target's SEED run falls back to when it has no `initial_lookback`
+        override of its own — resolved fresh on every call (cheap, no
+        caching) so an admin-config write takes effect on the next crawl,
+        no restart needed, the same "read fresh every time" posture
+        `VenueBudgetService`/`EligibilityRuleService` already take with
+        their own admin-config reads.
+
+        `self.admin_config_service is None` (no collaborator wired — every
+        test that builds this service directly and never passes one, plus
+        any future caller with no admin-config layer available) degrades to
+        `config.default_initial_lookback`, the pre-existing Settings-level
+        default — never this module's own `DEFAULT_CRAWL_SEED_LOOKBACK`,
+        which would silently change already-tested behavior for callers
+        that never opted into the new admin-config layer at all. A read
+        failure or a stored value that fails validation (e.g. hand-edited
+        RDS row) degrades the SAME way, logged, never raised — an admin-
+        config problem must not stop a scheduled crawl from running."""
+        if self.admin_config_service is None:
+            return self.config.default_initial_lookback
+        try:
+            raw = self.admin_config_service.get(ADMIN_CONFIG_CRAWL_SEED_LOOKBACK_KEY)
+        except Exception as e:
+            logger.warning(f"[InstagramCrawl] seed lookback config read failed, using default: {e}")
+            return self.config.default_initial_lookback
+        if raw is None:
+            return DEFAULT_CRAWL_SEED_LOOKBACK
+        try:
+            return validate_crawl_seed_lookback_config(raw)
+        except (TypeError, ValueError) as e:
+            logger.warning(f"[InstagramCrawl] seed lookback config invalid, using default: {e}")
+            return DEFAULT_CRAWL_SEED_LOOKBACK
+
     # ── one stream (posts or reels) of one target ────────────────────────────
     async def _run_stream(self, target: dict, stream: str, *, now: datetime) -> dict:
         handle = target["handle"]
         kind = target["kind"]
         cursor_field = "cursor_posts_at" if stream == STREAM_POSTS else "cursor_reels_at"
         cursor = _as_utc_dt(target.get(cursor_field))
-        lookback = target.get("initial_lookback") or self.config.default_initial_lookback
+        # §B: a SEED (this stream's cursor still null) falls back to the
+        # admin-config-driven seed lookback; a steady-state run's fallback
+        # is unchanged — though moot in practice, since `compute_bound`
+        # below only ever reads `lookback_text` on the seed path (a set
+        # cursor sends `cursor - overlap`, an absolute timestamp, never a
+        # lookback string at all).
+        lookback = target.get("initial_lookback") or (
+            self._resolve_seed_lookback() if cursor is None else self.config.default_initial_lookback
+        )
         bound = compute_bound(
             cursor, overlap_hours=self.config.overlap_hours, lookback_text=lookback, now=now,
         )
@@ -1007,7 +1155,7 @@ class ScheduledInstagramCrawlService:
             )
 
         try:
-            raw_posts = await self.apify_client.fetch_recent_posts(
+            fetch_result = await self.apify_client.fetch_recent_posts(
                 handle, results_limit=effective_limit,
                 only_posts_newer_than=bound.actor_value, results_type=stream,
             )
@@ -1020,6 +1168,14 @@ class ScheduledInstagramCrawlService:
             logger.error(f"[InstagramCrawl] {handle} {stream}: fetch failed: {e}")
             return {"outcome": OUTCOME_FAILED, "results": 0, "dropped_pinned": 0, "kept": [], "error": str(e)}
 
+        # `.posts` NEVER includes Apify's own error item (the client strips
+        # it at the edge — plans/260812_crawl-error-visibility.md §A), so
+        # `result_count` — the BILLED number, feeding CRAWL_RESULTS_TOTAL,
+        # the monthly budget increment, and last_run_cost_usd below — already
+        # excludes it. This is the fix for §B's "do not bill an error item":
+        # structural, not a special case here.
+        raw_posts = fetch_result.posts
+        error_code = fetch_result.error_code
         result_count = len(raw_posts or [])
         if result_count:
             # The billed number — counted regardless of what happens to each
@@ -1031,10 +1187,65 @@ class ScheduledInstagramCrawlService:
         kept, dropped = _split_kept_and_dropped(raw_posts or [], bound.cutoff_at)
 
         if not kept:
-            CRAWL_RUNS_TOTAL.labels(handle_kind=kind, result_type=stream, outcome=OUTCOME_EMPTY).inc()
+            # §A/§B (plans/260812_crawl-error-visibility.md): an error item
+            # present (even alongside zero KEPT posts — e.g. every returned
+            # post was pinned-and-dropped is NOT this branch, since `kept`
+            # empty here means raw_posts itself yielded nothing usable)
+            # changes what "nothing came back" MEANS. `not_found` is
+            # permanent; `no_items` with request errors is a transient
+            # block; `no_items` with none is a genuinely empty/private
+            # stream (still OUTCOME_EMPTY); anything else — an Apify code
+            # never seen before, OR (plans/260813_crawl-transport-failure-
+            # visibility.md §A/§B) one of THIS client's own transport codes
+            # (`timeout`/`http_error`/`request_error`) — is treated as a
+            # transient failure, never silently folded into "empty" (the
+            # whole defect 260812 exists to close, and 260813 closes for the
+            # transport layer specifically: a timeout is not an empty
+            # account either).
+            if error_code == "not_found":
+                outcome = OUTCOME_HANDLE_NOT_FOUND
+            elif error_code == "no_items":
+                outcome = OUTCOME_BLOCKED if fetch_result.request_error_count > 0 else OUTCOME_EMPTY
+            elif error_code is not None:
+                outcome = OUTCOME_FAILED
+            else:
+                outcome = OUTCOME_EMPTY
+            # plans/260813_dormant-vs-broken-targets.md §A: the posts
+            # stream's DORMANT signature — see `is_posts_dormant`'s own
+            # docstring for the three conditions. Scoped to STREAM_POSTS
+            # only, mirroring `posts_never_seeded`'s identical scoping
+            # (reels is seed-only and already has its own visibility).
+            dormant = stream == STREAM_POSTS and is_posts_dormant(
+                error_code=error_code, request_error_count=fetch_result.request_error_count,
+                cursor=cursor,
+            )
+            if error_code is not None:
+                # Logged HERE (not only at the Apify client edge, which
+                # already logs the same fields for every caller — see
+                # apify_instagram_client.fetch_recent_posts): this is the
+                # ONE log line the crawl's own decision is guaranteed to
+                # produce regardless of which concrete client is wired in
+                # (a real ApifyInstagramClient in production, a fake in
+                # tests), since the classification above is what THIS
+                # module owns.
+                #
+                # plans/260813_dormant-vs-broken-targets.md §Error Handling:
+                # "Do not log a dormant run at warning. It is not a problem,
+                # and warning-level noise for a normal state is how real
+                # warnings get ignored." An OUTCOME_EMPTY result (dormant OR
+                # the plain "no error item at all" empty case) logs at INFO;
+                # every other error_code-bearing outcome (blocked, handle-
+                # not-found, failed) is unchanged at WARNING.
+                log = logger.info if outcome == OUTCOME_EMPTY else logger.warning
+                log(
+                    f"[InstagramCrawl] {handle} {stream}: Apify error="
+                    f"{error_code!r} request_error_count="
+                    f"{fetch_result.request_error_count} classified as {outcome!r}"
+                )
+            CRAWL_RUNS_TOTAL.labels(handle_kind=kind, result_type=stream, outcome=outcome).inc()
             return {
-                "outcome": OUTCOME_EMPTY, "results": result_count,
-                "dropped_pinned": dropped, "kept": [],
+                "outcome": outcome, "results": result_count, "dormant": dormant,
+                "dropped_pinned": dropped, "kept": [], "error_code": error_code,
             }
 
         CRAWL_RUNS_TOTAL.labels(handle_kind=kind, result_type=stream, outcome=OUTCOME_SUCCESS).inc()
@@ -1068,6 +1279,11 @@ class ScheduledInstagramCrawlService:
         stream_reports: dict[str, dict] = {}
         credit_exhausted = False
         any_failed = False
+        # §B: the FIRST failing stream's outcome (posts always runs before
+        # reels — see `streams` above) — persisted as `last_failure_kind`
+        # below so the admin read model can say WHY, not just THAT, a target
+        # failed. Left None on a run where nothing failed.
+        failure_kind: Optional[str] = None
         cursor_updates: dict[str, datetime] = {}
         new_posts_by_stream: dict[str, list[dict]] = {}
 
@@ -1078,8 +1294,10 @@ class ScheduledInstagramCrawlService:
             if outcome == OUTCOME_CREDIT_EXHAUSTED:
                 credit_exhausted = True
                 break
-            if outcome == OUTCOME_FAILED:
+            if outcome in FAILURE_OUTCOMES:
                 any_failed = True
+                if failure_kind is None:
+                    failure_kind = outcome
                 continue
             if outcome == OUTCOME_SUCCESS:
                 field_name = "cursor_posts_at" if stream == STREAM_POSTS else "cursor_reels_at"
@@ -1109,6 +1327,60 @@ class ScheduledInstagramCrawlService:
             updates["consecutive_failures"] = (
                 int(target.get("consecutive_failures") or 0) + 1 if any_failed else 0
             )
+            # plans/260813_dormant-vs-broken-targets.md §A: recomputed and
+            # OVERWRITTEN every run from THIS run's own posts-stream report
+            # — never sticky like `last_failure_kind` below. `stream_reports
+            # [STREAM_POSTS]` always exists here (posts always runs first,
+            # and `not credit_exhausted` already proves it did not abort
+            # mid-posts-stream); any outcome OTHER than the dormant-empty
+            # signature (success, blocked, failed, handle-not-found) reports
+            # `False` via `.get(..., False)`, so a target recovers from — or
+            # is knocked out of — a dormant reading on the very next signal,
+            # never left stale. Explicitly NOT written on a
+            # credit_exhausted run (this whole block is skipped): there is
+            # no trustworthy posts-stream answer to record.
+            new_dormant = bool(stream_reports[STREAM_POSTS].get("dormant", False))
+            was_dormant = bool(target.get("posts_dormant"))
+            updates["posts_dormant"] = new_dormant
+            if new_dormant:
+                CRAWL_DORMANT_TOTAL.labels(handle_kind=kind).inc()
+            # §Error Handling: "A target that flips from dormant to
+            # producing is the signal worth celebrating; one that flips the
+            # other way is worth noticing" — both logged at INFO (never
+            # WARNING; dormancy is not a failure) only on the TRANSITION,
+            # not every run, so a long-dormant or long-healthy target does
+            # not spam the log on every scheduled fire.
+            if new_dormant and not was_dormant:
+                logger.info(
+                    f"[InstagramCrawl] {handle}: posts stream is now dormant "
+                    "(account answered, nothing in the lookback window -- not a failure)"
+                )
+            elif was_dormant and not new_dormant:
+                logger.info(
+                    f"[InstagramCrawl] {handle}: posts stream is no longer dormant"
+                )
+            # §B: surface WHY, not just THAT, the target failed — written
+            # every run that had a failure, left standing (never cleared) on
+            # a run that did not, so `last_failure_kind`/`last_failure_at`
+            # always answer "what was the last failure and when," even if
+            # that failure was several runs ago.
+            if failure_kind is not None:
+                updates["last_failure_kind"] = failure_kind
+                updates["last_failure_at"] = now
+                if failure_kind == OUTCOME_HANDLE_NOT_FOUND:
+                    # Permanent: Instagram says the handle does not exist, so
+                    # retrying on the next scheduled fire can only ever spend
+                    # money for the same answer. Disabled rather than left to
+                    # keep firing — but SURFACED (last_failure_kind above),
+                    # never silently: a target vanishing from the rotation
+                    # with no explanation is the failure mode this plan is
+                    # about (plan §B).
+                    updates["enabled"] = False
+                    logger.warning(
+                        f"[InstagramCrawl] {handle}: Instagram reports this handle "
+                        "does not exist -- disabling the target rather than "
+                        "retrying a scrape that can never succeed"
+                    )
             reels_report = stream_reports.get(STREAM_REELS)
             if reels_report is not None and reels_report["outcome"] in (OUTCOME_SUCCESS, OUTCOME_EMPTY):
                 # §B: make the reels stream's marginal contribution visible.

@@ -21,8 +21,10 @@ from app.services.event_date_resolver import (
     REASON_YEAR_INFERRED,
     RECIFE_TZ,
     resolve_event_datetime,
+    select_date_interpretation_for_reuse,
     vote_on_sibling_years,
 )
+from app.services.event_identity import compute_source_event_key
 
 RECIFE = ZoneInfo("America/Recife")
 
@@ -675,7 +677,16 @@ class TestSiblingYearVoting:
         a genuine 2-2 split by year (2027, 2027, 2026, 2026), a TIE by raw
         count, not a 3-1 majority. The fix must resolve it anyway: within
         July, the tie prefers the year the two NATIVE (never-rolled)
-        siblings already hold."""
+        siblings already hold.
+
+        `year_roll_grace_days=0` pins THIS test to the pre-§D roll-or-not
+        rule (plans/260812_event-attribution-and-dates.md's grace window is
+        tested on its own, in TestYearRollGraceWindow below) — every one of
+        this fixture's four dates sits within 30 days of the 13 July
+        anchor, well inside the real 60-day default, so leaving the default
+        in place would make every date "keep the anchor's year" before
+        voting ever runs, and this test would no longer exercise
+        `vote_on_sibling_years`' tie-break logic at all."""
         post_ts = _post_at(2026, 7, 13)
         texts = [
             "01, 02 e 03 de julho",
@@ -684,7 +695,9 @@ class TestSiblingYearVoting:
             "22, 23 e 24 de julho",
         ]
         resolved = [
-            resolve_event_datetime(date_text=t, time_text=None, post_timestamp=post_ts)
+            resolve_event_datetime(
+                date_text=t, time_text=None, post_timestamp=post_ts, year_roll_grace_days=0,
+            )
             for t in texts
         ]
         # Pre-vote: weeks 1-2 individually roll to 2027 (both before the 13
@@ -708,11 +721,15 @@ class TestSiblingYearVoting:
     def test_a_unique_majority_pulls_a_rolled_outlier_back(self):
         """A synthetic (non-evidence) fixture isolating the OTHER branch:
         a real, non-tied plurality -- three siblings already agree, one
-        rolled outlier does not."""
+        rolled outlier does not. `year_roll_grace_days=0` pins this to the
+        pre-§D roll-or-not rule for the same reason the ferias_amigos_park
+        test above does."""
         post_ts = _post_at(2026, 7, 5)
         texts = ["01/07", "08/07", "15/07", "22/07"]
         resolved = [
-            resolve_event_datetime(date_text=t, time_text=None, post_timestamp=post_ts)
+            resolve_event_datetime(
+                date_text=t, time_text=None, post_timestamp=post_ts, year_roll_grace_days=0,
+            )
             for t in texts
         ]
         assert [r.starts_at.year for r in resolved] == [2027, 2026, 2026, 2026], resolved
@@ -855,3 +872,629 @@ class TestSiblingYearVoting:
         voted_b = vote_on_sibling_years([unrelated_native])
         assert voted_a[0].starts_at.year == 2027, voted_a
         assert voted_b[0].starts_at.year == 2026, voted_b
+
+
+# ── §D: the range PREPOSITION form ("de X a Y de MONTH") ─────────────────────
+class TestDateRangePrepositionForm:
+    def test_range_stated_with_prepositions_resolves_to_its_first_day(self):
+        post_ts = _post_at(2026, 8, 12)
+        resolved = resolve_event_datetime(
+            date_text="De 06 a 09 de fevereiro", time_text=None, post_timestamp=post_ts,
+        )
+        assert resolved.starts_at is not None, resolved
+        assert resolved.starts_at.date().isoformat() == "2027-02-06", resolved
+        assert resolved.date_range is True, resolved
+
+    def test_the_preposition_form_never_silently_keeps_the_last_day(self):
+        """The exact danger the plan's Evidence section names: pre-fix, the
+        ordinary finders matched only the TRAILING date ("09 de fevereiro")
+        and silently kept the LAST day with no range flag at all."""
+        post_ts = _post_at(2026, 8, 12)
+        resolved = resolve_event_datetime(
+            date_text="De 06 a 09 de fevereiro", time_text=None, post_timestamp=post_ts,
+        )
+        assert resolved.starts_at.date().day == 6, resolved
+        assert resolved.starts_at.date().day != 9, resolved
+
+    def test_preposition_form_within_the_grace_window_stays_in_the_posts_year(self):
+        post_ts = _post_at(2026, 6, 20)
+        resolved = resolve_event_datetime(
+            date_text="de 18 a 21 de junho", time_text=None, post_timestamp=post_ts,
+        )
+        assert resolved.starts_at.date().isoformat() == "2026-06-18", resolved
+        assert resolved.date_range is True, resolved
+
+
+# ── §D: the year-roll grace window ───────────────────────────────────────────
+class TestYearRollGraceWindow:
+    def test_one_day_inside_the_window_keeps_the_anchors_year(self):
+        # anchor 2026-08-12; candidate is 59 days earlier -- inside the
+        # default 60-day window.
+        post_ts = _post_at(2026, 8, 12)
+        resolved = resolve_event_datetime(
+            date_text="14/06", time_text=None, post_timestamp=post_ts,
+        )
+        assert resolved.starts_at.date().isoformat() == "2026-06-14", resolved
+        assert resolved.year_inferred is True, resolved
+
+    def test_exactly_on_the_window_boundary_keeps_the_anchors_year(self):
+        # anchor 2026-08-12; candidate is EXACTLY 60 days earlier -- the
+        # boundary is inclusive (matching this project's other expiry-
+        # window convention -- see app.models.menu_lifecycle.
+        # is_menu_item_current's own "inclusive at the boundary" rule).
+        post_ts = _post_at(2026, 8, 12)
+        resolved = resolve_event_datetime(
+            date_text="13/06", time_text=None, post_timestamp=post_ts,
+        )
+        assert resolved.starts_at.date().isoformat() == "2026-06-13", resolved
+        assert resolved.year_inferred is True, resolved
+
+    def test_one_day_outside_the_window_rolls_to_next_year(self):
+        # anchor 2026-08-12; candidate is 61 days earlier -- one day past
+        # the boundary.
+        post_ts = _post_at(2026, 8, 12)
+        resolved = resolve_event_datetime(
+            date_text="12/06", time_text=None, post_timestamp=post_ts,
+        )
+        assert resolved.starts_at.date().isoformat() == "2027-06-12", resolved
+        assert resolved.year_inferred is True, resolved
+
+    def test_a_date_a_few_days_older_than_its_post_keeps_the_current_year(self):
+        """The plan's own named scenario: "08/08" on a post published
+        2026-08-12 -- 4 days old, well inside the window."""
+        post_ts = _post_at(2026, 8, 12)
+        resolved = resolve_event_datetime(
+            date_text="08/08", time_text=None, post_timestamp=post_ts,
+        )
+        assert resolved.starts_at.date().isoformat() == "2026-08-08", resolved
+        assert resolved.year_inferred is True, resolved
+
+    def test_a_date_months_older_than_its_post_rolls_the_year(self):
+        post_ts = _post_at(2026, 8, 12)
+        resolved = resolve_event_datetime(
+            date_text="06 de fevereiro", time_text=None, post_timestamp=post_ts,
+        )
+        assert resolved.starts_at.date().isoformat() == "2027-02-06", resolved
+        assert resolved.year_inferred is True, resolved
+
+    def test_a_december_january_boundary_still_rolls_correctly_outside_the_window(self):
+        """The naive per-candidate arithmetic (`date(year, month, day)`
+        then compare to `anchor`) must still get a December/January
+        boundary right once the gap exceeds the grace window, even though
+        the RESOLVED date ends up only ONE day after the anchor once
+        rolled — the grace window is about the age of the CANDIDATE before
+        rolling, never the proximity of the final answer."""
+        post_ts = _post_at(2026, 12, 31)
+        resolved = resolve_event_datetime(
+            date_text="01/01", time_text=None, post_timestamp=post_ts,
+        )
+        # The naive same-year candidate (2026-01-01) is 364 days before the
+        # anchor -- far outside any grace window -- so it rolls to 2027.
+        assert resolved.starts_at.date().isoformat() == "2027-01-01", resolved
+        assert resolved.year_inferred is True, resolved
+
+    def test_a_custom_grace_window_is_honoured(self):
+        """`year_roll_grace_days` is a real parameter, not a hardcoded
+        constant with a keyword-shaped alias — a 0-day window rolls even a
+        1-day-old candidate."""
+        post_ts = _post_at(2026, 8, 12)
+        resolved = resolve_event_datetime(
+            date_text="11/08", time_text=None, post_timestamp=post_ts,
+            year_roll_grace_days=0,
+        )
+        assert resolved.starts_at.date().isoformat() == "2027-08-11", resolved
+
+
+# ── §C: the model interprets, Python computes ────────────────────────────────
+class TestStructuredInterpretationFallback:
+    def test_relative_hoje_via_interpretation_when_the_text_is_unrecognised(self):
+        # plans/260813_review-gate-and-date-vocabulary.md §A: "É HOJE" itself
+        # is now read deterministically (word-boundary "hoje"), so it no
+        # longer exercises this fallback — this fixture stands in as a text
+        # the deterministic finders genuinely cannot read at all (no digit,
+        # no weekday, no "hoje"/"amanhã" token), the SAME idiom this file
+        # already uses elsewhere in this class for that purpose.
+        post_ts = _post_at(2026, 8, 7)
+        resolved = resolve_event_datetime(
+            date_text="algo que o regex nao le", time_text=None, post_timestamp=post_ts,
+            date_interpretation={"kind": "relative", "relative": "hoje"},
+        )
+        assert resolved.starts_at is not None, resolved
+        assert resolved.starts_at.date().isoformat() == "2026-08-07", resolved
+        assert resolved.needs_review is False, resolved
+        assert resolved.date_source == "structured_fallback", resolved
+
+    def test_the_fallback_is_never_consulted_when_the_deterministic_path_resolves(self):
+        """Loud proof the fallback is a fallback: a deterministic date_text
+        resolves on its OWN, and a WILDLY different interpretation (would
+        resolve to a totally different date if trusted) is ignored."""
+        post_ts = _post_at(2026, 8, 12)
+        resolved = resolve_event_datetime(
+            date_text="08/08", time_text=None, post_timestamp=post_ts,
+            date_interpretation={"kind": "relative", "relative": "amanha"},
+        )
+        assert resolved.starts_at.date().isoformat() == "2026-08-08", resolved
+
+    def test_weekday_with_day_number_via_interpretation(self):
+        # 2026-07-02 is genuinely a Thursday (same evidence the deterministic
+        # tests pin elsewhere in this file).
+        post_ts = _post_at(2026, 6, 25)
+        resolved = resolve_event_datetime(
+            date_text="Quinta (02)", time_text=None, post_timestamp=post_ts,
+            date_interpretation={"kind": "weekday_day", "weekday": "quinta", "day": 2},
+        )
+        assert resolved.starts_at is not None, resolved
+        assert resolved.starts_at.date().isoformat() == "2026-07-02", resolved
+        assert resolved.review_reason is None, resolved
+
+    def test_weekday_contradicting_its_day_number_is_flagged(self):
+        post_ts = _post_at(2026, 8, 31)
+        resolved = resolve_event_datetime(
+            date_text="Quinta (02)", time_text=None, post_timestamp=post_ts,
+            date_interpretation={"kind": "weekday_day", "weekday": "quinta", "day": 2},
+        )
+        assert resolved.starts_at is not None, resolved
+        assert resolved.review_reason == REASON_WEEKDAY_MISMATCH, resolved
+
+    def test_day_month_via_interpretation_still_rolls_and_flags(self):
+        post_ts = _post_at(2026, 8, 12)
+        resolved = resolve_event_datetime(
+            date_text="algo que o regex nao le", time_text=None, post_timestamp=post_ts,
+            date_interpretation={"kind": "day_month", "day": 6, "month": 2},
+        )
+        assert resolved.starts_at.date().isoformat() == "2027-02-06", resolved
+        assert resolved.year_inferred is True, resolved
+
+    def test_day_month_year_via_interpretation_is_never_rolled(self):
+        post_ts = _post_at(2026, 8, 12)
+        resolved = resolve_event_datetime(
+            date_text="algo que o regex nao le", time_text=None, post_timestamp=post_ts,
+            date_interpretation={"kind": "day_month_year", "day": 6, "month": 2, "year": 2027},
+        )
+        assert resolved.starts_at.date().isoformat() == "2027-02-06", resolved
+        assert resolved.year_inferred is False, resolved
+
+    def test_range_via_interpretation_resolves_to_the_first_day_and_flags_range(self):
+        post_ts = _post_at(2026, 8, 12)
+        resolved = resolve_event_datetime(
+            date_text="algo que o regex nao le", time_text=None, post_timestamp=post_ts,
+            date_interpretation={
+                "kind": "range", "range_first_day": 6, "range_last_day": 9, "month": 2,
+            },
+        )
+        assert resolved.starts_at.date().isoformat() == "2027-02-06", resolved
+        assert resolved.date_range is True, resolved
+
+    def test_an_unreadable_date_with_no_usable_interpretation_stays_unresolved(self):
+        post_ts = _post_at(2026, 8, 12)
+        resolved = resolve_event_datetime(
+            date_text="uma data ilegivel qualquer", time_text=None, post_timestamp=post_ts,
+            date_interpretation=None,
+        )
+        assert resolved.starts_at is None, resolved
+        assert resolved.review_reason == REASON_MISSING_DATE, resolved
+
+    def test_a_malformed_interpretation_is_ignored_never_guessed(self):
+        post_ts = _post_at(2026, 8, 12)
+        resolved = resolve_event_datetime(
+            date_text="uma data ilegivel qualquer", time_text=None, post_timestamp=post_ts,
+            date_interpretation={"kind": "not_a_real_kind"},
+        )
+        assert resolved.starts_at is None, resolved
+        assert resolved.review_reason == REASON_MISSING_DATE, resolved
+
+    def test_a_model_supplied_absolute_date_is_ignored(self):
+        """The hard constraint the plan pins: Python does every calculation,
+        never the model. An extra key that LOOKS like a computed absolute
+        date is simply not one of the fields this module ever reads —
+        proven here by a WRONG absolute date sitting right next to a
+        correct relative interpretation and never winning."""
+        post_ts = _post_at(2026, 8, 7)
+        resolved = resolve_event_datetime(
+            date_text="É HOJE", time_text=None, post_timestamp=post_ts,
+            date_interpretation={
+                "kind": "relative", "relative": "hoje",
+                "absolute_date": "2027-01-01", "resolved_date": "2027-01-01",
+            },
+        )
+        assert resolved.starts_at is not None, resolved
+        assert resolved.starts_at.date().isoformat() == "2026-08-07", resolved
+
+
+# ── §C/Error Handling: date_source (deterministic / fallback / unresolved) ──
+class TestDateSource:
+    """`ResolvedDate.date_source` is what
+    app.metrics.EVENT_DATE_RESOLUTION_TOTAL is built from — "the fallback
+    rate is the signal that matters" per the plan's own Error Handling
+    section."""
+
+    def test_a_deterministic_numeric_date_reports_deterministic(self):
+        post_ts = _post_at(2026, 8, 12)
+        resolved = resolve_event_datetime(
+            date_text="15/08", time_text=None, post_timestamp=post_ts,
+        )
+        assert resolved.date_source == "deterministic", resolved
+
+    def test_a_recurring_post_reports_deterministic(self):
+        post_ts = _post_at(2026, 7, 16)
+        resolved = resolve_event_datetime(
+            date_text="toda quinta", time_text=None, post_timestamp=post_ts,
+        )
+        assert resolved.date_source == "deterministic", resolved
+
+    def test_an_unresolved_date_reports_unresolved(self):
+        post_ts = _post_at(2026, 8, 12)
+        resolved = resolve_event_datetime(
+            date_text="algo ilegivel", time_text=None, post_timestamp=post_ts,
+        )
+        assert resolved.date_source == "unresolved", resolved
+
+    def test_a_fallback_resolved_date_reports_structured_fallback(self):
+        # See TestStructuredInterpretationFallback's own note above: "É
+        # HOJE" now resolves deterministically (§A), so a text the
+        # deterministic side genuinely cannot read is what exercises the
+        # fallback path here.
+        post_ts = _post_at(2026, 8, 7)
+        resolved = resolve_event_datetime(
+            date_text="algo que o regex nao le", time_text=None, post_timestamp=post_ts,
+            date_interpretation={"kind": "relative", "relative": "hoje"},
+        )
+        assert resolved.date_source == "structured_fallback", resolved
+
+
+# ── §C: determinism guard ─────────────────────────────────────────────────────
+class TestDeterminismGuard:
+    def test_select_reuses_the_stored_interpretation_for_byte_identical_text(self):
+        chosen = select_date_interpretation_for_reuse(
+            fresh_date_text="É HOJE",
+            fresh_interpretation={"kind": "relative", "relative": "amanha"},
+            stored_date_text="É HOJE",
+            stored_interpretation={"kind": "relative", "relative": "hoje"},
+        )
+        assert chosen == {"kind": "relative", "relative": "hoje"}
+
+    def test_select_trusts_the_fresh_answer_when_text_differs(self):
+        chosen = select_date_interpretation_for_reuse(
+            fresh_date_text="É HOJE MESMO",
+            fresh_interpretation={"kind": "relative", "relative": "amanha"},
+            stored_date_text="É HOJE",
+            stored_interpretation={"kind": "relative", "relative": "hoje"},
+        )
+        assert chosen == {"kind": "relative", "relative": "amanha"}
+
+    def test_select_trusts_the_fresh_answer_when_nothing_is_stored(self):
+        chosen = select_date_interpretation_for_reuse(
+            fresh_date_text="É HOJE",
+            fresh_interpretation={"kind": "relative", "relative": "hoje"},
+            stored_date_text=None,
+            stored_interpretation=None,
+        )
+        assert chosen == {"kind": "relative", "relative": "hoje"}
+
+    def test_the_same_date_text_always_yields_the_same_source_event_key(self):
+        """The identity guarantee this whole guard exists to protect,
+        exercised end to end: the SAME verbatim date_text, resolved via the
+        REUSED stored interpretation, produces the SAME starts_at and
+        therefore the SAME source_event_key — even though a SECOND
+        extraction's model answered the structured interpretation
+        differently."""
+        post_ts = _post_at(2026, 8, 7)
+        stored_interpretation = {"kind": "relative", "relative": "hoje"}
+        first = resolve_event_datetime(
+            date_text="É HOJE", time_text=None, post_timestamp=post_ts,
+            date_interpretation=stored_interpretation,
+        )
+        key_first = compute_source_event_key("Festa", first.starts_at)
+
+        # Second extraction: the model answers DIFFERENTLY this time, but
+        # the caller applies the determinism guard before calling the
+        # resolver, exactly as the real services do.
+        fresh_interpretation_this_run = {"kind": "relative", "relative": "amanha"}
+        interpretation_to_use = select_date_interpretation_for_reuse(
+            fresh_date_text="É HOJE", fresh_interpretation=fresh_interpretation_this_run,
+            stored_date_text="É HOJE", stored_interpretation=stored_interpretation,
+        )
+        second = resolve_event_datetime(
+            date_text="É HOJE", time_text=None, post_timestamp=post_ts,
+            date_interpretation=interpretation_to_use,
+        )
+        key_second = compute_source_event_key("Festa", second.starts_at)
+
+        assert second.starts_at == first.starts_at, (first, second)
+        assert key_second == key_first, (key_first, key_second)
+
+    def test_python_computes_the_arithmetic_not_the_model(self):
+        """A model-supplied absolute date is ignored even inside the reuse
+        path -- Python (via `_interpretation_to_date`, called from
+        `resolve_event_datetime`) is what turns the interpretation into a
+        date, never a value read straight off the model's JSON."""
+        post_ts = _post_at(2026, 8, 7)
+        resolved = resolve_event_datetime(
+            date_text="É HOJE", time_text=None, post_timestamp=post_ts,
+            date_interpretation={
+                "kind": "relative", "relative": "hoje", "absolute_date": "2099-12-31",
+            },
+        )
+        assert resolved.starts_at.date().isoformat() == "2026-08-07", resolved
+
+
+# ── plans/260813_review-gate-and-date-vocabulary.md §A: the full relative- ──
+# token evidence table, probed against the SAME anchor (2026-08-07) the plan
+# itself uses.
+class TestRelativeTokenVocabularyTable:
+    _ANCHOR = _post_at(2026, 8, 7)
+
+    @pytest.mark.parametrize("date_text", [
+        "hoje", "HOJE", "hoje à noite", "hoje a noite",
+        "É HOJE", "é hoje", "Hoje!", "hoje!!", "HOJE 🔥", "hoje tem", "hoje é dia",
+    ])
+    def test_every_hoje_form_resolves_to_the_anchor(self, date_text):
+        resolved = resolve_event_datetime(
+            date_text=date_text, time_text=None, post_timestamp=self._ANCHOR,
+        )
+        assert resolved.starts_at is not None, resolved
+        assert resolved.starts_at.date().isoformat() == "2026-08-07", resolved
+        assert resolved.needs_review is False, resolved
+        assert resolved.date_source == "deterministic", resolved
+
+    @pytest.mark.parametrize("date_text", [
+        "amanhã", "amanha", "AMANHÃ!", "É AMANHÃ", "amanha a noite",
+    ])
+    def test_every_amanha_form_resolves_to_the_day_after(self, date_text):
+        resolved = resolve_event_datetime(
+            date_text=date_text, time_text=None, post_timestamp=self._ANCHOR,
+        )
+        assert resolved.starts_at is not None, resolved
+        assert resolved.starts_at.date().isoformat() == "2026-08-08", resolved
+        assert resolved.needs_review is False, resolved
+        assert resolved.date_source == "deterministic", resolved
+
+    def test_hoje_with_an_explicit_date_resolves_through_the_intended_numeric_path(self):
+        """"hoje, 07/08" is an ACCIDENTAL success even before this plan
+        (§A's own evidence) — the relative guard must defer to the explicit
+        date, never resolve it itself. 2026-01-01 is chosen specifically so
+        the two paths disagree if the guard were missing: a wrongly-firing
+        relative match would land on the anchor (Jan 1); the intended
+        numeric finder lands on 07 August instead."""
+        anchor = _post_at(2026, 1, 1)
+        resolved = resolve_event_datetime(
+            date_text="hoje, 07/08", time_text=None, post_timestamp=anchor,
+        )
+        assert resolved.starts_at is not None, resolved
+        assert resolved.starts_at.date().isoformat() == "2026-08-07", resolved
+
+    def test_sexta_hoje_resolves_through_the_intended_weekday_finder(self):
+        """"sexta, hoje" is the OTHER accidental success §A's evidence
+        names. 2026-08-03 (a Monday) is chosen so the two paths disagree if
+        the guard were missing: a wrongly-firing relative match would land
+        on the anchor itself (Monday); the intended weekday fallback lands
+        on the next Friday instead."""
+        monday = _post_at(2026, 8, 3)
+        resolved = resolve_event_datetime(
+            date_text="sexta, hoje", time_text=None, post_timestamp=monday,
+        )
+        assert resolved.starts_at is not None, resolved
+        assert resolved.starts_at.date().isoformat() == "2026-08-07", resolved
+
+
+# ── plans/260813_review-gate-and-date-vocabulary.md §B: the full cadence ────
+# evidence table, all probed with is_recurring=True (the model's own claim),
+# via `recurrence_text` — exactly how the plan's own evidence was gathered.
+class TestCadenceVocabularyTable:
+    _MONDAY = _post_at(2026, 7, 13)  # 2026-07-13 is a Monday (see class above)
+    _TUESDAY = _post_at(2026, 8, 11)  # matches this plan's own BDD anchor
+
+    def _resolve(self, recurrence_text, *, anchor=None):
+        return resolve_event_datetime(
+            date_text=None, time_text=None, post_timestamp=anchor or self._MONDAY,
+            is_recurring=True, recurrence_text=recurrence_text,
+        )
+
+    @pytest.mark.parametrize("recurrence_text", [
+        "de segunda a sexta", "toda quinta", "sextas e sábados", "quintas",
+        "de terça a quinta",
+    ])
+    def test_already_working_forms_still_resolve(self, recurrence_text):
+        """Regression pin: none of §B's NEW vocabulary may narrow or
+        shadow the range/list forms plans/260810_post-kind-and-post-
+        extraction-attribution.md §D already established."""
+        resolved = self._resolve(recurrence_text)
+        assert resolved.starts_at is not None, resolved
+        assert resolved.is_recurring is True, resolved
+        assert resolved.review_reason is None, resolved
+
+    @pytest.mark.parametrize("recurrence_text", [
+        "todo dia", "todos os dias", "diariamente", "todo dia!", "todo santo dia",
+    ])
+    def test_daily_forms_resolve_to_the_anchor_itself(self, recurrence_text):
+        # Every weekday is in the set, so the next matching day is the
+        # anchor's own day — no new arithmetic, just a wider weekday set.
+        resolved = self._resolve(recurrence_text, anchor=self._TUESDAY)
+        assert resolved.starts_at is not None, resolved
+        assert resolved.starts_at.date().isoformat() == "2026-08-11", resolved
+        assert resolved.is_recurring is True, resolved
+        assert resolved.review_reason is None, resolved
+        assert resolved.date_source == "deterministic", resolved
+
+    @pytest.mark.parametrize("recurrence_text", [
+        "todo fim de semana", "fins de semana", "todo final de semana",
+    ])
+    def test_weekend_forms_resolve_to_the_next_saturday_or_sunday(self, recurrence_text):
+        # Tuesday 2026-08-11 -> the next Saturday is 2026-08-15.
+        resolved = self._resolve(recurrence_text, anchor=self._TUESDAY)
+        assert resolved.starts_at is not None, resolved
+        assert resolved.starts_at.date().isoformat() == "2026-08-15", resolved
+        assert resolved.is_recurring is True, resolved
+        assert resolved.review_reason is None, resolved
+
+    @pytest.mark.parametrize("recurrence_text", ["toda semana", "sempre"])
+    def test_no_computable_day_forms_resolve_to_nothing_but_are_never_flagged_missing(
+        self, recurrence_text,
+    ):
+        """§E: these two deliberately return NO weekday set at all — a
+        legitimate "recurring, no single next occurrence" state, not a
+        reading failure. `is_recurring` is still True (the model's own
+        claim, carried through) and `review_reason` must never read
+        `missing_date`."""
+        resolved = self._resolve(recurrence_text, anchor=self._TUESDAY)
+        assert resolved.starts_at is None, resolved
+        assert resolved.is_recurring is True, resolved
+        assert resolved.needs_review is False, resolved
+        assert resolved.review_reason is None, resolved
+        assert resolved.review_reason != REASON_MISSING_DATE, resolved
+
+    def test_an_unparseable_cadence_word_is_not_swept_into_the_no_computable_day_state(self):
+        """`_is_no_computable_day_recurrence` is a NAMED, narrow vocabulary
+        ("toda semana"/"sempre"), never a blanket `is_recurring=True` check
+        — an unrecognised cadence word stays a genuine `missing_date`,
+        exactly as `TestRecurrenceReadFromTheModel.
+        test_unparseable_recurrence_phrase_keeps_todays_behaviour` already
+        pins at the class above."""
+        resolved = self._resolve("semanalmente", anchor=self._TUESDAY)
+        assert resolved.starts_at is None, resolved
+        assert resolved.review_reason == REASON_MISSING_DATE, resolved
+
+
+# ── plans/260813_review-gate-and-date-vocabulary.md Test Plan: the resolver ─
+# stays pure — 260812_history-repair-dates.md depends on replaying a stored
+# row's own inputs being deterministic (no wall-clock read of any kind).
+class TestResolverStaysPureAcrossRepeatedCalls:
+    def test_replaying_the_same_inputs_is_byte_for_byte_deterministic(self):
+        """The SAME inputs, called twice, must produce the SAME
+        `ResolvedDate` in every field — proof this module reads nothing but
+        its own arguments (`datetime.now()` would make a replay of a stored
+        row's inputs non-deterministic, exactly the hazard a history-repair
+        pass depends on this module NEVER exhibiting)."""
+        anchor = _post_at(2026, 8, 11)
+        kwargs = dict(
+            date_text="todo fim de semana", time_text="22h", post_timestamp=anchor,
+            is_recurring=True, recurrence_text="todo fim de semana",
+        )
+        first = resolve_event_datetime(**kwargs)
+        second = resolve_event_datetime(**kwargs)
+        assert first == second, (first, second)
+
+    @pytest.mark.parametrize("date_text,is_recurring,recurrence_text", [
+        ("É HOJE", None, None),
+        ("hoje, 15/08", None, None),
+        ("15/08", None, None),
+        (None, True, "todo dia"),
+        (None, True, "toda semana"),
+        ("Quinta (02)", None, None),
+    ])
+    def test_no_field_ever_drifts_on_replay(self, date_text, is_recurring, recurrence_text):
+        anchor = _post_at(2026, 8, 7)
+        first = resolve_event_datetime(
+            date_text=date_text, time_text="22h", post_timestamp=anchor,
+            is_recurring=is_recurring, recurrence_text=recurrence_text,
+        )
+        second = resolve_event_datetime(
+            date_text=date_text, time_text="22h", post_timestamp=anchor,
+            is_recurring=is_recurring, recurrence_text=recurrence_text,
+        )
+        assert first == second, (date_text, first, second)
+
+
+class TestRelativeTokenDefersButDoesNotAbandon:
+    """plans/260813_review-gate-and-date-vocabulary.md §A: a relative token
+    lets the explicit finders answer FIRST whenever the text also carries a
+    digit or a weekday name — but a deferral that no finder honours must fall
+    BACK to the relative reading, not report no date at all.
+
+    Found in review of the §A implementation: guarding on "contains a digit"
+    is right for "hoje, 15/08" (a competing day-of-month) and wrong for
+    "hoje às 22h" (a clock time, which names no day). A bare "hoje" resolved
+    while "hoje às 22h" did not — the same inconsistency §A exists to remove.
+    """
+
+    ANCHOR = _post_at(2026, 8, 7)  # a Friday
+
+    @pytest.mark.parametrize("date_text,expected_day", [
+        # An explicit day-of-month is a real competing claim and WINS.
+        ("hoje, 15/08", 15),
+        ("HOJE 07/08", 7),
+        ("hoje, 5 de setembro", 5),
+        # A clock time carries digits but names no day — the finders decline
+        # and the relative token is the only reading left.
+        ("hoje às 22h", 7),
+        ("HOJE 22h", 7),
+        ("hoje a partir das 21h", 7),
+        ("É HOJE! 23h", 7),
+    ])
+    def test_relative_token_defers_to_a_real_date_and_survives_a_clock_time(
+        self, date_text, expected_day,
+    ):
+        resolved = resolve_event_datetime(
+            date_text=date_text, time_text=None, post_timestamp=self.ANCHOR,
+        )
+        assert resolved.starts_at is not None, date_text
+        assert resolved.starts_at.day == expected_day, date_text
+        assert resolved.review_reason is None, date_text
+
+    def test_amanha_beside_a_clock_time_still_rolls_one_day(self):
+        resolved = resolve_event_datetime(
+            date_text="amanhã às 20h", time_text=None, post_timestamp=self.ANCHOR,
+        )
+        assert resolved.starts_at.date().isoformat() == "2026-08-08"
+
+    @pytest.mark.parametrize("date_text", ["em breve", "sem data", "hojeando", "anteontem"])
+    def test_prose_without_a_relative_token_is_still_unreadable(self, date_text):
+        resolved = resolve_event_datetime(
+            date_text=date_text, time_text=None, post_timestamp=self.ANCHOR,
+        )
+        assert resolved.starts_at is None, date_text
+        assert resolved.review_reason == REASON_MISSING_DATE, date_text
+
+
+class TestStatedDateOutranksACadence:
+    """plans/260813_review-gate-and-date-vocabulary.md §B: "an ordinary
+    caption containing 'todo dia' cannot hijack a one-off event's explicit
+    date". §B's daily form matches the text of ANY venue with a standing
+    happy hour, so this collision is common rather than hypothetical, and
+    before this guard existed "15/08" + `todo dia` resolved to the post's own
+    day and lost the 15th entirely.
+
+    The item stays recurring either way — only which day `starts_at` lands on
+    changes.
+    """
+
+    ANCHOR = _post_at(2026, 8, 7)  # a Friday
+
+    @pytest.mark.parametrize("recurrence_text", [
+        "todo dia", "todos os dias", "diariamente", "todo fim de semana",
+        "toda quinta", "de segunda a sexta", "sextas e sábados",
+    ])
+    def test_a_stated_date_beats_every_cadence_form(self, recurrence_text):
+        resolved = resolve_event_datetime(
+            date_text="15/08", time_text=None, post_timestamp=self.ANCHOR,
+            is_recurring=True, recurrence_text=recurrence_text,
+        )
+        assert resolved.starts_at.date().isoformat() == "2026-08-15", recurrence_text
+        # The cadence is still reported — it was outranked for the DATE only.
+        assert resolved.is_recurring is True, recurrence_text
+        assert resolved.recurrence_text == recurrence_text
+
+    @pytest.mark.parametrize("recurrence_text,expected", [
+        ("todo dia", "2026-08-07"),
+        ("todo fim de semana", "2026-08-08"),
+        ("toda quinta", "2026-08-13"),
+        ("de terça a quinta", "2026-08-11"),
+    ])
+    def test_the_cadence_still_resolves_when_no_date_is_stated(
+        self, recurrence_text, expected,
+    ):
+        resolved = resolve_event_datetime(
+            date_text=None, time_text=None, post_timestamp=self.ANCHOR,
+            is_recurring=True, recurrence_text=recurrence_text,
+        )
+        assert resolved.starts_at.date().isoformat() == expected, recurrence_text
+
+    def test_an_unreadable_date_text_falls_back_to_the_cadence(self):
+        """The stated date is preferred only when it actually RESOLVES —
+        unreadable prose beside a cadence must not blank the date."""
+        resolved = resolve_event_datetime(
+            date_text="quando der", time_text=None, post_timestamp=self.ANCHOR,
+            is_recurring=True, recurrence_text="toda quinta",
+        )
+        assert resolved.starts_at.date().isoformat() == "2026-08-13"
+        assert resolved.review_reason is None

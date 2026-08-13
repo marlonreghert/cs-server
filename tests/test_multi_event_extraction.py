@@ -51,7 +51,7 @@ class TestParseMultiEventExtractionResponse:
             {"title": "Adilson Ramos", "location_text": "RioMar", "confidence": 0.9},
             {"title": "Khrystal", "location_text": "Terra", "confidence": 0.9},
         ]})
-        events, malformed, malformed_attractions = parse_multi_event_extraction_response(raw)
+        events, malformed, malformed_attractions, _truncated_by_cap = parse_multi_event_extraction_response(raw)
         assert [e["title"] for e in events] == ["O Homem do Fraque Verde", "Adilson Ramos", "Khrystal"]
         assert malformed == 0
         assert malformed_attractions == 0
@@ -60,7 +60,7 @@ class TestParseMultiEventExtractionResponse:
         """The plan's own invariant: a single-event post must behave exactly
         like today, just wrapped in a list of one."""
         raw = json.dumps({"events": [{"title": "Festa", "confidence": 0.9}]})
-        events, malformed, malformed_attractions = parse_multi_event_extraction_response(raw)
+        events, malformed, malformed_attractions, _truncated_by_cap = parse_multi_event_extraction_response(raw)
         assert len(events) == 1
         assert events[0]["title"] == "Festa"
         assert malformed == 0
@@ -72,7 +72,7 @@ class TestParseMultiEventExtractionResponse:
             "not-an-object",
             {"title": "Valid B", "confidence": 0.9},
         ]})
-        events, malformed, malformed_attractions = parse_multi_event_extraction_response(raw)
+        events, malformed, malformed_attractions, _truncated_by_cap = parse_multi_event_extraction_response(raw)
         assert [e["title"] for e in events] == ["Valid A", "Valid B"]
         assert malformed == 1
         assert malformed_attractions == 0
@@ -98,12 +98,30 @@ class TestParseMultiEventExtractionResponse:
         entries beyond the ceiling — they are over budget, not defective, so
         they must never inflate the malformed counter."""
         raw = json.dumps({"events": [{"title": f"E{i}", "confidence": 0.9} for i in range(5)]})
-        events, malformed, malformed_attractions = parse_multi_event_extraction_response(
+        events, malformed, malformed_attractions, truncated_by_cap = parse_multi_event_extraction_response(
             raw, max_events=2,
         )
         assert len(events) == 2
         assert malformed == 0
         assert malformed_attractions == 0
+        assert truncated_by_cap is True
+
+    def test_truncated_by_cap_is_false_when_the_raw_list_fits(self):
+        """plans/260812_crawl-error-visibility.md §D: a post whose raw list
+        is AT or under the cap is not truncated — 'the cap bit' must mean
+        something was actually dropped, not merely that a cap exists."""
+        raw = json.dumps({"events": [{"title": f"E{i}", "confidence": 0.9} for i in range(2)]})
+        _events, _malformed, _malformed_attractions, truncated_by_cap = (
+            parse_multi_event_extraction_response(raw, max_events=2)
+        )
+        assert truncated_by_cap is False
+
+    def test_truncated_by_cap_is_false_when_no_cap_is_given(self):
+        raw = json.dumps({"events": [{"title": f"E{i}", "confidence": 0.9} for i in range(5)]})
+        _events, _malformed, _malformed_attractions, truncated_by_cap = (
+            parse_multi_event_extraction_response(raw)
+        )
+        assert truncated_by_cap is False
 
 
 # ── output budget scaling ─────────────────────────────────────────────────────
@@ -259,7 +277,7 @@ class TestMalformedAttractionsCountedPerMultiEventResponse:
                 "attractions": [{"styles": []}, {"styles": []}],
             },
         ]})
-        events, malformed, malformed_attractions = parse_multi_event_extraction_response(raw)
+        events, malformed, malformed_attractions, _truncated_by_cap = parse_multi_event_extraction_response(raw)
         assert malformed == 0
         assert malformed_attractions == 3
         assert [e["title"] for e in events] == ["Event A", "Event B"]
@@ -403,7 +421,7 @@ class TestKindFieldParsing:
         assert parsed["kind"] == "giveaway"
 
     def test_kind_survives_the_multi_event_shape_too(self):
-        events, _malformed, _malformed_attractions = parse_multi_event_extraction_response(
+        events, _malformed, _malformed_attractions, _truncated_by_cap = parse_multi_event_extraction_response(
             json.dumps({"events": [{"kind": "promotion"}, {"kind": "event"}]}),
         )
         assert [e["kind"] for e in events] == ["promotion", "event"]
@@ -430,7 +448,7 @@ class TestCategoryFieldParsing:
         assert parsed["category"] is None
 
     def test_category_survives_the_multi_event_shape_too(self):
-        events, _malformed, _malformed_attractions = parse_multi_event_extraction_response(
+        events, _malformed, _malformed_attractions, _truncated_by_cap = parse_multi_event_extraction_response(
             json.dumps({"events": [{"category": "samba"}, {"category": "rock"}]}),
         )
         assert [e["category"] for e in events] == ["samba", "rock"]
@@ -473,3 +491,172 @@ class TestExtractEventsTruncationDetection:
         _, kwargs = create.call_args
         assert "max_tokens" not in kwargs
         assert "max_completion_tokens" in kwargs
+
+
+# ── plans/260812_event-attribution-and-dates.md §C ───────────────────────────
+class TestBothPromptsStateDateInterpretation:
+    """Extending only one prompt with `date_interpretation` would be the
+    exact same half-fix TestBothPromptsStateKindAndItsPrecedence already
+    guards against for `kind` — asserted directly on BOTH prompt strings,
+    since a bug here is invisible to any test that only exercises the
+    multi-event path (both real runtime callers use it)."""
+
+    @pytest.mark.parametrize("prompt", [EXTRACTION_PROMPT, MULTI_EVENT_EXTRACTION_PROMPT])
+    def test_prompt_mentions_date_interpretation(self, prompt):
+        assert "date_interpretation" in prompt
+
+    @pytest.mark.parametrize("prompt", [EXTRACTION_PROMPT, MULTI_EVENT_EXTRACTION_PROMPT])
+    def test_prompt_states_every_interpretation_kind(self, prompt):
+        for kind in ("relative", "day_month", "day_month_year", "weekday", "weekday_day", "range"):
+            assert kind in prompt
+
+    @pytest.mark.parametrize("prompt", [EXTRACTION_PROMPT, MULTI_EVENT_EXTRACTION_PROMPT])
+    def test_prompt_states_it_is_optional_and_never_a_computed_date(self, prompt):
+        assert "OPTIONAL" in prompt
+        assert "NEVER a computed or absolute date" in prompt
+
+
+class TestDateInterpretationParsing:
+    """`_normalize_date_interpretation`, driven through the public parse
+    functions — mirrors TestAttractionsNormalization's own convention just
+    above in this file."""
+
+    def test_a_relative_interpretation_is_parsed(self):
+        raw = json.dumps({
+            "title": "Festa", "date_text": "É HOJE",
+            "date_interpretation": {"kind": "relative", "relative": "hoje"},
+        })
+        parsed = parse_extraction_response(raw)
+        assert parsed["date_interpretation"] == {"kind": "relative", "relative": "hoje"}
+
+    def test_absent_date_interpretation_parses_to_none(self):
+        raw = json.dumps({"title": "Festa", "date_text": "15/08"})
+        parsed = parse_extraction_response(raw)
+        assert parsed["date_interpretation"] is None
+
+    def test_an_unrecognised_kind_parses_to_none(self):
+        raw = json.dumps({
+            "title": "Festa", "date_text": "algo",
+            "date_interpretation": {"kind": "not_a_real_kind"},
+        })
+        parsed = parse_extraction_response(raw)
+        assert parsed["date_interpretation"] is None
+
+    def test_a_non_object_date_interpretation_parses_to_none(self):
+        raw = json.dumps({
+            "title": "Festa", "date_text": "algo", "date_interpretation": "hoje",
+        })
+        parsed = parse_extraction_response(raw)
+        assert parsed["date_interpretation"] is None
+
+    def test_only_the_recognised_keys_survive_an_extra_absolute_date_field(self):
+        """The hard constraint the plan pins: a model-invented extra key
+        that looks like a computed date is dropped at PARSE time, the first
+        of two independent places this repo ignores it (event_date_resolver.
+        _interpretation_to_date is the second)."""
+        raw = json.dumps({
+            "title": "Festa", "date_text": "É HOJE",
+            "date_interpretation": {
+                "kind": "relative", "relative": "hoje",
+                "absolute_date": "2027-01-01", "resolved_date": "2027-01-01",
+            },
+        })
+        parsed = parse_extraction_response(raw)
+        assert parsed["date_interpretation"] == {"kind": "relative", "relative": "hoje"}
+
+    def test_a_weekday_day_interpretation_keeps_its_int_fields(self):
+        raw = json.dumps({
+            "title": "Festa", "date_text": "Quinta (02)",
+            "date_interpretation": {"kind": "weekday_day", "weekday": "Quinta", "day": 2},
+        })
+        parsed = parse_extraction_response(raw)
+        assert parsed["date_interpretation"] == {
+            "kind": "weekday_day", "weekday": "quinta", "day": 2,
+        }
+
+    def test_a_bool_day_is_never_treated_as_an_int(self):
+        """`bool` subclasses `int` in Python — the same guard this project's
+        other admin-config validators already apply."""
+        raw = json.dumps({
+            "title": "Festa", "date_text": "algo",
+            "date_interpretation": {"kind": "day_month", "day": True, "month": 2},
+        })
+        parsed = parse_extraction_response(raw)
+        assert "day" not in parsed["date_interpretation"]
+
+
+# ── plans/260812_event-attribution-and-dates.md §E ───────────────────────────
+class TestBothPromptsDistinguishAnnouncementFromGreetingOrRecap:
+    """Extending only one prompt would be the exact same half-fix already
+    guarded against above for `kind`/`date_interpretation` — asserted
+    directly on BOTH prompt strings."""
+
+    @pytest.mark.parametrize("prompt", [EXTRACTION_PROMPT, MULTI_EVENT_EXTRACTION_PROMPT])
+    def test_prompt_states_the_attendable_test(self, prompt):
+        # Whitespace-normalized: the prompt hard-wraps this sentence across
+        # lines, matching TestBothPromptsStateKindAndItsPrecedence's own
+        # convention above for the SAME reason.
+        normalized = " ".join(prompt.split())
+        assert "does this announce something attendable" in normalized
+
+    @pytest.mark.parametrize("prompt", [EXTRACTION_PROMPT, MULTI_EVENT_EXTRACTION_PROMPT])
+    def test_prompt_names_greetings_and_recaps_as_other(self, prompt):
+        normalized = " ".join(prompt.split())
+        assert "congratulates, thanks, recaps, or reports" in normalized
+
+    @pytest.mark.parametrize("prompt", [EXTRACTION_PROMPT, MULTI_EVENT_EXTRACTION_PROMPT])
+    def test_prompt_states_the_birthday_greeting_stays_other_even_with_a_date_and_venue(self, prompt):
+        normalized = " ".join(prompt.split())
+        assert "even when it names a real event, a real venue, a real date" in normalized
+
+    @pytest.mark.parametrize("prompt", [EXTRACTION_PROMPT, MULTI_EVENT_EXTRACTION_PROMPT])
+    def test_prompt_names_the_recap_case_explicitly(self, prompt):
+        normalized = " ".join(prompt.split())
+        assert "RECAP" in normalized
+        assert "already over" in normalized
+
+
+class TestOtherVerdictSurvivesIntoThePostTypeColumn:
+    """plans/260812_event-attribution-and-dates.md §E: `resolve_post_type`
+    and `NON_EVENT_KINDS` already carry `other` and need no code change —
+    this is the parser test that proves an `other` verdict the model
+    returns (the §E prompt work's whole point) survives into the parsed
+    `kind`/eventual `post_type` column rather than being coerced back to
+    `event` somewhere along the way."""
+
+    def test_a_birthday_greeting_response_parses_to_kind_other(self):
+        raw = json.dumps({
+            "kind": "other", "title": "31 Anos",
+            "description": "Parabéns pelos seus 31 anos! Feliz aniversário!",
+            "date_text": "08/08", "location_text": "Bar Tal", "confidence": 0.9,
+        })
+        parsed = parse_extraction_response(raw)
+        assert parsed["kind"] == "other"
+
+        from app.models.event_kind import resolve_post_type
+
+        assert resolve_post_type(parsed["kind"]) == "other"
+        assert resolve_post_type(parsed["kind"]) != "event"
+
+    def test_a_recap_response_parses_to_kind_other(self):
+        raw = json.dumps({
+            "kind": "other", "title": "Obrigado!",
+            "description": "Valeu a todo mundo que veio na sexta passada!",
+            "date_text": "sexta passada", "confidence": 0.9,
+        })
+        parsed = parse_extraction_response(raw)
+
+        from app.models.event_kind import resolve_post_type
+
+        assert resolve_post_type(parsed["kind"]) == "other"
+
+    def test_a_genuine_announcement_still_parses_to_kind_event(self):
+        raw = json.dumps({
+            "kind": "event", "title": "Festa de Sexta", "date_text": "sexta",
+            "lineup": ["DJ X"], "price_text": "R$20", "confidence": 0.9,
+        })
+        parsed = parse_extraction_response(raw)
+
+        from app.models.event_kind import resolve_post_type
+
+        assert resolve_post_type(parsed["kind"]) == "event"

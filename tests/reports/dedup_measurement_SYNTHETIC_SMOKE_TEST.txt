@@ -1,0 +1,28 @@
+=== measure_event_dedup (DRY RUN) ===
+venues considered: 5 | candidate rows: 23
+auto pairs: 13 (venue-sourced: 12, promoter-sourced: 1)
+suggest pairs: 8 (venue-sourced: 8, promoter-sourced: 0)
+refused: disjoint=20 no_distinctive_tokens=5
+-- auto pairs (surviving <- absorbed, reasons, promoter-sourced) --
+  [Sempre Rock Bar] 'Show do DJ Teste' <- 'Show do DJ Teste Extended'  reasons=('title_containment',) promoter_sourced=True
+  [Conchittas Bar] 'Aniversário do Rodolpho Produções' <- '31º Rodolpho Produções'  reasons=('title_containment',) promoter_sourced=False
+  [Conchittas Bar] 'Aniversário do Rodolpho Produções' <- 'Rodolpho'  reasons=('title_containment',) promoter_sourced=False
+  [Conchittas Bar] 'Aniversário do Rodolpho Produções' <- 'Rodolpho Produções'  reasons=('title_containment',) promoter_sourced=False
+  [Conchittas Bar] 'Aniversário do Rodolpho Produções' <- 'Aniversário do Rodolpho Produções'  reasons=('title_containment',) promoter_sourced=False
+  [Conchittas Bar] '31º Rodolpho Produções' <- 'Rodolpho'  reasons=('title_containment',) promoter_sourced=False
+  [Conchittas Bar] '31º Rodolpho Produções' <- 'Rodolpho Produções'  reasons=('title_containment',) promoter_sourced=False
+  [Conchittas Bar] '31º Rodolpho Produções' <- 'Aniversário do Rodolpho Produções'  reasons=('title_containment',) promoter_sourced=False
+  [Conchittas Bar] 'Rodolpho' <- 'Rodolpho Produções'  reasons=('title_containment',) promoter_sourced=False
+  [Conchittas Bar] 'Rodolpho' <- 'Aniversário do Rodolpho Produções'  reasons=('title_containment',) promoter_sourced=False
+  [Conchittas Bar] 'Rodolpho Produções' <- 'SEXTOU NO CONCHITTAS BAR!'  reasons=('shared_lineup',) promoter_sourced=False
+  [Conchittas Bar] 'Rodolpho Produções' <- 'Aniversário do Rodolpho Produções'  reasons=('title_containment',) promoter_sourced=False
+  [Sala de Reboco] 'ONILDO ALMEIDA & CONVIDADOS' <- 'Homenagem aos 98 anos de Onildo Almeida'  reasons=('shared_lineup',) promoter_sourced=False
+-- suggest pairs (title_a / title_b, promoter-sourced) --
+  [Entre Amigos O Bode] 'Férias Amigos Park — Semana 1' / 'Férias Amigos Park — Semana 2'  promoter_sourced=False
+  [Entre Amigos O Bode] 'Férias Amigos Park — Semana 1' / 'Férias Amigos Park — Semana 3'  promoter_sourced=False
+  [Entre Amigos O Bode] 'Férias Amigos Park — Semana 1' / 'Férias Amigos Park — Semana 4'  promoter_sourced=False
+  [Entre Amigos O Bode] 'Férias Amigos Park — Semana 2' / 'Férias Amigos Park — Semana 3'  promoter_sourced=False
+  [Entre Amigos O Bode] 'Férias Amigos Park — Semana 2' / 'Férias Amigos Park — Semana 4'  promoter_sourced=False
+  [Entre Amigos O Bode] 'Férias Amigos Park — Semana 3' / 'Férias Amigos Park — Semana 4'  promoter_sourced=False
+  [Sempre Rock Bar] 'Ação Leitura: Bate-papo com Marcelino Freire' / 'Ação Leitura: Bate-papo com Jeferson Tenório'  promoter_sourced=False
+  [Casanova Ecobar] 'Bolinha do Cavaco' / 'JB do Cavaco'  promoter_sourced=False

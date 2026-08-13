@@ -1,0 +1,141 @@
+.venv/bin/python -m behave "tests/bdd/enrichment/dormant-vs-broken-targets.feature"
+USING RUNNER: behave.runner:Runner
+Feature: Dormant versus broken targets # tests/bdd/enrichment/dormant-vs-broken-targets.feature:1
+  An account that answers but has posted nothing inside the lookback window is
+  dormant, not broken. It must be reported as such, must never count as a
+  failure, and must never be disabled — while a genuinely blocked or
+  non-existent handle keeps being reported exactly as it is today.
+  Feature: Dormant versus broken targets  # tests/bdd/enrichment/dormant-vs-broken-targets.feature:1
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: Report a target as dormant when its account answers but has nothing in the window  # tests/bdd/enrichment/dormant-vs-broken-targets.feature:10
+    Given a crawl target "quietbar" that has never been seeded                                 # tests/bdd/steps/crawl_error_visibility_steps.py:99
+    Given Apify returns an error item for "quietbar" posts with code "no_items"                # tests/bdd/steps/crawl_error_visibility_steps.py:140
+    And that error item reports no blocked requests                                            # tests/bdd/steps/crawl_error_visibility_steps.py:171
+    When the crawl runs for "quietbar"                                                         # tests/bdd/steps/crawl_error_visibility_steps.py:106
+LOG_INFO:app.services.instagram_crawl_service: [InstagramCrawl] quietbar posts: Apify error='no_items' request_error_count=0 classified as 'empty'
+LOG_INFO:app.services.instagram_crawl_service: [InstagramCrawl] quietbar: posts stream is now dormant (account answered, nothing in the lookback window -- not a failure)
+    Then "quietbar" is reported as dormant                                                     # tests/bdd/steps/dormant_vs_broken_targets_steps.py:66
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: Do not increment the failure counter for a dormant target         # tests/bdd/enrichment/dormant-vs-broken-targets.feature:16
+    Given a crawl target "quietbar" that has never been seeded                # tests/bdd/steps/crawl_error_visibility_steps.py:99
+    Given the consecutive failure count for "quietbar" is 0                   # tests/bdd/steps/crawl_error_visibility_steps.py:227
+    And Apify returns an error item for "quietbar" posts with code "no_items" # tests/bdd/steps/crawl_error_visibility_steps.py:140
+    And that error item reports no blocked requests                           # tests/bdd/steps/crawl_error_visibility_steps.py:171
+    When the crawl runs for "quietbar"                                        # tests/bdd/steps/crawl_error_visibility_steps.py:106
+LOG_INFO:app.services.instagram_crawl_service: [InstagramCrawl] quietbar posts: Apify error='no_items' request_error_count=0 classified as 'empty'
+LOG_INFO:app.services.instagram_crawl_service: [InstagramCrawl] quietbar: posts stream is now dormant (account answered, nothing in the lookback window -- not a failure)
+    Then the consecutive failure count for "quietbar" is 0                    # tests/bdd/steps/crawl_error_visibility_steps.py:227
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: Do not disable a dormant target                                     # tests/bdd/enrichment/dormant-vs-broken-targets.feature:23
+    Given a crawl target "quietbar" that has never been seeded                  # tests/bdd/steps/crawl_error_visibility_steps.py:99
+    Given Apify returns an error item for "quietbar" posts with code "no_items" # tests/bdd/steps/crawl_error_visibility_steps.py:140
+    And that error item reports no blocked requests                             # tests/bdd/steps/crawl_error_visibility_steps.py:171
+    When the crawl runs for "quietbar"                                          # tests/bdd/steps/crawl_error_visibility_steps.py:106
+LOG_INFO:app.services.instagram_crawl_service: [InstagramCrawl] quietbar posts: Apify error='no_items' request_error_count=0 classified as 'empty'
+LOG_INFO:app.services.instagram_crawl_service: [InstagramCrawl] quietbar: posts stream is now dormant (account answered, nothing in the lookback window -- not a failure)
+    Then "quietbar" is still enabled                                            # tests/bdd/steps/dormant_vs_broken_targets_steps.py:91
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: Keep reporting a blocked target as blocked                          # tests/bdd/enrichment/dormant-vs-broken-targets.feature:29
+    Given a crawl target "quietbar" that has never been seeded                  # tests/bdd/steps/crawl_error_visibility_steps.py:99
+    Given Apify returns an error item for "quietbar" posts with code "no_items" # tests/bdd/steps/crawl_error_visibility_steps.py:140
+    And that error item reports 11 blocked requests                             # tests/bdd/steps/crawl_error_visibility_steps.py:163
+    When the crawl runs for "quietbar"                                          # tests/bdd/steps/crawl_error_visibility_steps.py:106
+LOG_WARNING:app.services.instagram_crawl_service: [InstagramCrawl] quietbar posts: Apify error='no_items' request_error_count=11 classified as 'blocked'
+    Then the posts stream outcome is recorded as blocked                        # tests/bdd/steps/crawl_error_visibility_steps.py:179
+    And "quietbar" is not reported as dormant                                   # tests/bdd/steps/dormant_vs_broken_targets_steps.py:85
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: Keep reporting a non-existent handle as permanently failed           # tests/bdd/enrichment/dormant-vs-broken-targets.feature:36
+    Given a crawl target "quietbar" that has never been seeded                   # tests/bdd/steps/crawl_error_visibility_steps.py:99
+    Given Apify returns an error item for "quietbar" posts with code "not_found" # tests/bdd/steps/crawl_error_visibility_steps.py:140
+    When the crawl runs for "quietbar"                                           # tests/bdd/steps/crawl_error_visibility_steps.py:106
+LOG_WARNING:app.services.instagram_crawl_service: [InstagramCrawl] quietbar posts: Apify error='not_found' request_error_count=0 classified as 'handle_not_found'
+LOG_WARNING:app.services.instagram_crawl_service: [InstagramCrawl] quietbar: Instagram reports this handle does not exist -- disabling the target rather than retrying a scrape that can never succeed
+    Then the posts stream outcome is recorded as a handle-not-found failure      # tests/bdd/steps/crawl_error_visibility_steps.py:184
+    And "quietbar" is not reported as dormant                                    # tests/bdd/steps/dormant_vs_broken_targets_steps.py:85
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: Surface dormancy alongside never-seeded on the admin read model     # tests/bdd/enrichment/dormant-vs-broken-targets.feature:42
+    Given a crawl target "quietbar" that has never been seeded                  # tests/bdd/steps/crawl_error_visibility_steps.py:99
+    Given Apify returns an error item for "quietbar" posts with code "no_items" # tests/bdd/steps/crawl_error_visibility_steps.py:140
+    And that error item reports no blocked requests                             # tests/bdd/steps/crawl_error_visibility_steps.py:171
+    When the crawl runs for "quietbar"                                          # tests/bdd/steps/crawl_error_visibility_steps.py:106
+LOG_INFO:app.services.instagram_crawl_service: [InstagramCrawl] quietbar posts: Apify error='no_items' request_error_count=0 classified as 'empty'
+LOG_INFO:app.services.instagram_crawl_service: [InstagramCrawl] quietbar: posts stream is now dormant (account answered, nothing in the lookback window -- not a failure)
+    And an operator reads the crawl targets from the admin API                  # tests/bdd/steps/crawl_error_visibility_steps.py:309
+    Then "quietbar" reports that its posts stream has never seeded              # tests/bdd/steps/crawl_transport_failure_visibility_steps.py:129
+    And "quietbar" reports that its account is dormant                          # tests/bdd/steps/dormant_vs_broken_targets_steps.py:102
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: Use the seed lookback on a target whose cursor is unset  # tests/bdd/enrichment/dormant-vs-broken-targets.feature:50
+    Given a crawl target "quietbar" that has never been seeded       # tests/bdd/steps/crawl_error_visibility_steps.py:99
+    Given the seed lookback is 12 months                             # tests/bdd/steps/dormant_vs_broken_targets_steps.py:109
+    And the steady-state lookback is 3 months                        # tests/bdd/steps/dormant_vs_broken_targets_steps.py:115
+    When the crawl runs for "quietbar"                               # tests/bdd/steps/crawl_error_visibility_steps.py:106
+    Then Apify is asked for posts newer than 12 months               # tests/bdd/steps/dormant_vs_broken_targets_steps.py:141
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: Use the steady-state lookback once the cursor is set  # tests/bdd/enrichment/dormant-vs-broken-targets.feature:56
+    Given a crawl target "quietbar" that has never been seeded    # tests/bdd/steps/crawl_error_visibility_steps.py:99
+    Given the seed lookback is 12 months                          # tests/bdd/steps/dormant_vs_broken_targets_steps.py:109
+    And the steady-state lookback is 3 months                     # tests/bdd/steps/dormant_vs_broken_targets_steps.py:115
+    And the posts cursor for "quietbar" is already set            # tests/bdd/steps/dormant_vs_broken_targets_steps.py:129
+    When the crawl runs for "quietbar"                            # tests/bdd/steps/crawl_error_visibility_steps.py:106
+    Then Apify is not asked for posts newer than 12 months        # tests/bdd/steps/dormant_vs_broken_targets_steps.py:148
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: Honour a per-target seed lookback override         # tests/bdd/enrichment/dormant-vs-broken-targets.feature:63
+    Given a crawl target "quietbar" that has never been seeded # tests/bdd/steps/crawl_error_visibility_steps.py:99
+    Given the seed lookback is 12 months                       # tests/bdd/steps/dormant_vs_broken_targets_steps.py:109
+    And "quietbar" overrides its seed lookback to 6 months     # tests/bdd/steps/dormant_vs_broken_targets_steps.py:136
+    When the crawl runs for "quietbar"                         # tests/bdd/steps/crawl_error_visibility_steps.py:106
+    Then Apify is asked for posts newer than 6 months          # tests/bdd/steps/dormant_vs_broken_targets_steps.py:141
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: Stop reporting dormancy once the target produces a post  # tests/bdd/enrichment/dormant-vs-broken-targets.feature:69
+    Given a crawl target "quietbar" that has never been seeded       # tests/bdd/steps/crawl_error_visibility_steps.py:99
+    Given "quietbar" is reported as dormant                          # tests/bdd/steps/dormant_vs_broken_targets_steps.py:72
+    And Apify returns 3 posts for "quietbar"                         # tests/bdd/steps/crawl_error_visibility_steps.py:244
+    When the crawl runs for "quietbar"                               # tests/bdd/steps/crawl_error_visibility_steps.py:106
+LOG_INFO:app.services.instagram_crawl_service: [InstagramCrawl] quietbar: posts stream is no longer dormant
+LOG_WARNING:app.services.instagram_crawl_service: [InstagramCrawl] quietbar: archived without image classification (skipped_no_classifier) — extraction for this crawl can only qualify posts by caption; an image-only flyer with no event-marker caption text will be missed, not correctly judged not-an-event
+    Then "quietbar" is not reported as dormant                       # tests/bdd/steps/dormant_vs_broken_targets_steps.py:85
+
+1 feature passed, 0 failed, 0 skipped
+10 scenarios passed, 0 failed, 0 skipped
+55 steps passed, 0 failed, 0 skipped
+Took 0min 0.042s

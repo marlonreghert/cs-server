@@ -482,6 +482,13 @@ class RdsVenueStore:
         # a merge/re-extraction decision lands on (see that module's
         # _confirmed_update_fields docstring).
         "time_known",
+        # plans/260812_event-dedup-fuzzy-title.md §E (migration 0038) — the
+        # event that absorbed THIS row via title/lineup similarity, when its
+        # status is 'superseded' for that reason. NULL for every row an
+        # exact-identity merge deleted instead (that path never sets this —
+        # the row is simply gone) and for every row that has never been
+        # absorbed at all.
+        "superseded_by",
     )
     _EVENT_JSONB_COLUMNS = ("lineup", "operator_edited_fields", "attractions")
     # Python dict key -> real SQL column name, for the one column whose
@@ -503,8 +510,22 @@ class RdsVenueStore:
         "source_kind", "source_handle", "source_shortcode", "source_permalink",
         "source_event_key", "source_event_index", "cover_photo_key",
         "raw_extraction", "first_seen_at", "last_seen_at",
+        # plans/260812_crawl-error-visibility.md §C/§D (migration 0036):
+        # Apify's own media type ("Video"/"Image"/"Sidecar" — NOT
+        # events.post_item.post_type, an unrelated event/promotion/menu
+        # classification) and the post's own upload timestamp (distinct from
+        # first_seen_at/last_seen_at above, which are CRAWL times), plus
+        # whether the per-post event cap (§D) dropped trailing entries from
+        # this post's own extraction.
+        "source_media_type", "source_uploaded_at", "source_events_truncated",
+        # plans/260812_event-attribution-and-dates.md §C (migration 0037):
+        # the model's structured date-interpretation fallback, persisted
+        # NEXT TO raw_extraction (its own column, not nested inside that
+        # blob) — the determinism guard's own store, read back by
+        # `list_events_by_source` before a re-extraction resolves a date.
+        "date_interpretation",
     )
-    _EVENT_SOURCE_JSONB_COLUMNS = ("raw_extraction",)
+    _EVENT_SOURCE_JSONB_COLUMNS = ("raw_extraction", "date_interpretation")
 
     # plans/260807_review-queue-completeness-and-venue-names.md: LEFT JOIN,
     # never INNER — an unresolved promoter event has `venue_id IS NULL` (or a
@@ -531,16 +552,20 @@ class RdsVenueStore:
         "e.price_text, e.location_text, e.confidence, e.status, e.review_reason, "
         "e.location_resolution, e.location_confidence, e.linked_by, e.linked_at, "
         "e.operator_edited_fields, e.ticket_info, e.attractions, "
-        "e.post_type, e.category, e.time_known, "
+        "e.post_type, e.category, e.time_known, e.superseded_by, "
         "e.updated_at, v.venue_name, "
         "ps.source_kind, ps.source_handle, ps.source_shortcode, ps.source_permalink, "
         "ps.source_event_key, ps.source_event_index, ps.cover_photo_key, ps.raw_extraction, "
+        "ps.source_media_type, ps.source_uploaded_at, ps.source_events_truncated, "
+        "ps.date_interpretation, "
         "agg.first_seen_at, agg.last_seen_at "
         "FROM events.post_item e "
         "LEFT JOIN venues.venue v ON v.venue_id = e.venue_id "
         "LEFT JOIN LATERAL ("
         "  SELECT source_kind, source_handle, source_shortcode, source_permalink, "
-        "         source_event_key, source_event_index, cover_photo_key, raw_extraction "
+        "         source_event_key, source_event_index, cover_photo_key, raw_extraction, "
+        "         source_media_type, source_uploaded_at, source_events_truncated, "
+        "         date_interpretation "
         "  FROM events.post_item_source es WHERE es.post_item_id = e.post_item_id "
         "  ORDER BY es.last_seen_at DESC, es.id DESC LIMIT 1"
         ") ps ON true "
@@ -560,11 +585,13 @@ class RdsVenueStore:
         "e.price_text, e.location_text, e.confidence, e.status, e.review_reason, "
         "e.location_resolution, e.location_confidence, e.linked_by, e.linked_at, "
         "e.operator_edited_fields, e.ticket_info, e.attractions, "
-        "e.post_type, e.category, e.time_known, "
+        "e.post_type, e.category, e.time_known, e.superseded_by, "
         "e.updated_at, v.venue_name, "
         "es.source_kind, es.source_handle, es.source_shortcode, es.source_permalink, "
         "es.source_event_key, es.source_event_index, es.cover_photo_key, "
-        "es.raw_extraction, es.first_seen_at, es.last_seen_at "
+        "es.raw_extraction, es.first_seen_at, es.last_seen_at, "
+        "es.source_media_type, es.source_uploaded_at, es.source_events_truncated, "
+        "es.date_interpretation "
         "FROM events.post_item_source es "
         "JOIN events.post_item e ON e.post_item_id = es.post_item_id "
         "LEFT JOIN venues.venue v ON v.venue_id = e.venue_id"
@@ -607,12 +634,66 @@ class RdsVenueStore:
                 text(
                     "SELECT id, post_item_id AS event_id, source_kind, source_handle, "
                     "source_shortcode, source_permalink, source_event_key, source_event_index, "
-                    "cover_photo_key, raw_extraction, first_seen_at, last_seen_at "
+                    "cover_photo_key, raw_extraction, first_seen_at, last_seen_at, "
+                    "source_media_type, source_uploaded_at, source_events_truncated, "
+                    "date_interpretation "
                     "FROM events.post_item_source WHERE post_item_id=:e ORDER BY first_seen_at, id"
                 ),
                 {"e": event_id},
             ).mappings()
             return [dict(r) for r in rows]
+
+    def list_all_event_sources(self) -> list[dict]:
+        """Every `events.post_item_source` row in the table, oldest
+        first-seen first — the whole-table view `list_event_sources(event_id)`
+        cannot give (that one is scoped to a single event). Exists for
+        `scripts.backfill_source_provenance`, which must consider every
+        source row exactly once regardless of how many share a `post_item_id`
+        (plans/260813_backfill-source-provenance.md)."""
+        with self.engine.connect() as conn:
+            rows = conn.execute(
+                text(
+                    "SELECT id, post_item_id AS event_id, source_kind, source_handle, "
+                    "source_shortcode, source_permalink, source_event_key, source_event_index, "
+                    "cover_photo_key, first_seen_at, last_seen_at, "
+                    "source_media_type, source_uploaded_at "
+                    "FROM events.post_item_source ORDER BY first_seen_at, id"
+                )
+            ).mappings()
+            return [dict(r) for r in rows]
+
+    def update_event_source_provenance(
+        self, source_id: str, *, source_uploaded_at=None, source_media_type: Optional[str] = None,
+    ) -> bool:
+        """Fill `source_uploaded_at`/`source_media_type` on ONE
+        `events.post_item_source` row, identified by its own `id` (never by
+        `event_id`+`source_handle`+`source_shortcode` — the caller already
+        has the exact row from `list_all_event_sources`, and re-deriving the
+        ambiguity-prone lookup `update_event` uses would be the wrong tool
+        here).
+
+        `COALESCE(existing, :new)` is the never-overwrite guarantee enforced
+        AT THE SQL LEVEL, independent of whatever the caller's own dry-run
+        decision logic already computed — a row written since the forward
+        fixes keeps its live value even if a caller bug ever passed one in.
+        Returns whether the row still exists (True) or vanished (False);
+        never raises on a no-op write (both columns already set is a normal,
+        expected outcome, not an error).
+        """
+        with self.engine.begin() as conn:
+            result = conn.execute(
+                text(
+                    "UPDATE events.post_item_source SET "
+                    "source_uploaded_at = COALESCE(source_uploaded_at, :source_uploaded_at), "
+                    "source_media_type = COALESCE(source_media_type, :source_media_type) "
+                    "WHERE id=:id"
+                ),
+                {
+                    "id": source_id, "source_uploaded_at": source_uploaded_at,
+                    "source_media_type": source_media_type,
+                },
+            )
+            return result.rowcount > 0
 
     def list_events_by_handle(self, source_handle: str) -> list[dict]:
         """Every event with AT LEAST ONE source posted under `source_handle`
@@ -645,6 +726,23 @@ class RdsVenueStore:
                     "UPDATE events.post_item_source SET post_item_id=:to_id WHERE post_item_id=:from_id"
                 ),
                 {"to_id": to_event_id, "from_id": from_event_id},
+            )
+
+    def reattach_event_source_by_id(self, source_id: str, to_event_id: str) -> None:
+        """Re-point ONE specific `events.post_item_source` row (by its own
+        `id`, never by `from_event_id`) at `to_event_id` —
+        plans/260812_event-dedup-fuzzy-title.md §E's reversal primitive.
+        `reattach_event_sources` above moves EVERY source currently on one
+        event, which is correct for an absorption but wrong for a reversal:
+        the canonical may have gained sources of its own (or from an
+        earlier, unrelated merge) since the absorption this call is
+        undoing, and only the SPECIFIC source ids that moved during THAT
+        merge (`events.event_merge_suggestion.moved_source_ids`) may move
+        back."""
+        with self.engine.begin() as conn:
+            conn.execute(
+                text("UPDATE events.post_item_source SET post_item_id=:to_id WHERE id=:id"),
+                {"to_id": to_event_id, "id": source_id},
             )
 
     def delete_event(self, event_id: str) -> None:
@@ -999,6 +1097,110 @@ class RdsVenueStore:
                 {"e": event_id},
             ).mappings()
             return [dict(r) for r in rows]
+
+    # ── events.event_merge_suggestion (plans/260812_event-dedup-fuzzy-title.md
+    # §C/§E, migration 0038) ────────────────────────────────────────────────
+    _MERGE_SUGGESTION_COLUMNS = (
+        "suggestion_id", "event_id", "candidate_event_id", "band", "reasons",
+        "event_distinctive_words", "candidate_distinctive_words", "shared_lineup_names",
+        "decision", "moved_source_ids", "absorbed_status_before", "created_at",
+        "decided_at", "decided_by",
+    )
+    _MERGE_SUGGESTION_JSONB_COLUMNS = (
+        "reasons", "event_distinctive_words", "candidate_distinctive_words",
+        "shared_lineup_names", "moved_source_ids",
+    )
+    _MERGE_SUGGESTION_SELECT = (
+        "SELECT suggestion_id, event_id, candidate_event_id, band, reasons, "
+        "event_distinctive_words, candidate_distinctive_words, shared_lineup_names, "
+        "decision, moved_source_ids, absorbed_status_before, created_at, decided_at, "
+        "decided_by FROM events.event_merge_suggestion"
+    )
+
+    def create_event_merge_suggestion(self, fields: dict) -> dict:
+        """Insert one `events.event_merge_suggestion` row — written both for
+        a SUGGEST-band pair awaiting an operator (`decision='pending'`) and,
+        in the SAME shape, for every AUTO-band absorption this feature
+        itself performs (`decision='auto_merged'`) — see the migration's own
+        docstring for why one table serves both."""
+        cols = [c for c in self._MERGE_SUGGESTION_COLUMNS if c in fields]
+        assign = {c: fields[c] for c in cols}
+        for c in self._MERGE_SUGGESTION_JSONB_COLUMNS:
+            if c in assign and assign[c] is not None:
+                assign[c] = json.dumps(assign[c])
+        col_list = ", ".join(cols)
+        val_list = ", ".join(
+            f"CAST(:{c} AS jsonb)" if c in self._MERGE_SUGGESTION_JSONB_COLUMNS else f":{c}"
+            for c in cols
+        )
+        with self.engine.begin() as conn:
+            conn.execute(
+                text(f"INSERT INTO events.event_merge_suggestion ({col_list}) VALUES ({val_list})"),
+                assign,
+            )
+        return self.get_event_merge_suggestion(fields["suggestion_id"])
+
+    def get_event_merge_suggestion(self, suggestion_id: str) -> Optional[dict]:
+        with self.engine.connect() as conn:
+            row = conn.execute(
+                text(f"{self._MERGE_SUGGESTION_SELECT} WHERE suggestion_id=:id"),
+                {"id": suggestion_id},
+            ).mappings().first()
+            return dict(row) if row else None
+
+    def list_event_merge_suggestions(
+        self, *, event_id: Optional[str] = None, candidate_event_id: Optional[str] = None,
+        decision: Optional[str] = None,
+    ) -> list[dict]:
+        """Every suggestion touching `event_id` on EITHER side (surviving or
+        candidate) — the review queue needs both directions on one event, and
+        a reversal looks a row up by `candidate_event_id` alone (the absorbed
+        side, which no longer knows its own canonical any other way)."""
+        sql = self._MERGE_SUGGESTION_SELECT
+        clauses = []
+        params: dict = {}
+        if event_id is not None:
+            clauses.append("(event_id=:event_id OR candidate_event_id=:event_id)")
+            params["event_id"] = event_id
+        if candidate_event_id is not None:
+            clauses.append("candidate_event_id=:candidate_event_id")
+            params["candidate_event_id"] = candidate_event_id
+        if decision is not None:
+            clauses.append("decision=:decision")
+            params["decision"] = decision
+        if clauses:
+            sql += " WHERE " + " AND ".join(clauses)
+        sql += " ORDER BY created_at, suggestion_id"
+        with self.engine.connect() as conn:
+            return [dict(r) for r in conn.execute(text(sql), params).mappings()]
+
+    def update_event_merge_suggestion(self, suggestion_id: str, fields: dict) -> Optional[dict]:
+        """Partial update — used to move a suggestion's `decision` (pending
+        -> applied/rejected/reversed) and to record `moved_source_ids`/
+        `absorbed_status_before` once a merge actually applies."""
+        if not fields:
+            return self.get_event_merge_suggestion(suggestion_id)
+        cols = [c for c in self._MERGE_SUGGESTION_COLUMNS if c in fields and c != "suggestion_id"]
+        assign = {c: fields[c] for c in cols}
+        for c in self._MERGE_SUGGESTION_JSONB_COLUMNS:
+            if c in assign and assign[c] is not None:
+                assign[c] = json.dumps(assign[c])
+        set_clauses = [
+            f"{c}=CAST(:{c} AS jsonb)" if c in self._MERGE_SUGGESTION_JSONB_COLUMNS else f"{c}=:{c}"
+            for c in cols
+        ]
+        assign["suggestion_id"] = suggestion_id
+        with self.engine.begin() as conn:
+            result = conn.execute(
+                text(
+                    f"UPDATE events.event_merge_suggestion SET {', '.join(set_clauses)} "
+                    "WHERE suggestion_id=:suggestion_id"
+                ),
+                assign,
+            )
+            if result.rowcount == 0:
+                return None
+        return self.get_event_merge_suggestion(suggestion_id)
 
     # ── bulk per-table readers (projector rebuild, P1) ─────────────────────────
     # Replace the projector's former per-venue read loop (~18 SQL queries per
@@ -1566,6 +1768,19 @@ class RdsVenueStore:
         # reels stream actually executed — NULL means "not yet measured",
         # never zero.
         "last_run_reels_fetched", "last_run_reels_new",
+        # plans/260812_crawl-error-visibility.md §B (migration 0036): which
+        # outcome (blocked, handle_not_found, or failed) the target's last
+        # FAILED run hit, and when — written by run_target, left standing
+        # (never cleared) on a run that did not fail, so these always answer
+        # "what was the last failure and when." NULL means no failure has
+        # ever been recorded.
+        "last_failure_kind", "last_failure_at",
+        # plans/260813_dormant-vs-broken-targets.md §A (migration 0038):
+        # whether the posts stream's most recent answer was the DORMANT
+        # signature — recomputed and overwritten on every run, never
+        # sticky like `last_failure_kind` (see the migration's own
+        # docstring for why neither existing column could carry this).
+        "posts_dormant",
     )
     _CRAWL_TARGET_SELECT = (
         "SELECT handle, kind, enabled, cron, timezone, crawl_reels, "
@@ -1573,7 +1788,8 @@ class RdsVenueStore:
         "reels_results_limit, reels_seed_results_limit, "
         "cursor_posts_at, cursor_reels_at, last_run_at, last_run_results, "
         "last_run_cost_usd, consecutive_failures, notes, "
-        "last_run_reels_fetched, last_run_reels_new, created_at, updated_at "
+        "last_run_reels_fetched, last_run_reels_new, "
+        "last_failure_kind, last_failure_at, posts_dormant, created_at, updated_at "
         "FROM events.crawl_target"
     )
 
