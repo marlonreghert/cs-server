@@ -597,6 +597,7 @@ class Container:
         from app.services.event_venue_targeting import (
             validate_event_candidate_categories_config,
         )
+        from app.models.promoter_event_visibility import validate_hide_promoter_events_config
 
         def _validate_eligibility_config(value):
             EligibilityConfig.from_dict(value, from_admin_override=True)  # raises on invalid
@@ -633,6 +634,15 @@ class Container:
                 # dedicated endpoint. Resolved fresh per add by
                 # AddVenueHandler._resolve_instagram_discovery_flags.
                 "instagram_discovery": validate_instagram_discovery_config,
+                # plans/260813_hide-promoter-events.md §B: whether admin
+                # event reads exclude all-promoter items — the SAME generic
+                # admin-config CRUD route every key here uses for a write; a
+                # dedicated GET /admin/events/config reports the live,
+                # default-applied value (app.routers.admin_events_router.
+                # get_events_config) since the generic GET 404s on an unset
+                # key, which is wrong for a flag whose default IS the
+                # answer most of the time.
+                "hide_promoter_events": validate_hide_promoter_events_config,
             },
         )
 

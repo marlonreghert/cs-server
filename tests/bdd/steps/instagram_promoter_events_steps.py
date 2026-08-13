@@ -20,12 +20,14 @@ import asyncio
 import json
 from datetime import datetime, timezone
 
+import fakeredis
 from behave import given, then, when  # type: ignore[import-untyped]
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from app.dao.venue_repository import VenueRepository
 from app.models.instagram import VenueInstagram
+from app.models.promoter_event_visibility import ADMIN_CONFIG_HIDE_PROMOTER_EVENTS_KEY
 from app.models.venue import Venue
 from app.routers.admin_events_router import router as admin_events_router
 from app.routers.admin_events_router import set_container as set_events_container
@@ -260,9 +262,22 @@ def _current_event(context) -> dict:
 
 
 def _build_admin_events_app(context) -> None:
+    """plans/260813_hide-promoter-events.md defaults admin event reads to
+    HIDE promoter-only items. Every scenario sharing this helper — this
+    file's own review-queue/candidate-ranking scenarios, plus
+    review_queue_completeness_steps.py and date_resolution_correctness_
+    steps.py, which reuse it via `ipe._build_admin_events_app` — predates
+    that plan and is testing promoter-event PLUMBING (queue membership,
+    candidate ranking, ordering), never visibility. Wiring a fakeredis
+    client with the flag explicitly off keeps those scenarios asserting
+    exactly what they always asserted, independent of the new default."""
     app = FastAPI()
     app.include_router(admin_events_router)
-    set_events_container(type("C", (), {"pipeline_repository": context.pe_dao})())
+    fake_redis = fakeredis.FakeRedis(decode_responses=True)
+    fake_redis.set(ADMIN_CONFIG_HIDE_PROMOTER_EVENTS_KEY, json.dumps(False))
+    set_events_container(type("C", (), {
+        "pipeline_repository": context.pe_dao, "redis_client": fake_redis,
+    })())
     context.pe_client = TestClient(app)
 
 

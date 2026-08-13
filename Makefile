@@ -128,6 +128,7 @@ test-unit:
 		tests/test_expose_time_known.py \
 		tests/test_menu_item_lifecycle.py \
 		tests/test_source_media_type_migration.py \
+		tests/test_promoter_event_visibility.py \
 		-v
 
 test-integration:
