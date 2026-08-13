@@ -1327,6 +1327,18 @@ EVENT_VENUE_LINK_TOTAL = Counter(
     ["method", "result"],
 )
 
+# plans/260813_handle-attribution-hardening.md §A/Error Handling: rung 4
+# (name match) invocations skipped because `location_text` was an @handle
+# with nothing else usable after stripping it — the expected steady state
+# for promoter roundups (`@mahalilacafe`, `@espaco.muta`, ...). A high rate
+# here is the fix doing its job, not a fault; it is the counterpart to
+# EVENT_VENUE_LINK_TOTAL's `method="venue_not_in_catalog"` series, which is
+# what those skipped events should resolve to instead.
+EVENT_VENUE_NAME_MATCH_SKIPPED_TOTAL = Counter(
+    "event_venue_name_match_skipped_total",
+    "Rung-4 name-match invocations skipped because location_text was handle-only",
+)
+
 # plans/260812_event-attribution-and-dates.md §C/Error Handling: how each
 # event's date was actually reached — `deterministic` (the proven regex
 # finders in event_date_resolver.py resolved it on their own, no model

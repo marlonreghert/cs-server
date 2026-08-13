@@ -28,7 +28,15 @@ one resolves.
      place", not two that can drift apart — plus proximity:
      `venue_eligibility.haversine_km` breaks ties among same-named venues
      when the location tag supplied coordinates even though its NAME did not
-     clear rung 2's bar.
+     clear rung 2's bar. plans/260813_handle-attribution-hardening.md §A:
+     every `@handle` token is stripped out of `location_text` BEFORE this
+     rung ever sees it (`_strip_handles_for_name_match`) — an @handle is an
+     exact identifier, not a name fragment, and fuzzy-scoring its characters
+     against a venue's name is a category error, not a low-confidence match
+     (`@mahalilacafe` scored 0.76 against "Maria Café" on the shared
+     substring "café", well above the floor). When nothing with actual
+     alphabetic content survives the strip, this rung does not run at all
+     for that text.
   5. @-mention in the POST CAPTION — kept, but demoted below every per-event
      signal, and only trusted when it is UNAMBIGUOUS (the caption names
      exactly one known venue). A caption naming several known venues (a
@@ -46,6 +54,23 @@ Failing either gate queues the event for review with its ranked candidates;
 failing the floor outright leaves it unresolved. Rungs 1-3 are identities or
 bounded-certain matches, not open-ended scores, so neither gate applies to
 them.
+
+plans/260813_handle-attribution-hardening.md — the general rule these three
+production rows taught: an automatic link needs evidence of the venue's
+IDENTITY, not a coincidence of characters. `@mahalilacafe` and `@espaco.muta`
+each auto-linked to an unrelated venue ("Maria Café", "Espaço Tucano") purely
+because rung 4's fuzzy scorer was handed the handle's own text and found a
+shared substring — a confident-looking answer built on evidence an operator
+could never see or check, since it carried no review reason at all. Raising
+the confidence floor cannot fix this: the floor is a global knob, and these
+matches score highly BECAUSE the comparison was fed the wrong KIND of string,
+not because the bar was too low. The fix is categorical, not numeric — an
+`@handle` is an identity to be looked up (rungs 1/2/5), never text to be
+fuzzy-matched (rung 4), enforced in two places that must never drift apart:
+`resolve_event_venue` strips every `@handle` out of `location_text` before
+rung 4 ever runs (§A), and `_name_match_candidates` itself refuses outright
+if handed text that still carries one (§C) — so the guarantee holds even for
+a call site that forgets to strip first.
 """
 from __future__ import annotations
 
@@ -56,7 +81,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Callable, Optional
 
-from app.metrics import EVENT_VENUE_LINK_TOTAL
+from app.metrics import EVENT_VENUE_LINK_TOTAL, EVENT_VENUE_NAME_MATCH_SKIPPED_TOTAL
 from app.services.instagram_cascade_service import name_similarity
 from app.services.instagram_handle_sources import normalize_handle
 from app.services.venue_eligibility import haversine_km
@@ -252,6 +277,40 @@ def build_handle_index(venue_dao) -> dict[str, str]:
     }
 
 
+def _strip_handles_for_name_match(location_text: Optional[str]) -> Optional[str]:
+    """plans/260813_handle-attribution-hardening.md §A: remove every
+    `@handle` token from `location_text` before it is ever fed to rung 4's
+    fuzzy name-similarity scorer. An `@handle` is an exact identifier — it
+    either resolves against `handle_index` (rung 1) or it does not — never a
+    fragment of a venue's NAME. Feeding it to `name_similarity` anyway is
+    how `@mahalilacafe` (nothing left after stripping) scored 0.76 against
+    "Maria Café" and `@espaco.muta` scored 0.73 against "Espaço Tucano": both
+    comfortably clear `DEFAULT_CONFIDENCE_FLOOR` (0.55) on shared characters
+    that mean nothing about the venue's identity.
+
+    Uses the SAME `_MENTION_RE` rung 1/5 already use to find mentions
+    (including the email-address guard, and handles that themselves contain
+    dots or underscores — `@espaco.muta`, `@bar54_` are real production
+    handles), so "what counts as a handle" has exactly one definition in
+    this module.
+
+    Returns `None` — never an empty or punctuation-only string — when
+    nothing with actual alphabetic content survives the strip, which tells
+    `resolve_event_venue` to skip rung 4 entirely for this text rather than
+    name-match on whatever punctuation or digits happened to be left over.
+    `@obarpraia Ponta Negra` strips to "Ponta Negra", a real place name and
+    legitimate rung-4 input; `@mahalilacafe` strips to "", which returns
+    `None`.
+    """
+    if not location_text:
+        return location_text
+    stripped = _MENTION_RE.sub("", location_text)
+    stripped = re.sub(r"\s+", " ", stripped).strip()
+    if not any(ch.isalpha() for ch in stripped):
+        return None
+    return stripped
+
+
 def _name_match_candidates(
     location_text: Optional[str],
     venues: list[VenueLite],
@@ -263,8 +322,19 @@ def _name_match_candidates(
     breaks ties among equally-scored venues — the proximity tie-break. A
     venue with no distance information never outranks one that has a real
     measurement at the same score.
+
+    plans/260813_handle-attribution-hardening.md §C: refuses outright — no
+    candidates, regardless of what any score would have been — when
+    `location_text` still carries a raw `@handle` token. `resolve_event_
+    venue`'s rung 4 call site already strips handles before ever calling
+    this function (§A); this is the SAME rule enforced a second time, HERE,
+    so "a rung-4 candidate is never derived from an @handle's characters" is
+    a property of this function itself, not a convention every current and
+    future call site has to separately remember — the lesson the
+    `@mahalilacafe`/`@espaco.muta` false positives taught (see this
+    module's own docstring).
     """
-    if not location_text:
+    if not location_text or _MENTION_RE.search(location_text):
         return []
     scored: list[tuple[VenueLite, float, Optional[float]]] = []
     for venue in venues:
@@ -362,6 +432,24 @@ def _known_venue_mentions(
     return resolved, unrecognized
 
 
+def _venue_not_in_catalog_result(handle: str) -> ResolutionResult:
+    """The ONE place `resolve_event_venue` returns
+    `METHOD_VENUE_NOT_IN_CATALOG` (plans/260813_handle-attribution-
+    hardening.md §B) — both the ladder's own end-of-line fallback and the
+    ambiguous-caption branch's per-event-outranks-post-level short-circuit
+    reach this, so the log line and the metric-visible `method` value can
+    never drift between the two call sites. Logs the handle: this is the
+    venue-acquisition backlog (Error Handling) — the most frequently named
+    unknown handle across these logs is the venue most worth adding next."""
+    logger.info(
+        f"[EventVenueResolution] venue_not_in_catalog: event's own text names "
+        f"unrecognized handle @{handle}"
+    )
+    return ResolutionResult(
+        RESOLUTION_UNRESOLVED, None, METHOD_VENUE_NOT_IN_CATALOG, None, [],
+    )
+
+
 def resolve_event_venue(
     *,
     caption: Optional[str],
@@ -452,7 +540,18 @@ def resolve_event_venue(
         # guessed here.
 
     # ── Rung 4 — name match, proximity tie-break ─────────────────────────
-    candidates = _name_match_candidates(location_text, venues, tag_coords)
+    # §A: strip @handle tokens before this rung ever sees `location_text` —
+    # an @handle is an identity, not a name fragment (see
+    # `_strip_handles_for_name_match`'s own docstring). `None` means nothing
+    # with real alphabetic content survived the strip, so this rung does not
+    # run at all for this text.
+    name_match_text = _strip_handles_for_name_match(location_text)
+    if name_match_text is None:
+        candidates = []
+        if location_text:
+            EVENT_VENUE_NAME_MATCH_SKIPPED_TOTAL.inc()
+    else:
+        candidates = _name_match_candidates(name_match_text, venues, tag_coords)
     if candidates:
         ok, _reason = gate_auto_link(candidates, floor=confidence_floor, margin=margin)
         if ok:
@@ -480,6 +579,23 @@ def resolve_event_venue(
             RESOLUTION_AUTO, venue.venue_id, METHOD_CAPTION_HANDLE_MENTION, 1.0, [candidate],
         )
     if len(distinct_caption_venues) > 1:
+        # plans/260813_handle-attribution-hardening.md §B: the event's own
+        # text is per-event evidence; the caption is post-level evidence for
+        # every event the post yields. plans/260812_event-attribution-and-
+        # dates.md §A already established that the FORMER outranks the
+        # LATTER for WHICH venue an event links to (rung 1 before rung 5) —
+        # the same precedence applies to WHY an event has no venue. An
+        # event whose own text names a SPECIFIC handle we do not carry has
+        # concrete per-event evidence; a caption naming several venues is
+        # only ambiguous POST-level evidence. Report the specific reason,
+        # not the ambiguous one — measured live: without this, all 12
+        # unlinked events on one incremental crawl of a roundup account
+        # stored the generic `unresolved_venue` even though every one named
+        # a specific unknown handle, because this branch returned first and
+        # the venue_not_in_catalog check below was never reached for them.
+        if unrecognized_event_handle is not None:
+            return _venue_not_in_catalog_result(unrecognized_event_handle)
+
         # The caption names several known venues and the event's own text
         # gave nothing conclusive — worthless as evidence for THIS event.
         # Refuse rather than guess (the 487/494 bug): no venue, and a
@@ -506,9 +622,7 @@ def resolve_event_venue(
     # still have named a SPECIFIC handle we simply do not carry — concrete
     # evidence of exactly where this is, distinct from "no idea at all".
     if unrecognized_event_handle is not None:
-        return ResolutionResult(
-            RESOLUTION_UNRESOLVED, None, METHOD_VENUE_NOT_IN_CATALOG, None, [],
-        )
+        return _venue_not_in_catalog_result(unrecognized_event_handle)
 
     if not candidates:
         return ResolutionResult(RESOLUTION_UNRESOLVED, None, None, None, [])
