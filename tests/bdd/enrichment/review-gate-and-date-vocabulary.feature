@@ -40,6 +40,21 @@ Feature: Queue only the events an operator can actually fix
     When the date is resolved
     Then the event starts on 2026-08-15
 
+  # Deferring to the explicit finders must not mean abandoning the token: a
+  # clock time contains digits but names no day, so the finders decline and
+  # the relative reading is the only one left.
+  Scenario: Resolve a relative token stated beside a clock time
+    Given a post published on 2026-08-07
+    And an extracted event whose date text is "hoje às 22h"
+    When the date is resolved
+    Then the event starts on 2026-08-07
+
+  Scenario: Resolve a decorated relative token stated beside a clock time
+    Given a post published on 2026-08-07
+    And an extracted event whose date text is "É HOJE! 23h"
+    When the date is resolved
+    Then the event starts on 2026-08-07
+
   # B. Cadences that name no weekday
 
   Scenario: Resolve a daily cadence to the post's own date
@@ -54,6 +69,29 @@ Feature: Queue only the events an operator can actually fix
     And an extracted event the model marked recurring with recurrence text "todo fim de semana"
     When the date is resolved
     Then the event starts on 2026-08-15
+
+  # A venue with a standing daily happy hour posts a dated special. The
+  # cadence must not eat the date the venue actually wrote down -- and the
+  # daily form matches almost every such venue's text, so this collision is
+  # common, not hypothetical.
+  Scenario: Prefer a stated date over a daily cadence
+    Given a post published on 2026-08-07
+    And an extracted event stating date text "15/08" alongside the cadence "todo dia"
+    When the date is resolved
+    Then the event starts on 2026-08-15
+    And the event is recorded as recurring
+
+  Scenario: Prefer a stated date over a weekday cadence
+    Given a post published on 2026-08-07
+    And an extracted event stating date text "15/08" alongside the cadence "toda quinta"
+    When the date is resolved
+    Then the event starts on 2026-08-15
+
+  Scenario: Fall back to the cadence when no date is stated
+    Given a post published on 2026-08-07
+    And an extracted event the model marked recurring with recurrence text "toda quinta"
+    When the date is resolved
+    Then the event starts on 2026-08-13
 
   Scenario: Leave a cadence with no computable day undated without calling it unreadable
     Given a post published on 2026-08-11

@@ -127,22 +127,36 @@ _AMANHA_RE = re.compile(r"\bamanh[aã]\b", re.IGNORECASE)
 
 
 def _relative_date(text: str, anchor: date) -> Optional[date]:
-    """`anchor` for "hoje", `anchor + 1 day` for "amanhã" -- `None` when
-    neither is present as a whole word, OR when the text ALSO carries a
-    digit or a weekday name: that is evidence of a COMPETING explicit
-    date/weekday claim in the same text ("hoje, 15/08", "sexta, hoje"), and
-    the relative token must defer to it (resolved further down this same
-    call chain) rather than resolve on its own. Reuses `_WEEKDAY_RE` — the
-    SAME loose, substring-matching "is a weekday mentioned here" check
-    `_corroborate_with_weekday` already relies on — rather than a second
-    weekday detector."""
-    if re.search(r"\d", text) or _WEEKDAY_RE.search(text):
-        return None
+    """`anchor` for "hoje", `anchor + 1 day` for "amanhã" — `None` when
+    neither is present as a whole word.
+
+    This says only "a relative token is present here". It never decides
+    whether that token WINS: `_resolve_explicit_date` uses it as a fast path
+    when nothing else could compete, and otherwise as a LAST RESORT after
+    every explicit finder has declined. See `_relative_defers_to_finders`
+    for the split, and why deferring must not mean abandoning."""
     if _HOJE_RE.search(text):
         return anchor
     if _AMANHA_RE.search(text):
         return anchor + timedelta(days=1)
     return None
+
+
+def _relative_defers_to_finders(text: str) -> bool:
+    """Whether a relative token found in `text` must let the explicit
+    finders answer FIRST — true when the text also carries a digit or a
+    weekday name, which is evidence of a competing explicit claim in the
+    same string ("hoje, 15/08", "sexta, hoje").
+
+    Deferring is not abandoning. If the finders then decline, the relative
+    token is still the best reading available and `_resolve_explicit_date`
+    falls back to it — otherwise a stated time would destroy the date, and
+    "hoje às 22h" (a digit, but not a day-of-month) would resolve to nothing
+    while a bare "hoje" resolved fine. Reuses `_WEEKDAY_RE` — the SAME
+    loose, substring-matching "is a weekday mentioned here" check
+    `_corroborate_with_weekday` already relies on — rather than a second
+    weekday detector."""
+    return bool(re.search(r"\d", text) or _WEEKDAY_RE.search(text))
 
 
 # A weekday named as a plural or bare word, with NO "toda"/"todo" marker and
@@ -584,7 +598,7 @@ def _resolve_explicit_date(
     # digit or a weekday name ("hoje, 15/08", "sexta, hoje"), leaving those
     # to the finders below exactly as before this change.
     relative_date = _relative_date(text, anchor)
-    if relative_date is not None:
+    if relative_date is not None and not _relative_defers_to_finders(text):
         return relative_date, None, False, False
 
     # A day-list-plus-final-date shape ("01, 02 e 03 de julho") or the
@@ -627,6 +641,15 @@ def _resolve_explicit_date(
             return None, None, False, False
         weekday = _WEEKDAYS[m.group(0).lower()]
         return _next_weekday_on_or_after(anchor, weekday), None, False, False
+
+    # §A last resort: a relative token that DEFERRED above (the text carried a
+    # digit or a weekday, so an explicit claim might have been present) but
+    # where no finder actually resolved anything. The deferral has now been
+    # honoured in full and the relative token is the only reading left — the
+    # alternative is reporting "no date" for "hoje às 22h" purely because a
+    # clock time contains digits, while a bare "hoje" resolves.
+    if relative_date is not None:
+        return relative_date, None, False, False
 
     return None, None, False, False
 
@@ -941,12 +964,33 @@ def resolve_event_datetime(
     date_range = False
     date_source = "deterministic"
     if recurring:
-        # The recurrence path never reaches _resolve_explicit_date, so it can
-        # never trip the weekday-corroboration guard above — there is no
-        # explicit date here to corroborate; the weekday IS the content. It
-        # can never roll a year or collapse a range either — those are both
-        # `_resolve_explicit_date`-only concepts.
-        resolved_date = _next_matching_weekday_on_or_after(anchor_date, recurring_weekdays)
+        # An EXPLICIT date stated in `date_text` outranks the cadence, and is
+        # tried first. plans/260813_review-gate-and-date-vocabulary.md §B
+        # requires that "an ordinary caption containing 'todo dia' cannot
+        # hijack a one-off event's explicit date" — and §B's own daily form
+        # makes that collision common, because it matches ANY text a venue
+        # with a standing happy hour posts, including the post that also
+        # announces a dated special ("15/08" + `todo dia` resolved to the
+        # anchor, losing the 15th, before this guard existed).
+        #
+        # The item stays recurring either way: `is_recurring` and
+        # `recurrence_text` are reported from the cadence exactly as before.
+        # Only WHICH day `starts_at` lands on changes, and a date the venue
+        # actually wrote down is the better answer than the next occurrence
+        # of a standing cadence.
+        resolved_date = None
+        if date_text and date_text.strip():
+            explicit_date, review_reason, year_inferred, date_range = _resolve_explicit_date(
+                date_text, anchor_date, year_roll_grace_days,
+            )
+            resolved_date = explicit_date
+        if resolved_date is None:
+            # No explicit date to prefer — the cadence IS the content. This
+            # path can never roll a year or collapse a range: both are
+            # `_resolve_explicit_date`-only concepts, so any flag that
+            # function set while declining is discarded here.
+            review_reason, year_inferred, date_range = None, False, False
+            resolved_date = _next_matching_weekday_on_or_after(anchor_date, recurring_weekdays)
     elif date_text and date_text.strip():
         resolved_date, review_reason, year_inferred, date_range = _resolve_explicit_date(
             date_text, anchor_date, year_roll_grace_days,

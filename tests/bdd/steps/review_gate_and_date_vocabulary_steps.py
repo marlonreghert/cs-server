@@ -96,6 +96,22 @@ def step_given_event_marked_recurring_with_recurrence_text(context, text):
     context.aa_shortcode = "rgv_recurring_persisted"
 
 
+# Deliberately NOT phrased "an extracted event whose date text is ..." — that
+# prefix already exists in event_attribution_and_dates_steps.py and behave's
+# `{placeholder}` is greedy, so the two would be an AmbiguousStep.
+@given('an extracted event stating date text "{date_text}" alongside the cadence '
+       '"{recurrence_text}"')
+def step_given_event_with_both_a_date_and_a_cadence(context, date_text, recurrence_text):
+    """Both claims at once — the collision §B's daily form makes common: a
+    venue with a standing happy hour posts a dated special, and the model
+    reports the cadence AND the date. Only the bare-resolver scenarios
+    ("When the date is resolved") read these."""
+    context.eadb_date_text = date_text
+    context.eadb_date_interpretation = None
+    context.eadb_is_recurring = True
+    context.eadb_recurrence_text = recurrence_text
+
+
 @then("the event is recorded as recurring")
 def step_then_event_recorded_as_recurring(context):
     assert context.eadb_resolved.is_recurring is True, context.eadb_resolved

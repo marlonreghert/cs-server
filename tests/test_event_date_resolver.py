@@ -1393,3 +1393,108 @@ class TestResolverStaysPureAcrossRepeatedCalls:
             is_recurring=is_recurring, recurrence_text=recurrence_text,
         )
         assert first == second, (date_text, first, second)
+
+
+class TestRelativeTokenDefersButDoesNotAbandon:
+    """plans/260813_review-gate-and-date-vocabulary.md §A: a relative token
+    lets the explicit finders answer FIRST whenever the text also carries a
+    digit or a weekday name — but a deferral that no finder honours must fall
+    BACK to the relative reading, not report no date at all.
+
+    Found in review of the §A implementation: guarding on "contains a digit"
+    is right for "hoje, 15/08" (a competing day-of-month) and wrong for
+    "hoje às 22h" (a clock time, which names no day). A bare "hoje" resolved
+    while "hoje às 22h" did not — the same inconsistency §A exists to remove.
+    """
+
+    ANCHOR = _post_at(2026, 8, 7)  # a Friday
+
+    @pytest.mark.parametrize("date_text,expected_day", [
+        # An explicit day-of-month is a real competing claim and WINS.
+        ("hoje, 15/08", 15),
+        ("HOJE 07/08", 7),
+        ("hoje, 5 de setembro", 5),
+        # A clock time carries digits but names no day — the finders decline
+        # and the relative token is the only reading left.
+        ("hoje às 22h", 7),
+        ("HOJE 22h", 7),
+        ("hoje a partir das 21h", 7),
+        ("É HOJE! 23h", 7),
+    ])
+    def test_relative_token_defers_to_a_real_date_and_survives_a_clock_time(
+        self, date_text, expected_day,
+    ):
+        resolved = resolve_event_datetime(
+            date_text=date_text, time_text=None, post_timestamp=self.ANCHOR,
+        )
+        assert resolved.starts_at is not None, date_text
+        assert resolved.starts_at.day == expected_day, date_text
+        assert resolved.review_reason is None, date_text
+
+    def test_amanha_beside_a_clock_time_still_rolls_one_day(self):
+        resolved = resolve_event_datetime(
+            date_text="amanhã às 20h", time_text=None, post_timestamp=self.ANCHOR,
+        )
+        assert resolved.starts_at.date().isoformat() == "2026-08-08"
+
+    @pytest.mark.parametrize("date_text", ["em breve", "sem data", "hojeando", "anteontem"])
+    def test_prose_without_a_relative_token_is_still_unreadable(self, date_text):
+        resolved = resolve_event_datetime(
+            date_text=date_text, time_text=None, post_timestamp=self.ANCHOR,
+        )
+        assert resolved.starts_at is None, date_text
+        assert resolved.review_reason == REASON_MISSING_DATE, date_text
+
+
+class TestStatedDateOutranksACadence:
+    """plans/260813_review-gate-and-date-vocabulary.md §B: "an ordinary
+    caption containing 'todo dia' cannot hijack a one-off event's explicit
+    date". §B's daily form matches the text of ANY venue with a standing
+    happy hour, so this collision is common rather than hypothetical, and
+    before this guard existed "15/08" + `todo dia` resolved to the post's own
+    day and lost the 15th entirely.
+
+    The item stays recurring either way — only which day `starts_at` lands on
+    changes.
+    """
+
+    ANCHOR = _post_at(2026, 8, 7)  # a Friday
+
+    @pytest.mark.parametrize("recurrence_text", [
+        "todo dia", "todos os dias", "diariamente", "todo fim de semana",
+        "toda quinta", "de segunda a sexta", "sextas e sábados",
+    ])
+    def test_a_stated_date_beats_every_cadence_form(self, recurrence_text):
+        resolved = resolve_event_datetime(
+            date_text="15/08", time_text=None, post_timestamp=self.ANCHOR,
+            is_recurring=True, recurrence_text=recurrence_text,
+        )
+        assert resolved.starts_at.date().isoformat() == "2026-08-15", recurrence_text
+        # The cadence is still reported — it was outranked for the DATE only.
+        assert resolved.is_recurring is True, recurrence_text
+        assert resolved.recurrence_text == recurrence_text
+
+    @pytest.mark.parametrize("recurrence_text,expected", [
+        ("todo dia", "2026-08-07"),
+        ("todo fim de semana", "2026-08-08"),
+        ("toda quinta", "2026-08-13"),
+        ("de terça a quinta", "2026-08-11"),
+    ])
+    def test_the_cadence_still_resolves_when_no_date_is_stated(
+        self, recurrence_text, expected,
+    ):
+        resolved = resolve_event_datetime(
+            date_text=None, time_text=None, post_timestamp=self.ANCHOR,
+            is_recurring=True, recurrence_text=recurrence_text,
+        )
+        assert resolved.starts_at.date().isoformat() == expected, recurrence_text
+
+    def test_an_unreadable_date_text_falls_back_to_the_cadence(self):
+        """The stated date is preferred only when it actually RESOLVES —
+        unreadable prose beside a cadence must not blank the date."""
+        resolved = resolve_event_datetime(
+            date_text="quando der", time_text=None, post_timestamp=self.ANCHOR,
+            is_recurring=True, recurrence_text="toda quinta",
+        )
+        assert resolved.starts_at.date().isoformat() == "2026-08-13"
+        assert resolved.review_reason is None
