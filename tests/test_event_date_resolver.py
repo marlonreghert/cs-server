@@ -988,9 +988,15 @@ class TestYearRollGraceWindow:
 # ── §C: the model interprets, Python computes ────────────────────────────────
 class TestStructuredInterpretationFallback:
     def test_relative_hoje_via_interpretation_when_the_text_is_unrecognised(self):
+        # plans/260813_review-gate-and-date-vocabulary.md §A: "É HOJE" itself
+        # is now read deterministically (word-boundary "hoje"), so it no
+        # longer exercises this fallback — this fixture stands in as a text
+        # the deterministic finders genuinely cannot read at all (no digit,
+        # no weekday, no "hoje"/"amanhã" token), the SAME idiom this file
+        # already uses elsewhere in this class for that purpose.
         post_ts = _post_at(2026, 8, 7)
         resolved = resolve_event_datetime(
-            date_text="É HOJE", time_text=None, post_timestamp=post_ts,
+            date_text="algo que o regex nao le", time_text=None, post_timestamp=post_ts,
             date_interpretation={"kind": "relative", "relative": "hoje"},
         )
         assert resolved.starts_at is not None, resolved
@@ -1124,9 +1130,13 @@ class TestDateSource:
         assert resolved.date_source == "unresolved", resolved
 
     def test_a_fallback_resolved_date_reports_structured_fallback(self):
+        # See TestStructuredInterpretationFallback's own note above: "É
+        # HOJE" now resolves deterministically (§A), so a text the
+        # deterministic side genuinely cannot read is what exercises the
+        # fallback path here.
         post_ts = _post_at(2026, 8, 7)
         resolved = resolve_event_datetime(
-            date_text="É HOJE", time_text=None, post_timestamp=post_ts,
+            date_text="algo que o regex nao le", time_text=None, post_timestamp=post_ts,
             date_interpretation={"kind": "relative", "relative": "hoje"},
         )
         assert resolved.date_source == "structured_fallback", resolved
@@ -1206,3 +1216,180 @@ class TestDeterminismGuard:
             },
         )
         assert resolved.starts_at.date().isoformat() == "2026-08-07", resolved
+
+
+# ── plans/260813_review-gate-and-date-vocabulary.md §A: the full relative- ──
+# token evidence table, probed against the SAME anchor (2026-08-07) the plan
+# itself uses.
+class TestRelativeTokenVocabularyTable:
+    _ANCHOR = _post_at(2026, 8, 7)
+
+    @pytest.mark.parametrize("date_text", [
+        "hoje", "HOJE", "hoje à noite", "hoje a noite",
+        "É HOJE", "é hoje", "Hoje!", "hoje!!", "HOJE 🔥", "hoje tem", "hoje é dia",
+    ])
+    def test_every_hoje_form_resolves_to_the_anchor(self, date_text):
+        resolved = resolve_event_datetime(
+            date_text=date_text, time_text=None, post_timestamp=self._ANCHOR,
+        )
+        assert resolved.starts_at is not None, resolved
+        assert resolved.starts_at.date().isoformat() == "2026-08-07", resolved
+        assert resolved.needs_review is False, resolved
+        assert resolved.date_source == "deterministic", resolved
+
+    @pytest.mark.parametrize("date_text", [
+        "amanhã", "amanha", "AMANHÃ!", "É AMANHÃ", "amanha a noite",
+    ])
+    def test_every_amanha_form_resolves_to_the_day_after(self, date_text):
+        resolved = resolve_event_datetime(
+            date_text=date_text, time_text=None, post_timestamp=self._ANCHOR,
+        )
+        assert resolved.starts_at is not None, resolved
+        assert resolved.starts_at.date().isoformat() == "2026-08-08", resolved
+        assert resolved.needs_review is False, resolved
+        assert resolved.date_source == "deterministic", resolved
+
+    def test_hoje_with_an_explicit_date_resolves_through_the_intended_numeric_path(self):
+        """"hoje, 07/08" is an ACCIDENTAL success even before this plan
+        (§A's own evidence) — the relative guard must defer to the explicit
+        date, never resolve it itself. 2026-01-01 is chosen specifically so
+        the two paths disagree if the guard were missing: a wrongly-firing
+        relative match would land on the anchor (Jan 1); the intended
+        numeric finder lands on 07 August instead."""
+        anchor = _post_at(2026, 1, 1)
+        resolved = resolve_event_datetime(
+            date_text="hoje, 07/08", time_text=None, post_timestamp=anchor,
+        )
+        assert resolved.starts_at is not None, resolved
+        assert resolved.starts_at.date().isoformat() == "2026-08-07", resolved
+
+    def test_sexta_hoje_resolves_through_the_intended_weekday_finder(self):
+        """"sexta, hoje" is the OTHER accidental success §A's evidence
+        names. 2026-08-03 (a Monday) is chosen so the two paths disagree if
+        the guard were missing: a wrongly-firing relative match would land
+        on the anchor itself (Monday); the intended weekday fallback lands
+        on the next Friday instead."""
+        monday = _post_at(2026, 8, 3)
+        resolved = resolve_event_datetime(
+            date_text="sexta, hoje", time_text=None, post_timestamp=monday,
+        )
+        assert resolved.starts_at is not None, resolved
+        assert resolved.starts_at.date().isoformat() == "2026-08-07", resolved
+
+
+# ── plans/260813_review-gate-and-date-vocabulary.md §B: the full cadence ────
+# evidence table, all probed with is_recurring=True (the model's own claim),
+# via `recurrence_text` — exactly how the plan's own evidence was gathered.
+class TestCadenceVocabularyTable:
+    _MONDAY = _post_at(2026, 7, 13)  # 2026-07-13 is a Monday (see class above)
+    _TUESDAY = _post_at(2026, 8, 11)  # matches this plan's own BDD anchor
+
+    def _resolve(self, recurrence_text, *, anchor=None):
+        return resolve_event_datetime(
+            date_text=None, time_text=None, post_timestamp=anchor or self._MONDAY,
+            is_recurring=True, recurrence_text=recurrence_text,
+        )
+
+    @pytest.mark.parametrize("recurrence_text", [
+        "de segunda a sexta", "toda quinta", "sextas e sábados", "quintas",
+        "de terça a quinta",
+    ])
+    def test_already_working_forms_still_resolve(self, recurrence_text):
+        """Regression pin: none of §B's NEW vocabulary may narrow or
+        shadow the range/list forms plans/260810_post-kind-and-post-
+        extraction-attribution.md §D already established."""
+        resolved = self._resolve(recurrence_text)
+        assert resolved.starts_at is not None, resolved
+        assert resolved.is_recurring is True, resolved
+        assert resolved.review_reason is None, resolved
+
+    @pytest.mark.parametrize("recurrence_text", [
+        "todo dia", "todos os dias", "diariamente", "todo dia!", "todo santo dia",
+    ])
+    def test_daily_forms_resolve_to_the_anchor_itself(self, recurrence_text):
+        # Every weekday is in the set, so the next matching day is the
+        # anchor's own day — no new arithmetic, just a wider weekday set.
+        resolved = self._resolve(recurrence_text, anchor=self._TUESDAY)
+        assert resolved.starts_at is not None, resolved
+        assert resolved.starts_at.date().isoformat() == "2026-08-11", resolved
+        assert resolved.is_recurring is True, resolved
+        assert resolved.review_reason is None, resolved
+        assert resolved.date_source == "deterministic", resolved
+
+    @pytest.mark.parametrize("recurrence_text", [
+        "todo fim de semana", "fins de semana", "todo final de semana",
+    ])
+    def test_weekend_forms_resolve_to_the_next_saturday_or_sunday(self, recurrence_text):
+        # Tuesday 2026-08-11 -> the next Saturday is 2026-08-15.
+        resolved = self._resolve(recurrence_text, anchor=self._TUESDAY)
+        assert resolved.starts_at is not None, resolved
+        assert resolved.starts_at.date().isoformat() == "2026-08-15", resolved
+        assert resolved.is_recurring is True, resolved
+        assert resolved.review_reason is None, resolved
+
+    @pytest.mark.parametrize("recurrence_text", ["toda semana", "sempre"])
+    def test_no_computable_day_forms_resolve_to_nothing_but_are_never_flagged_missing(
+        self, recurrence_text,
+    ):
+        """§E: these two deliberately return NO weekday set at all — a
+        legitimate "recurring, no single next occurrence" state, not a
+        reading failure. `is_recurring` is still True (the model's own
+        claim, carried through) and `review_reason` must never read
+        `missing_date`."""
+        resolved = self._resolve(recurrence_text, anchor=self._TUESDAY)
+        assert resolved.starts_at is None, resolved
+        assert resolved.is_recurring is True, resolved
+        assert resolved.needs_review is False, resolved
+        assert resolved.review_reason is None, resolved
+        assert resolved.review_reason != REASON_MISSING_DATE, resolved
+
+    def test_an_unparseable_cadence_word_is_not_swept_into_the_no_computable_day_state(self):
+        """`_is_no_computable_day_recurrence` is a NAMED, narrow vocabulary
+        ("toda semana"/"sempre"), never a blanket `is_recurring=True` check
+        — an unrecognised cadence word stays a genuine `missing_date`,
+        exactly as `TestRecurrenceReadFromTheModel.
+        test_unparseable_recurrence_phrase_keeps_todays_behaviour` already
+        pins at the class above."""
+        resolved = self._resolve("semanalmente", anchor=self._TUESDAY)
+        assert resolved.starts_at is None, resolved
+        assert resolved.review_reason == REASON_MISSING_DATE, resolved
+
+
+# ── plans/260813_review-gate-and-date-vocabulary.md Test Plan: the resolver ─
+# stays pure — 260812_history-repair-dates.md depends on replaying a stored
+# row's own inputs being deterministic (no wall-clock read of any kind).
+class TestResolverStaysPureAcrossRepeatedCalls:
+    def test_replaying_the_same_inputs_is_byte_for_byte_deterministic(self):
+        """The SAME inputs, called twice, must produce the SAME
+        `ResolvedDate` in every field — proof this module reads nothing but
+        its own arguments (`datetime.now()` would make a replay of a stored
+        row's inputs non-deterministic, exactly the hazard a history-repair
+        pass depends on this module NEVER exhibiting)."""
+        anchor = _post_at(2026, 8, 11)
+        kwargs = dict(
+            date_text="todo fim de semana", time_text="22h", post_timestamp=anchor,
+            is_recurring=True, recurrence_text="todo fim de semana",
+        )
+        first = resolve_event_datetime(**kwargs)
+        second = resolve_event_datetime(**kwargs)
+        assert first == second, (first, second)
+
+    @pytest.mark.parametrize("date_text,is_recurring,recurrence_text", [
+        ("É HOJE", None, None),
+        ("hoje, 15/08", None, None),
+        ("15/08", None, None),
+        (None, True, "todo dia"),
+        (None, True, "toda semana"),
+        ("Quinta (02)", None, None),
+    ])
+    def test_no_field_ever_drifts_on_replay(self, date_text, is_recurring, recurrence_text):
+        anchor = _post_at(2026, 8, 7)
+        first = resolve_event_datetime(
+            date_text=date_text, time_text="22h", post_timestamp=anchor,
+            is_recurring=is_recurring, recurrence_text=recurrence_text,
+        )
+        second = resolve_event_datetime(
+            date_text=date_text, time_text="22h", post_timestamp=anchor,
+            is_recurring=is_recurring, recurrence_text=recurrence_text,
+        )
+        assert first == second, (date_text, first, second)

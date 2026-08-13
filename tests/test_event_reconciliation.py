@@ -16,6 +16,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 from app.dao.venue_repository import VenueRepository
+from app.models.event_kind import KIND_EVENT, KIND_FOOD, KIND_MENU, KIND_OTHER, KIND_PROMOTION
 from app.services.event_reconciliation import (
     PROTECTABLE_EVENT_FIELDS,
     REVIEW_REASON_ABSENT_FROM_LATEST_EXTRACTION,
@@ -27,6 +28,7 @@ from app.services.event_reconciliation import (
     STATUS_PENDING_REVIEW,
     STATUS_SUPERSEDED,
     _TEXT_FIELDS,
+    date_required_for_post_type,
     is_clean_extraction,
     reconcile_post_events,
 )
@@ -696,7 +698,13 @@ class TestCleanPredicateTruthTable:
     extraction` is the SOLE gate between `accepted` and `pending_review`,
     so its truth table is pinned directly, independent of reconcile_post_
     events' plumbing — every one of the four conditions must be
-    independently necessary, and all four together must be sufficient."""
+    independently necessary, and all four together must be sufficient.
+    `post_type=KIND_EVENT` throughout this class: plans/260813_review-gate-
+    and-date-vocabulary.md §C makes the start-date requirement conditional
+    on post_type, so every test below that means to exercise "a missing
+    start date alone" needs a post_type the predicate actually requires one
+    for — see TestCleanPredicatePostTypeGate below for the post_type
+    dimension itself."""
 
     _CLEAN_KWARGS = dict(
         review_reason=None,
@@ -704,6 +712,7 @@ class TestCleanPredicateTruthTable:
         venue_id="v1",
         confidence=0.9,
         min_confidence=0.5,
+        post_type=KIND_EVENT,
     )
 
     def test_all_four_conditions_together_are_clean(self):
@@ -759,10 +768,77 @@ class TestCleanPredicateTruthTable:
                         actual = is_clean_extraction(
                             review_reason=review_reason, starts_at=starts_at,
                             venue_id=venue_id, confidence=confidence, min_confidence=0.5,
+                            post_type=KIND_EVENT,
                         )
                         assert actual == expected, (
                             review_reason, starts_at, venue_id, confidence, actual, expected,
                         )
+
+
+class TestCleanPredicatePostTypeGate:
+    """plans/260813_review-gate-and-date-vocabulary.md §C: `is_clean_
+    extraction` gains the item's `post_type`, and a missing start date only
+    blocks acceptance for `event` — but ONLY the four model-recognised
+    non-event kinds the plan's own Evidence section names (promotion, menu,
+    food, other) are exempt, never "anything that is not literally 'event'".
+    An UNRECOGNISED kind still requires a date — the same fail-toward-the-
+    reviewed-assumption posture app.models.event_kind.resolve_post_type
+    already takes for a MISSING kind, and the exact invariant
+    tests/bdd/enrichment/post-kind-and-post-extraction-attribution.feature's
+    "Treat an unrecognised kind as still needing review like any other"
+    already pins end to end — this class is the pure-predicate mirror of
+    that same scenario."""
+
+    _BASE = dict(
+        review_reason=None, venue_id="v1", confidence=0.9, min_confidence=0.5,
+    )
+
+    def test_date_required_for_post_type_is_true_for_event_and_for_the_unrecognised(self):
+        for post_type in (KIND_PROMOTION, KIND_MENU, KIND_FOOD, KIND_OTHER):
+            assert date_required_for_post_type(post_type) is False, post_type
+        for post_type in (KIND_EVENT, "giveaway", None):
+            assert date_required_for_post_type(post_type) is True, post_type
+
+    def test_an_event_with_no_start_date_is_not_clean(self):
+        kwargs = {**self._BASE, "starts_at": None, "post_type": KIND_EVENT}
+        assert is_clean_extraction(**kwargs) is False
+
+    def test_an_unrecognised_kind_with_no_start_date_is_not_clean(self):
+        """The exact case the BDD scenario above pins: an unrecognised kind
+        gets NO optimistic free pass — it is gated exactly like an event."""
+        kwargs = {**self._BASE, "starts_at": None, "post_type": "giveaway"}
+        assert is_clean_extraction(**kwargs) is False
+
+    def test_every_known_non_event_post_type_matrix_row(self):
+        """The exhaustive matrix: every KNOWN non-event `post_type`, crossed
+        with `starts_at` present/absent, is clean either way — never gated
+        by a date it was never required to carry."""
+        for post_type in (KIND_PROMOTION, KIND_MENU, KIND_FOOD, KIND_OTHER):
+            for starts_at in (datetime(2026, 8, 10, tzinfo=timezone.utc), None):
+                kwargs = {**self._BASE, "starts_at": starts_at, "post_type": post_type}
+                assert is_clean_extraction(**kwargs) is True, (post_type, starts_at)
+
+    def test_an_event_with_a_start_date_is_still_clean(self):
+        """The control case: §C only RELAXES the requirement for the four
+        known non-event types — an event with a real date is unaffected."""
+        kwargs = {
+            **self._BASE, "starts_at": datetime(2026, 8, 10, tzinfo=timezone.utc),
+            "post_type": KIND_EVENT,
+        }
+        assert is_clean_extraction(**kwargs) is True
+
+    def test_a_missing_venue_or_review_reason_still_blocks_a_dateless_promotion(self):
+        """§C relaxes ONLY the start-date clause — the other three
+        conditions (no review reason, a linked venue, confidence at/above
+        the floor) still apply to every post_type, event or not."""
+        no_venue = {**self._BASE, "starts_at": None, "post_type": KIND_PROMOTION, "venue_id": None}
+        assert is_clean_extraction(**no_venue) is False
+
+        has_reason = {
+            **self._BASE, "starts_at": None, "post_type": KIND_PROMOTION,
+            "review_reason": "low_confidence",
+        }
+        assert is_clean_extraction(**has_reason) is False
 
 
 class TestAutoAcceptWiring:
