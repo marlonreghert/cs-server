@@ -375,6 +375,23 @@ def step_given_twelve_items_unknown_venues(context):
 
 # ── running the backfill ───────────────────────────────────────────────────────
 def _run(context, *, apply: bool, since_id=None) -> None:
+    """Shared by this feature AND `backfill-source-provenance.feature`: both
+    use the literal Gherkin text "the backfill runs with/without apply[,
+    again]", and Behave allows only ONE registration of an identical step
+    pattern across the whole `tests/bdd/steps/` directory — a second
+    `@when("the backfill runs with apply")` elsewhere raises AmbiguousStep.
+    Rather than inventing different wording for what is, in both features,
+    the same sentence about the same kind of operator script, this function
+    dispatches on which fixture the scenario actually built:
+    `context.bsp_dao` (tests/bdd/steps/backfill_source_provenance_steps.py)
+    or the `context.bfl_dao` this module itself builds — a scenario only
+    ever constructs one of the two, never both.
+    """
+    if getattr(context, "bsp_dao", None) is not None:
+        from tests.bdd.steps.backfill_source_provenance_steps import run_bsp_backfill
+
+        run_bsp_backfill(context, apply=apply, since_id=since_id)
+        return
     _ensure_bfl(context)
     context.bfl_exception = None
     try:

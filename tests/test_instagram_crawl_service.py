@@ -28,6 +28,10 @@ import pytest
 
 from app.api.apify_instagram_client import ApifyCreditExhaustedError, FetchPostsResult
 from app.dao.venue_repository import VenueRepository
+from app.models.crawl_seed_lookback import (
+    ADMIN_CONFIG_CRAWL_SEED_LOOKBACK_KEY,
+    DEFAULT_CRAWL_SEED_LOOKBACK,
+)
 from app.models.instagram import VenueInstagram
 from app.models.venue import Venue
 from app.services import job_lock
@@ -46,6 +50,7 @@ from app.services.instagram_crawl_service import (
     compute_bound,
     dedupe_posts_by_shortcode,
     group_venue_ids_by_handle,
+    is_posts_dormant,
     lock_name_for,
     posts_never_seeded,
     reels_already_seeded,
@@ -336,7 +341,23 @@ def _venue_dao():
     return VenueRepository(client=None, rds_store=InMemoryRdsVenueStore())
 
 
-def _service(venue_dao, apify_client, budget_dao, **config_overrides):
+class _FakeAdminConfigService:
+    """Minimal `.get(key)`/`.set(key, value, updated_by=None)` double for the
+    real `AdminConfigService` — bare keys (no `admin_config:` prefix, added
+    by the real service internally), already-decoded Python values."""
+
+    def __init__(self):
+        self._store: dict = {}
+
+    def get(self, key):
+        return self._store.get(key)
+
+    def set(self, key, value, updated_by=None):
+        self._store[key] = value
+        return value
+
+
+def _service(venue_dao, apify_client, budget_dao, *, admin_config_service=None, **config_overrides):
     config = CrawlServiceConfig(
         overlap_hours=6.0, default_initial_lookback="3 months", default_results_limit=10,
         monthly_result_budget=1000, max_consecutive_failures=5, result_cost_usd=0.0027,
@@ -346,6 +367,7 @@ def _service(venue_dao, apify_client, budget_dao, **config_overrides):
     return ScheduledInstagramCrawlService(
         venue_dao=venue_dao, apify_client=apify_client, budget_dao=budget_dao,
         config=config, chainer=None, now_provider=lambda: NOW,
+        admin_config_service=admin_config_service,
     )
 
 
@@ -2002,3 +2024,226 @@ class TestSharedHandleMetricsParity:
         row = dao.get_event_by_source("shared1", "ambiguouspost1")
         assert row["venue_id"] is None, row
         assert "unresolved_venue" in (row["review_reason"] or ""), row
+
+
+# =============================================================================
+# plans/260813_dormant-vs-broken-targets.md
+# =============================================================================
+
+# ── §A: the dormancy predicate, standalone and unit-testable exactly like
+# `posts_never_seeded` — the plan's own test plan bullet: "error item present
+# + empty + cursor unset; error item present + cursor set; no error item; a
+# blocked error item (must not be dormant)." ────────────────────────────────
+class TestDormancyPredicate:
+    def test_no_items_no_blocked_requests_cursor_unset_is_dormant(self):
+        assert is_posts_dormant(error_code="no_items", request_error_count=0, cursor=None) is True
+
+    def test_no_items_no_blocked_requests_cursor_set_is_not_dormant(self):
+        """The SAME error-item signature as the dormant case above, but the
+        stream has already seeded — an ordinary steady-state 'nothing new
+        since last check,' not a standing account condition worth
+        reporting (pairs with `posts_never_seeded`'s own cursor gating)."""
+        cursor = datetime(2026, 8, 1, tzinfo=timezone.utc)
+        assert is_posts_dormant(error_code="no_items", request_error_count=0, cursor=cursor) is False
+
+    def test_no_error_item_is_not_dormant(self):
+        """`error_code is None` carries no positive evidence the account was
+        even reached — stays plain `empty`, never dormant."""
+        assert is_posts_dormant(error_code=None, request_error_count=0, cursor=None) is False
+
+    def test_blocked_error_item_is_not_dormant(self):
+        """The exact signature `no_items` shares with dormancy, EXCEPT for
+        blocked requests present — must never be dormant; it is
+        OUTCOME_BLOCKED, a transient fault."""
+        assert is_posts_dormant(error_code="no_items", request_error_count=11, cursor=None) is False
+
+    def test_not_found_is_not_dormant(self):
+        """A permanent handle-not-found is a different code entirely and
+        must never read as dormant regardless of cursor state."""
+        assert is_posts_dormant(error_code="not_found", request_error_count=0, cursor=None) is False
+
+
+class TestDormancyWiredThroughRunTarget:
+    def test_a_dormant_run_writes_posts_dormant_true_and_leaves_failures_at_zero(self):
+        """plans/260813_dormant-vs-broken-targets.md's own unit test plan:
+        `consecutive_failures` is untouched by a dormant run — DAO-level,
+        not just the outcome label BDD already covers."""
+        dao = _venue_dao()
+        dao.upsert_crawl_target("dormanttarget", {"kind": "venue", "cron": "0 22 * * 5,6"})
+        apify = _FakeApifyClient()
+        apify.program_error("dormanttarget", "posts", code="no_items", request_error_count=0)
+        service = _service(dao, apify, _FakeBudgetDao())
+
+        report = _run(service.run_target("dormanttarget"))
+
+        assert report["streams"]["posts"]["dormant"] is True, report
+        row = dao.get_crawl_target("dormanttarget")
+        assert row["posts_dormant"] is True, row
+        assert row["consecutive_failures"] == 0, row
+        assert row["enabled"] is True, row
+
+    def test_dormancy_clears_the_moment_the_target_produces_a_post(self):
+        dao = _venue_dao()
+        dao.upsert_crawl_target(
+            "recoveredtarget", {"kind": "venue", "cron": "0 22 * * 5,6", "posts_dormant": True},
+        )
+        apify = _FakeApifyClient()
+        apify.program("recoveredtarget", "posts", [
+            {
+                "caption": "post", "likes_count": 0, "comments_count": 0,
+                "timestamp": "2026-08-07T10:00:00.000Z", "post_type": "image",
+                "shortcode": "recoveredpost1", "permalink": "https://instagram.com/p/recoveredpost1",
+                "image_urls": [], "is_pinned": False,
+            },
+        ])
+        service = _service(dao, apify, _FakeBudgetDao())
+
+        _run(service.run_target("recoveredtarget"))
+
+        row = dao.get_crawl_target("recoveredtarget")
+        assert row["posts_dormant"] is False, row
+
+    def test_a_blocked_run_is_not_recorded_as_dormant(self):
+        dao = _venue_dao()
+        dao.upsert_crawl_target("blockednotdormant", {"kind": "venue", "cron": "0 22 * * 5,6"})
+        apify = _FakeApifyClient()
+        apify.program_error("blockednotdormant", "posts", code="no_items", request_error_count=11)
+        service = _service(dao, apify, _FakeBudgetDao())
+
+        report = _run(service.run_target("blockednotdormant"))
+
+        assert report["streams"]["posts"]["dormant"] is False, report
+        row = dao.get_crawl_target("blockednotdormant")
+        assert row["posts_dormant"] is False, row
+
+
+# ── §B: the seed lookback, admin-config-driven with a per-target override
+# and a Settings-level degrade path when no admin-config collaborator is
+# wired ───────────────────────────────────────────────────────────────────
+class TestSeedLookbackAdminConfig:
+    def test_no_admin_config_service_falls_back_to_the_settings_default(self):
+        """The pre-existing behavior every OTHER test in this file relies on
+        (`_service()` never passes `admin_config_service`) — this pins that
+        default explicitly as a regression guard for this plan's change."""
+        dao = _venue_dao()
+        dao.upsert_crawl_target("nolookbacksvc", {"kind": "venue", "cron": "0 22 * * *"})
+        apify = _FakeApifyClient()
+        service = _service(dao, apify, _FakeBudgetDao(), default_initial_lookback="3 months")
+
+        _run(service.run_target("nolookbacksvc"))
+
+        assert apify.calls[0]["only_posts_newer_than"] == "3 months", apify.calls
+
+    def test_admin_config_value_is_used_for_a_seed_with_no_target_override(self):
+        dao = _venue_dao()
+        dao.upsert_crawl_target("adminlookback", {"kind": "venue", "cron": "0 22 * * *"})
+        apify = _FakeApifyClient()
+        admin_config = _FakeAdminConfigService()
+        admin_config.set(ADMIN_CONFIG_CRAWL_SEED_LOOKBACK_KEY, "12 months")
+        service = _service(dao, apify, _FakeBudgetDao(), admin_config_service=admin_config)
+
+        _run(service.run_target("adminlookback"))
+
+        assert apify.calls[0]["only_posts_newer_than"] == "12 months", apify.calls
+
+    def test_admin_config_key_unset_falls_back_to_the_module_default(self):
+        """`admin_config_service` IS wired but has never been written to —
+        the loader's own default (`DEFAULT_CRAWL_SEED_LOOKBACK`), not the
+        Settings-level `config.default_initial_lookback`."""
+        dao = _venue_dao()
+        dao.upsert_crawl_target("unsetlookback", {"kind": "venue", "cron": "0 22 * * *"})
+        apify = _FakeApifyClient()
+        service = _service(
+            dao, apify, _FakeBudgetDao(), admin_config_service=_FakeAdminConfigService(),
+        )
+
+        _run(service.run_target("unsetlookback"))
+
+        assert apify.calls[0]["only_posts_newer_than"] == DEFAULT_CRAWL_SEED_LOOKBACK, apify.calls
+
+    def test_a_targets_own_override_wins_over_the_admin_config_value(self):
+        dao = _venue_dao()
+        dao.upsert_crawl_target(
+            "ownlookbackwins",
+            {"kind": "venue", "cron": "0 22 * * *", "initial_lookback": "6 months"},
+        )
+        apify = _FakeApifyClient()
+        admin_config = _FakeAdminConfigService()
+        admin_config.set(ADMIN_CONFIG_CRAWL_SEED_LOOKBACK_KEY, "12 months")
+        service = _service(dao, apify, _FakeBudgetDao(), admin_config_service=admin_config)
+
+        _run(service.run_target("ownlookbackwins"))
+
+        assert apify.calls[0]["only_posts_newer_than"] == "6 months", apify.calls
+
+    def test_a_set_cursor_never_consults_the_admin_config_seed_lookback(self):
+        """§B: the seed lookback is read only when a stream's cursor is
+        null — `compute_bound` sends `cursor - overlap` once it is set,
+        never a lookback string at all. Pins that `_resolve_seed_lookback`
+        is not even reached on a steady-state run."""
+        dao = _venue_dao()
+        dao.upsert_crawl_target("steadyneverasks", {
+            "kind": "venue", "cron": "0 22 * * *",
+            "cursor_posts_at": datetime(2026, 8, 1, tzinfo=timezone.utc),
+        })
+        apify = _FakeApifyClient()
+        admin_config = _FakeAdminConfigService()
+        admin_config.set(ADMIN_CONFIG_CRAWL_SEED_LOOKBACK_KEY, "12 months")
+        service = _service(dao, apify, _FakeBudgetDao(), admin_config_service=admin_config)
+
+        _run(service.run_target("steadyneverasks"))
+
+        assert apify.calls[0]["only_posts_newer_than"] != "12 months", apify.calls
+
+    def test_an_invalid_stored_value_degrades_to_the_module_default(self):
+        """A hand-edited/corrupt RDS row must never crash a scheduled crawl
+        — degrades exactly like `load_menu_expiry_days` does for its own
+        admin-config key."""
+        dao = _venue_dao()
+        dao.upsert_crawl_target("badlookback", {"kind": "venue", "cron": "0 22 * * *"})
+        apify = _FakeApifyClient()
+        admin_config = _FakeAdminConfigService()
+        admin_config.set(ADMIN_CONFIG_CRAWL_SEED_LOOKBACK_KEY, "not a real lookback")
+        service = _service(dao, apify, _FakeBudgetDao(), admin_config_service=admin_config)
+
+        _run(service.run_target("badlookback"))
+
+        assert apify.calls[0]["only_posts_newer_than"] == DEFAULT_CRAWL_SEED_LOOKBACK, apify.calls
+
+    def test_an_admin_config_read_failure_degrades_to_the_settings_default(self):
+        dao = _venue_dao()
+        dao.upsert_crawl_target("readfails", {"kind": "venue", "cron": "0 22 * * *"})
+        apify = _FakeApifyClient()
+
+        class _BoomAdminConfigService:
+            def get(self, key):
+                raise RuntimeError("admin config read failed (simulated)")
+
+        service = _service(
+            dao, apify, _FakeBudgetDao(), admin_config_service=_BoomAdminConfigService(),
+            default_initial_lookback="3 months",
+        )
+
+        _run(service.run_target("readfails"))
+
+        assert apify.calls[0]["only_posts_newer_than"] == "3 months", apify.calls
+
+    def test_cost_is_bounded_by_the_results_cap_not_the_lookback_window(self):
+        """The PR's own explicit claim, pinned as a test: a longer window
+        changes WHICH posts are eligible, never how many are fetched —
+        `seed_results_limit` still caps the count regardless of the
+        lookback string sent."""
+        dao = _venue_dao()
+        dao.upsert_crawl_target("boundedbycap", {"kind": "venue", "cron": "0 22 * * *"})
+        apify = _FakeApifyClient()
+        admin_config = _FakeAdminConfigService()
+        admin_config.set(ADMIN_CONFIG_CRAWL_SEED_LOOKBACK_KEY, "12 months")
+        service = _service(
+            dao, apify, _FakeBudgetDao(), admin_config_service=admin_config,
+            default_seed_results_limit=200,
+        )
+
+        _run(service.run_target("boundedbycap"))
+
+        assert apify.calls[0]["only_posts_newer_than"] == "12 months", apify.calls
+        assert apify.calls[0]["results_limit"] == 200, apify.calls

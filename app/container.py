@@ -598,6 +598,7 @@ class Container:
             validate_event_candidate_categories_config,
         )
         from app.models.promoter_event_visibility import validate_hide_promoter_events_config
+        from app.models.crawl_seed_lookback import validate_crawl_seed_lookback_config
 
         def _validate_eligibility_config(value):
             EligibilityConfig.from_dict(value, from_admin_override=True)  # raises on invalid
@@ -643,6 +644,13 @@ class Container:
                 # key, which is wrong for a flag whose default IS the
                 # answer most of the time.
                 "hide_promoter_events": validate_hide_promoter_events_config,
+                # plans/260813_dormant-vs-broken-targets.md §B: the default
+                # a scheduled crawl's SEED run falls back to when a target
+                # sets no `initial_lookback` of its own — the SAME generic
+                # admin-config CRUD route every key here uses, no dedicated
+                # endpoint. Resolved fresh per run by
+                # ScheduledInstagramCrawlService._resolve_seed_lookback.
+                "crawl_seed_lookback": validate_crawl_seed_lookback_config,
             },
         )
 
@@ -830,6 +838,13 @@ class Container:
                     result_cost_usd=settings.apify_instagram_post_cost_usd,
                 ),
                 chainer=crawl_chainer,
+                # plans/260813_dormant-vs-broken-targets.md §B: the real
+                # AdminConfigService — already built above, unconditionally
+                # — so the seed lookback default is runtime-editable
+                # (admin_config:crawl_seed_lookback) with no redeploy,
+                # exactly like every other admin-config key in this
+                # container.
+                admin_config_service=self.admin_config_service,
             )
             logger.info("[Container] Scheduled Instagram crawl service initialized")
         else:
