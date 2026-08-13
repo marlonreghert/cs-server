@@ -492,6 +492,70 @@ class TestCrawlErrorVisibility:
         assert row["cursor_posts_at"] is None, row
 
 
+# ── plans/260813_crawl-transport-failure-visibility.md §B: a transport
+# failure (FetchPostsResult.error_code == "timeout"/"http_error"/
+# "request_error", plan §A) reaches _run_stream through the SAME generic
+# "any non-Apify, non-None error_code is a failure" branch 260812 already
+# shipped for an unrecognised Apify code -- no new branch, no new outcome
+# label. These tests pin that the wiring genuinely reaches consecutive_
+# failures/last_failure_kind/cursor exactly like every other FAILURE_
+# OUTCOMES member, for each of the three transport codes specifically (not
+# just "some unrecognised string", which TestCrawlErrorVisibility already
+# covers) -- protecting against a future change to _run_stream's
+# classification accidentally special-casing these three strings out of the
+# failure path.
+class TestCrawlTransportFailureVisibility:
+    @pytest.mark.parametrize("code", ["timeout", "http_error", "request_error"])
+    def test_a_transport_code_is_recorded_as_a_failure_not_empty(self, code):
+        dao = _venue_dao()
+        dao.upsert_crawl_target("transporttarget", {"kind": "venue", "cron": "0 22 * * 5,6"})
+        apify = _FakeApifyClient()
+        apify.program_error("transporttarget", "posts", code=code, request_error_count=0)
+        service = _service(dao, apify, _FakeBudgetDao())
+
+        report = _run(service.run_target("transporttarget"))
+
+        assert report["streams"]["posts"]["outcome"] == "failed", report
+        row = dao.get_crawl_target("transporttarget")
+        assert row["consecutive_failures"] == 1, row
+        assert row["last_failure_kind"] == "failed", row
+        assert row["last_failure_at"] is not None, row
+        assert row["cursor_posts_at"] is None, row
+
+    def test_a_timeout_increments_an_existing_failure_streak(self):
+        dao = _venue_dao()
+        dao.upsert_crawl_target(
+            "streaktarget", {"kind": "venue", "cron": "0 22 * * 5,6", "consecutive_failures": 1},
+        )
+        apify = _FakeApifyClient()
+        apify.program_error("streaktarget", "posts", code="timeout", request_error_count=0)
+        service = _service(dao, apify, _FakeBudgetDao())
+
+        _run(service.run_target("streaktarget"))
+
+        row = dao.get_crawl_target("streaktarget")
+        assert row["consecutive_failures"] == 2, row
+
+    def test_a_timeout_never_bills_and_never_disables_the_target(self):
+        """Unlike handle_not_found (permanent -- disables the target), a
+        transport failure is transient: the target must stay enabled and
+        retryable on the next scheduled fire, and nothing is billed since
+        `.posts` is empty."""
+        dao = _venue_dao()
+        dao.upsert_crawl_target("transienttarget", {"kind": "venue", "cron": "0 22 * * 5,6"})
+        apify = _FakeApifyClient()
+        apify.program_error("transienttarget", "posts", code="timeout", request_error_count=0)
+        budget = _FakeBudgetDao()
+        service = _service(dao, apify, budget)
+
+        _run(service.run_target("transienttarget"))
+
+        row = dao.get_crawl_target("transienttarget")
+        assert row["enabled"] is True, row
+        assert row["last_run_results"] == 0, row
+        assert budget.get_month_count(budget.current_year_month_utc(NOW)) == 0
+
+
 # ── §C split in two: the seed cap vs the steady-state cap ───────────────────
 # A brand-new target with a null cursor used to be capped by the SAME small
 # `results_limit` (default 10) a steady-state run uses — silently undoing

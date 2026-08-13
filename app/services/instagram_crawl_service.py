@@ -135,13 +135,22 @@ OUTCOME_BOOKKEEPING_FAILED = "bookkeeping_failed"
 # `OUTCOME_HANDLE_NOT_FOUND` is Apify's own `not_found` — PERMANENT, the
 # handle does not exist; `run_target` disables the target rather than
 # retrying a scrape that will never succeed. Both are DISTINCT from
-# `OUTCOME_FAILED` (a transport-level exception, or an unrecognised Apify
-# error code) and from `OUTCOME_EMPTY` (no error item at all, or `no_items`
-# with no request errors — a genuinely empty/private stream): a real empty
-# stream must stay `empty` and must NOT increment `consecutive_failures`;
-# these two, and `OUTCOME_FAILED`, all do. Never reuse `OUTCOME_NOT_FOUND`
-# for this — that constant already means "this handle has no crawl_target
-# row in our own DB at all," an unrelated concept.
+# `OUTCOME_FAILED` — an in-process exception escaping the fetch call (see
+# `_run_stream`'s own `except Exception` below), an unrecognised Apify error
+# code, OR (plans/260813_crawl-transport-failure-visibility.md §A/§B) one of
+# FetchPostsResult's own transport codes (`timeout`/`http_error`/
+# `request_error`, surfaced when the Apify CLIENT itself failed at the HTTP
+# layer rather than Apify ever running) — and from `OUTCOME_EMPTY` (no error
+# item at all, or `no_items` with no request errors — a genuinely empty/
+# private stream): a real empty stream must stay `empty` and must NOT
+# increment `consecutive_failures`; these two, and `OUTCOME_FAILED`, all do.
+# No dedicated branch exists for the three transport codes below (`if not
+# kept:`) — they fall through the SAME "anything else is a failure" `elif
+# error_code is not None` arm an unrecognised Apify code already used, since
+# a timeout and an in-process exception are the same fact: the call did not
+# answer. Never reuse `OUTCOME_NOT_FOUND` for this — that constant already
+# means "this handle has no crawl_target row in our own DB at all," an
+# unrelated concept.
 OUTCOME_BLOCKED = "blocked"
 OUTCOME_HANDLE_NOT_FOUND = "handle_not_found"
 # The set of per-stream outcomes that count as a FAILED fetch — increments
@@ -1059,16 +1068,21 @@ class ScheduledInstagramCrawlService:
         kept, dropped = _split_kept_and_dropped(raw_posts or [], bound.cutoff_at)
 
         if not kept:
-            # §A/§B: an error item present (even alongside zero KEPT posts —
-            # e.g. every returned post was pinned-and-dropped is NOT this
-            # branch, since `kept` empty here means raw_posts itself yielded
-            # nothing usable) changes what "nothing came back" MEANS.
-            # `not_found` is permanent; `no_items` with request errors is a
-            # transient block; `no_items` with none is a genuinely empty/
-            # private stream (still OUTCOME_EMPTY); anything else Apify has
-            # never been seen to return is treated as a transient failure,
-            # never silently folded into "empty" (the whole defect this plan
-            # exists to close).
+            # §A/§B (plans/260812_crawl-error-visibility.md): an error item
+            # present (even alongside zero KEPT posts — e.g. every returned
+            # post was pinned-and-dropped is NOT this branch, since `kept`
+            # empty here means raw_posts itself yielded nothing usable)
+            # changes what "nothing came back" MEANS. `not_found` is
+            # permanent; `no_items` with request errors is a transient
+            # block; `no_items` with none is a genuinely empty/private
+            # stream (still OUTCOME_EMPTY); anything else — an Apify code
+            # never seen before, OR (plans/260813_crawl-transport-failure-
+            # visibility.md §A/§B) one of THIS client's own transport codes
+            # (`timeout`/`http_error`/`request_error`) — is treated as a
+            # transient failure, never silently folded into "empty" (the
+            # whole defect 260812 exists to close, and 260813 closes for the
+            # transport layer specifically: a timeout is not an empty
+            # account either).
             if error_code == "not_found":
                 outcome = OUTCOME_HANDLE_NOT_FOUND
             elif error_code == "no_items":
