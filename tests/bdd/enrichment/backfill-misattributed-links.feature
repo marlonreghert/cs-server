@@ -1,4 +1,3 @@
-@wip
 Feature: Backfill mis-attributed venue links
   As an operator
   I want every item whose venue came from a post-level caption mention re-decided
