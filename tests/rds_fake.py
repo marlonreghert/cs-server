@@ -432,6 +432,11 @@ class InMemoryRdsVenueStore:
         # whether the per-post event cap dropped trailing entries from this
         # post's own extraction.
         "source_media_type", "source_uploaded_at", "source_events_truncated",
+        # plans/260812_event-attribution-and-dates.md §C (migration 0037):
+        # the model's structured date-interpretation fallback, persisted
+        # NEXT TO raw_extraction (its own column) — the determinism guard's
+        # own store.
+        "date_interpretation",
     )
 
     # A source's first/last_seen_at can be an ISO string (the fake's own
@@ -666,6 +671,9 @@ class InMemoryRdsVenueStore:
             "source_media_type": source_fields.get("source_media_type"),
             "source_uploaded_at": source_fields.get("source_uploaded_at"),
             "source_events_truncated": source_fields.get("source_events_truncated", False),
+            # plans/260812_event-attribution-and-dates.md §C (migration
+            # 0037): nullable, mirroring the real column default.
+            "date_interpretation": source_fields.get("date_interpretation"),
         }
         self.event_sources[source_row["id"]] = source_row
         return self.get_event(event_id)

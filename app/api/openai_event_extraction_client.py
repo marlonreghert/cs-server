@@ -85,15 +85,30 @@ _KIND_FIELD_DOC = """- kind: what this post actually IS — exactly one of:
     - "promotion": an offer or price advantage — happy hour, birthday freebie
     - "menu": a dish or menu announcement, including a daily special
     - "food": food or drink imagery with no offer and no event
-    - "other": anything else — staff, decor, hiring, closure notices
+    - "other": anything else — staff, decor, hiring, closure notices,
+      birthday/anniversary greetings, thank-you or recap posts about a
+      night that already happened
   Decide with this PRECEDENCE, in order, and stop at the FIRST that applies:
   a happening with a date or recurring schedule -> "event"; else an offer or
   price advantage -> "promotion"; else a named dish or menu -> "menu"; else
   food or drink imagery -> "food"; else "other". This puts "event" FIRST on
   purpose: a genuine event advertised alongside a drinks offer is still an
-  event, never a promotion. A post with no photo attached still gets a
-  kind, judged from the caption alone. This field is REQUIRED — always
-  answer with one of the five values above, never omit it."""
+  event, never a promotion.
+  BEFORE applying that precedence, ask whether the post actually ANNOUNCES
+  something a reader could attend — not merely whether it MENTIONS an
+  event, a venue, a date, or a lineup. A post that congratulates, thanks,
+  recaps, or reports on something is "other", even when it names a real
+  event, a real venue, a real date, and a real lineup: "Parabéns pelos seus
+  31 anos! Feliz aniversário!" is a birthday greeting, not a party
+  announcement, even if it states a date and tags a venue. A caption
+  thanking everyone who came out last Friday, naming the acts that played,
+  is a RECAP of a night already over, not an invitation to a future one —
+  "other", not "event", no matter how much detail it includes about what
+  already happened. The test is always "does this announce something
+  attendable", never "does this post contain event-shaped words".
+  A post with no photo attached still gets a kind, judged from the caption
+  alone. This field is REQUIRED — always answer with one of the five values
+  above, never omit it."""
 
 # Shared by both prompts below (single-line, embedded via an f-string) so the
 # two can never drift on what an `attractions` entry looks like — extending
@@ -126,6 +141,33 @@ _ATTRACTIONS_FIELD_DOC = f"""- attractions: array of every DJ, live act or perfo
 # with the SAME vocabulary argument so neither can drift — extending only
 # one is the exact half-fix `_KIND_FIELD_DOC`'s own docstring already warns
 # about for `kind`.
+# Shared by both prompts below (plans/260812_event-attribution-and-dates.md
+# §C) so neither can drift — CLAUDE.md's own warning: "both extraction
+# prompts must change together; they have drifted before." An OPTIONAL
+# fallback the deterministic resolver (app/services/event_date_resolver.py)
+# consults ONLY when it cannot parse `date_text` on its own — today's ~97%
+# of dates never need it. The model supplies literal, categorised FACTS it
+# read off the flyer; Python performs every calculation (anchoring, rolling
+# years, picking a range's first day) — never a computed/absolute date, and
+# a model that returns one anyway is simply ignored (the resolver only ever
+# reads the fields named below).
+_DATE_INTERPRETATION_FIELD_DOC = """- date_interpretation: OPTIONAL. Only when `date_text` is a shape you are
+  not confident a simple parser can read on its own (a bare "É HOJE", a
+  weekday paired with a day number like "Quinta (02)") — null when
+  `date_text` is already a plain, ordinary date ("15/08", "5 de setembro").
+  NEVER a computed or absolute date — only the literal pieces you read off
+  the text, tagged by shape:
+    {"kind": "relative", "relative": "hoje"} or {"relative": "amanha"}
+    {"kind": "day_month", "day": 6, "month": 2}
+    {"kind": "day_month_year", "day": 6, "month": 2, "year": 2027}
+    {"kind": "weekday", "weekday": "quinta"}
+    {"kind": "weekday_day", "weekday": "quinta", "day": 2}
+    {"kind": "range", "range_first_day": 6, "range_last_day": 9, "month": 2}
+  `weekday` is one of: segunda, terça, quarta, quinta, sexta, sábado,
+  domingo. `month` is the numeral 1-12. Omit any field this shape does not
+  use rather than guessing a value for it."""
+
+
 def _category_field_doc(category_vocabulary) -> str:
     vocab_text = ", ".join(category_vocabulary)
     return f"""- category: a short label for what this is — a music style, a theme, a
@@ -161,6 +203,7 @@ Never invent one.
 - date_text: the raw date expression exactly as printed/spoken, or null
 - time_text: the raw time expression exactly as printed/spoken (may be a
   range like "22h às 04h"), or null
+""" + _DATE_INTERPRETATION_FIELD_DOC + """
 - is_recurring: true only if the text explicitly states a recurring
   cadence ("toda quinta", "todo sábado", "semanalmente")
 - recurrence_text: the raw recurrence phrase when is_recurring, else null
@@ -177,7 +220,8 @@ Never invent one.
 ## Output
 Reply with ONLY a JSON object, no markdown fences:
 {"kind": "event", "title": "...", "description": null, "date_text": "15/08",
- "time_text": "22h", "is_recurring": false, "recurrence_text": null,
+ "time_text": "22h", "date_interpretation": null, "is_recurring": false,
+ "recurrence_text": null,
  "attractions": [{"name": "DJ X", "type": "dj", "stage": null, "styles": ["House"]}],
  "ticket_url": null, "ticket_info": null, "price_text": "R$30", "location_text": null,
  "category": "rock", "confidence": 0.85}
@@ -229,6 +273,7 @@ venue for it.
 - date_text: the raw date expression exactly as printed/spoken, or null
 - time_text: the raw time expression exactly as printed/spoken (may be a
   range like "22h às 04h"), or null
+""" + _DATE_INTERPRETATION_FIELD_DOC + """
 - is_recurring: true only if the text explicitly states a recurring
   cadence ("toda quinta", "todo sábado", "semanalmente")
 - recurrence_text: the raw recurrence phrase when is_recurring, else null
@@ -246,7 +291,8 @@ Reply with ONLY a JSON object, no markdown fences, wrapping every event in an
 "events" array (a single-event post still returns a list of one):
 {"events": [
   {"kind": "event", "title": "...", "description": null, "date_text": "15/08",
-   "time_text": "22h", "is_recurring": false, "recurrence_text": null,
+   "time_text": "22h", "date_interpretation": null, "is_recurring": false,
+   "recurrence_text": null,
    "attractions": [{"name": "DJ X", "type": "dj", "stage": null, "styles": ["House"]}],
    "ticket_url": null, "ticket_info": null, "price_text": "R$30", "location_text": "Venue A",
    "category": "rock", "confidence": 0.85}
@@ -369,6 +415,48 @@ def _normalize_attractions(raw) -> tuple[list[dict], int]:
     return attractions, malformed
 
 
+# plans/260812_event-attribution-and-dates.md §C: the ONLY keys this parser
+# (and, downstream, app.services.event_date_resolver._interpretation_to_
+# date) ever reads from a `date_interpretation` payload. Deliberately a
+# closed allow-list, not a passthrough of whatever the model sent — this is
+# what makes a model-invented extra key (a computed/absolute date under some
+# other name) inert by construction rather than something either layer has
+# to specially detect and reject.
+_INTERPRETATION_KINDS = {
+    "relative", "day_month", "day_month_year", "weekday", "weekday_day", "range",
+}
+_INTERPRETATION_STRING_FIELDS = ("relative", "weekday")
+_INTERPRETATION_INT_FIELDS = ("day", "month", "year", "range_first_day", "range_last_day")
+
+
+def _normalize_date_interpretation(raw) -> Optional[dict]:
+    """One event's raw `date_interpretation` -> a normalized dict, or `None`
+    when absent, not an object, or carrying an unrecognised `kind` — never
+    fatal to the event, mirroring `_normalize_attractions`'s own per-item
+    isolation. Only ever copies the closed field set above; anything else
+    the model included (an "absolute_date", a "resolved_date", ...) is
+    silently dropped here, the FIRST of two independent places this repo
+    ignores it (event_date_resolver._interpretation_to_date is the second,
+    for a payload that reaches it some other way)."""
+    if not isinstance(raw, dict):
+        return None
+    kind = raw.get("kind")
+    if kind not in _INTERPRETATION_KINDS:
+        return None
+    out: dict = {"kind": kind}
+    for field in _INTERPRETATION_STRING_FIELDS:
+        value = raw.get(field)
+        if isinstance(value, str) and value.strip():
+            out[field] = value.strip().lower()
+    for field in _INTERPRETATION_INT_FIELDS:
+        value = raw.get(field)
+        if isinstance(value, bool):
+            continue  # bool subclasses int -- never a real day/month/year
+        if isinstance(value, int):
+            out[field] = value
+    return out
+
+
 def _parse_event_fields(data: dict) -> tuple[dict, int]:
     """The per-event field normalization shared by the single-event and
     multi-event response shapes — one definition of "what a parsed event
@@ -427,6 +515,11 @@ def _parse_event_fields(data: dict) -> tuple[dict, int]:
         "description": _text("description"),
         "date_text": _text("date_text"),
         "time_text": _text("time_text"),
+        # plans/260812_event-attribution-and-dates.md §C: consulted by
+        # app.services.event_date_resolver ONLY as a fallback when the
+        # deterministic finders cannot read `date_text` at all. `None` when
+        # absent or unusable — never invented.
+        "date_interpretation": _normalize_date_interpretation(data.get("date_interpretation")),
         "is_recurring": bool(data.get("is_recurring", False)),
         "recurrence_text": _text("recurrence_text"),
         "lineup": lineup,

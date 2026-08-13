@@ -47,6 +47,18 @@ from zoneinfo import ZoneInfo
 
 RECIFE_TZ = ZoneInfo("America/Recife")
 
+# plans/260812_event-attribution-and-dates.md §D: the default grace window
+# for `_roll_forward` — a candidate date up to this many days OLDER than its
+# own anchor keeps the anchor's year rather than being rolled a full year
+# forward. Runtime-configurable (see `app.models.date_resolution_config`,
+# this project's standing pattern for a first-guess constant — the same
+# shape `menu_expiry_days` and the category vocabulary already use); the
+# resolver itself stays pure (no I/O, no Redis read) and simply accepts the
+# resolved value as a keyword argument, defaulting to this constant so every
+# pre-existing caller (and every existing test) that never cared about the
+# grace window keeps working unchanged.
+DEFAULT_YEAR_ROLL_GRACE_DAYS = 60
+
 REASON_MISSING_DATE = "missing_date"
 # An explicit date parsed AND a weekday was stated AND they name different
 # days (plans/260807_date-resolution-correctness.md, defect 2b). The explicit
@@ -157,6 +169,23 @@ _NUMERIC_DATE_RE = re.compile(r"\b(\d{1,2})[/.\-](\d{1,2})(?:[/.\-](\d{2,4}))?\b
 # prevents "set" from matching inside "setembro"; this just avoids the
 # wasted backtrack).
 _MONTH_NAMES_BY_LENGTH = sorted(_MONTHS, key=len, reverse=True)
+
+# "De 06 a 09 de fevereiro" — the PREPOSITION range form
+# plans/260812_event-attribution-and-dates.md §D adds: `de` DAY `a` DAY `de`
+# MONTH, one shared month for both ends. Unrecognised before this plan, so
+# the ordinary single-date finders below matched only the TRAILING date
+# ("09 de fevereiro") and silently kept the last day of the range instead of
+# the first — the dangerous failure mode named in the plan's own Evidence
+# section (it does not fail, it silently returns the wrong day). Deliberately
+# a SEPARATE pattern from `_WEEKDAY_RANGE_RE` above (that one matches WEEKDAY
+# names between "de" and "a"; this one matches bare day NUMERALS) — the two
+# can never fire on the same text.
+_DATE_RANGE_PREPOSITION_RE = re.compile(
+    r"\bde\s+(\d{1,2})\s+a\s+(\d{1,2})\s*(?:de\s*|[/.\-]\s*)("
+    + "|".join(_MONTH_NAMES_BY_LENGTH) + r")\b",
+    re.IGNORECASE,
+)
+
 # "5 de setembro", "5 setembro", "05/set", "08.Ago" — day first, ANY month
 # form. The day numeral must be immediately adjacent (a required \b on both
 # ends): this is what stops "mar"/"set"/"mai" — ordinary Portuguese words —
@@ -281,23 +310,40 @@ class _NoMatch:
 _NO_MATCH = _NoMatch()
 
 
-def _roll_forward(candidate: date, anchor: date, year: int, month: int, day: int) -> tuple[Optional[date], bool]:
-    """`(candidate, False)` when it is at/after `anchor` (no guess needed);
-    else `(the same month/day one year later, True)` — the shared "no year
-    stated" forward-fill rule. The second element is `year_inferred`
+def _roll_forward(
+    candidate: date, anchor: date, year: int, month: int, day: int,
+    grace_days: int = DEFAULT_YEAR_ROLL_GRACE_DAYS,
+) -> tuple[Optional[date], bool]:
+    """`(candidate, False)` when it is at/after `anchor` (no guess needed,
+    nothing was inferred). Otherwise a year must be chosen, and there are
+    now two candidates rather than one always-correct answer
+    (plans/260812_event-attribution-and-dates.md §D):
+
+      - within `grace_days` of `anchor` (inclusive), KEEP the anchor's own
+        year — a date a few days "in the past" is far more often a flyer
+        posted slightly after the fact than a date meant a full year out;
+      - older than that, ROLL forward one year, exactly as before this
+        grace window existed.
+
+    Either way the second element is `year_inferred`
     (plans/260810_date-correctness-review-reasons-and-path-parity.md §A):
-    True exactly when a year had to be GUESSED by rolling, never merely
-    because the year itself was absent from the text (a same-year candidate
-    that never needed to roll is not a guess and must stay unflagged)."""
+    True whenever a year had to be CHOSEN at all (kept OR rolled) — the
+    grace window turns the "keep" branch into a guess too (there were two
+    plausible years to pick between), never merely because the year itself
+    was absent from the text (a same-year candidate that never needed
+    either choice, `candidate >= anchor`, is not a guess and stays
+    unflagged)."""
     if candidate >= anchor:
         return candidate, False
+    if (anchor - candidate).days <= grace_days:
+        return candidate, True
     try:
         return date(year + 1, month, day), True
     except ValueError:
         return None, True  # e.g. 29/02 rolling into a non-leap year
 
 
-def _numeric_date(text: str, anchor: date):
+def _numeric_date(text: str, anchor: date, grace_days: int = DEFAULT_YEAR_ROLL_GRACE_DAYS):
     """Day/month(/year), ALWAYS day-first — never month-first. Returns
     `_NO_MATCH` when the pattern never fired, else `(date_or_None,
     year_inferred)` — `date_or_None` is `None` when the pattern fired on an
@@ -316,10 +362,10 @@ def _numeric_date(text: str, anchor: date):
         candidate = date(anchor.year, month, day)
     except ValueError:
         return None, False  # e.g. "31/02" — not a real date; never guess one
-    return _roll_forward(candidate, anchor, anchor.year, month, day)
+    return _roll_forward(candidate, anchor, anchor.year, month, day, grace_days)
 
 
-def _textual_date(text: str, anchor: date):
+def _textual_date(text: str, anchor: date, grace_days: int = DEFAULT_YEAR_ROLL_GRACE_DAYS):
     """"25 de dezembro", "3 agosto", "05/set", "SET 05" — day-first (any
     month form) or the abbreviated month-first order. Same `_NO_MATCH`/
     `(date_or_None, year_inferred)` contract as `_numeric_date`."""
@@ -335,7 +381,7 @@ def _textual_date(text: str, anchor: date):
         candidate = date(anchor.year, month, day)
     except ValueError:
         return None, False
-    return _roll_forward(candidate, anchor, anchor.year, month, day)
+    return _roll_forward(candidate, anchor, anchor.year, month, day, grace_days)
 
 
 def _final_day_month(tail: str) -> Optional[tuple[int, int, Optional[str]]]:
@@ -354,14 +400,31 @@ def _final_day_month(tail: str) -> Optional[tuple[int, int, Optional[str]]]:
     return None
 
 
-def _date_range_candidate(text: str, anchor: date):
-    """`_NO_MATCH` when no "day list + final date" shape is present at all —
-    the overwhelmingly common case, falling through unchanged to the
-    ordinary single-date finders. Otherwise `(date_or_None, year_inferred,
-    date_range=True)`, resolved from the FIRST day of the range against
-    `anchor` exactly like a single date would be (plans/260810_date-
-    correctness-review-reasons-and-path-parity.md §B: "an event starts on
-    the day it starts", never its last day)."""
+def _date_range_candidate(
+    text: str, anchor: date, grace_days: int = DEFAULT_YEAR_ROLL_GRACE_DAYS,
+):
+    """`_NO_MATCH` when no "day list + final date" shape (comma/"e"-joined,
+    `_DATE_RANGE_PREFIX_RE`) AND no "de X a Y de MONTH" preposition shape
+    (`_DATE_RANGE_PREPOSITION_RE`) is present at all — the overwhelmingly
+    common case, falling through unchanged to the ordinary single-date
+    finders. Otherwise `(date_or_None, year_inferred, date_range=True)`,
+    resolved from the FIRST day of the range against `anchor` exactly like a
+    single date would be (plans/260810_date-correctness-review-reasons-and-
+    path-parity.md §B: "an event starts on the day it starts", never its
+    last day). The preposition form is checked FIRST: it is more specific
+    (both a start and an end day, one shared month) and the comma-list form
+    could not accidentally match its text anyway (no comma/"e"-joined day
+    list is present in "de 06 a 09 de fevereiro")."""
+    prep_match = _DATE_RANGE_PREPOSITION_RE.search(text)
+    if prep_match:
+        first_day, month = int(prep_match.group(1)), _MONTHS[prep_match.group(3).lower()]
+        try:
+            candidate = date(anchor.year, month, first_day)
+        except ValueError:
+            return None, False, True  # matched but invalid — consumed, never guess
+        resolved, rolled = _roll_forward(candidate, anchor, anchor.year, month, first_day, grace_days)
+        return resolved, rolled, True
+
     m = _DATE_RANGE_PREFIX_RE.search(text)
     if not m:
         return _NO_MATCH
@@ -382,7 +445,7 @@ def _date_range_candidate(text: str, anchor: date):
         candidate = date(anchor.year, month, first_day)
     except ValueError:
         return None, False, True  # matched but invalid — consumed, never guess
-    resolved, rolled = _roll_forward(candidate, anchor, anchor.year, month, first_day)
+    resolved, rolled = _roll_forward(candidate, anchor, anchor.year, month, first_day, grace_days)
     return resolved, rolled, True
 
 
@@ -402,7 +465,7 @@ def _corroborate_with_weekday(text: str, explicit_date: date) -> tuple[date, Opt
 
 
 def _resolve_explicit_date(
-    date_text: str, anchor: date,
+    date_text: str, anchor: date, grace_days: int = DEFAULT_YEAR_ROLL_GRACE_DAYS,
 ) -> tuple[Optional[date], Optional[str], bool, bool]:
     """A calendar date out of free text, resolved against `anchor` (the
     post's own date). Returns `(date_or_None, review_reason, year_inferred,
@@ -417,8 +480,8 @@ def _resolve_explicit_date(
         FIRST was kept (§B).
     `(None, None, False, False)` when nothing recognisable is present at
     all — the caller treats that as "never invent a date", not as an error
-    to raise.
-    """
+    to raise (`resolve_event_datetime` then tries the model's structured
+    `date_interpretation` as a fallback — see `_interpretation_to_date`)."""
     text = date_text.strip().lower()
 
     if text in ("hoje", "hoje à noite", "hoje a noite"):
@@ -426,12 +489,13 @@ def _resolve_explicit_date(
     if text in ("amanhã", "amanha"):
         return anchor + timedelta(days=1), None, False, False
 
-    # A day-list-plus-final-date shape ("01, 02 e 03 de julho") is checked
-    # BEFORE the ordinary single-date finders below: those would still match
-    # the trailing "03 de julho" alone and silently lose the range. Only
-    # ever fires on the two day-first shapes those finders already accept —
-    # see `_date_range_candidate`'s own docstring.
-    range_result = _date_range_candidate(text, anchor)
+    # A day-list-plus-final-date shape ("01, 02 e 03 de julho") or the
+    # preposition form ("de 06 a 09 de fevereiro") is checked BEFORE the
+    # ordinary single-date finders below: those would still match the
+    # TRAILING date alone and silently lose the range. Only ever fires on
+    # shapes those finders already accept — see `_date_range_candidate`'s
+    # own docstring.
+    range_result = _date_range_candidate(text, anchor, grace_days)
     if range_result is not _NO_MATCH:
         resolved_date, rolled, is_range = range_result
         if resolved_date is None:
@@ -440,7 +504,7 @@ def _resolve_explicit_date(
         return date_val, reason, rolled, is_range
 
     for finder in (_numeric_date, _textual_date):
-        result = finder(text, anchor)
+        result = finder(text, anchor, grace_days)
         if result is _NO_MATCH:
             continue
         resolved_date, rolled = result
@@ -553,6 +617,140 @@ class ResolvedDate:
     date_range: bool = False
 
 
+# ── §C: the model interprets, Python computes ───────────────────────────────
+# The tagged shape `date_interpretation` may hold — plans/260812_event-
+# attribution-and-dates.md §C. Every kind Python recognises; a `kind` outside
+# this set (or a non-dict payload) is simply unusable and never guessed at.
+INTERPRETATION_KIND_RELATIVE = "relative"
+INTERPRETATION_KIND_DAY_MONTH = "day_month"
+INTERPRETATION_KIND_DAY_MONTH_YEAR = "day_month_year"
+INTERPRETATION_KIND_WEEKDAY = "weekday"
+INTERPRETATION_KIND_WEEKDAY_DAY = "weekday_day"
+INTERPRETATION_KIND_RANGE = "range"
+
+_INTERPRETATION_KINDS = frozenset({
+    INTERPRETATION_KIND_RELATIVE, INTERPRETATION_KIND_DAY_MONTH,
+    INTERPRETATION_KIND_DAY_MONTH_YEAR, INTERPRETATION_KIND_WEEKDAY,
+    INTERPRETATION_KIND_WEEKDAY_DAY, INTERPRETATION_KIND_RANGE,
+})
+
+
+def _interpretation_to_date(
+    interpretation, anchor: date, grace_days: int = DEFAULT_YEAR_ROLL_GRACE_DAYS,
+) -> tuple[Optional[date], Optional[str], bool, bool]:
+    """§C's fallback: `(date_or_None, review_reason, year_inferred,
+    date_range)` — the SAME four-tuple shape `_resolve_explicit_date`
+    returns, computed from the model's structured `interpretation` using the
+    IDENTICAL arithmetic primitives every deterministic finder above already
+    uses (`_roll_forward`, `_next_weekday_on_or_after`) — never a second,
+    parallel notion of "what date is this". The model supplies literal,
+    categorised FACTS it read off the flyer; Python performs every
+    calculation. Any key besides the ones this function explicitly reads
+    (including a model-invented "computed" date under some other name) is
+    silently ignored — this is what makes a model-supplied absolute date a
+    no-op by construction, never something this function has to specially
+    detect and reject.
+
+    `(None, None, False, False)` for anything absent, non-dict, or carrying
+    an unrecognised/malformed `kind` — never a guess."""
+    if not isinstance(interpretation, dict):
+        return None, None, False, False
+    kind = interpretation.get("kind")
+    if kind not in _INTERPRETATION_KINDS:
+        return None, None, False, False
+
+    if kind == INTERPRETATION_KIND_RELATIVE:
+        relative = interpretation.get("relative")
+        if relative == "hoje":
+            return anchor, None, False, False
+        if relative == "amanha":
+            return anchor + timedelta(days=1), None, False, False
+        return None, None, False, False
+
+    if kind in (
+        INTERPRETATION_KIND_DAY_MONTH, INTERPRETATION_KIND_DAY_MONTH_YEAR,
+        INTERPRETATION_KIND_RANGE,
+    ):
+        day = (
+            interpretation.get("range_first_day")
+            if kind == INTERPRETATION_KIND_RANGE
+            else interpretation.get("day")
+        )
+        month = interpretation.get("month")
+        if not isinstance(day, int) or not isinstance(month, int):
+            return None, None, False, False
+        if not (1 <= day <= 31 and 1 <= month <= 12):
+            return None, None, False, False
+        is_range = kind == INTERPRETATION_KIND_RANGE
+        year = interpretation.get("year")
+        try:
+            if kind == INTERPRETATION_KIND_DAY_MONTH_YEAR and isinstance(year, int):
+                # An EXPLICITLY-stated year is trusted outright, exactly like
+                # the deterministic finders trust one — never rolled, never
+                # inferred.
+                return date(year, month, day), None, False, is_range
+            candidate = date(anchor.year, month, day)
+        except ValueError:
+            return None, None, False, is_range  # invalid calendar date — never guess
+        resolved, rolled = _roll_forward(candidate, anchor, anchor.year, month, day, grace_days)
+        if resolved is None:
+            return None, None, False, is_range
+        return resolved, None, rolled, is_range
+
+    # WEEKDAY / WEEKDAY_DAY
+    weekday = _WEEKDAYS.get((interpretation.get("weekday") or "").strip().lower())
+    if weekday is None:
+        return None, None, False, False
+    if kind == INTERPRETATION_KIND_WEEKDAY:
+        return _next_weekday_on_or_after(anchor, weekday), None, False, False
+
+    day = interpretation.get("day")
+    if not isinstance(day, int) or not (1 <= day <= 31):
+        return None, None, False, False
+    year, month = anchor.year, anchor.month
+    for _ in range(24):  # forward-search bounded to two years, always terminates
+        try:
+            candidate = date(year, month, day)
+        except ValueError:
+            candidate = None
+        if candidate is not None and candidate >= anchor:
+            if candidate.weekday() == weekday:
+                return candidate, None, False, False
+            return candidate, REASON_WEEKDAY_MISMATCH, False, False
+        month += 1
+        if month > 12:
+            month, year = 1, year + 1
+    return None, None, False, False  # pragma: no cover - unreachable in practice
+
+
+def select_date_interpretation_for_reuse(
+    *, fresh_date_text, fresh_interpretation, stored_date_text, stored_interpretation,
+):
+    """The determinism guard §C requires: `compute_source_event_key` hashes
+    the RESOLVED date, so a re-extraction whose model answers a STRUCTURED
+    interpretation differently for the SAME verbatim `date_text` would
+    silently change the key — the exact duplicate-event failure
+    `0025_multi_event_posts` was written to prevent, reopened through a new
+    door.
+
+    Reuses the STORED interpretation exactly when the fresh `date_text` is
+    BYTE-IDENTICAL to the stored one and a stored interpretation exists to
+    reuse; otherwise trusts the fresh model answer — a genuinely new or
+    edited `date_text` has no stored interpretation worth pinning a re-
+    extraction to. Pure and caller-supplied: this module never reads
+    "stored" state itself (see the module's own no-I/O guarantee) — the two
+    real callers (EventExtractionService, PromoterCrawlService) look up the
+    matching existing source row themselves and pass its values in here."""
+    if (
+        fresh_date_text is not None
+        and stored_date_text is not None
+        and fresh_date_text == stored_date_text
+        and isinstance(stored_interpretation, dict)
+    ):
+        return stored_interpretation
+    return fresh_interpretation
+
+
 def _as_recife(post_timestamp: datetime) -> datetime:
     """A tz-aware America/Recife instant. A naive timestamp is assumed to
     already be Recife local time (the archive pipeline never stores naive
@@ -566,6 +764,8 @@ def _as_recife(post_timestamp: datetime) -> datetime:
 def resolve_event_datetime(
     *, date_text: Optional[str], time_text: Optional[str], post_timestamp: datetime,
     is_recurring: Optional[bool] = None, recurrence_text: Optional[str] = None,
+    date_interpretation=None,
+    year_roll_grace_days: int = DEFAULT_YEAR_ROLL_GRACE_DAYS,
 ) -> ResolvedDate:
     """Resolve a flyer/caption's raw date+time text against the post's own
     timestamp. Never reads the wall clock — the run time is not an input.
@@ -576,6 +776,22 @@ def resolve_event_datetime(
     only ever passed `date_text`) keeps working unchanged. See
     `_detect_recurrence` for exactly how they extend recurrence detection
     beyond the toda/todo marker without widening the one-off weekday path.
+
+    `date_interpretation` (plans/260812_event-attribution-and-dates.md §C)
+    is the model's OWN structured reading of `date_text` — consulted ONLY as
+    a FALLBACK, when the deterministic finders below `_resolve_explicit_date`
+    calls return no match at all (never when they resolve something, even a
+    flagged something). The caller is responsible for the determinism guard
+    (`select_date_interpretation_for_reuse`) BEFORE calling this function —
+    this function only ever computes from whatever interpretation it is
+    given, never fetches or compares a stored one itself (this module stays
+    pure, no I/O).
+
+    `year_roll_grace_days` (§D) feeds `_roll_forward`'s grace window —
+    defaults to `DEFAULT_YEAR_ROLL_GRACE_DAYS` so every pre-existing caller
+    keeps its exact previous behaviour... except that the window itself
+    IS the fix: a date up to 60 days "in the past" now keeps its anchor's
+    year instead of always rolling.
     """
     anchor_dt = _as_recife(post_timestamp)
     anchor_date = anchor_dt.date()
@@ -609,10 +825,26 @@ def resolve_event_datetime(
         resolved_date = _next_matching_weekday_on_or_after(anchor_date, recurring_weekdays)
     elif date_text and date_text.strip():
         resolved_date, review_reason, year_inferred, date_range = _resolve_explicit_date(
-            date_text, anchor_date,
+            date_text, anchor_date, year_roll_grace_days,
         )
     else:
         resolved_date = None
+
+    # §C: the model's structured interpretation is a FALLBACK, consulted
+    # ONLY when the deterministic path above (recurrence aside) found no
+    # date at all — never when it resolved something, even something merely
+    # FLAGGED (a weekday mismatch still trusts the explicit date). This is
+    # what keeps today's ~97% on their existing, proven path with zero
+    # behaviour change.
+    if not recurring and resolved_date is None:
+        fallback_date, fallback_reason, fallback_year_inferred, fallback_range = (
+            _interpretation_to_date(date_interpretation, anchor_date, year_roll_grace_days)
+        )
+        if fallback_date is not None:
+            resolved_date = fallback_date
+            review_reason = fallback_reason
+            year_inferred = fallback_year_inferred
+            date_range = fallback_range
 
     if resolved_date is None:
         return ResolvedDate(
@@ -773,6 +1005,10 @@ def vote_on_sibling_years(resolved: list[ResolvedDate]) -> list[ResolvedDate]:
 
 __all__ = [
     "RECIFE_TZ", "REASON_MISSING_DATE", "REASON_WEEKDAY_MISMATCH",
-    "REASON_YEAR_INFERRED", "REASON_DATE_RANGE",
+    "REASON_YEAR_INFERRED", "REASON_DATE_RANGE", "DEFAULT_YEAR_ROLL_GRACE_DAYS",
+    "INTERPRETATION_KIND_RELATIVE", "INTERPRETATION_KIND_DAY_MONTH",
+    "INTERPRETATION_KIND_DAY_MONTH_YEAR", "INTERPRETATION_KIND_WEEKDAY",
+    "INTERPRETATION_KIND_WEEKDAY_DAY", "INTERPRETATION_KIND_RANGE",
     "ResolvedDate", "resolve_event_datetime", "vote_on_sibling_years",
+    "select_date_interpretation_for_reuse",
 ]

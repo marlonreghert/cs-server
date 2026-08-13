@@ -1,4 +1,3 @@
-@wip
 Feature: Event attribution and dates
   An event must link to the venue its own text names, not to whichever venue the
   surrounding post mentioned first, and a date expression the model read
@@ -110,14 +109,14 @@ Feature: Event attribution and dates
     And an extracted event whose date text is "08/08"
     When the date is resolved
     Then the event starts on 2026-08-08
-    And the event is flagged as having an inferred year
+    And the event's year is flagged as inferred
 
   Scenario: Roll the year for a date months older than its post
     Given a post published on 2026-08-12
     And an extracted event whose date text is "06 de fevereiro"
     When the date is resolved
     Then the event starts on 2027-02-06
-    And the event is flagged as having an inferred year
+    And the event's year is flagged as inferred
 
   Scenario: Resolve a three-letter month
     Given a post published on 2026-08-12
@@ -157,7 +156,7 @@ Feature: Event attribution and dates
     Given a post published on 2026-08-12
     And an extracted event whose date text cannot be interpreted
     When the date is resolved
-    Then the event has no start date
+    Then the event resolves to no start date
     And the event is queued for review with reason "missing_date"
 
   # ── E. A greeting is not an event ──────────────────────────────────────────

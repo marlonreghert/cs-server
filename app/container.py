@@ -586,6 +586,9 @@ class Container:
         from app.models.venue_category import validate_category_map_config
         from app.models.post_category import validate_post_category_vocabulary_config
         from app.models.menu_lifecycle import validate_menu_expiry_days_config
+        from app.models.date_resolution_config import (
+            validate_date_year_roll_grace_days_config,
+        )
         from app.services.config_validation import validate_instagram_discovery_config
         from app.services.event_venue_targeting import (
             validate_event_candidate_categories_config,
@@ -615,6 +618,11 @@ class Container:
                 # admin-config CRUD route every key here uses, no dedicated
                 # endpoint.
                 "menu_expiry_days": validate_menu_expiry_days_config,
+                # plans/260812_event-attribution-and-dates.md §D: the year-
+                # roll grace window (app.services.event_date_resolver.
+                # _roll_forward) — the SAME generic admin-config CRUD route
+                # every key here uses, no dedicated endpoint.
+                "date_year_roll_grace_days": validate_date_year_roll_grace_days_config,
                 # plans/260811_instagram-discovery-admin-flags.md: the two
                 # add-time Instagram discovery spend switches — the SAME
                 # generic admin-config CRUD route every key here uses, no
