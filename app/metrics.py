@@ -1393,6 +1393,28 @@ EVENT_REVIEW_QUEUE_DEPTH = Gauge(
     "event with no location decision yet)",
 )
 
+# plans/260813_hide-promoter-events.md: every admin events read (the list and
+# the review queue), labelled by whether the promoter-hiding filter was
+# actually applied (`filter_applied`, from the live admin-config flag at read
+# time) — lets an operator confirm the config read is even reaching a "true"
+# value in production, not just that SOME reads happened.
+ADMIN_EVENTS_READ_TOTAL = Counter(
+    "admin_events_read_total",
+    "Admin events reads, by path and whether the promoter filter was applied",
+    ["path", "filter_applied"],
+)
+
+# How many promoter-only items one read actually hid, by path. The plan's own
+# named signal to watch: "If the hidden count ever reaches zero while
+# promoter rows exist, the unanimity rule in §A has broken" — a healthy
+# system keeps incrementing this as long as the known promoter backlog (587
+# rows, all from one account) sits in `events.post_item`.
+ADMIN_EVENTS_PROMOTER_HIDDEN_TOTAL = Counter(
+    "admin_events_promoter_hidden_total",
+    "Promoter-only items hidden from an admin events read, by path",
+    ["path"],
+)
+
 # plans/260806_event-cover-presign.md — `result` distinguishes a working sign
 # (signed) from the three ways it doesn't: no archived cover on the event
 # (no_key), no such event (not_found), and MediaArchiveStore.presign()

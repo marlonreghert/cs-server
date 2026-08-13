@@ -1,4 +1,3 @@
-@wip
 Feature: Hide promoter events
   Promoter-sourced items are out of scope for now, so the admin console shows
   only venue-sourced coverage. Nothing is deleted or re-statused — the filter is
