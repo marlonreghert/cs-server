@@ -73,6 +73,7 @@ from app.models.post_category import (
 from app.services.event_caption_matcher import matches_event_marker
 from app.services.event_date_resolver import (
     REASON_DATE_RANGE,
+    REASON_MISSING_DATE,
     REASON_WEEKDAY_MISMATCH,
     REASON_YEAR_INFERRED,
     resolve_event_datetime,
@@ -85,6 +86,7 @@ from app.services.event_reconciliation import (
     ALL_STATUSES,
     STATUS_CONFIRMED,
     STATUS_SUPERSEDED,
+    date_required_for_post_type,
     new_event_id,
     reconcile_post_events,
     update_events_gauge,
@@ -988,34 +990,58 @@ class EventExtractionService:
                 and post.flyer_names_time == "yes"
             )
 
+            # plans/260811_post-items-and-categories.md §B/§C: `post_type` is
+            # the model's own `kind`, stored VERBATIM when recognised or not
+            # (resolve_post_type only substitutes KIND_EVENT for a missing/
+            # blank answer — never coerces a real one). Computed here, before
+            # the reasons list below, because §C's missing-date suppression
+            # needs it too — one call, reused by both.
+            post_type = resolve_post_type(parsed.get("kind"))
+            # plans/260813_review-gate-and-date-vocabulary.md §C: a missing
+            # date is only ever a DEFECT for a post_type that is required to
+            # carry one (`date_required_for_post_type` — the SAME predicate
+            # event_reconciliation.is_clean_extraction's own gate uses, so
+            # the two can never disagree about what "clean" means). For
+            # every other type, `resolved.review_reason == "missing_date"`
+            # describes a correct reading of a post that never had a date to
+            # begin with, and must not be WRITTEN, not merely ignored by the
+            # gate downstream — a reason recorded but not acted on is how
+            # the console and the queue count come apart (plans/260813_
+            # hide-promoter-events.md §B).
+            missing_date_suppressed = (
+                resolved.review_reason == REASON_MISSING_DATE
+                and not date_required_for_post_type(post_type)
+            )
+
             reasons: list[str] = []
-            if resolved.review_reason:
+            if resolved.review_reason and not missing_date_suppressed:
                 reasons.append(resolved.review_reason)
             if resolved.year_inferred:
                 reasons.append(REASON_YEAR_INFERRED)
             if resolved.date_range:
                 reasons.append(REASON_DATE_RANGE)
-            if unread_time:
-                reasons.append(REVIEW_REASON_UNREAD_TIME)
+            # §D: `unread_time` stays a COUNTER (below, and via the
+            # OUTCOME_UNREAD_TIME branch further down) but no longer queues
+            # the item — an event whose date resolved must not be held up by
+            # a clock time alone. Surfaced instead as an additive admin API
+            # flag (app.routers.admin_events_router.EventOut.unread_time,
+            # sourced from raw_extraction — see the assignment below).
             low_confidence = parsed["confidence"] < cfg["min_confidence"]
             if low_confidence:
                 reasons.append(REVIEW_REASON_LOW_CONFIDENCE)
             review_reason = "; ".join(reasons) if reasons else None
 
-            # `time_known` rides in the existing raw_extraction JSONB blob
-            # rather than a new column — a copy, not the model's own dict, so
-            # the shared reconciliation's confirmed-divergence check still
-            # compares the model's actual, unmodified answer.
+            # `time_known`/`unread_time` ride in the existing raw_extraction
+            # JSONB blob rather than a new column — a copy, not the model's
+            # own dict, so the shared reconciliation's confirmed-divergence
+            # check still compares the model's actual, unmodified answer.
             raw_extraction = dict(parsed)
             raw_extraction["time_known"] = resolved.time_known
+            raw_extraction["unread_time"] = unread_time
 
-            # plans/260811_post-items-and-categories.md §B/§C: `post_type`
-            # is the model's own `kind`, stored VERBATIM when recognised or
-            # not (resolve_post_type only substitutes KIND_EVENT for a
-            # missing/blank answer — never coerces a real one). `category`
-            # is canonicalized against the vocabulary read once above; a
-            # miss is counted (never rejected) so the vocabulary can grow
-            # from evidence.
+            # `category` is canonicalized against the vocabulary read once
+            # above; a miss is counted (never rejected) so the vocabulary
+            # can grow from evidence.
             category = canonicalize_category(parsed.get("category"), category_vocabulary)
             if category is not None and not is_in_vocabulary(category, category_vocabulary):
                 record_off_vocabulary_category(category)
@@ -1038,7 +1064,7 @@ class EventExtractionService:
                 "description": parsed["description"],
                 "lineup": parsed["lineup"],
                 "attractions": parsed["attractions"],
-                "post_type": resolve_post_type(parsed.get("kind")),
+                "post_type": post_type,
                 "category": category,
                 "ticket_url": parsed["ticket_url"],
                 "ticket_info": parsed["ticket_info"],
@@ -1080,7 +1106,13 @@ class EventExtractionService:
                     single_event_outcome = OUTCOME_YEAR_INFERRED
                 elif resolved.date_range:
                     single_event_outcome = OUTCOME_DATE_RANGE
-                elif resolved.needs_review:
+                # §C: `not missing_date_suppressed` — `needs_review` is True
+                # here purely because the resolver found no date, which for
+                # a post_type that never needed one is not a "no_date"
+                # defect at all (that outcome would otherwise contradict
+                # this same post landing on OUTCOME_ACCEPTED below, since
+                # `review_reason` was never written for it either).
+                elif resolved.needs_review and not missing_date_suppressed:
                     single_event_outcome = OUTCOME_NO_DATE
                 elif unread_time:
                     single_event_outcome = OUTCOME_UNREAD_TIME
@@ -1091,7 +1123,8 @@ class EventExtractionService:
                     # `venue_id` (the posting venue), and `not low_confidence`
                     # here means confidence already cleared `cfg[
                     # "min_confidence"]` — every clause of `is_clean_
-                    # extraction` holds, so this event is auto-`accepted`.
+                    # extraction` holds (§C's own post_type-aware starts_at
+                    # clause included), so this event is auto-`accepted`.
                     single_event_outcome = OUTCOME_ACCEPTED
 
         # The common case: a venue post's events are attributed to the
