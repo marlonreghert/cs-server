@@ -1,4 +1,3 @@
-@wip
 Feature: Event dedup by fuzzy title
   As an operator
   I want two rows at one venue on one night collapsed when one title's

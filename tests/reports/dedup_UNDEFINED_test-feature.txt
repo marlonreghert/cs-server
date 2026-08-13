@@ -1,0 +1,1461 @@
+/media/mario/ssd/projects/vibesense_wrapper/cs-server/.venv/bin/python -m behave "tests/bdd/enrichment/event-dedup-fuzzy-title.feature"
+USING RUNNER: behave.runner:Runner
+Feature: Event dedup by fuzzy title # tests/bdd/enrichment/event-dedup-fuzzy-title.feature:1
+  As an operator
+  I want two rows at one venue on one night collapsed when one title's
+  distinctive words are contained in the other's, and merely proposed when they
+  only overlap
+  So that one party stored under six title variants becomes one listing, while
+  two genuinely different events on the same night stay two listings
+  Feature: Event dedup by fuzzy title  # tests/bdd/enrichment/event-dedup-fuzzy-title.feature:1
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: Merge a shortened title into its fuller form on the same night                            # tests/bdd/enrichment/event-dedup-fuzzy-title.feature:20
+    Given the venue "Conchittas Bar" exists                                                           # None
+    And the venue "Sempre Rock Bar" exists                                                            # None
+    And the venue "Entre Amigos O Bode" exists                                                        # None
+    And the venue "Casanova Ecobar" exists                                                            # None
+    And the venue "Sala de Reboco" exists                                                             # None
+    And the candidate window is 8 hours                                                               # None
+    And the generic event vocabulary includes "aniversario", "oficina", "sextou", "anos" and "semana" # None
+    Given an item "Rodolpho" at "Conchittas Bar" starting 2026-08-07 21:00 local                      # None
+    And an item "Rodolpho Produções" at "Conchittas Bar" starting 2026-08-07 21:00 local              # None
+    When the merge pass runs                                                                          # None
+    Then one item remains at "Conchittas Bar" for that night                                          # None
+    And the surviving item is titled "Rodolpho Produções"                                             # None
+    And the surviving item carries both source posts                                                  # None
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+----
+CAPTURED LOG: before_scenario
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+---- CAPTURED_SCENARIO_OUTPUT_END ----
+
+  Scenario: Merge the whole Rodolpho cluster into one listing                                         # tests/bdd/enrichment/event-dedup-fuzzy-title.feature:28
+    Given the venue "Conchittas Bar" exists                                                           # None
+    And the venue "Sempre Rock Bar" exists                                                            # None
+    And the venue "Entre Amigos O Bode" exists                                                        # None
+    And the venue "Casanova Ecobar" exists                                                            # None
+    And the venue "Sala de Reboco" exists                                                             # None
+    And the candidate window is 8 hours                                                               # None
+    And the generic event vocabulary includes "aniversario", "oficina", "sextou", "anos" and "semana" # None
+    Given the following items at "Conchittas Bar":                                                    # None
+      | title                             | starts_at local  |
+      | Aniversário do Rodolpho Produções | 2026-08-07 19:00 |
+      | 31º Rodolpho Produções            | 2026-08-07 19:00 |
+      | Rodolpho                          | 2026-08-07 21:00 |
+      | Rodolpho Produções                | 2026-08-07 21:00 |
+      | Aniversário do Rodolpho Produções | 2026-08-08 00:00 |
+    When the merge pass runs                                                                          # None
+    Then exactly one item remains for that night at "Conchittas Bar"                                  # None
+    And that item carries all five source posts                                                       # None
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+----
+CAPTURED LOG: before_scenario
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+---- CAPTURED_SCENARIO_OUTPUT_END ----
+
+  Scenario: Merge two items whose starts straddle midnight                                              # tests/bdd/enrichment/event-dedup-fuzzy-title.feature:40
+    Given the venue "Conchittas Bar" exists                                                             # None
+    And the venue "Sempre Rock Bar" exists                                                              # None
+    And the venue "Entre Amigos O Bode" exists                                                          # None
+    And the venue "Casanova Ecobar" exists                                                              # None
+    And the venue "Sala de Reboco" exists                                                               # None
+    And the candidate window is 8 hours                                                                 # None
+    And the generic event vocabulary includes "aniversario", "oficina", "sextou", "anos" and "semana"   # None
+    Given an item "Rodolpho Produções" at "Conchittas Bar" starting 2026-08-07 21:00 local              # None
+    And an item "Aniversário do Rodolpho Produções" at "Conchittas Bar" starting 2026-08-08 00:00 local # None
+    When the merge pass runs                                                                            # None
+    Then the two items are merged                                                                       # None
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+----
+CAPTURED LOG: before_scenario
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+---- CAPTURED_SCENARIO_OUTPUT_END ----
+
+  Scenario: Merge two identical titles stored on different days but one local date                              # tests/bdd/enrichment/event-dedup-fuzzy-title.feature:46
+    Given the venue "Conchittas Bar" exists                                                                     # None
+    And the venue "Sempre Rock Bar" exists                                                                      # None
+    And the venue "Entre Amigos O Bode" exists                                                                  # None
+    And the venue "Casanova Ecobar" exists                                                                      # None
+    And the venue "Sala de Reboco" exists                                                                       # None
+    And the candidate window is 8 hours                                                                         # None
+    And the generic event vocabulary includes "aniversario", "oficina", "sextou", "anos" and "semana"           # None
+    Given an item "Homenagem aos 98 anos de Onildo Almeida" at "Sala de Reboco" starting 2026-08-07 00:00 local # None
+    And an item "Homenagem aos 98 anos de Onildo Almeida" at "Sala de Reboco" starting 2026-08-07 21:00 local   # None
+    When the merge pass runs                                                                                    # None
+    Then the two items are merged                                                                               # None
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+----
+CAPTURED LOG: before_scenario
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+---- CAPTURED_SCENARIO_OUTPUT_END ----
+
+  Scenario: Refuse to merge two workshops that share only their series prefix                         # tests/bdd/enrichment/event-dedup-fuzzy-title.feature:54
+    Given the venue "Conchittas Bar" exists                                                           # None
+    And the venue "Sempre Rock Bar" exists                                                            # None
+    And the venue "Entre Amigos O Bode" exists                                                        # None
+    And the venue "Casanova Ecobar" exists                                                            # None
+    And the venue "Sala de Reboco" exists                                                             # None
+    And the candidate window is 8 hours                                                               # None
+    And the generic event vocabulary includes "aniversario", "oficina", "sextou", "anos" and "semana" # None
+    Given an item "Oficina Vida de Inseto" at "Entre Amigos O Bode" starting 2026-07-15 14:00 local   # None
+    And an item "Oficina Cobra Gigante" at "Entre Amigos O Bode" starting 2026-07-15 14:00 local      # None
+    And an item "Oficina de Sorvete" at "Entre Amigos O Bode" starting 2026-07-15 14:00 local         # None
+    When the merge pass runs                                                                          # None
+    Then all three items remain                                                                       # None
+    And no merge is suggested for any pair of them                                                    # None
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+----
+CAPTURED LOG: before_scenario
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+---- CAPTURED_SCENARIO_OUTPUT_END ----
+
+  Scenario: Refuse to merge four numbered weeks of one programme                                      # tests/bdd/enrichment/event-dedup-fuzzy-title.feature:62
+    Given the venue "Conchittas Bar" exists                                                           # None
+    And the venue "Sempre Rock Bar" exists                                                            # None
+    And the venue "Entre Amigos O Bode" exists                                                        # None
+    And the venue "Casanova Ecobar" exists                                                            # None
+    And the venue "Sala de Reboco" exists                                                             # None
+    And the candidate window is 8 hours                                                               # None
+    And the generic event vocabulary includes "aniversario", "oficina", "sextou", "anos" and "semana" # None
+    Given the following items at "Entre Amigos O Bode" starting 2026-07-15 10:00 local:               # None
+      | title                         |
+      | Férias Amigos Park — Semana 1 |
+      | Férias Amigos Park — Semana 2 |
+      | Férias Amigos Park — Semana 3 |
+      | Férias Amigos Park — Semana 4 |
+    When the merge pass runs                                                                          # None
+    Then all four items remain                                                                        # None
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+----
+CAPTURED LOG: before_scenario
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+---- CAPTURED_SCENARIO_OUTPUT_END ----
+
+  Scenario: Refuse to merge two acts that share only a surname                                        # tests/bdd/enrichment/event-dedup-fuzzy-title.feature:72
+    Given the venue "Conchittas Bar" exists                                                           # None
+    And the venue "Sempre Rock Bar" exists                                                            # None
+    And the venue "Entre Amigos O Bode" exists                                                        # None
+    And the venue "Casanova Ecobar" exists                                                            # None
+    And the venue "Sala de Reboco" exists                                                             # None
+    And the candidate window is 8 hours                                                               # None
+    And the generic event vocabulary includes "aniversario", "oficina", "sextou", "anos" and "semana" # None
+    Given an item "Bolinha do Cavaco" at "Casanova Ecobar" starting 2026-08-07 20:00 local            # None
+    And an item "JB do Cavaco" at "Casanova Ecobar" starting 2026-08-07 20:00 local                   # None
+    When the merge pass runs                                                                          # None
+    Then both items remain                                                                            # None
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+----
+CAPTURED LOG: before_scenario
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+---- CAPTURED_SCENARIO_OUTPUT_END ----
+
+  Scenario: Refuse to merge a generic weekday post into a named party                                 # tests/bdd/enrichment/event-dedup-fuzzy-title.feature:78
+    Given the venue "Conchittas Bar" exists                                                           # None
+    And the venue "Sempre Rock Bar" exists                                                            # None
+    And the venue "Entre Amigos O Bode" exists                                                        # None
+    And the venue "Casanova Ecobar" exists                                                            # None
+    And the venue "Sala de Reboco" exists                                                             # None
+    And the candidate window is 8 hours                                                               # None
+    And the generic event vocabulary includes "aniversario", "oficina", "sextou", "anos" and "semana" # None
+    Given an item "SEXTOU NO CONCHITTAS BAR!" at "Conchittas Bar" starting 2026-08-07 21:00 local     # None
+    And an item "Rodolpho Produções" at "Conchittas Bar" starting 2026-08-07 21:00 local              # None
+    When the merge pass runs                                                                          # None
+    Then both items remain                                                                            # None
+    And no merge is suggested for that pair                                                           # None
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+----
+CAPTURED LOG: before_scenario
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+---- CAPTURED_SCENARIO_OUTPUT_END ----
+
+  Scenario: Refuse to merge two items at different venues on the same night                           # tests/bdd/enrichment/event-dedup-fuzzy-title.feature:85
+    Given the venue "Conchittas Bar" exists                                                           # None
+    And the venue "Sempre Rock Bar" exists                                                            # None
+    And the venue "Entre Amigos O Bode" exists                                                        # None
+    And the venue "Casanova Ecobar" exists                                                            # None
+    And the venue "Sala de Reboco" exists                                                             # None
+    And the candidate window is 8 hours                                                               # None
+    And the generic event vocabulary includes "aniversario", "oficina", "sextou", "anos" and "semana" # None
+    Given an item "Rodolpho Produções" at "Conchittas Bar" starting 2026-08-07 21:00 local            # None
+    And an item "Rodolpho Produções" at "Sala de Reboco" starting 2026-08-07 21:00 local              # None
+    When the merge pass runs                                                                          # None
+    Then both items remain                                                                            # None
+    And no merge is suggested for that pair                                                           # None
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+----
+CAPTURED LOG: before_scenario
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+---- CAPTURED_SCENARIO_OUTPUT_END ----
+
+  Scenario: Refuse to merge two items at the same venue a week apart                                  # tests/bdd/enrichment/event-dedup-fuzzy-title.feature:92
+    Given the venue "Conchittas Bar" exists                                                           # None
+    And the venue "Sempre Rock Bar" exists                                                            # None
+    And the venue "Entre Amigos O Bode" exists                                                        # None
+    And the venue "Casanova Ecobar" exists                                                            # None
+    And the venue "Sala de Reboco" exists                                                             # None
+    And the candidate window is 8 hours                                                               # None
+    And the generic event vocabulary includes "aniversario", "oficina", "sextou", "anos" and "semana" # None
+    Given an item "Rodolpho Produções" at "Conchittas Bar" starting 2026-08-07 21:00 local            # None
+    And an item "Rodolpho Produções" at "Conchittas Bar" starting 2026-08-14 21:00 local              # None
+    When the merge pass runs                                                                          # None
+    Then both items remain                                                                            # None
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+----
+CAPTURED LOG: before_scenario
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+---- CAPTURED_SCENARIO_OUTPUT_END ----
+
+  Scenario: Suggest a merge for two talks that differ only in the speaker                                             # tests/bdd/enrichment/event-dedup-fuzzy-title.feature:100
+    Given the venue "Conchittas Bar" exists                                                                           # None
+    And the venue "Sempre Rock Bar" exists                                                                            # None
+    And the venue "Entre Amigos O Bode" exists                                                                        # None
+    And the venue "Casanova Ecobar" exists                                                                            # None
+    And the venue "Sala de Reboco" exists                                                                             # None
+    And the candidate window is 8 hours                                                                               # None
+    And the generic event vocabulary includes "aniversario", "oficina", "sextou", "anos" and "semana"                 # None
+    Given an item "Ação Leitura: Bate-papo com Marcelino Freire" at "Sempre Rock Bar" starting 2026-08-04 19:00 local # None
+    And an item "Ação Leitura: Bate-papo com Jeferson Tenório" at "Sempre Rock Bar" starting 2026-08-04 19:00 local   # None
+    When the merge pass runs                                                                                          # None
+    Then both items remain                                                                                            # None
+    And a merge is suggested for that pair                                                                            # None
+    And the suggestion states each title's distinctive words                                                          # None
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+----
+CAPTURED LOG: before_scenario
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+---- CAPTURED_SCENARIO_OUTPUT_END ----
+
+  Scenario: Show merge suggestions on the review queue                                                # tests/bdd/enrichment/event-dedup-fuzzy-title.feature:108
+    Given the venue "Conchittas Bar" exists                                                           # None
+    And the venue "Sempre Rock Bar" exists                                                            # None
+    And the venue "Entre Amigos O Bode" exists                                                        # None
+    And the venue "Casanova Ecobar" exists                                                            # None
+    And the venue "Sala de Reboco" exists                                                             # None
+    And the candidate window is 8 hours                                                               # None
+    And the generic event vocabulary includes "aniversario", "oficina", "sextou", "anos" and "semana" # None
+    Given a suggested merge between two items at "Sempre Rock Bar"                                    # None
+    When the review queue is read                                                                     # None
+    Then each of the two items carries the suggestion                                                 # None
+    And each suggestion names the other item                                                          # None
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+----
+CAPTURED LOG: before_scenario
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+---- CAPTURED_SCENARIO_OUTPUT_END ----
+
+  Scenario: Apply a suggestion only when an operator asks for it                                      # tests/bdd/enrichment/event-dedup-fuzzy-title.feature:114
+    Given the venue "Conchittas Bar" exists                                                           # None
+    And the venue "Sempre Rock Bar" exists                                                            # None
+    And the venue "Entre Amigos O Bode" exists                                                        # None
+    And the venue "Casanova Ecobar" exists                                                            # None
+    And the venue "Sala de Reboco" exists                                                             # None
+    And the candidate window is 8 hours                                                               # None
+    And the generic event vocabulary includes "aniversario", "oficina", "sextou", "anos" and "semana" # None
+    Given a suggested merge between two items at "Sempre Rock Bar"                                    # None
+    When the merge pass runs again                                                                    # None
+    Then both items still remain                                                                      # None
+    When an operator applies the suggestion                                                           # None
+    Then one item remains                                                                             # None
+    And the absorbed item is superseded                                                               # None
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+----
+CAPTURED LOG: before_scenario
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+---- CAPTURED_SCENARIO_OUTPUT_END ----
+
+  Scenario: Absorb an undated item into its dated twin from the same account                                                              # tests/bdd/enrichment/event-dedup-fuzzy-title.feature:124
+    Given the venue "Conchittas Bar" exists                                                                                               # None
+    And the venue "Sempre Rock Bar" exists                                                                                                # None
+    And the venue "Entre Amigos O Bode" exists                                                                                            # None
+    And the venue "Casanova Ecobar" exists                                                                                                # None
+    And the venue "Sala de Reboco" exists                                                                                                 # None
+    And the candidate window is 8 hours                                                                                                   # None
+    And the generic event vocabulary includes "aniversario", "oficina", "sextou", "anos" and "semana"                                     # None
+    Given an item "Aniversário do RODOLPHO Produções" at "Conchittas Bar" with no date, from the account "conchittasbar"                  # None
+    And an item "Aniversário do Rodolpho Produções" at "Conchittas Bar" starting 2026-08-07 19:00 local, from the account "conchittasbar" # None
+    When the merge pass runs                                                                                                              # None
+    Then one item remains                                                                                                                 # None
+    And the surviving item has the date 2026-08-07                                                                                        # None
+    And the surviving item carries both source posts                                                                                      # None
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+----
+CAPTURED LOG: before_scenario
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+---- CAPTURED_SCENARIO_OUTPUT_END ----
+
+  Scenario: Refuse to absorb an undated item whose distinctive words are only a subset                                     # tests/bdd/enrichment/event-dedup-fuzzy-title.feature:132
+    Given the venue "Conchittas Bar" exists                                                                                # None
+    And the venue "Sempre Rock Bar" exists                                                                                 # None
+    And the venue "Entre Amigos O Bode" exists                                                                             # None
+    And the venue "Casanova Ecobar" exists                                                                                 # None
+    And the venue "Sala de Reboco" exists                                                                                  # None
+    And the candidate window is 8 hours                                                                                    # None
+    And the generic event vocabulary includes "aniversario", "oficina", "sextou", "anos" and "semana"                      # None
+    Given an item "Rodolpho" at "Conchittas Bar" with no date, from the account "conchittasbar"                            # None
+    And an item "Rodolpho Produções" at "Conchittas Bar" starting 2026-08-07 19:00 local, from the account "conchittasbar" # None
+    When the merge pass runs                                                                                               # None
+    Then both items remain                                                                                                 # None
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+----
+CAPTURED LOG: before_scenario
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+---- CAPTURED_SCENARIO_OUTPUT_END ----
+
+  Scenario: Refuse to absorb an undated item from a different account                                                                     # tests/bdd/enrichment/event-dedup-fuzzy-title.feature:138
+    Given the venue "Conchittas Bar" exists                                                                                               # None
+    And the venue "Sempre Rock Bar" exists                                                                                                # None
+    And the venue "Entre Amigos O Bode" exists                                                                                            # None
+    And the venue "Casanova Ecobar" exists                                                                                                # None
+    And the venue "Sala de Reboco" exists                                                                                                 # None
+    And the candidate window is 8 hours                                                                                                   # None
+    And the generic event vocabulary includes "aniversario", "oficina", "sextou", "anos" and "semana"                                     # None
+    Given an item "Aniversário do Rodolpho Produções" at "Conchittas Bar" with no date, from the account "oquetemhojeemnatal"             # None
+    And an item "Aniversário do Rodolpho Produções" at "Conchittas Bar" starting 2026-08-07 19:00 local, from the account "conchittasbar" # None
+    When the merge pass runs                                                                                                              # None
+    Then both items remain                                                                                                                # None
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+----
+CAPTURED LOG: before_scenario
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+---- CAPTURED_SCENARIO_OUTPUT_END ----
+
+  Scenario: Refuse to absorb an undated item first seen long after its twin                                   # tests/bdd/enrichment/event-dedup-fuzzy-title.feature:144
+    Given the venue "Conchittas Bar" exists                                                                   # None
+    And the venue "Sempre Rock Bar" exists                                                                    # None
+    And the venue "Entre Amigos O Bode" exists                                                                # None
+    And the venue "Casanova Ecobar" exists                                                                    # None
+    And the venue "Sala de Reboco" exists                                                                     # None
+    And the candidate window is 8 hours                                                                       # None
+    And the generic event vocabulary includes "aniversario", "oficina", "sextou", "anos" and "semana"         # None
+    Given an item "Aniversário do Rodolpho Produções" at "Conchittas Bar" with no date, first seen 2026-10-01 # None
+    And an item "Aniversário do Rodolpho Produções" at "Conchittas Bar" starting 2026-08-07 19:00 local       # None
+    When the merge pass runs                                                                                  # None
+    Then both items remain                                                                                    # None
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+----
+CAPTURED LOG: before_scenario
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+---- CAPTURED_SCENARIO_OUTPUT_END ----
+
+  Scenario: Leave menu items out of the title similarity path                                         # tests/bdd/enrichment/event-dedup-fuzzy-title.feature:150
+    Given the venue "Conchittas Bar" exists                                                           # None
+    And the venue "Sempre Rock Bar" exists                                                            # None
+    And the venue "Entre Amigos O Bode" exists                                                        # None
+    And the venue "Casanova Ecobar" exists                                                            # None
+    And the venue "Sala de Reboco" exists                                                             # None
+    And the candidate window is 8 hours                                                               # None
+    And the generic event vocabulary includes "aniversario", "oficina", "sextou", "anos" and "semana" # None
+    Given a menu item "Especial do dia" at "Conchittas Bar" with no date                              # None
+    And a menu item "Especial do dia da casa" at "Conchittas Bar" with no date                        # None
+    When the merge pass runs                                                                          # None
+    Then the title similarity path considered neither item                                            # None
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+----
+CAPTURED LOG: before_scenario
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+---- CAPTURED_SCENARIO_OUTPUT_END ----
+
+  Scenario: Never absorb a confirmed item                                                             # tests/bdd/enrichment/event-dedup-fuzzy-title.feature:158
+    Given the venue "Conchittas Bar" exists                                                           # None
+    And the venue "Sempre Rock Bar" exists                                                            # None
+    And the venue "Entre Amigos O Bode" exists                                                        # None
+    And the venue "Casanova Ecobar" exists                                                            # None
+    And the venue "Sala de Reboco" exists                                                             # None
+    And the candidate window is 8 hours                                                               # None
+    And the generic event vocabulary includes "aniversario", "oficina", "sextou", "anos" and "semana" # None
+    Given a confirmed item "Rodolpho" at "Conchittas Bar" starting 2026-08-07 21:00 local             # None
+    And an item "Rodolpho Produções" at "Conchittas Bar" starting 2026-08-07 21:00 local              # None
+    When the merge pass runs                                                                          # None
+    Then the confirmed item still exists                                                              # None
+    And the confirmed item is still confirmed                                                         # None
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+----
+CAPTURED LOG: before_scenario
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+---- CAPTURED_SCENARIO_OUTPUT_END ----
+
+  Scenario: Never absorb an item whose operator edited its title, but still suggest it                           # tests/bdd/enrichment/event-dedup-fuzzy-title.feature:165
+    Given the venue "Conchittas Bar" exists                                                                      # None
+    And the venue "Sempre Rock Bar" exists                                                                       # None
+    And the venue "Entre Amigos O Bode" exists                                                                   # None
+    And the venue "Casanova Ecobar" exists                                                                       # None
+    And the venue "Sala de Reboco" exists                                                                        # None
+    And the candidate window is 8 hours                                                                          # None
+    And the generic event vocabulary includes "aniversario", "oficina", "sextou", "anos" and "semana"            # None
+    Given an item "Rodolpho" at "Conchittas Bar" starting 2026-08-07 21:00 local whose operator edited its title # None
+    And an item "Rodolpho Produções" at "Conchittas Bar" starting 2026-08-07 21:00 local                         # None
+    When the merge pass runs                                                                                     # None
+    Then both items remain                                                                                       # None
+    And a merge is suggested for that pair                                                                       # None
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+----
+CAPTURED LOG: before_scenario
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+---- CAPTURED_SCENARIO_OUTPUT_END ----
+
+  Scenario: Never absorb an item whose operator edited its venue                                                 # tests/bdd/enrichment/event-dedup-fuzzy-title.feature:172
+    Given the venue "Conchittas Bar" exists                                                                      # None
+    And the venue "Sempre Rock Bar" exists                                                                       # None
+    And the venue "Entre Amigos O Bode" exists                                                                   # None
+    And the venue "Casanova Ecobar" exists                                                                       # None
+    And the venue "Sala de Reboco" exists                                                                        # None
+    And the candidate window is 8 hours                                                                          # None
+    And the generic event vocabulary includes "aniversario", "oficina", "sextou", "anos" and "semana"            # None
+    Given an item "Rodolpho" at "Conchittas Bar" starting 2026-08-07 21:00 local whose operator edited its venue # None
+    And an item "Rodolpho Produções" at "Conchittas Bar" starting 2026-08-07 21:00 local                         # None
+    When the merge pass runs                                                                                     # None
+    Then both items remain                                                                                       # None
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+----
+CAPTURED LOG: before_scenario
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+---- CAPTURED_SCENARIO_OUTPUT_END ----
+
+  Scenario: Leave a group with two confirmed members entirely alone                                     # tests/bdd/enrichment/event-dedup-fuzzy-title.feature:178
+    Given the venue "Conchittas Bar" exists                                                             # None
+    And the venue "Sempre Rock Bar" exists                                                              # None
+    And the venue "Entre Amigos O Bode" exists                                                          # None
+    And the venue "Casanova Ecobar" exists                                                              # None
+    And the venue "Sala de Reboco" exists                                                               # None
+    And the candidate window is 8 hours                                                                 # None
+    And the generic event vocabulary includes "aniversario", "oficina", "sextou", "anos" and "semana"   # None
+    Given a confirmed item "Rodolpho" at "Conchittas Bar" starting 2026-08-07 21:00 local               # None
+    And a confirmed item "Rodolpho Produções" at "Conchittas Bar" starting 2026-08-07 21:00 local       # None
+    And an item "Aniversário do Rodolpho Produções" at "Conchittas Bar" starting 2026-08-07 21:00 local # None
+    When the merge pass runs                                                                            # None
+    Then all three items remain unchanged                                                               # None
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+----
+CAPTURED LOG: before_scenario
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+---- CAPTURED_SCENARIO_OUTPUT_END ----
+
+  Scenario: Supersede rather than delete the item a title merge absorbs                               # tests/bdd/enrichment/event-dedup-fuzzy-title.feature:187
+    Given the venue "Conchittas Bar" exists                                                           # None
+    And the venue "Sempre Rock Bar" exists                                                            # None
+    And the venue "Entre Amigos O Bode" exists                                                        # None
+    And the venue "Casanova Ecobar" exists                                                            # None
+    And the venue "Sala de Reboco" exists                                                             # None
+    And the candidate window is 8 hours                                                               # None
+    And the generic event vocabulary includes "aniversario", "oficina", "sextou", "anos" and "semana" # None
+    Given an item "Rodolpho" at "Conchittas Bar" starting 2026-08-07 21:00 local                      # None
+    And an item "Rodolpho Produções" at "Conchittas Bar" starting 2026-08-07 21:00 local              # None
+    When the merge pass runs                                                                          # None
+    Then the absorbed item is still readable                                                          # None
+    And the absorbed item is superseded                                                               # None
+    And the absorbed item records the item that absorbed it                                           # None
+    And the absorbed item's source posts are attached to the surviving item                           # None
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+----
+CAPTURED LOG: before_scenario
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+---- CAPTURED_SCENARIO_OUTPUT_END ----
+
+  Scenario: Reverse an applied merge                                                                  # tests/bdd/enrichment/event-dedup-fuzzy-title.feature:196
+    Given the venue "Conchittas Bar" exists                                                           # None
+    And the venue "Sempre Rock Bar" exists                                                            # None
+    And the venue "Entre Amigos O Bode" exists                                                        # None
+    And the venue "Casanova Ecobar" exists                                                            # None
+    And the venue "Sala de Reboco" exists                                                             # None
+    And the candidate window is 8 hours                                                               # None
+    And the generic event vocabulary includes "aniversario", "oficina", "sextou", "anos" and "semana" # None
+    Given a title merge that absorbed one item into another                                           # None
+    When an operator reverses the merge                                                               # None
+    Then the absorbed item is no longer superseded                                                    # None
+    And the absorbed item carries its own source post again                                           # None
+    And the previously surviving item no longer carries that source post                              # None
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+----
+CAPTURED LOG: before_scenario
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+---- CAPTURED_SCENARIO_OUTPUT_END ----
+
+  Scenario: Keep the exact identity merge behaving exactly as it does today                           # tests/bdd/enrichment/event-dedup-fuzzy-title.feature:203
+    Given the venue "Conchittas Bar" exists                                                           # None
+    And the venue "Sempre Rock Bar" exists                                                            # None
+    And the venue "Entre Amigos O Bode" exists                                                        # None
+    And the venue "Casanova Ecobar" exists                                                            # None
+    And the venue "Sala de Reboco" exists                                                             # None
+    And the candidate window is 8 hours                                                               # None
+    And the generic event vocabulary includes "aniversario", "oficina", "sextou", "anos" and "semana" # None
+    Given two items with the same venue, the same date and the same normalized title                  # None
+    When the merge pass runs                                                                          # None
+    Then the two items are merged by the exact identity rule                                          # None
+    And the absorbed item is deleted, not superseded                                                  # None
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+----
+CAPTURED LOG: before_scenario
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+---- CAPTURED_SCENARIO_OUTPUT_END ----
+
+  Scenario: Leave the stored content identity unchanged                                               # tests/bdd/enrichment/event-dedup-fuzzy-title.feature:211
+    Given the venue "Conchittas Bar" exists                                                           # None
+    And the venue "Sempre Rock Bar" exists                                                            # None
+    And the venue "Entre Amigos O Bode" exists                                                        # None
+    And the venue "Casanova Ecobar" exists                                                            # None
+    And the venue "Sala de Reboco" exists                                                             # None
+    And the candidate window is 8 hours                                                               # None
+    And the generic event vocabulary includes "aniversario", "oficina", "sextou", "anos" and "semana" # None
+    Given the production titles from the Conchittas cluster                                           # None
+    When each title's content identity key is computed                                                # None
+    Then every key equals the key stored for it before this feature shipped                           # None
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+----
+CAPTURED LOG: before_scenario
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+---- CAPTURED_SCENARIO_OUTPUT_END ----
+
+  Scenario: Merge two rows sharing two performers even though neither title contains the other        # tests/bdd/enrichment/event-dedup-fuzzy-title.feature:218
+    Given the venue "Conchittas Bar" exists                                                           # None
+    And the venue "Sempre Rock Bar" exists                                                            # None
+    And the venue "Entre Amigos O Bode" exists                                                        # None
+    And the venue "Casanova Ecobar" exists                                                            # None
+    And the venue "Sala de Reboco" exists                                                             # None
+    And the candidate window is 8 hours                                                               # None
+    And the generic event vocabulary includes "aniversario", "oficina", "sextou", "anos" and "semana" # None
+    Given an item "ONILDO ALMEIDA & CONVIDADOS" at "Sala de Reboco" on 2026-08-14                     # None
+    And an item "Homenagem aos 98 anos de Onildo Almeida" at "Sala de Reboco" on 2026-08-14           # None
+    And both items list "Cezzinha", "Josildo Sá" and "Silvério Pessoa"                                # None
+    When the merge pass runs                                                                          # None
+    Then the two items are merged                                                                     # None
+    And the merge records shared lineup as its reason                                                 # None
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+----
+CAPTURED LOG: before_scenario
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+---- CAPTURED_SCENARIO_OUTPUT_END ----
+
+  Scenario: Merge a row whose title shares nothing with its twin but whose lineup matches             # tests/bdd/enrichment/event-dedup-fuzzy-title.feature:226
+    Given the venue "Conchittas Bar" exists                                                           # None
+    And the venue "Sempre Rock Bar" exists                                                            # None
+    And the venue "Entre Amigos O Bode" exists                                                        # None
+    And the venue "Casanova Ecobar" exists                                                            # None
+    And the venue "Sala de Reboco" exists                                                             # None
+    And the candidate window is 8 hours                                                               # None
+    And the generic event vocabulary includes "aniversario", "oficina", "sextou", "anos" and "semana" # None
+    Given an item "Rodolpho Produções" at "Conchittas Bar" on 2026-08-07                              # None
+    And an item "SEXTOU NO CONCHITTAS BAR!" at "Conchittas Bar" on 2026-08-07                         # None
+    And both items list the same eleven performers                                                    # None
+    When the merge pass runs                                                                          # None
+    Then the two items are merged                                                                     # None
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+----
+CAPTURED LOG: before_scenario
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+---- CAPTURED_SCENARIO_OUTPUT_END ----
+
+  Scenario: Refuse to merge two rows sharing only one performer                                       # tests/bdd/enrichment/event-dedup-fuzzy-title.feature:233
+    Given the venue "Conchittas Bar" exists                                                           # None
+    And the venue "Sempre Rock Bar" exists                                                            # None
+    And the venue "Entre Amigos O Bode" exists                                                        # None
+    And the venue "Casanova Ecobar" exists                                                            # None
+    And the venue "Sala de Reboco" exists                                                             # None
+    And the candidate window is 8 hours                                                               # None
+    And the generic event vocabulary includes "aniversario", "oficina", "sextou", "anos" and "semana" # None
+    Given an item "Quarta do Rock" at "Conchittas Bar" on 2026-08-05                                  # None
+    And an item "Samba de Quarta" at "Conchittas Bar" on 2026-08-05                                   # None
+    And both items list only "DJ Fabinho" in common                                                   # None
+    When the merge pass runs                                                                          # None
+    Then the two items are not merged                                                                 # None
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+----
+CAPTURED LOG: before_scenario
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+---- CAPTURED_SCENARIO_OUTPUT_END ----
+
+  Scenario: Refuse to merge on lineup when one side has no lineup                                     # tests/bdd/enrichment/event-dedup-fuzzy-title.feature:240
+    Given the venue "Conchittas Bar" exists                                                           # None
+    And the venue "Sempre Rock Bar" exists                                                            # None
+    And the venue "Entre Amigos O Bode" exists                                                        # None
+    And the venue "Casanova Ecobar" exists                                                            # None
+    And the venue "Sala de Reboco" exists                                                             # None
+    And the candidate window is 8 hours                                                               # None
+    And the generic event vocabulary includes "aniversario", "oficina", "sextou", "anos" and "semana" # None
+    Given an item "Rodolpho" at "Conchittas Bar" on 2026-08-07 with no lineup                         # None
+    And an item "Noite do Brega" at "Conchittas Bar" on 2026-08-07 listing three performers           # None
+    When the merge pass runs                                                                          # None
+    Then the two items are not merged by the lineup rule                                              # None
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+----
+CAPTURED LOG: before_scenario
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+---- CAPTURED_SCENARIO_OUTPUT_END ----
+
+  Scenario: Treat the same performer written in different case as one name                            # tests/bdd/enrichment/event-dedup-fuzzy-title.feature:246
+    Given the venue "Conchittas Bar" exists                                                           # None
+    And the venue "Sempre Rock Bar" exists                                                            # None
+    And the venue "Entre Amigos O Bode" exists                                                        # None
+    And the venue "Casanova Ecobar" exists                                                            # None
+    And the venue "Sala de Reboco" exists                                                             # None
+    And the candidate window is 8 hours                                                               # None
+    And the generic event vocabulary includes "aniversario", "oficina", "sextou", "anos" and "semana" # None
+    Given an item listing "DAYANNE" and "PALAS PINHO"                                                 # None
+    And a sibling item at the same venue and night listing "Dayanne" and "Palas Pinho"                # None
+    When the merge pass runs                                                                          # None
+    Then the two items are merged                                                                     # None
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+----
+CAPTURED LOG: before_scenario
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+---- CAPTURED_SCENARIO_OUTPUT_END ----
+
+  Scenario: Treat a performer and a longer name containing it as two names                            # tests/bdd/enrichment/event-dedup-fuzzy-title.feature:252
+    Given the venue "Conchittas Bar" exists                                                           # None
+    And the venue "Sempre Rock Bar" exists                                                            # None
+    And the venue "Entre Amigos O Bode" exists                                                        # None
+    And the venue "Casanova Ecobar" exists                                                            # None
+    And the venue "Sala de Reboco" exists                                                             # None
+    And the candidate window is 8 hours                                                               # None
+    And the generic event vocabulary includes "aniversario", "oficina", "sextou", "anos" and "semana" # None
+    Given an item listing "Dayanne" and "Cheila do Pará"                                              # None
+    And a sibling item at the same venue and night listing "Dayanne Henrique" and "Anny Love"         # None
+    When the merge pass runs                                                                          # None
+    Then the two items are not merged by the lineup rule                                              # None
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+----
+CAPTURED LOG: before_scenario
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+---- CAPTURED_SCENARIO_OUTPUT_END ----
+
+  Scenario: Refuse to merge a birthday greeting into the party it congratulates                        # tests/bdd/enrichment/event-dedup-fuzzy-title.feature:260
+    Given the venue "Conchittas Bar" exists                                                            # None
+    And the venue "Sempre Rock Bar" exists                                                             # None
+    And the venue "Entre Amigos O Bode" exists                                                         # None
+    And the venue "Casanova Ecobar" exists                                                             # None
+    And the venue "Sala de Reboco" exists                                                              # None
+    And the candidate window is 8 hours                                                                # None
+    And the generic event vocabulary includes "aniversario", "oficina", "sextou", "anos" and "semana"  # None
+    Given an item "31 Anos" at "Conchittas Bar" on 2026-08-07 typed as "other"                         # None
+    And an item "Aniversário do Rodolpho Produções" at "Conchittas Bar" on 2026-08-07 typed as "event" # None
+    When the merge pass runs                                                                           # None
+    Then the two items are not merged                                                                  # None
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+----
+CAPTURED LOG: before_scenario
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+---- CAPTURED_SCENARIO_OUTPUT_END ----
+
+  Scenario: Refuse to merge across differing post types at one venue on one night                     # tests/bdd/enrichment/event-dedup-fuzzy-title.feature:266
+    Given the venue "Conchittas Bar" exists                                                           # None
+    And the venue "Sempre Rock Bar" exists                                                            # None
+    And the venue "Entre Amigos O Bode" exists                                                        # None
+    And the venue "Casanova Ecobar" exists                                                            # None
+    And the venue "Sala de Reboco" exists                                                             # None
+    And the candidate window is 8 hours                                                               # None
+    And the generic event vocabulary includes "aniversario", "oficina", "sextou", "anos" and "semana" # None
+    Given an item "Especial do dia" at "Conchittas Bar" on 2026-08-07 typed as "promotion"            # None
+    And an item "Especial do dia no Conchittas" at "Conchittas Bar" on 2026-08-07 typed as "event"    # None
+    When the merge pass runs                                                                          # None
+    Then the two items are not merged                                                                 # None
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+----
+CAPTURED LOG: before_scenario
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+---- CAPTURED_SCENARIO_OUTPUT_END ----
+
+  Scenario: Collapse the whole Rodolpho cluster to a single row                                       # tests/bdd/enrichment/event-dedup-fuzzy-title.feature:272
+    Given the venue "Conchittas Bar" exists                                                           # None
+    And the venue "Sempre Rock Bar" exists                                                            # None
+    And the venue "Entre Amigos O Bode" exists                                                        # None
+    And the venue "Casanova Ecobar" exists                                                            # None
+    And the venue "Sala de Reboco" exists                                                             # None
+    And the candidate window is 8 hours                                                               # None
+    And the generic event vocabulary includes "aniversario", "oficina", "sextou", "anos" and "semana" # None
+    Given the eight production rows of the Conchittas Rodolpho cluster                                # None
+    When the merge pass runs                                                                          # None
+    Then the seven event rows survive as one item titled "Aniversário do Rodolpho Produções"          # None
+    And that item carries every source post of the seven                                              # None
+    And "31 Anos" is still a separate item                                                            # None
+----
+CAPTURED LOG: before_scenario
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+---- CAPTURED_SCENARIO_OUTPUT_END ----
+
+
+You can implement step definitions for undefined steps with these snippets:
+
+from behave.api.pending_step import StepNotImplementedError
+@given(u'the venue "Conchittas Bar" exists')
+def step_impl(context):
+    raise StepNotImplementedError(u'Given the venue "Conchittas Bar" exists')
+
+
+@given(u'the venue "Sempre Rock Bar" exists')
+def step_impl(context):
+    raise StepNotImplementedError(u'Given the venue "Sempre Rock Bar" exists')
+
+
+@given(u'the venue "Entre Amigos O Bode" exists')
+def step_impl(context):
+    raise StepNotImplementedError(u'Given the venue "Entre Amigos O Bode" exists')
+
+
+@given(u'the venue "Casanova Ecobar" exists')
+def step_impl(context):
+    raise StepNotImplementedError(u'Given the venue "Casanova Ecobar" exists')
+
+
+@given(u'the venue "Sala de Reboco" exists')
+def step_impl(context):
+    raise StepNotImplementedError(u'Given the venue "Sala de Reboco" exists')
+
+
+@given(u'the candidate window is 8 hours')
+def step_impl(context):
+    raise StepNotImplementedError(u'Given the candidate window is 8 hours')
+
+
+@given(u'the generic event vocabulary includes "aniversario", "oficina", "sextou", "anos" and "semana"')
+def step_impl(context):
+    raise StepNotImplementedError(u'Given the generic event vocabulary includes "aniversario", "oficina", "sextou", "anos" and "semana"')
+
+
+@given(u'an item "Rodolpho" at "Conchittas Bar" starting 2026-08-07 21:00 local')
+def step_impl(context):
+    raise StepNotImplementedError(u'Given an item "Rodolpho" at "Conchittas Bar" starting 2026-08-07 21:00 local')
+
+
+@given(u'an item "Rodolpho Produções" at "Conchittas Bar" starting 2026-08-07 21:00 local')
+def step_impl(context):
+    raise StepNotImplementedError(u'Given an item "Rodolpho Produções" at "Conchittas Bar" starting 2026-08-07 21:00 local')
+
+
+@when(u'the merge pass runs')
+def step_impl(context):
+    raise StepNotImplementedError(u'When the merge pass runs')
+
+
+@then(u'one item remains at "Conchittas Bar" for that night')
+def step_impl(context):
+    raise StepNotImplementedError(u'Then one item remains at "Conchittas Bar" for that night')
+
+
+@then(u'the surviving item is titled "Rodolpho Produções"')
+def step_impl(context):
+    raise StepNotImplementedError(u'Then the surviving item is titled "Rodolpho Produções"')
+
+
+@then(u'the surviving item carries both source posts')
+def step_impl(context):
+    raise StepNotImplementedError(u'Then the surviving item carries both source posts')
+
+
+@given(u'the following items at "Conchittas Bar":')
+def step_impl(context):
+    raise StepNotImplementedError(u'Given the following items at "Conchittas Bar":')
+
+
+@then(u'exactly one item remains for that night at "Conchittas Bar"')
+def step_impl(context):
+    raise StepNotImplementedError(u'Then exactly one item remains for that night at "Conchittas Bar"')
+
+
+@then(u'that item carries all five source posts')
+def step_impl(context):
+    raise StepNotImplementedError(u'Then that item carries all five source posts')
+
+
+@given(u'an item "Aniversário do Rodolpho Produções" at "Conchittas Bar" starting 2026-08-08 00:00 local')
+def step_impl(context):
+    raise StepNotImplementedError(u'Given an item "Aniversário do Rodolpho Produções" at "Conchittas Bar" starting 2026-08-08 00:00 local')
+
+
+@then(u'the two items are merged')
+def step_impl(context):
+    raise StepNotImplementedError(u'Then the two items are merged')
+
+
+@given(u'an item "Homenagem aos 98 anos de Onildo Almeida" at "Sala de Reboco" starting 2026-08-07 00:00 local')
+def step_impl(context):
+    raise StepNotImplementedError(u'Given an item "Homenagem aos 98 anos de Onildo Almeida" at "Sala de Reboco" starting 2026-08-07 00:00 local')
+
+
+@given(u'an item "Homenagem aos 98 anos de Onildo Almeida" at "Sala de Reboco" starting 2026-08-07 21:00 local')
+def step_impl(context):
+    raise StepNotImplementedError(u'Given an item "Homenagem aos 98 anos de Onildo Almeida" at "Sala de Reboco" starting 2026-08-07 21:00 local')
+
+
+@given(u'an item "Oficina Vida de Inseto" at "Entre Amigos O Bode" starting 2026-07-15 14:00 local')
+def step_impl(context):
+    raise StepNotImplementedError(u'Given an item "Oficina Vida de Inseto" at "Entre Amigos O Bode" starting 2026-07-15 14:00 local')
+
+
+@given(u'an item "Oficina Cobra Gigante" at "Entre Amigos O Bode" starting 2026-07-15 14:00 local')
+def step_impl(context):
+    raise StepNotImplementedError(u'Given an item "Oficina Cobra Gigante" at "Entre Amigos O Bode" starting 2026-07-15 14:00 local')
+
+
+@given(u'an item "Oficina de Sorvete" at "Entre Amigos O Bode" starting 2026-07-15 14:00 local')
+def step_impl(context):
+    raise StepNotImplementedError(u'Given an item "Oficina de Sorvete" at "Entre Amigos O Bode" starting 2026-07-15 14:00 local')
+
+
+@then(u'all three items remain')
+def step_impl(context):
+    raise StepNotImplementedError(u'Then all three items remain')
+
+
+@then(u'no merge is suggested for any pair of them')
+def step_impl(context):
+    raise StepNotImplementedError(u'Then no merge is suggested for any pair of them')
+
+
+@given(u'the following items at "Entre Amigos O Bode" starting 2026-07-15 10:00 local:')
+def step_impl(context):
+    raise StepNotImplementedError(u'Given the following items at "Entre Amigos O Bode" starting 2026-07-15 10:00 local:')
+
+
+@then(u'all four items remain')
+def step_impl(context):
+    raise StepNotImplementedError(u'Then all four items remain')
+
+
+@given(u'an item "Bolinha do Cavaco" at "Casanova Ecobar" starting 2026-08-07 20:00 local')
+def step_impl(context):
+    raise StepNotImplementedError(u'Given an item "Bolinha do Cavaco" at "Casanova Ecobar" starting 2026-08-07 20:00 local')
+
+
+@given(u'an item "JB do Cavaco" at "Casanova Ecobar" starting 2026-08-07 20:00 local')
+def step_impl(context):
+    raise StepNotImplementedError(u'Given an item "JB do Cavaco" at "Casanova Ecobar" starting 2026-08-07 20:00 local')
+
+
+@then(u'both items remain')
+def step_impl(context):
+    raise StepNotImplementedError(u'Then both items remain')
+
+
+@given(u'an item "SEXTOU NO CONCHITTAS BAR!" at "Conchittas Bar" starting 2026-08-07 21:00 local')
+def step_impl(context):
+    raise StepNotImplementedError(u'Given an item "SEXTOU NO CONCHITTAS BAR!" at "Conchittas Bar" starting 2026-08-07 21:00 local')
+
+
+@then(u'no merge is suggested for that pair')
+def step_impl(context):
+    raise StepNotImplementedError(u'Then no merge is suggested for that pair')
+
+
+@given(u'an item "Rodolpho Produções" at "Sala de Reboco" starting 2026-08-07 21:00 local')
+def step_impl(context):
+    raise StepNotImplementedError(u'Given an item "Rodolpho Produções" at "Sala de Reboco" starting 2026-08-07 21:00 local')
+
+
+@given(u'an item "Rodolpho Produções" at "Conchittas Bar" starting 2026-08-14 21:00 local')
+def step_impl(context):
+    raise StepNotImplementedError(u'Given an item "Rodolpho Produções" at "Conchittas Bar" starting 2026-08-14 21:00 local')
+
+
+@given(u'an item "Ação Leitura: Bate-papo com Marcelino Freire" at "Sempre Rock Bar" starting 2026-08-04 19:00 local')
+def step_impl(context):
+    raise StepNotImplementedError(u'Given an item "Ação Leitura: Bate-papo com Marcelino Freire" at "Sempre Rock Bar" starting 2026-08-04 19:00 local')
+
+
+@given(u'an item "Ação Leitura: Bate-papo com Jeferson Tenório" at "Sempre Rock Bar" starting 2026-08-04 19:00 local')
+def step_impl(context):
+    raise StepNotImplementedError(u'Given an item "Ação Leitura: Bate-papo com Jeferson Tenório" at "Sempre Rock Bar" starting 2026-08-04 19:00 local')
+
+
+@then(u'a merge is suggested for that pair')
+def step_impl(context):
+    raise StepNotImplementedError(u'Then a merge is suggested for that pair')
+
+
+@then(u'the suggestion states each title\'s distinctive words')
+def step_impl(context):
+    raise StepNotImplementedError(u'Then the suggestion states each title\'s distinctive words')
+
+
+@given(u'a suggested merge between two items at "Sempre Rock Bar"')
+def step_impl(context):
+    raise StepNotImplementedError(u'Given a suggested merge between two items at "Sempre Rock Bar"')
+
+
+@when(u'the review queue is read')
+def step_impl(context):
+    raise StepNotImplementedError(u'When the review queue is read')
+
+
+@then(u'each of the two items carries the suggestion')
+def step_impl(context):
+    raise StepNotImplementedError(u'Then each of the two items carries the suggestion')
+
+
+@then(u'each suggestion names the other item')
+def step_impl(context):
+    raise StepNotImplementedError(u'Then each suggestion names the other item')
+
+
+@when(u'the merge pass runs again')
+def step_impl(context):
+    raise StepNotImplementedError(u'When the merge pass runs again')
+
+
+@then(u'both items still remain')
+def step_impl(context):
+    raise StepNotImplementedError(u'Then both items still remain')
+
+
+@when(u'an operator applies the suggestion')
+def step_impl(context):
+    raise StepNotImplementedError(u'When an operator applies the suggestion')
+
+
+@then(u'one item remains')
+def step_impl(context):
+    raise StepNotImplementedError(u'Then one item remains')
+
+
+@then(u'the absorbed item is superseded')
+def step_impl(context):
+    raise StepNotImplementedError(u'Then the absorbed item is superseded')
+
+
+@given(u'an item "Aniversário do RODOLPHO Produções" at "Conchittas Bar" with no date, from the account "conchittasbar"')
+def step_impl(context):
+    raise StepNotImplementedError(u'Given an item "Aniversário do RODOLPHO Produções" at "Conchittas Bar" with no date, from the account "conchittasbar"')
+
+
+@given(u'an item "Aniversário do Rodolpho Produções" at "Conchittas Bar" starting 2026-08-07 19:00 local, from the account "conchittasbar"')
+def step_impl(context):
+    raise StepNotImplementedError(u'Given an item "Aniversário do Rodolpho Produções" at "Conchittas Bar" starting 2026-08-07 19:00 local, from the account "conchittasbar"')
+
+
+@then(u'the surviving item has the date 2026-08-07')
+def step_impl(context):
+    raise StepNotImplementedError(u'Then the surviving item has the date 2026-08-07')
+
+
+@given(u'an item "Rodolpho" at "Conchittas Bar" with no date, from the account "conchittasbar"')
+def step_impl(context):
+    raise StepNotImplementedError(u'Given an item "Rodolpho" at "Conchittas Bar" with no date, from the account "conchittasbar"')
+
+
+@given(u'an item "Rodolpho Produções" at "Conchittas Bar" starting 2026-08-07 19:00 local, from the account "conchittasbar"')
+def step_impl(context):
+    raise StepNotImplementedError(u'Given an item "Rodolpho Produções" at "Conchittas Bar" starting 2026-08-07 19:00 local, from the account "conchittasbar"')
+
+
+@given(u'an item "Aniversário do Rodolpho Produções" at "Conchittas Bar" with no date, from the account "oquetemhojeemnatal"')
+def step_impl(context):
+    raise StepNotImplementedError(u'Given an item "Aniversário do Rodolpho Produções" at "Conchittas Bar" with no date, from the account "oquetemhojeemnatal"')
+
+
+@given(u'an item "Aniversário do Rodolpho Produções" at "Conchittas Bar" with no date, first seen 2026-10-01')
+def step_impl(context):
+    raise StepNotImplementedError(u'Given an item "Aniversário do Rodolpho Produções" at "Conchittas Bar" with no date, first seen 2026-10-01')
+
+
+@given(u'an item "Aniversário do Rodolpho Produções" at "Conchittas Bar" starting 2026-08-07 19:00 local')
+def step_impl(context):
+    raise StepNotImplementedError(u'Given an item "Aniversário do Rodolpho Produções" at "Conchittas Bar" starting 2026-08-07 19:00 local')
+
+
+@given(u'a menu item "Especial do dia" at "Conchittas Bar" with no date')
+def step_impl(context):
+    raise StepNotImplementedError(u'Given a menu item "Especial do dia" at "Conchittas Bar" with no date')
+
+
+@given(u'a menu item "Especial do dia da casa" at "Conchittas Bar" with no date')
+def step_impl(context):
+    raise StepNotImplementedError(u'Given a menu item "Especial do dia da casa" at "Conchittas Bar" with no date')
+
+
+@then(u'the title similarity path considered neither item')
+def step_impl(context):
+    raise StepNotImplementedError(u'Then the title similarity path considered neither item')
+
+
+@given(u'a confirmed item "Rodolpho" at "Conchittas Bar" starting 2026-08-07 21:00 local')
+def step_impl(context):
+    raise StepNotImplementedError(u'Given a confirmed item "Rodolpho" at "Conchittas Bar" starting 2026-08-07 21:00 local')
+
+
+@then(u'the confirmed item still exists')
+def step_impl(context):
+    raise StepNotImplementedError(u'Then the confirmed item still exists')
+
+
+@then(u'the confirmed item is still confirmed')
+def step_impl(context):
+    raise StepNotImplementedError(u'Then the confirmed item is still confirmed')
+
+
+@given(u'an item "Rodolpho" at "Conchittas Bar" starting 2026-08-07 21:00 local whose operator edited its title')
+def step_impl(context):
+    raise StepNotImplementedError(u'Given an item "Rodolpho" at "Conchittas Bar" starting 2026-08-07 21:00 local whose operator edited its title')
+
+
+@given(u'an item "Rodolpho" at "Conchittas Bar" starting 2026-08-07 21:00 local whose operator edited its venue')
+def step_impl(context):
+    raise StepNotImplementedError(u'Given an item "Rodolpho" at "Conchittas Bar" starting 2026-08-07 21:00 local whose operator edited its venue')
+
+
+@given(u'a confirmed item "Rodolpho Produções" at "Conchittas Bar" starting 2026-08-07 21:00 local')
+def step_impl(context):
+    raise StepNotImplementedError(u'Given a confirmed item "Rodolpho Produções" at "Conchittas Bar" starting 2026-08-07 21:00 local')
+
+
+@given(u'an item "Aniversário do Rodolpho Produções" at "Conchittas Bar" starting 2026-08-07 21:00 local')
+def step_impl(context):
+    raise StepNotImplementedError(u'Given an item "Aniversário do Rodolpho Produções" at "Conchittas Bar" starting 2026-08-07 21:00 local')
+
+
+@then(u'all three items remain unchanged')
+def step_impl(context):
+    raise StepNotImplementedError(u'Then all three items remain unchanged')
+
+
+@then(u'the absorbed item is still readable')
+def step_impl(context):
+    raise StepNotImplementedError(u'Then the absorbed item is still readable')
+
+
+@then(u'the absorbed item records the item that absorbed it')
+def step_impl(context):
+    raise StepNotImplementedError(u'Then the absorbed item records the item that absorbed it')
+
+
+@then(u'the absorbed item\'s source posts are attached to the surviving item')
+def step_impl(context):
+    raise StepNotImplementedError(u'Then the absorbed item\'s source posts are attached to the surviving item')
+
+
+@given(u'a title merge that absorbed one item into another')
+def step_impl(context):
+    raise StepNotImplementedError(u'Given a title merge that absorbed one item into another')
+
+
+@when(u'an operator reverses the merge')
+def step_impl(context):
+    raise StepNotImplementedError(u'When an operator reverses the merge')
+
+
+@then(u'the absorbed item is no longer superseded')
+def step_impl(context):
+    raise StepNotImplementedError(u'Then the absorbed item is no longer superseded')
+
+
+@then(u'the absorbed item carries its own source post again')
+def step_impl(context):
+    raise StepNotImplementedError(u'Then the absorbed item carries its own source post again')
+
+
+@then(u'the previously surviving item no longer carries that source post')
+def step_impl(context):
+    raise StepNotImplementedError(u'Then the previously surviving item no longer carries that source post')
+
+
+@given(u'two items with the same venue, the same date and the same normalized title')
+def step_impl(context):
+    raise StepNotImplementedError(u'Given two items with the same venue, the same date and the same normalized title')
+
+
+@then(u'the two items are merged by the exact identity rule')
+def step_impl(context):
+    raise StepNotImplementedError(u'Then the two items are merged by the exact identity rule')
+
+
+@then(u'the absorbed item is deleted, not superseded')
+def step_impl(context):
+    raise StepNotImplementedError(u'Then the absorbed item is deleted, not superseded')
+
+
+@given(u'the production titles from the Conchittas cluster')
+def step_impl(context):
+    raise StepNotImplementedError(u'Given the production titles from the Conchittas cluster')
+
+
+@when(u'each title\'s content identity key is computed')
+def step_impl(context):
+    raise StepNotImplementedError(u'When each title\'s content identity key is computed')
+
+
+@then(u'every key equals the key stored for it before this feature shipped')
+def step_impl(context):
+    raise StepNotImplementedError(u'Then every key equals the key stored for it before this feature shipped')
+
+
+@given(u'an item "ONILDO ALMEIDA & CONVIDADOS" at "Sala de Reboco" on 2026-08-14')
+def step_impl(context):
+    raise StepNotImplementedError(u'Given an item "ONILDO ALMEIDA & CONVIDADOS" at "Sala de Reboco" on 2026-08-14')
+
+
+@given(u'an item "Homenagem aos 98 anos de Onildo Almeida" at "Sala de Reboco" on 2026-08-14')
+def step_impl(context):
+    raise StepNotImplementedError(u'Given an item "Homenagem aos 98 anos de Onildo Almeida" at "Sala de Reboco" on 2026-08-14')
+
+
+@given(u'both items list "Cezzinha", "Josildo Sá" and "Silvério Pessoa"')
+def step_impl(context):
+    raise StepNotImplementedError(u'Given both items list "Cezzinha", "Josildo Sá" and "Silvério Pessoa"')
+
+
+@then(u'the merge records shared lineup as its reason')
+def step_impl(context):
+    raise StepNotImplementedError(u'Then the merge records shared lineup as its reason')
+
+
+@given(u'an item "Rodolpho Produções" at "Conchittas Bar" on 2026-08-07')
+def step_impl(context):
+    raise StepNotImplementedError(u'Given an item "Rodolpho Produções" at "Conchittas Bar" on 2026-08-07')
+
+
+@given(u'an item "SEXTOU NO CONCHITTAS BAR!" at "Conchittas Bar" on 2026-08-07')
+def step_impl(context):
+    raise StepNotImplementedError(u'Given an item "SEXTOU NO CONCHITTAS BAR!" at "Conchittas Bar" on 2026-08-07')
+
+
+@given(u'both items list the same eleven performers')
+def step_impl(context):
+    raise StepNotImplementedError(u'Given both items list the same eleven performers')
+
+
+@given(u'an item "Quarta do Rock" at "Conchittas Bar" on 2026-08-05')
+def step_impl(context):
+    raise StepNotImplementedError(u'Given an item "Quarta do Rock" at "Conchittas Bar" on 2026-08-05')
+
+
+@given(u'an item "Samba de Quarta" at "Conchittas Bar" on 2026-08-05')
+def step_impl(context):
+    raise StepNotImplementedError(u'Given an item "Samba de Quarta" at "Conchittas Bar" on 2026-08-05')
+
+
+@given(u'both items list only "DJ Fabinho" in common')
+def step_impl(context):
+    raise StepNotImplementedError(u'Given both items list only "DJ Fabinho" in common')
+
+
+@then(u'the two items are not merged')
+def step_impl(context):
+    raise StepNotImplementedError(u'Then the two items are not merged')
+
+
+@given(u'an item "Rodolpho" at "Conchittas Bar" on 2026-08-07 with no lineup')
+def step_impl(context):
+    raise StepNotImplementedError(u'Given an item "Rodolpho" at "Conchittas Bar" on 2026-08-07 with no lineup')
+
+
+@given(u'an item "Noite do Brega" at "Conchittas Bar" on 2026-08-07 listing three performers')
+def step_impl(context):
+    raise StepNotImplementedError(u'Given an item "Noite do Brega" at "Conchittas Bar" on 2026-08-07 listing three performers')
+
+
+@then(u'the two items are not merged by the lineup rule')
+def step_impl(context):
+    raise StepNotImplementedError(u'Then the two items are not merged by the lineup rule')
+
+
+@given(u'an item listing "DAYANNE" and "PALAS PINHO"')
+def step_impl(context):
+    raise StepNotImplementedError(u'Given an item listing "DAYANNE" and "PALAS PINHO"')
+
+
+@given(u'a sibling item at the same venue and night listing "Dayanne" and "Palas Pinho"')
+def step_impl(context):
+    raise StepNotImplementedError(u'Given a sibling item at the same venue and night listing "Dayanne" and "Palas Pinho"')
+
+
+@given(u'an item listing "Dayanne" and "Cheila do Pará"')
+def step_impl(context):
+    raise StepNotImplementedError(u'Given an item listing "Dayanne" and "Cheila do Pará"')
+
+
+@given(u'a sibling item at the same venue and night listing "Dayanne Henrique" and "Anny Love"')
+def step_impl(context):
+    raise StepNotImplementedError(u'Given a sibling item at the same venue and night listing "Dayanne Henrique" and "Anny Love"')
+
+
+@given(u'an item "31 Anos" at "Conchittas Bar" on 2026-08-07 typed as "other"')
+def step_impl(context):
+    raise StepNotImplementedError(u'Given an item "31 Anos" at "Conchittas Bar" on 2026-08-07 typed as "other"')
+
+
+@given(u'an item "Aniversário do Rodolpho Produções" at "Conchittas Bar" on 2026-08-07 typed as "event"')
+def step_impl(context):
+    raise StepNotImplementedError(u'Given an item "Aniversário do Rodolpho Produções" at "Conchittas Bar" on 2026-08-07 typed as "event"')
+
+
+@given(u'an item "Especial do dia" at "Conchittas Bar" on 2026-08-07 typed as "promotion"')
+def step_impl(context):
+    raise StepNotImplementedError(u'Given an item "Especial do dia" at "Conchittas Bar" on 2026-08-07 typed as "promotion"')
+
+
+@given(u'an item "Especial do dia no Conchittas" at "Conchittas Bar" on 2026-08-07 typed as "event"')
+def step_impl(context):
+    raise StepNotImplementedError(u'Given an item "Especial do dia no Conchittas" at "Conchittas Bar" on 2026-08-07 typed as "event"')
+
+
+@given(u'the eight production rows of the Conchittas Rodolpho cluster')
+def step_impl(context):
+    raise StepNotImplementedError(u'Given the eight production rows of the Conchittas Rodolpho cluster')
+
+
+@then(u'the seven event rows survive as one item titled "Aniversário do Rodolpho Produções"')
+def step_impl(context):
+    raise StepNotImplementedError(u'Then the seven event rows survive as one item titled "Aniversário do Rodolpho Produções"')
+
+
+@then(u'that item carries every source post of the seven')
+def step_impl(context):
+    raise StepNotImplementedError(u'Then that item carries every source post of the seven')
+
+
+@then(u'"31 Anos" is still a separate item')
+def step_impl(context):
+    raise StepNotImplementedError(u'Then "31 Anos" is still a separate item')
+
+
+
+Errored scenarios:
+  tests/bdd/enrichment/event-dedup-fuzzy-title.feature:20  Merge a shortened title into its fuller form on the same night
+  tests/bdd/enrichment/event-dedup-fuzzy-title.feature:28  Merge the whole Rodolpho cluster into one listing
+  tests/bdd/enrichment/event-dedup-fuzzy-title.feature:40  Merge two items whose starts straddle midnight
+  tests/bdd/enrichment/event-dedup-fuzzy-title.feature:46  Merge two identical titles stored on different days but one local date
+  tests/bdd/enrichment/event-dedup-fuzzy-title.feature:54  Refuse to merge two workshops that share only their series prefix
+  tests/bdd/enrichment/event-dedup-fuzzy-title.feature:62  Refuse to merge four numbered weeks of one programme
+  tests/bdd/enrichment/event-dedup-fuzzy-title.feature:72  Refuse to merge two acts that share only a surname
+  tests/bdd/enrichment/event-dedup-fuzzy-title.feature:78  Refuse to merge a generic weekday post into a named party
+  tests/bdd/enrichment/event-dedup-fuzzy-title.feature:85  Refuse to merge two items at different venues on the same night
+  tests/bdd/enrichment/event-dedup-fuzzy-title.feature:92  Refuse to merge two items at the same venue a week apart
+  tests/bdd/enrichment/event-dedup-fuzzy-title.feature:100  Suggest a merge for two talks that differ only in the speaker
+  tests/bdd/enrichment/event-dedup-fuzzy-title.feature:108  Show merge suggestions on the review queue
+  tests/bdd/enrichment/event-dedup-fuzzy-title.feature:114  Apply a suggestion only when an operator asks for it
+  tests/bdd/enrichment/event-dedup-fuzzy-title.feature:124  Absorb an undated item into its dated twin from the same account
+  tests/bdd/enrichment/event-dedup-fuzzy-title.feature:132  Refuse to absorb an undated item whose distinctive words are only a subset
+  tests/bdd/enrichment/event-dedup-fuzzy-title.feature:138  Refuse to absorb an undated item from a different account
+  tests/bdd/enrichment/event-dedup-fuzzy-title.feature:144  Refuse to absorb an undated item first seen long after its twin
+  tests/bdd/enrichment/event-dedup-fuzzy-title.feature:150  Leave menu items out of the title similarity path
+  tests/bdd/enrichment/event-dedup-fuzzy-title.feature:158  Never absorb a confirmed item
+  tests/bdd/enrichment/event-dedup-fuzzy-title.feature:165  Never absorb an item whose operator edited its title, but still suggest it
+  tests/bdd/enrichment/event-dedup-fuzzy-title.feature:172  Never absorb an item whose operator edited its venue
+  tests/bdd/enrichment/event-dedup-fuzzy-title.feature:178  Leave a group with two confirmed members entirely alone
+  tests/bdd/enrichment/event-dedup-fuzzy-title.feature:187  Supersede rather than delete the item a title merge absorbs
+  tests/bdd/enrichment/event-dedup-fuzzy-title.feature:196  Reverse an applied merge
+  tests/bdd/enrichment/event-dedup-fuzzy-title.feature:203  Keep the exact identity merge behaving exactly as it does today
+  tests/bdd/enrichment/event-dedup-fuzzy-title.feature:211  Leave the stored content identity unchanged
+  tests/bdd/enrichment/event-dedup-fuzzy-title.feature:218  Merge two rows sharing two performers even though neither title contains the other
+  tests/bdd/enrichment/event-dedup-fuzzy-title.feature:226  Merge a row whose title shares nothing with its twin but whose lineup matches
+  tests/bdd/enrichment/event-dedup-fuzzy-title.feature:233  Refuse to merge two rows sharing only one performer
+  tests/bdd/enrichment/event-dedup-fuzzy-title.feature:240  Refuse to merge on lineup when one side has no lineup
+  tests/bdd/enrichment/event-dedup-fuzzy-title.feature:246  Treat the same performer written in different case as one name
+  tests/bdd/enrichment/event-dedup-fuzzy-title.feature:252  Treat a performer and a longer name containing it as two names
+  tests/bdd/enrichment/event-dedup-fuzzy-title.feature:260  Refuse to merge a birthday greeting into the party it congratulates
+  tests/bdd/enrichment/event-dedup-fuzzy-title.feature:266  Refuse to merge across differing post types at one venue on one night
+  tests/bdd/enrichment/event-dedup-fuzzy-title.feature:272  Collapse the whole Rodolpho cluster to a single row
+
+0 features passed, 0 failed, 1 error, 0 skipped
+0 scenarios passed, 0 failed, 35 error, 0 skipped
+0 steps passed, 0 failed, 0 skipped, 407 undefined
+Took 0min 0.000s
+make: *** [Makefile:152: test-feature] Error 1
