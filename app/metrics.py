@@ -1532,6 +1532,24 @@ CRAWL_RUNS_TOTAL = Counter(
     # not that individual venues went quiet.
 )
 
+# plans/260813_dormant-vs-broken-targets.md §Error Handling: "Count dormant
+# outcomes by target." `handle_kind` only (never the handle itself), mirroring
+# CRAWL_RUNS_TOTAL's own cardinality discipline above — targets are opt-in
+# and few, but a per-handle label on a Counter that increments every scheduled
+# fire is unbounded growth CRAWL_RUNS_TOTAL deliberately avoids too. Distinct
+# from CRAWL_RUNS_TOTAL{outcome="empty"}: that counter cannot tell a dormant
+# account (this one) from a genuinely-empty one with no error item at all —
+# this counter exists BECAUSE that distinction matters (the whole plan). Not
+# a gauge: a target's dormant/producing STATE lives on `posts_dormant`
+# (events.crawl_target, surfaced on the admin read model) — this is the
+# per-run occurrence count, watched as a rate, not a snapshot.
+CRAWL_DORMANT_TOTAL = Counter(
+    "crawl_dormant_total",
+    "Scheduled Instagram crawl runs whose posts stream answered with nothing "
+    "in the lookback window (account reached, not a failure), by handle kind",
+    ["handle_kind"],
+)
+
 # The number that maps to money: every BILLED result the actor returned,
 # summed regardless of what happened to it afterwards (kept, or dropped as an
 # out-of-bound pinned post — §G. A pinned post is billed whether or not it is

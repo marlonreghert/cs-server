@@ -205,6 +205,17 @@ class CrawlTargetOut(BaseModel):
     # alarmed about) and false again from the first run that DOES produce a
     # cursor.
     posts_never_seeded: bool = False
+    # plans/260813_dormant-vs-broken-targets.md §A: whether the posts
+    # stream's most recent answer was the DORMANT signature — the account
+    # answered, nothing in the lookback window, not blocked — as opposed
+    # to a genuine failure or an ordinary steady-state "nothing new since
+    # last check." Recomputed and overwritten by `run_target` on every run
+    # (never sticky like `last_failure_kind`), so a target that starts
+    # producing again reports `False` on its very next crawl. Pairs with
+    # `posts_never_seeded` above so the console can say "never seeded --
+    # account dormant" instead of leaving an operator to guess whether a
+    # never-seeded target is dormant or broken.
+    posts_dormant: bool = False
     notes: Optional[str] = None
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
