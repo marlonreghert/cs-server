@@ -114,6 +114,37 @@ _WEEKDAY_RANGE_RE = re.compile(
     r"\bde\s+(" + _WEEKDAY_PATTERN + r")\s+a\s+(" + _WEEKDAY_PATTERN + r")\b",
     re.IGNORECASE,
 )
+# plans/260813_review-gate-and-date-vocabulary.md §A: "hoje"/"amanhã" as a
+# WHOLE WORD, anywhere in the text -- decorated forms ("É HOJE", "Hoje!",
+# "HOJE 🔥", "hoje tem") included. Safe to match this loosely (unlike a
+# caption) because `date_text` is not free text: the extraction prompt
+# requires the model to copy the date expression itself, character for
+# character, into this field -- a short, already-scoped string, never a
+# whole caption. `amanh[aã]` covers both the accented and unaccented
+# spelling in one pattern, exactly like `_MONTHS`' "março"/"marco" pair does.
+_HOJE_RE = re.compile(r"\bhoje\b", re.IGNORECASE)
+_AMANHA_RE = re.compile(r"\bamanh[aã]\b", re.IGNORECASE)
+
+
+def _relative_date(text: str, anchor: date) -> Optional[date]:
+    """`anchor` for "hoje", `anchor + 1 day` for "amanhã" -- `None` when
+    neither is present as a whole word, OR when the text ALSO carries a
+    digit or a weekday name: that is evidence of a COMPETING explicit
+    date/weekday claim in the same text ("hoje, 15/08", "sexta, hoje"), and
+    the relative token must defer to it (resolved further down this same
+    call chain) rather than resolve on its own. Reuses `_WEEKDAY_RE` — the
+    SAME loose, substring-matching "is a weekday mentioned here" check
+    `_corroborate_with_weekday` already relies on — rather than a second
+    weekday detector."""
+    if re.search(r"\d", text) or _WEEKDAY_RE.search(text):
+        return None
+    if _HOJE_RE.search(text):
+        return anchor
+    if _AMANHA_RE.search(text):
+        return anchor + timedelta(days=1)
+    return None
+
+
 # A weekday named as a plural or bare word, with NO "toda"/"todo" marker and
 # no "de X a Y" range shape — "sextas e sábados" (a LIST), or a single bare
 # "sextas" (plans/260810 desired behaviour explicitly names both forms).
@@ -296,6 +327,67 @@ def _weekdays_from_recurrence_forms(text: str):
     matches = [m.group(1).lower() for m in _WEEKDAY_WORD_RE.finditer(text)]
     weekdays = {_WEEKDAYS[w] for w in matches if w in _WEEKDAYS}
     return weekdays or None
+
+
+# plans/260813_review-gate-and-date-vocabulary.md §B: cadences that name NO
+# weekday at all. "todo dia" (all seven) is what makes `_next_matching_
+# weekday_on_or_after` resolve to the anchor itself with no new arithmetic;
+# "todo fim de semana" (Saturday+Sunday) is the other cadence Brazilian
+# venues actually use this way. Deliberately does NOT recognise "toda
+# semana"/"sempre" — those name a cadence with no computable single day at
+# all, and `resolve_event_datetime` below handles that state directly
+# (§E) rather than guessing a day for it here.
+_DAILY_RECURRENCE_RE = re.compile(
+    r"\btodo\s+santo\s+dia\b|\btodos?\s+os\s+dias\b|\bdiariamente\b|\btodo\s+dia\b",
+    re.IGNORECASE,
+)
+_WEEKEND_RECURRENCE_RE = re.compile(
+    r"\btodo\s+final\s+de\s+semana\b|\btodo\s+fim\s+de\s+semana\b|\bfins?\s+de\s+semana\b",
+    re.IGNORECASE,
+)
+_ALL_WEEKDAYS = frozenset(range(7))
+_WEEKEND_WEEKDAYS = frozenset({5, 6})
+
+
+def _weekdays_from_cadence_forms(text: str) -> Optional[frozenset]:
+    """Daily/weekend cadence forms that name no weekday at all — see this
+    module's own §B note above. Checked BEFORE `_weekdays_from_recurrence_
+    forms` (both are only ever consulted together, in `_detect_recurrence`'s
+    `is_recurring` branch below) so a phrase like "todo dia" — which
+    contains no weekday word — is settled here rather than falling through
+    to that function and finding nothing."""
+    if _DAILY_RECURRENCE_RE.search(text):
+        return _ALL_WEEKDAYS
+    if _WEEKEND_RECURRENCE_RE.search(text):
+        return _WEEKEND_WEEKDAYS
+    return None
+
+
+# plans/260813_review-gate-and-date-vocabulary.md §B/§E: the two cadence
+# forms that state a recurrence with NO resolvable day at all — "toda
+# semana", "sempre". `resolve_event_datetime` reports these as a legitimate
+# no-date state (§E) rather than a reading failure, once `is_recurring=True`
+# is ALSO true. Deliberately a NAMED, narrow vocabulary, exactly like
+# `_DAILY_RECURRENCE_RE`/`_WEEKEND_RECURRENCE_RE` above — an `is_recurring=
+# True` claim whose text is unparseable prose, or a cadence word this module
+# simply does not recognise ("semanalmente"), is NOT this state: it stays a
+# genuine `missing_date`, unchanged from before this plan.
+_NO_COMPUTABLE_DAY_RECURRENCE_RE = re.compile(r"\btoda\s+semana\b|\bsempre\b", re.IGNORECASE)
+
+
+def _is_no_computable_day_recurrence(
+    *, is_recurring: Optional[bool], recurrence_text: Optional[str], date_text: Optional[str],
+) -> bool:
+    """True only for a "toda semana"/"sempre" cadence, gated on the model's
+    own `is_recurring=True` claim exactly like every other cadence form —
+    see `_NO_COMPUTABLE_DAY_RECURRENCE_RE`'s own docstring for why this is
+    narrower than a blanket `is_recurring` check."""
+    if not is_recurring:
+        return False
+    for text in (recurrence_text, date_text):
+        if text and _NO_COMPUTABLE_DAY_RECURRENCE_RE.search(text.strip().lower()):
+            return True
+    return False
 
 
 # Sentinel distinguishing "this pattern did not fire at all" (try the next
@@ -484,10 +576,16 @@ def _resolve_explicit_date(
     `date_interpretation` as a fallback — see `_interpretation_to_date`)."""
     text = date_text.strip().lower()
 
-    if text in ("hoje", "hoje à noite", "hoje a noite"):
-        return anchor, None, False, False
-    if text in ("amanhã", "amanha"):
-        return anchor + timedelta(days=1), None, False, False
+    # §A: word-boundary match, not whole-string equality — "É HOJE", "Hoje!"
+    # and "HOJE 🔥" all resolve now, not only a bare "hoje"/"hoje à noite"/
+    # "hoje a noite". Order matters: this runs BEFORE every finder below, so
+    # a text with no competing content ("hoje tem") resolves right here —
+    # but `_relative_date` itself declines whenever the text ALSO carries a
+    # digit or a weekday name ("hoje, 15/08", "sexta, hoje"), leaving those
+    # to the finders below exactly as before this change.
+    relative_date = _relative_date(text, anchor)
+    if relative_date is not None:
+        return relative_date, None, False, False
 
     # A day-list-plus-final-date shape ("01, 02 e 03 de julho") or the
     # preposition form ("de 06 a 09 de fevereiro") is checked BEFORE the
@@ -560,6 +658,13 @@ def _detect_recurrence(
          purpose (a caption naming a weekday with no recurring cadence
          stated must resolve through the ONE-OFF path below, never this
          one) — the model's own claim is the gate that keeps this narrow.
+         plans/260813_review-gate-and-date-vocabulary.md §B extends this
+         SAME `is_recurring`-gated branch with the daily/weekend cadence
+         forms that name no weekday at all ("todo dia", "todo fim de
+         semana") — see `_weekdays_from_cadence_forms`, tried first since
+         those forms never contain a weekday word for the range/list finder
+         to find anyway. "toda semana"/"sempre" deliberately resolve NEITHER
+         way — see `resolve_event_datetime`'s own §E handling of that state.
     """
     if date_text:
         text = date_text.strip().lower()
@@ -572,7 +677,11 @@ def _detect_recurrence(
         for text in (recurrence_text, date_text):
             if not text:
                 continue
-            weekdays = _weekdays_from_recurrence_forms(text.strip().lower())
+            normalized = text.strip().lower()
+            weekdays = (
+                _weekdays_from_cadence_forms(normalized)
+                or _weekdays_from_recurrence_forms(normalized)
+            )
             if weekdays:
                 return weekdays
 
@@ -815,9 +924,13 @@ def resolve_event_datetime(
     # "toda quinta" duplicated from date_text) when it was actually
     # supplied and non-empty, else fall back to `date_text` itself — the
     # exact value every pre-existing caller/test already expects when only
-    # `date_text` carries the marker.
+    # `date_text` carries the marker. `or is_recurring` (plans/260813_
+    # review-gate-and-date-vocabulary.md §E) extends this to the model's OWN
+    # raw claim too, not just a weekday `_detect_recurrence` could compute —
+    # "toda semana"/"sempre" carry a real recurrence phrase worth reporting
+    # even though no weekday was ever derivable from it.
     result_recurrence_text: Optional[str] = None
-    if recurring:
+    if recurring or is_recurring:
         if recurrence_text and recurrence_text.strip():
             result_recurrence_text = recurrence_text.strip()
         elif date_text:
@@ -859,6 +972,29 @@ def resolve_event_datetime(
             date_source = "structured_fallback"
 
     if resolved_date is None:
+        # §E: the model claimed `is_recurring=True` with a "toda semana"/
+        # "sempre" cadence — §B deliberately leaves these unmapped to any
+        # weekday — yet nothing above produced a date. That is a LEGITIMATE
+        # state, not a reading failure: the post was read correctly, there
+        # is simply no single next occurrence to compute. Reporting it as
+        # `missing_date` is exactly the self-contradiction §E exists to
+        # close (a stored row claiming `is_recurring=true` while also being
+        # queued for "the date is missing"), so this branch is checked
+        # BEFORE the generic missing-date return below and never sets a
+        # review reason at all. Narrower than a blanket `is_recurring` check
+        # — see `_is_no_computable_day_recurrence`'s own docstring for why:
+        # an is_recurring=True claim whose text is unparseable prose, or a
+        # cadence word this module does not recognise, stays a genuine
+        # `missing_date`, exactly as it did before this plan.
+        if _is_no_computable_day_recurrence(
+            is_recurring=is_recurring, recurrence_text=recurrence_text, date_text=date_text,
+        ):
+            return ResolvedDate(
+                starts_at=None, ends_at=None, is_recurring=True,
+                recurrence_text=result_recurrence_text, needs_review=False,
+                review_reason=None, time_known=False,
+                year_inferred=False, date_range=False, date_source="unresolved",
+            )
         return ResolvedDate(
             starts_at=None, ends_at=None, is_recurring=recurring,
             recurrence_text=result_recurrence_text, needs_review=True,
