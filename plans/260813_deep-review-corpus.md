@@ -164,7 +164,36 @@ act with a memory number attached, not a default anybody inherits by accident.
 **Budget.** New `ReviewCrawlBudgetDao` mirroring `CrawlBudgetDao` exactly —
 atomic monthly counter, distinct key namespace `review_crawl_budget_v1:{year_month}`
 so it can never be conflated with the Instagram result budget, checked before
-each batch and incremented by the actual returned count.
+each batch and incremented by the actual returned count. Ceiling:
+`reviews_deep_monthly_review_budget = 30000` (~$9/month at
+`apify_review_cost_usd`).
+
+**The review budget is not additive — it competes with production.** Measured
+2026-08-13: the prod Apify account (`STARTER`) has
+`maxMonthlyUsageUsd: 29`, a **hard cap** above which Apify refuses runs rather
+than billing extra, and the current cycle (2026-07-29 → 2026-08-28) has already
+consumed **$12.45**, essentially all of it `PAID_ACTORS_PER_EVENT` from the
+Instagram/events crawl and the photo scrapers. At ~$0.80/day that cycle projects
+to ~$24.5 unaided, leaving roughly **$4.5 of headroom**. A review crawl that
+spent its full $9 allowance this cycle would therefore push the account into the
+cap and **start failing the production events crawl** — a serving regression
+caused by a background job, which is the worst shape this feature could take.
+
+So the local review counter is necessary but **not sufficient**. The gate must
+also refuse on the SHARED account limit:
+
+- Before each batch, read Apify's own `/v2/users/me` (`maxMonthlyUsageUsd`) and
+  `/v2/users/me/usage/monthly` (`totalUsageCreditsUsdBeforeVolumeDiscount`) and
+  compute remaining account headroom.
+- Refuse the batch unless
+  `headroom_usd − batch_cost_usd ≥ reviews_deep_reserved_headroom_usd`
+  (a new config, default **$8**) — the reserve that keeps the Instagram/events
+  crawl alive for the rest of the cycle. The reserve is the point: the review
+  crawl must yield to production, never the other way round.
+- A lookup failure is a **refusal**, not a pass. An unknown headroom is treated
+  as zero headroom.
+- Surface both numbers on the estimate response so an operator sees the real
+  constraint before authorising, not after.
 
 **Admin surface.** Register `reviews_deep_crawl` in the existing `JOB_REGISTRY`
 so it inherits `job_lock`, the minted `job_id`, the background task and the run
@@ -184,8 +213,9 @@ select on, what has already been captured.
   `apify_reviews_actor` (`compass~google-maps-reviews-scraper`),
   `apify_review_cost_usd` (`0.0003`), `reviews_deep_window_days` (`180`),
   `reviews_deep_max_per_venue` (`300`), `reviews_deep_projection_max` (`40`),
-  `reviews_deep_batch_size`, and `reviews_deep_monthly_review_budget` (see Open
-  Questions).
+  `reviews_deep_batch_size`, `reviews_deep_monthly_review_budget` (**30000**,
+  ~$9/month), and `reviews_deep_reserved_headroom_usd` (**8.0**) — the shared
+  Apify quota this job must always leave for the production crawls.
 - **New admin endpoints**, behind the existing admin auth:
   `POST /admin/reviews-deep/estimate` and the `reviews_deep_crawl` entry under
   the existing `POST /admin/trigger/{job_name}`. `GET /admin/jobs/runs/{job_id}`
@@ -234,7 +264,10 @@ Scenarios:
   pruned.
 - A venue with no `google_place_id` is skipped, reported, and never billed.
 - The estimate call returns a bound and spends nothing.
-- The monthly budget is checked before the actor call, not after.
+- The monthly review budget is checked before the actor call, not after.
+- A batch is refused when it would leave less than the reserved Apify headroom,
+  even though the local review budget still allows it.
+- An Apify usage lookup failure refuses the batch rather than letting it pass.
 - A run that would cross the budget stops at the boundary, persists what it
   fetched, and names the venues it did not reach.
 - One venue's actor failure does not abort the run.
@@ -286,18 +319,21 @@ Manual or integration checks:
 - `make test` passes and the feature file's `@wip` tag is removed.
 
 ## Open Questions
-1. **What monthly review budget should the ceiling be set to?** This is the one
-   number that cannot be derived from the repo, and it is real money. For
-   scale: the full catalog at depth 50 is ~72k reviews ≈ **$22 one-off**; depth
-   100 is ~144k ≈ $43; depth 20 is ~29k ≈ $9. Refresh after the first capture
-   is far cheaper because of the incremental cursor. A sensible starting
-   ceiling is **80,000 reviews/month (~$24)**, which covers a full-catalog
-   backfill in one month with headroom for refreshes — but the number is the
-   operator's call, and `/execute-feature` should not start without it.
-2. **Confirm the Apify plan's headroom.** Apify's own free tier is $5/month in
-   credits; the Starter plan is $29/month and covers roughly 58k reviews. Which
-   plan this account is on determines whether the backfill is marginal spend on
-   an existing subscription or a genuine bill increase — and that distinction
-   is what the spend gate turns on.
+None. Both were answered on 2026-08-13:
 
-Both must be resolved before `/execute-feature`.
+1. **Monthly review budget: 30,000 reviews (~$9).** Encoded as
+   `reviews_deep_monthly_review_budget`. A cautious start — roughly a third of
+   the catalog per month at depth 50, or the whole catalog at depth 20 — chosen
+   deliberately so the first invoice is seen before committing to a full corpus.
+2. **Prod runs Apify `STARTER`, $29/month, `maxMonthlyUsageUsd: 29` — a hard
+   cap, shared with production.** $12.45 of the 2026-07-29 → 2026-08-28 cycle
+   was already consumed by the Instagram/events crawl and photo scrapers. This
+   is why the budget design above gained a second, account-level gate and the
+   `reviews_deep_reserved_headroom_usd` reserve: the review crawl must never be
+   the reason a production crawl is refused.
+
+**Scheduling consequence (not a blocker for 2a/2b).** With ~$4.5 of projected
+headroom left in the current cycle, the 2c backfill must not run before the
+next cycle opens on **2026-08-29** — or must be sized to the measured headroom
+at the time. 2a (build) and 2b (the one-venue trial, ~50 reviews ≈ $0.015) are
+unaffected and can proceed immediately.
