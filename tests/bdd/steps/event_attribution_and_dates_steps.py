@@ -307,16 +307,24 @@ def step_then_link_from_caption(context):
 
 @then('the event is queued for review with reason "{reason}"')
 def step_then_queued_with_reason(context, reason):
-    # Shared between §A/§B (the eadb_dao-persisted event) and §D's "leave an
+    # Shared between §A/§B (the eadb_dao-persisted event), §D's "leave an
     # unreadable date unresolved and queued" (a bare resolve_event_datetime
-    # call, never persisted at all) — `context.eadb_resolved` is only set by
-    # the §D "When the date is resolved" step, so its presence disambiguates
-    # which fixture this scenario used.
+    # call, never persisted at all), and plans/260813_review-gate-and-date-
+    # vocabulary.md's own "still queue an event that states no date" (the
+    # `context.ee_*` EventExtractionService fixture instagram_event_
+    # extraction_steps.py builds) — `context.eadb_resolved`/`eadb_dao`
+    # disambiguate the first two; a THIRD fixture never sets either, so it
+    # falls to the `ee_*` branch instead of guessing at an uninitialised
+    # `eadb_dao`.
     resolved = getattr(context, "eadb_resolved", None)
     if resolved is not None:
         assert reason in (resolved.review_reason or ""), resolved
         return
-    row = _eadb_event(context)
+    if getattr(context, "eadb_dao", None) is not None:
+        row = _eadb_event(context)
+        assert reason in (row.get("review_reason") or ""), row
+        return
+    row = _stored_event(context)
     assert reason in (row.get("review_reason") or ""), row
 
 
@@ -474,6 +482,14 @@ def step_given_post_published_on(context, date_str):
     year, month, day = (int(x) for x in date_str.split("-"))
     context.eadb_date_post_ts = datetime(year, month, day, 20, 0, tzinfo=RECIFE)
     context.eadb_date_interpretation = None
+    # plans/260813_review-gate-and-date-vocabulary.md §B: reset alongside
+    # `eadb_date_interpretation` above so a cadence fixture set by an
+    # EARLIER scenario in this run (this file's own, or another feature
+    # file's, since this step is the common entry point every "the date is
+    # resolved" scenario starts from) never leaks into a later one that
+    # never touches recurrence at all.
+    context.eadb_is_recurring = None
+    context.eadb_recurrence_text = None
 
 
 @given('an extracted event whose date text is "{date_text}"')
@@ -504,6 +520,14 @@ def step_when_the_date_is_resolved(context):
         date_text=context.eadb_date_text, time_text=None,
         post_timestamp=context.eadb_date_post_ts,
         date_interpretation=context.eadb_date_interpretation,
+        # plans/260813_review-gate-and-date-vocabulary.md §B: additive --
+        # `getattr(..., None)` so every scenario that never sets these (every
+        # scenario in THIS feature file, today) passes `None` for both,
+        # identical to omitting them entirely (resolve_event_datetime's own
+        # defaults). Only review-gate-and-date-vocabulary.feature's cadence
+        # scenarios ever set them.
+        is_recurring=getattr(context, "eadb_is_recurring", None),
+        recurrence_text=getattr(context, "eadb_recurrence_text", None),
     )
 
 

@@ -1,4 +1,3 @@
-@wip
 Feature: Queue only the events an operator can actually fix
   As the operator of the event pipeline
   I must see a review queue that holds real extraction failures, and not posts
