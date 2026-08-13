@@ -1,0 +1,111 @@
+USING RUNNER: behave.runner:Runner
+Feature: Backfill source provenance # tests/bdd/enrichment/backfill-source-provenance.feature:1
+  Every archived post recorded when it was posted and what medium it was. Copy
+  those facts onto the stored source rows that predate the columns, without
+  inventing a value and without overwriting one already there.
+  Feature: Backfill source provenance  # tests/bdd/enrichment/backfill-source-provenance.feature:1
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: Fill both fields from an archived manifest record                                   # tests/bdd/enrichment/backfill-source-provenance.feature:9
+    Given the provenance backfill script is available                                           # tests/bdd/steps/backfill_source_provenance_steps.py:193
+    Given a stored source with no upload time and no media type                                 # tests/bdd/steps/backfill_source_provenance_steps.py:199
+    And its archived manifest records an upload time of 2026-08-12 15:26 and media type "Video" # tests/bdd/steps/backfill_source_provenance_steps.py:250
+    When the backfill runs with apply                                                           # tests/bdd/steps/backfill_misattributed_links_steps.py:404
+    Then the stored source records an upload time of 2026-08-12 15:26                           # tests/bdd/steps/promoter_source_provenance_parity_steps.py:269
+    And the stored source records its media type as "Video"                                     # tests/bdd/steps/crawl_error_visibility_steps.py:371
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: Leave a row that already has values untouched                      # tests/bdd/enrichment/backfill-source-provenance.feature:16
+    Given the provenance backfill script is available                          # tests/bdd/steps/backfill_source_provenance_steps.py:193
+    Given a stored source that already records an upload time and a media type # tests/bdd/steps/backfill_source_provenance_steps.py:204
+    When the backfill runs with apply                                          # tests/bdd/steps/backfill_misattributed_links_steps.py:404
+    Then that source's upload time is unchanged                                # tests/bdd/steps/backfill_source_provenance_steps.py:294
+    And that source's media type is unchanged                                  # tests/bdd/steps/backfill_source_provenance_steps.py:301
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: Leave a row whose manifest has no upload time with a null upload time  # tests/bdd/enrichment/backfill-source-provenance.feature:22
+    Given the provenance backfill script is available                              # tests/bdd/steps/backfill_source_provenance_steps.py:193
+    Given a stored source with no upload time                                      # tests/bdd/steps/backfill_source_provenance_steps.py:219
+    And its archived manifest records no upload time                               # tests/bdd/steps/backfill_source_provenance_steps.py:260
+    When the backfill runs with apply                                              # tests/bdd/steps/backfill_misattributed_links_steps.py:404
+    Then the stored source still records no upload time                            # tests/bdd/steps/backfill_source_provenance_steps.py:288
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: Never substitute the crawl time for a missing upload time       # tests/bdd/enrichment/backfill-source-provenance.feature:28
+    Given the provenance backfill script is available                       # tests/bdd/steps/backfill_source_provenance_steps.py:193
+    Given a stored source with no upload time                               # tests/bdd/steps/backfill_source_provenance_steps.py:219
+    And its archived manifest records no upload time                        # tests/bdd/steps/backfill_source_provenance_steps.py:260
+    When the backfill runs with apply                                       # tests/bdd/steps/backfill_misattributed_links_steps.py:404
+    Then the stored source's upload time does not equal its first seen time # tests/bdd/steps/backfill_source_provenance_steps.py:308
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: Report a row whose manifest record cannot be found  # tests/bdd/enrichment/backfill-source-provenance.feature:34
+    Given the provenance backfill script is available           # tests/bdd/steps/backfill_source_provenance_steps.py:193
+    Given a stored source with no upload time                   # tests/bdd/steps/backfill_source_provenance_steps.py:219
+    And no archived manifest record matches it                  # tests/bdd/steps/backfill_source_provenance_steps.py:266
+    When the backfill runs with apply                           # tests/bdd/steps/backfill_misattributed_links_steps.py:404
+    Then the stored source still records no upload time         # tests/bdd/steps/backfill_source_provenance_steps.py:288
+    And the report counts it as unmatched                       # tests/bdd/steps/backfill_source_provenance_steps.py:316
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: Report every change and write nothing without apply  # tests/bdd/enrichment/backfill-source-provenance.feature:41
+    Given the provenance backfill script is available            # tests/bdd/steps/backfill_source_provenance_steps.py:193
+    Given several stored sources with no upload time             # tests/bdd/steps/backfill_source_provenance_steps.py:224
+    When the backfill runs without apply                         # tests/bdd/steps/backfill_misattributed_links_steps.py:409
+    Then no source is changed                                    # tests/bdd/steps/backfill_source_provenance_steps.py:323
+    And the report counts what it would have filled              # tests/bdd/steps/backfill_source_provenance_steps.py:341
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: Change nothing on a second apply          # tests/bdd/enrichment/backfill-source-provenance.feature:47
+    Given the provenance backfill script is available # tests/bdd/steps/backfill_source_provenance_steps.py:193
+    Given the backfill has already been applied       # tests/bdd/steps/backfill_source_provenance_steps.py:274
+    When the backfill runs with apply again           # tests/bdd/steps/backfill_misattributed_links_steps.py:420
+    Then no source is changed                         # tests/bdd/steps/backfill_source_provenance_steps.py:323
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: Continue past an unreadable manifest                         # tests/bdd/enrichment/backfill-source-provenance.feature:52
+    Given the provenance backfill script is available                    # tests/bdd/steps/backfill_source_provenance_steps.py:193
+    Given two stored sources and the first one's manifest cannot be read # tests/bdd/steps/backfill_source_provenance_steps.py:234
+    When the backfill runs with apply                                    # tests/bdd/steps/backfill_misattributed_links_steps.py:404
+LOG_WARNING:backfill_source_provenance: backfill_source_provenance: manifest read failed for source_id=evsrc_1 key=retrieved/source=instagram_posts/year=2026/month=08/day=12/run_id=01BSP000001/venue_id=v_bsp/info/_manifest.json: simulated unreadable manifest read: retrieved/source=instagram_posts/year=2026/month=08/day=12/run_id=01BSP000001/venue_id=v_bsp/info/_manifest.json
+    Then the second source is still filled                               # tests/bdd/steps/backfill_source_provenance_steps.py:349
+    And the report counts the unreadable manifest                        # tests/bdd/steps/backfill_source_provenance_steps.py:356
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: Write nothing to the archive              # tests/bdd/enrichment/backfill-source-provenance.feature:58
+    Given the provenance backfill script is available # tests/bdd/steps/backfill_source_provenance_steps.py:193
+    Given a stored source with no upload time         # tests/bdd/steps/backfill_source_provenance_steps.py:219
+    When the backfill runs with apply                 # tests/bdd/steps/backfill_misattributed_links_steps.py:404
+    Then no object is written to the archive bucket   # tests/bdd/steps/backfill_source_provenance_steps.py:363
+
+1 feature passed, 0 failed, 0 skipped
+9 scenarios passed, 0 failed, 0 skipped
+45 steps passed, 0 failed, 0 skipped
+Took 0min 0.020s

@@ -175,6 +175,22 @@ class VenueRepository(RedisVenueDAO):
         API's `sources[]`."""
         return self.rds_store.list_event_sources(event_id)
 
+    def list_all_event_sources(self):
+        """Every `events.post_item_source` row across the whole table —
+        `scripts.backfill_source_provenance`'s candidate set
+        (plans/260813_backfill-source-provenance.md)."""
+        return self.rds_store.list_all_event_sources()
+
+    def update_event_source_provenance(
+        self, source_id: str, *, source_uploaded_at=None, source_media_type=None,
+    ):
+        """Fill `source_uploaded_at`/`source_media_type` on one source row,
+        never overwriting a value already present — see
+        RdsVenueStore.update_event_source_provenance."""
+        return self.rds_store.update_event_source_provenance(
+            source_id, source_uploaded_at=source_uploaded_at, source_media_type=source_media_type,
+        )
+
     def list_events_by_handle(self, source_handle: str):
         """Every event with at least one source posted under `source_handle`
         — plans/260811_merge-unresolved-into-resolved-sibling.md's handle-
