@@ -1,4 +1,3 @@
-@wip
 Feature: History repair — dates
   Re-resolve every stored date expression with the current resolver, using only
   data already in RDS. No model call, no Apify. A repaired date moves the row's

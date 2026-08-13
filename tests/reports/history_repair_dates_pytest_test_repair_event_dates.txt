@@ -1,0 +1,64 @@
+============================= test session starts ==============================
+platform linux -- Python 3.12.3, pytest-8.3.3, pluggy-1.6.0 -- /media/mario/ssd/projects/vibesense_wrapper/cs-server/.venv/bin/python
+cachedir: .pytest_cache
+rootdir: /media/mario/ssd/projects/vibesense_wrapper/cs-server
+configfile: pytest.ini
+plugins: mock-3.14.0, anyio-4.14.2, respx-0.21.1, asyncio-0.24.0
+asyncio: mode=Mode.AUTO, default_loop_scope=function
+collecting ... collected 47 items
+
+tests/test_repair_event_dates.py::TestDateTextShape::test_empty PASSED   [  2%]
+tests/test_repair_event_dates.py::TestDateTextShape::test_relative PASSED [  4%]
+tests/test_repair_event_dates.py::TestDateTextShape::test_numeric_dmy PASSED [  6%]
+tests/test_repair_event_dates.py::TestDateTextShape::test_range_preposition PASSED [  8%]
+tests/test_repair_event_dates.py::TestDateTextShape::test_textual_month PASSED [ 10%]
+tests/test_repair_event_dates.py::TestDateTextShape::test_bare_weekday PASSED [ 12%]
+tests/test_repair_event_dates.py::TestDateTextShape::test_daily_cadence PASSED [ 14%]
+tests/test_repair_event_dates.py::TestDateTextShape::test_no_computable_cadence PASSED [ 17%]
+tests/test_repair_event_dates.py::TestDateTextShape::test_different_shapes_are_actually_different PASSED [ 19%]
+tests/test_repair_event_dates.py::TestResolveSourceProductionStrings::test_e_hoje PASSED [ 21%]
+tests/test_repair_event_dates.py::TestResolveSourceProductionStrings::test_numeric_rolled_within_grace_keeps_anchor_year PASSED [ 23%]
+tests/test_repair_event_dates.py::TestResolveSourceProductionStrings::test_preposition_range_resolves_to_first_day PASSED [ 25%]
+tests/test_repair_event_dates.py::TestResolveSourceProductionStrings::test_abbreviated_month_reversed_form PASSED [ 27%]
+tests/test_repair_event_dates.py::TestResolveSourceProductionStrings::test_weekday_plus_day_needs_the_stored_interpretation PASSED [ 29%]
+tests/test_repair_event_dates.py::TestResolveSourceProductionStrings::test_no_anchor_is_never_guessed PASSED [ 31%]
+tests/test_repair_event_dates.py::TestKeyRewriting::test_recomputed_key_matches_a_fresh_extraction PASSED [ 34%]
+tests/test_repair_event_dates.py::TestKeyRewriting::test_key_and_date_land_in_the_same_write PASSED [ 36%]
+tests/test_repair_event_dates.py::TestCollisionDetection::test_seed_and_register_agree_with_the_real_unique_constraint PASSED [ 38%]
+tests/test_repair_event_dates.py::TestCollisionDetection::test_run_repair_reports_the_collision_and_never_forces_the_write PASSED [ 40%]
+tests/test_repair_event_dates.py::TestFoldDateReasons::test_removal PASSED [ 42%]
+tests/test_repair_event_dates.py::TestFoldDateReasons::test_addition PASSED [ 44%]
+tests/test_repair_event_dates.py::TestFoldDateReasons::test_composite_removes_one_keeps_another PASSED [ 46%]
+tests/test_repair_event_dates.py::TestFoldDateReasons::test_composite_preserves_non_date_reason_order PASSED [ 48%]
+tests/test_repair_event_dates.py::TestFoldDateReasons::test_replaces_one_date_reason_with_another PASSED [ 51%]
+tests/test_repair_event_dates.py::TestFoldDateReasons::test_already_correct_reason_is_a_no_op PASSED [ 53%]
+tests/test_repair_event_dates.py::TestDateReasonsFor::test_missing_date_suppressed_for_exempt_post_type PASSED [ 55%]
+tests/test_repair_event_dates.py::TestFoldCandidates::test_single_contributor PASSED [ 57%]
+tests/test_repair_event_dates.py::TestFoldCandidates::test_disagreement_is_broken_by_merge_event_fields_recency PASSED [ 59%]
+tests/test_repair_event_dates.py::TestFoldCandidates::test_two_time_unknown_disagreeing_dates_keep_the_first_seen PASSED [ 61%]
+tests/test_repair_event_dates.py::TestFoldCandidates::test_empty_contributor_never_beats_a_known_time_answer PASSED [ 63%]
+tests/test_repair_event_dates.py::TestIdempotency::test_second_apply_over_a_mixed_corpus_changes_nothing PASSED [ 65%]
+tests/test_repair_event_dates.py::TestProtectionReason::test_confirmed PASSED [ 68%]
+tests/test_repair_event_dates.py::TestProtectionReason::test_operator_edited_starts_at PASSED [ 70%]
+tests/test_repair_event_dates.py::TestProtectionReason::test_operator_edited_other_field_is_not_protected PASSED [ 72%]
+tests/test_repair_event_dates.py::TestProtectionReason::test_superseded PASSED [ 74%]
+tests/test_repair_event_dates.py::TestProtectionReason::test_extraction_failed_and_rejected PASSED [ 76%]
+tests/test_repair_event_dates.py::TestProtectionReason::test_confirmed_outranks_operator_edit PASSED [ 78%]
+tests/test_repair_event_dates.py::TestProtectionReason::test_ordinary_accepted_row_is_unprotected PASSED [ 80%]
+tests/test_repair_event_dates.py::TestNeverOverwriteOperator::test_confirmed_row_is_byte_identical_after_a_disagreeing_repair PASSED [ 82%]
+tests/test_repair_event_dates.py::TestNeverOverwriteOperator::test_operator_edited_row_is_byte_identical_after_a_disagreeing_repair PASSED [ 85%]
+tests/test_repair_event_dates.py::TestDependencyGuard::test_refuses_to_run_before_reading_any_row_when_not_landed PASSED [ 87%]
+tests/test_repair_event_dates.py::TestAnchorCoverageGuard::test_small_corpus_is_never_gated_by_anchor_share PASSED [ 89%]
+tests/test_repair_event_dates.py::TestAnchorCoverageGuard::test_large_corpus_with_too_many_missing_anchors_refuses PASSED [ 91%]
+tests/test_repair_event_dates.py::TestAnchorCoverageGuard::test_large_corpus_within_the_configured_ceiling_runs PASSED [ 93%]
+tests/test_repair_event_dates.py::TestCheckBalance::test_balanced_report_does_not_raise PASSED [ 95%]
+tests/test_repair_event_dates.py::TestCheckBalance::test_imbalanced_report_raises PASSED [ 97%]
+tests/test_repair_event_dates.py::TestDryRun::test_dry_run_writes_nothing_but_reports_the_would_be_change PASSED [100%]
+
+=============================== warnings summary ===============================
+.venv/lib/python3.12/site-packages/pydantic/_internal/_config.py:291
+  /media/mario/ssd/projects/vibesense_wrapper/cs-server/.venv/lib/python3.12/site-packages/pydantic/_internal/_config.py:291: PydanticDeprecatedSince20: Support for class-based `config` is deprecated, use ConfigDict instead. Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.9/migration/
+    warnings.warn(DEPRECATION_MESSAGE, DeprecationWarning)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+======================== 47 passed, 1 warning in 0.46s =========================

@@ -564,6 +564,22 @@ class InMemoryRdsVenueStore:
         rows.sort(key=lambda s: (self._sort_dt(s.get("first_seen_at")), s["id"]))
         return rows
 
+    def list_all_event_sources_with_context(self) -> list[dict]:
+        """Mirrors RdsVenueStore.list_all_event_sources_with_context: every
+        source row's `_view_for_source` (post_item content + this source's
+        own fields), widened with the source's own `id` — `_view_for_source`
+        does not carry it (see that method's own docstring: it exists to
+        look like an ordinary "event" dict, keyed by `event_id`)."""
+        rows = []
+        for source_row in self.event_sources.values():
+            view = self._view_for_source(source_row)
+            if view is None:
+                continue
+            view["id"] = source_row["id"]
+            rows.append(view)
+        rows.sort(key=lambda r: (self._sort_dt(r.get("first_seen_at")), r["id"]))
+        return rows
+
     def update_event_source_provenance(
         self, source_id: str, *, source_uploaded_at=None, source_media_type: Optional[str] = None,
     ) -> bool:
