@@ -422,3 +422,29 @@ class TestTransportFailureLogNamesTheHandle:
             asyncio.run(client.search_users("some query"))
         messages = [r.getMessage() for r in caplog.records]
         assert any(m == "[ApifyInstagram] Timeout for search_users" for m in messages), messages
+
+
+class TestTransportFailureTimeoutRaised:
+    """plans/260813_crawl-transport-failure-visibility.md §D: a 120s
+    constructor default abandoned a run that had ALREADY billed results
+    server-side and succeeded (2026-08-13, downtownbeergarden_). 300s is the
+    measured starting point -- comfortably past the slowest observed
+    2026-08-12 success. Pinned at both layers this value now lives:
+    `ApifyInstagramClient`'s own constructor default (for a caller that
+    builds one directly, e.g. a script or a test), and `Settings`' new field
+    (what `app/container.py` actually wires the real client from)."""
+
+    def test_the_client_constructor_default_is_300_seconds(self):
+        client = ApifyInstagramClient(api_token="t")
+        assert client.timeout == 300.0
+
+    def test_the_settings_default_is_300_seconds(self):
+        from app.config import Settings
+
+        assert Settings(_env_file=None).apify_instagram_client_timeout_seconds == 300.0
+
+    def test_the_timeout_is_still_overridable(self):
+        """A configurable value must still be a real constructor parameter,
+        not a value hardcoded past the point of being overridden."""
+        client = ApifyInstagramClient(api_token="t", timeout=45.0)
+        assert client.timeout == 45.0

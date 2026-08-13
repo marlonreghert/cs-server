@@ -343,6 +343,10 @@ class Container:
         if settings.apify_api_token:
             self.apify_instagram_client = ApifyInstagramClient(
                 api_token=settings.apify_api_token,
+                # plans/260813_crawl-transport-failure-visibility.md §D --
+                # settings.py's own comment on this field carries the
+                # measured basis for the value.
+                timeout=settings.apify_instagram_client_timeout_seconds,
             )
             logger.info("[Container] Apify Instagram client initialized")
 

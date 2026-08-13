@@ -182,7 +182,18 @@ class FetchPostsResult:
 class ApifyInstagramClient:
     """Async HTTP client for Apify Instagram scraper actors."""
 
-    def __init__(self, api_token: str, timeout: float = 120.0):
+    # plans/260813_crawl-transport-failure-visibility.md §D: 120s abandoned a
+    # run that had ALREADY billed results server-side and succeeded --
+    # 2026-08-13, downtownbeergarden_ (121 posts, a 20-post seed): Apify's
+    # run succeeded with 16 items, our client gave up two minutes in and
+    # threw the answer away. 300s is the starting proposal, comfortably past
+    # the slowest OBSERVED success on 2026-08-12 (a few seconds to just over
+    # a minute) -- container.py wires the real, admin-tunable value from
+    # `settings.apify_instagram_client_timeout_seconds`; this default only
+    # matters for a caller that constructs the client directly (tests, or a
+    # future script), and must not silently regress back to the value that
+    # caused the incident.
+    def __init__(self, api_token: str, timeout: float = 300.0):
         self.api_token = api_token
         self.timeout = timeout
         self.client = httpx.AsyncClient(
