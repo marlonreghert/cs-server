@@ -25,6 +25,7 @@ from app.services.event_venue_resolution import (
     RESOLUTION_UNRESOLVED,
     LinkCandidate,
     VenueLite,
+    _name_match_candidates,
     _strip_handles_for_name_match,
     extract_mentions,
     gate_auto_link,
@@ -617,6 +618,23 @@ class TestRungFourSkippedWhenHandleOnly:
         assert result.resolution == RESOLUTION_AUTO
         assert result.method == METHOD_NEIGHBOURHOOD_MATCH
         assert result.venue_id == "v_bv"
+
+
+# ── §C: _name_match_candidates refuses handle-tainted text directly ───────
+class TestNameMatchCandidatesRefusesHandleTaintedText:
+    def test_a_raw_handle_never_produces_a_candidate_even_if_it_would_score_high(self):
+        """Defense in depth: even called DIRECTLY (bypassing
+        `resolve_event_venue`'s own §A strip), `_name_match_candidates`
+        refuses text that still carries an @handle -- the guarantee is a
+        property of the scorer itself, not a caller convention."""
+        maria = _venue("v_maria", "Maria Café")
+        assert _name_match_candidates("@mahalilacafe", [maria]) == []
+
+    def test_stripped_text_still_scores_normally(self):
+        target = _venue("v1", "Ponta Negra Beach Club")
+        candidates = _name_match_candidates("Ponta Negra", [target])
+        assert len(candidates) == 1
+        assert candidates[0].venue_id == "v1"
 
 
 # ── the three production false positives, pinned by NAME ──────────────────

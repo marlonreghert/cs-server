@@ -1,4 +1,3 @@
-@wip
 Feature: Handle attribution hardening
   An @handle is an exact identifier: it either resolves to a venue we carry or
   it does not. Its characters must never be fuzzy-matched against a different

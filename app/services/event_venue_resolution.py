@@ -54,6 +54,23 @@ Failing either gate queues the event for review with its ranked candidates;
 failing the floor outright leaves it unresolved. Rungs 1-3 are identities or
 bounded-certain matches, not open-ended scores, so neither gate applies to
 them.
+
+plans/260813_handle-attribution-hardening.md — the general rule these three
+production rows taught: an automatic link needs evidence of the venue's
+IDENTITY, not a coincidence of characters. `@mahalilacafe` and `@espaco.muta`
+each auto-linked to an unrelated venue ("Maria Café", "Espaço Tucano") purely
+because rung 4's fuzzy scorer was handed the handle's own text and found a
+shared substring — a confident-looking answer built on evidence an operator
+could never see or check, since it carried no review reason at all. Raising
+the confidence floor cannot fix this: the floor is a global knob, and these
+matches score highly BECAUSE the comparison was fed the wrong KIND of string,
+not because the bar was too low. The fix is categorical, not numeric — an
+`@handle` is an identity to be looked up (rungs 1/2/5), never text to be
+fuzzy-matched (rung 4), enforced in two places that must never drift apart:
+`resolve_event_venue` strips every `@handle` out of `location_text` before
+rung 4 ever runs (§A), and `_name_match_candidates` itself refuses outright
+if handed text that still carries one (§C) — so the guarantee holds even for
+a call site that forgets to strip first.
 """
 from __future__ import annotations
 
@@ -305,8 +322,19 @@ def _name_match_candidates(
     breaks ties among equally-scored venues — the proximity tie-break. A
     venue with no distance information never outranks one that has a real
     measurement at the same score.
+
+    plans/260813_handle-attribution-hardening.md §C: refuses outright — no
+    candidates, regardless of what any score would have been — when
+    `location_text` still carries a raw `@handle` token. `resolve_event_
+    venue`'s rung 4 call site already strips handles before ever calling
+    this function (§A); this is the SAME rule enforced a second time, HERE,
+    so "a rung-4 candidate is never derived from an @handle's characters" is
+    a property of this function itself, not a convention every current and
+    future call site has to separately remember — the lesson the
+    `@mahalilacafe`/`@espaco.muta` false positives taught (see this
+    module's own docstring).
     """
-    if not location_text:
+    if not location_text or _MENTION_RE.search(location_text):
         return []
     scored: list[tuple[VenueLite, float, Optional[float]]] = []
     for venue in venues:
