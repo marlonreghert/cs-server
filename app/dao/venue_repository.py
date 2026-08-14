@@ -23,7 +23,7 @@ from app.models import LiveForecastResponse, WeekRawDay
 from app.models.instagram import VenueInstagram, VenueInstagramPosts
 from app.models.menu import VenueMenuData, VenueMenuPhotos
 from app.models.opening_hours import OpeningHours
-from app.models.venue_review import VenueReviews
+from app.models.venue_review import VenueReviews, VenueReviewsDeep
 from app.models.vibe_attributes import VibeAttributes
 from app.models.vibe_profile import VenueVibeProfile
 
@@ -64,6 +64,9 @@ class VenueRepository(RedisVenueDAO):
 
     def get_venue_reviews(self, venue_id):
         return self._rds_enrichment("google_places.reviews", VenueReviews, venue_id)
+
+    def get_venue_reviews_deep(self, venue_id):
+        return self._rds_enrichment("venues.reviews_deep", VenueReviewsDeep, venue_id)
 
     def get_venue_instagram(self, venue_id):
         return self._rds_enrichment("instagram.handle", VenueInstagram, venue_id)
@@ -320,6 +323,16 @@ class VenueRepository(RedisVenueDAO):
             "google_places.reviews", reviews.venue_id, _json(reviews), history=_HISTORY,
         )
 
+    def set_venue_reviews_deep(self, deep) -> None:
+        """RDS write for the deep-review corpus — always the FULL merged set
+        the caller passes (DeepReviewCrawlService owns merge/dedup/window/cap
+        before calling this). The Redis projection's bounded slice is a
+        separate concern, applied by RedisVenueDAO.set_venue_reviews_deep at
+        project time, not here."""
+        self.rds_store.upsert_enrichment(
+            "venues.reviews_deep", deep.venue_id, _json(deep), history=_HISTORY,
+        )
+
     # ── instagram ───────────────────────────────────────────────────────────────
     def set_venue_instagram(
         self, instagram, cache_ttl_days: int = 30, not_found_ttl_days: int = 7
@@ -391,6 +404,7 @@ class VenueRepository(RedisVenueDAO):
         "delete_venue_menu_photos": "venues.menu_photos",
         "delete_venue_menu_data": "venues.menu_data",
         "delete_venue_vibe_profile": "venues.vibe_profile",
+        "delete_venue_reviews_deep": "venues.reviews_deep",
     }
 
     def _soft_delete_enrichment(self, name, venue_id):
@@ -422,3 +436,6 @@ class VenueRepository(RedisVenueDAO):
 
     def delete_venue_vibe_profile(self, venue_id):
         return self._soft_delete_enrichment("delete_venue_vibe_profile", venue_id)
+
+    def delete_venue_reviews_deep(self, venue_id):
+        return self._soft_delete_enrichment("delete_venue_reviews_deep", venue_id)

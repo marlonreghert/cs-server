@@ -1,4 +1,3 @@
-@wip
 Feature: Capture a deep review corpus for operator-selected venues
   As an operator
   I want to capture every review inside a recent window for venues I choose

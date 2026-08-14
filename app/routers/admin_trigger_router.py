@@ -15,7 +15,7 @@ from app.handlers.add_venue_handler import (
 )
 from app.models.batch_add import BatchAddRequest
 from app.services.archive_sources import public_catalog
-from app.services.venue_photo_archive_service import InvalidArchivePath
+from app.services.venue_photo_archive_service import InvalidArchivePath, parse_venue_ids
 from app.services.venue_eligibility import (
     ADMIN_CONFIG_ELIGIBILITY_KEY,
     ADMIN_CONFIG_GEOFENCE_KEY,
@@ -326,6 +326,21 @@ JOB_REGISTRY = {
         "unavailable_detail": "Promoter crawl not configured (needs Apify API token)",
         "runner": lambda c, cfg: c.promoter_crawl_service.run(cfg),
     },
+    "reviews_deep_crawl": {
+        "label": "Deep Review Corpus Crawl",
+        "description": "Capture every Google review newer than a configurable "
+        "window (default 180 days) for operator-selected venues, via a paid "
+        "Apify actor. Gated by a local monthly review budget AND the shared "
+        "Apify account's remaining headroom — a run never spends the "
+        "production Instagram/events crawl's quota. Not scheduled: "
+        "operator-driven only, no cron.",
+        "default_config": {"venue_ids": "", "filter": None},
+        "service_attr": "deep_review_crawl_service",
+        "unavailable_detail": "Deep review crawl not configured (needs Apify API token)",
+        "runner": lambda c, cfg: c.deep_review_crawl_service.run(
+            venue_ids=parse_venue_ids(cfg.get("venue_ids")) or None, filter_spec=cfg.get("filter"),
+        ),
+    },
 }
 
 
@@ -505,6 +520,32 @@ def _photo_archive_service():
             detail="Media archive not configured (needs Google Places + a bucket)",
         )
     return service
+
+
+def _deep_review_crawl_service():
+    service = getattr(_container, "deep_review_crawl_service", None)
+    if service is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Deep review crawl not configured (needs Apify API token)",
+        )
+    return service
+
+
+@router.post("/reviews-deep/estimate")
+async def estimate_deep_review_crawl(config: Optional[dict] = None):
+    """Price a deep review crawl WITHOUT making a single Apify request — the
+    id-list-is-authoritative selection rule (a filter may narrow, never
+    widen) applies here exactly as it does to the real run, and the reported
+    review/cost figures are an explicit UPPER BOUND (see DeepReviewCrawlService.
+    estimate), not a prediction: how many reviews actually fall inside the
+    window is unknowable without crawling."""
+    require()
+    cfg = config or {}
+    return _deep_review_crawl_service().estimate(
+        venue_ids=parse_venue_ids(cfg.get("venue_ids")) or None,
+        filter_spec=cfg.get("filter"),
+    )
 
 
 @router.post("/trigger/venue_photo_archive/estimate")
@@ -1066,6 +1107,7 @@ def _venue_cache_flags_bulk(
     hours_map = venue_dao.get_opening_hours_bulk(venue_ids)
     ig_map = venue_dao.get_venue_instagram_bulk(venue_ids)
     reviews_map = venue_dao.get_venue_reviews_bulk(venue_ids)
+    reviews_deep_map = venue_dao.get_venue_reviews_deep_bulk(venue_ids)
     menu_photos_map = venue_dao.get_venue_menu_photos_bulk(venue_ids)
     menu_data_map = venue_dao.get_venue_menu_data_bulk(venue_ids)
     vibe_profile_map = venue_dao.get_venue_vibe_profile_bulk(venue_ids)
@@ -1084,6 +1126,10 @@ def _venue_cache_flags_bulk(
             # boolean.
             "instagram": vid in ig_map,
             "reviews": vid in reviews_map,
+            # Presence in the Redis serving projection only, matching every
+            # other flag here — a venue can hold a much larger corpus in RDS
+            # than this reflects (the projector caps what reaches Redis).
+            "reviews_deep": vid in reviews_deep_map,
             "menu_photos": vid in menu_photos_map,
             "menu_data": vid in menu_data_map,
             "vibe_profile": vid in vibe_profile_map,

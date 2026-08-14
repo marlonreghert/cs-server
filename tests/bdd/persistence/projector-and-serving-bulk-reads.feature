@@ -21,7 +21,7 @@ Feature: Projector and serving bulk reads preserve outputs with bounded round-tr
 
   Scenario: Projector RDS queries do not grow with the venue count
     When the Redis projection rebuild runs
-    Then the number of RDS queries issued must not exceed 12
+    Then the number of RDS queries issued must not exceed 13
     And the number of RDS queries must be the same regardless of how many servable venues exist
 
   Scenario: One bad venue row still skips only that venue

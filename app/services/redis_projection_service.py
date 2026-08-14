@@ -14,6 +14,7 @@ from typing import Optional
 
 from app.dao.venue_row import venue_from_row
 from app.metrics import (
+    DEEP_REVIEWS_PROJECTED_VENUES,
     REDIS_PROJECTION_ENTITY_DELETES_TOTAL,
     REDIS_PROJECTION_REMOVED_TOTAL,
     REDIS_PROJECTION_VENUES,
@@ -28,7 +29,7 @@ from app.models.vibe_attributes import VibeAttributes
 from app.models.opening_hours import OpeningHours
 from app.models.instagram import VenueInstagram, VenueInstagramPosts
 from app.models.menu import VenueMenuData, VenueMenuPhotos
-from app.models.venue_review import VenueReviews
+from app.models.venue_review import VenueReviews, VenueReviewsDeep
 from app.models.vibe_profile import VenueVibeProfile
 
 logger = logging.getLogger(__name__)
@@ -69,6 +70,11 @@ _REBUILD_MODELS = {
     "venues.menu_photos": (VenueMenuPhotos, "set_venue_menu_photos", "delete_venue_menu_photos"),
     "venues.menu_data": (VenueMenuData, "set_venue_menu_data", "delete_venue_menu_data"),
     "venues.vibe_profile": (VenueVibeProfile, "set_venue_vibe_profile", "delete_venue_vibe_profile"),
+    # The setter itself bounds what actually reaches Redis to the newest
+    # `settings.reviews_deep_projection_max` (RedisVenueDAO.set_venue_reviews_
+    # deep) — this entry follows the exact same call/delete shape every other
+    # family here does; only that one setter's INTERNAL behavior differs.
+    "venues.reviews_deep": (VenueReviewsDeep, "set_venue_reviews_deep", "delete_venue_reviews_deep"),
 }
 
 _WEEK_DAYS = range(7)
@@ -113,12 +119,13 @@ class RedisProjectionService:
         except Exception as e:
             logger.warning(f"[Rebuild] geo-excluded count failed: {e}")
         # Bulk-prefetch every input the per-venue loop below needs, once per
-        # cycle (P1): 1 venue-rows query + 9 enrichment-table queries (the 8
-        # _REBUILD_MODELS tables + photos) + 1 weekly query + 1 live query = 12
-        # bulk reads total, independent of how many servable venues exist —
-        # replacing what was ~18 SQL queries PER VENUE. The per-venue projection
-        # logic below is unchanged; only the source of each row/rec moves from a
-        # per-call SELECT to a dict lookup on these prefetched maps.
+        # cycle (P1): 1 venue-rows query + 10 enrichment-table queries (the 9
+        # _REBUILD_MODELS tables, incl. venues.reviews_deep, + photos) + 1
+        # weekly query + 1 live query = 13 bulk reads total, independent of
+        # how many servable venues exist — replacing what was ~18 SQL queries
+        # PER VENUE. The per-venue projection logic below is unchanged; only
+        # the source of each row/rec moves from a per-call SELECT to a dict
+        # lookup on these prefetched maps.
         venue_rows = self.rds_store.get_venues_by_ids(servable_ids)
         enrichment_maps = {
             table_key: self.rds_store.get_enrichment_bulk(table_key, servable_ids)
@@ -129,6 +136,13 @@ class RedisProjectionService:
         )
         weekly_map = self.rds_store.get_weekly_bulk(servable_ids)
         live_map = self.rds_store.get_live_bulk(servable_ids)
+        # Deep-review-corpus-specific observability (plan Error Handling And
+        # Observability): a gauge of how many venues carry a projected slice
+        # this cycle, plus the total bytes actually written — the projection
+        # slice cap is the one place this feature could hurt production
+        # Redis, so its size is logged from the same place the risk lives.
+        deep_reviews_projected = 0
+        deep_reviews_bytes = 0
 
         for venue_id in servable_ids:
             # Isolation boundary: any exception while reading/projecting this ONE
@@ -151,8 +165,12 @@ class RedisProjectionService:
                     rec = enrichment_maps[table_key].get(venue_id)
                     if rec is not None:
                         obj = model_cls.model_validate(rec["payload"])
-                        getattr(self.redis_only_dao, setter)(obj)
+                        result = getattr(self.redis_only_dao, setter)(obj)
                         summary["enrichment"] += 1
+                        if table_key == "venues.reviews_deep":
+                            deep_reviews_projected += 1
+                            if isinstance(result, int):
+                                deep_reviews_bytes += result
                     elif getattr(self.redis_only_dao, deleter)(venue_id):
                         REDIS_PROJECTION_ENTITY_DELETES_TOTAL.labels(entity=table_key).inc()
 
@@ -186,6 +204,12 @@ class RedisProjectionService:
                 logger.warning(f"[Rebuild] venue {venue_id} failed at stage={stage}: {e}")
                 continue
         REDIS_PROJECTION_VENUES.set(summary["venues"])
+        DEEP_REVIEWS_PROJECTED_VENUES.set(deep_reviews_projected)
+        if deep_reviews_projected:
+            logger.info(
+                f"[Rebuild] deep review projection: {deep_reviews_projected} venues, "
+                f"{deep_reviews_bytes} bytes"
+            )
         # Reconcile: remove from Redis any venue that has an RDS row but is not in
         # the serving view — deprecated OR active-but-ineligible. Editing the
         # block-list thus removes/restores venues here, both directions, with no

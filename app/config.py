@@ -471,6 +471,49 @@ class Settings(BaseSettings):
     # charge is NOT published, so an Apify estimate is a floor.
     apify_place_scraped_cost_usd: float = 0.004
     apify_place_details_cost_usd: float = 0.002
+    # Deep review corpus (plans/260813_deep-review-corpus.md): an operator-
+    # selected, budget-gated capture of every Google review inside a window,
+    # via compass/google-maps-reviews-scraper. Distinct family from
+    # google_places.reviews (the free 5 Places-API reviews) — that path is
+    # UNTOUCHED by this feature; this is a separate, paid, opt-in corpus.
+    apify_reviews_actor: str = "compass~google-maps-reviews-scraper"
+    # Published at $0.30 per 1,000 scraped reviews (plan Evidence) = $0.0003/review.
+    apify_review_cost_usd: float = 0.0003
+    # How far back a deep crawl reaches, newest-first. Reviews already stored
+    # that later fall outside this window are KEPT, never pruned (item 5 of
+    # the plan's Desired Behavior) — this only bounds what a NEW fetch stores.
+    reviews_deep_window_days: int = 180
+    # Per-venue ceiling, independent of the window: whichever binds first
+    # stops the fetch. Hitting this (not the window) is what "truncated" means.
+    reviews_deep_max_per_venue: int = 300
+    # Redis serving projection carries only the newest N per venue; RDS (via
+    # VenueRepository) always holds the full stored corpus. Deliberately much
+    # smaller than reviews_deep_max_per_venue: at the 300-review cap, all 1438
+    # venues would be ~158MB on a Redis box with maxmemory 0 (no cap) and
+    # noeviction — 8x today's entire footprint. 40 keeps the projected total
+    # (~21MB) a small fraction of that. Raising this is a deliberate,
+    # measured act, not a default anyone should inherit by accident.
+    reviews_deep_projection_max: int = 40
+    # How many venues share one Apify-account headroom lookup before the next
+    # is refreshed. NOT how many place ids go into one actor run — an actor
+    # failure must be attributable to the ONE venue it was crawling, so the
+    # crawl service still issues one actor call per venue; batching here only
+    # amortizes the headroom HTTP round-trip across a group of venues.
+    reviews_deep_batch_size: int = 20
+    # Local monthly ceiling, checked before EVERY actor call (never after).
+    # 30,000 reviews ~= $9/month at apify_review_cost_usd — a deliberately
+    # cautious start (see plan's Open Questions: roughly a third of the
+    # catalog per month at depth 50, or the whole catalog at depth 20).
+    reviews_deep_monthly_review_budget: int = 30000
+    # The SECOND, account-level gate: prod's Apify plan is STARTER with a
+    # hard $29/month cap SHARED with the production Instagram/events crawl.
+    # A batch is refused unless it would leave at least this much USD
+    # headroom on the shared account afterwards — the reserve that keeps
+    # production crawls alive for the rest of the billing cycle. A failed
+    # account-usage lookup is treated as ZERO headroom (refuse), never as a
+    # pass. See plan's Open Questions #2 for the measured $12.45-of-$29
+    # baseline this reserve is sized against.
+    reviews_deep_reserved_headroom_usd: float = 8.0
     # How much longer to keep polling an Apify actor run that is STILL ALIVE when
     # the 300s base poll budget runs out. Continuing costs nothing extra — the
     # scrape is already billed — whereas abandoning it loses the venue and

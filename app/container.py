@@ -852,6 +852,37 @@ class Container:
                 "[Container] Scheduled Instagram crawl disabled (needs Apify API token)"
             )
 
+        # Deep review corpus (plans/260813_deep-review-corpus.md): an operator-
+        # selected, budget-gated capture of every Google review inside a
+        # window. Not scheduled (no cron, no LOCKED_JOB_NAMES entry — it never
+        # races a scheduler tick), so it only needs the Apify token to exist,
+        # like the other on-demand Apify-backed jobs above.
+        self.deep_review_crawl_service = None
+        if settings.apify_api_token:
+            from app.api.apify_account_usage_client import ApifyAccountUsageClient
+            from app.api.apify_gmaps_reviews_client import ApifyGMapsReviewsClient
+            from app.dao.review_crawl_budget_dao import ReviewCrawlBudgetDao
+            from app.services.deep_review_crawl_service import DeepReviewCrawlService
+
+            self.review_crawl_budget_dao = ReviewCrawlBudgetDao(redis_internal_client)
+            self.apify_gmaps_reviews_client = ApifyGMapsReviewsClient(
+                api_token=settings.apify_api_token,
+            )
+            self.apify_account_usage_client = ApifyAccountUsageClient(
+                api_token=settings.apify_api_token,
+            )
+            self.deep_review_crawl_service = DeepReviewCrawlService(
+                repo=self.pipeline_repository,
+                apify_client=self.apify_gmaps_reviews_client,
+                budget_dao=self.review_crawl_budget_dao,
+                account_usage_client=self.apify_account_usage_client,
+            )
+            logger.info("[Container] Deep review crawl service initialized")
+        else:
+            logger.info(
+                "[Container] Deep review crawl disabled (needs Apify API token)"
+            )
+
         # The serve handler resolves the live-busyness freshness window through the
         # admin-config mirror; wire it now that the service exists (venue_handler
         # was built above, before admin_config_service).

@@ -47,6 +47,7 @@ _ENRICHMENT = {
     "venues.menu_photos": ("venues", "menu_photos", []),
     "venues.menu_data": ("venues", "menu_data", []),
     "venues.vibe_profile": ("venues", "vibe_profile", []),
+    "venues.reviews_deep": ("venues", "reviews_deep", []),
 }
 _WEEKLY = "besttime.weekly_forecast"
 

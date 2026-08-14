@@ -1,7 +1,7 @@
 """Behave steps for tests/bdd/persistence/projector-and-serving-bulk-reads.feature.
 
 Covers the P1-P5 bulk-reads refactor (plans/260710_projector-and-serving-bulk-reads.md):
-the projector rebuild moves from ~18 per-venue SQL queries to ~12 bulk queries
+the projector rebuild moves from ~18 per-venue SQL queries to ~13 bulk queries
 per cycle, and `/v1/venues/nearby` moves from N GETs-per-venue to bounded
 per-key-family MGETs — with the Redis projection content and the nearby
 response body required to stay byte-equivalent.
@@ -38,7 +38,7 @@ from app.models.instagram import InstagramPost, VenueInstagram, VenueInstagramPo
 from app.models.menu import VenueMenuData, VenueMenuPhotos
 from app.models.opening_hours import OpeningHours
 from app.models.venue import DayInfo, DayInfoV2, OpenCloseDetail
-from app.models.venue_review import VenueReviews
+from app.models.venue_review import VenueReview, VenueReviews, VenueReviewsDeep
 from app.models.vibe_attributes import VibeAttributes
 from app.models.vibe_profile import VenueVibeProfile
 from app.models.week_raw import WeekRawDay
@@ -117,6 +117,17 @@ def _seed_full_venue(context, vid: str, name: str) -> None:
     store.upsert_enrichment("venues.menu_data", vid, md.model_dump(mode="json"), history=False)
     vp = VenueVibeProfile(venue_id=vid, top_vibes=["animado"], overall_confidence=0.9)
     store.upsert_enrichment("venues.vibe_profile", vid, vp.model_dump(mode="json"), history=False)
+    rd = VenueReviewsDeep(
+        venue_id=vid,
+        reviews=[VenueReview(
+            author_name="Deep A", rating=5, text="a deep review", relative_time="",
+            publish_time="2026-08-01T00:00:00+00:00", review_id=f"{vid}-deep0", source="apify_gmaps",
+        )],
+        window_days=180, fetched_at="2026-08-01T00:00:00+00:00",
+        oldest_publish_time="2026-08-01T00:00:00+00:00", newest_publish_time="2026-08-01T00:00:00+00:00",
+        truncated=False,
+    )
+    store.upsert_enrichment("venues.reviews_deep", vid, rd.model_dump(mode="json"), history=False)
 
     for day_int in range(7):
         wk = _weekly_day(day_int, with_hours=True)
@@ -357,6 +368,7 @@ def step_projection_matches_rds(context):
                 "venues.menu_photos": "get_venue_menu_photos",
                 "venues.menu_data": "get_venue_menu_data",
                 "venues.vibe_profile": "get_venue_vibe_profile",
+                "venues.reviews_deep": "get_venue_reviews_deep",
             }[table_key]
             actual = getattr(dao, getter_name)(vid)
             assert actual is not None, f"{table_key} missing in Redis for {vid}"
@@ -392,10 +404,10 @@ def step_summary_counts(context):
     # 5 servable venues projected: the 3 full ones + the no-hours venue + the
     # soft-deleted-vibe venue (ineligible v5 excluded).
     assert summary["venues"] == 5, summary
-    # 8 enrichment tables x 3 fully-enriched venues; the no-hours venue has
-    # none, the soft-deleted-vibe venue's only enrichment row is soft-deleted
-    # (not counted).
-    assert summary["enrichment"] == 24, summary
+    # 9 enrichment tables (incl. venues.reviews_deep) x 3 fully-enriched
+    # venues; the no-hours venue has none, the soft-deleted-vibe venue's only
+    # enrichment row is soft-deleted (not counted).
+    assert summary["enrichment"] == 27, summary
     # Live forecasts: only the 3 fully-enriched venues have one.
     assert summary["live"] == 3, summary
     # The stale pre-seeded ineligible-venue copy is reconciled out.
@@ -404,9 +416,9 @@ def step_summary_counts(context):
 
 
 # ── Then: bounded projector queries ────────────────────────────────────────
-@then("the number of RDS queries issued must not exceed 12")
+@then("the number of RDS queries issued must not exceed 13")
 def step_bounded_rds_queries(context):
-    assert context.rebuild_query_count <= 12, context.rebuild_query_count
+    assert context.rebuild_query_count <= 13, context.rebuild_query_count
 
 
 @then("the number of RDS queries must be the same regardless of how many servable venues exist")

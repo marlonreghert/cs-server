@@ -11,7 +11,7 @@ from app.models import Venue, LiveForecastResponse, WeekRawDay
 from app.models.vibe_attributes import VibeAttributes
 from app.models.opening_hours import OpeningHours
 from app.models.instagram import VenueInstagram, VenueInstagramPosts
-from app.models.venue_review import VenueReviews
+from app.models.venue_review import VenueReviews, VenueReviewsDeep
 from app.models.menu import VenueMenuPhotos, VenueMenuData
 from app.models.vibe_profile import VenueVibeProfile
 
@@ -39,6 +39,12 @@ ADMIN_CONFIG_FRESH_PHOTOS_TTL_KEY = "admin_config:photo_fresh_cache_ttl_hours"
 OPENING_HOURS_KEY_FORMAT = "opening_hours_v1:{}"
 VENUE_INSTAGRAM_KEY_FORMAT = "venue_instagram_v1:{}"
 VENUE_REVIEWS_KEY_FORMAT = "venue_reviews_v1:{}"
+# Separate family from VENUE_REVIEWS_KEY_FORMAT above — the deep-review corpus
+# projection. See plans/260813_deep-review-corpus.md: writer is set_venue_
+# reviews_deep below, which bounds what actually lands here to the newest
+# `settings.reviews_deep_projection_max`, regardless of how many the model
+# instance passed in carries (RDS holds the rest).
+VENUE_REVIEWS_DEEP_KEY_FORMAT = "venue_reviews_deep_v1:{}"
 VENUE_MENU_PHOTOS_KEY_FORMAT = "venue_menu_photos_v1:{}"
 VENUE_MENU_RAW_DATA_KEY_FORMAT = "venue_menu_raw_data_v1:{}"
 VENUE_IG_POSTS_KEY_FORMAT = "venue_ig_posts_v1:{}"
@@ -964,6 +970,55 @@ class RedisVenueDAO:
             True if a key was actually removed, False if it was already absent.
         """
         key = VENUE_REVIEWS_KEY_FORMAT.format(venue_id)
+        return bool(self.client.del_(key))
+
+    # =========================================================================
+    # DEEP REVIEW CORPUS PROJECTION (bounded slice — see module note above)
+    # =========================================================================
+
+    def set_venue_reviews_deep(self, deep: VenueReviewsDeep) -> int:
+        """Project the newest `settings.reviews_deep_projection_max` reviews
+        of `deep` to Redis. RDS (via VenueRepository.set_venue_reviews_deep)
+        is the system of record for the FULL corpus; this is the ONLY place
+        the cap is applied for Redis, so no caller can accidentally bypass it
+        by passing an unbounded model straight through.
+
+        At the 300-review per-venue cap, projecting everything for all ~1438
+        venues would be ~158MB on a Redis box with `maxmemory 0` (no ceiling)
+        and `noeviction` — the single way this feature could hurt production
+        (see the plan's Evidence section). Bounding to the newest N keeps the
+        projected total a small, deliberate fraction of that.
+
+        Returns the number of bytes written, for the projector's own
+        observability log line — not used by callers that only care about the
+        write itself.
+        """
+        limit = settings.reviews_deep_projection_max
+        newest_first = sorted(
+            deep.reviews, key=lambda r: r.publish_time or "", reverse=True
+        )[:limit]
+        sliced = deep.model_copy(update={"reviews": newest_first})
+        payload = sliced.model_dump_json(by_alias=True)
+        self.client.set(VENUE_REVIEWS_DEEP_KEY_FORMAT.format(deep.venue_id), payload)
+        logger.debug(
+            f"[RedisVenueDAO] Projected {len(newest_first)}/{len(deep.reviews)} deep "
+            f"reviews for {deep.venue_id}"
+        )
+        return len(payload.encode("utf-8"))
+
+    def get_venue_reviews_deep(self, venue_id: str) -> Optional[VenueReviewsDeep]:
+        return self._get_model(
+            VENUE_REVIEWS_DEEP_KEY_FORMAT.format(venue_id), VenueReviewsDeep, "deep reviews"
+        )
+
+    def get_venue_reviews_deep_bulk(self, venue_ids: list[str]) -> dict[str, VenueReviewsDeep]:
+        """MGET the deep-review projection for an id set, keyed by venue_id —
+        the bulk counterpart of `get_venue_reviews_deep` (used by the admin
+        inventory panel's cache-presence flags)."""
+        return self._mget_parsed(VENUE_REVIEWS_DEEP_KEY_FORMAT.format, venue_ids, VenueReviewsDeep)
+
+    def delete_venue_reviews_deep(self, venue_id: str) -> bool:
+        key = VENUE_REVIEWS_DEEP_KEY_FORMAT.format(venue_id)
         return bool(self.client.del_(key))
 
     def count_venues_with_instagram(self) -> int:

@@ -58,6 +58,9 @@ class _InventoryDao:
     def get_venue_reviews_bulk(self, venue_ids):
         return {vid: object() for vid in venue_ids if vid == "closed"}
 
+    def get_venue_reviews_deep_bulk(self, venue_ids):
+        return {vid: object() for vid in venue_ids if vid == "closed"}
+
     def get_venue_menu_photos_bulk(self, venue_ids):
         return {vid: object() for vid in venue_ids if vid == "closed"}
 
