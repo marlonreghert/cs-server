@@ -45,7 +45,11 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
-from app.api.apify_gmaps_reviews_client import parse_publish_time, parse_review
+from app.api.apify_gmaps_reviews_client import (
+    format_publish_time_for_actor,
+    parse_publish_time,
+    parse_review,
+)
 from app.config import settings
 from app.dao.review_crawl_budget_dao import ReviewCrawlBudgetDao
 from app.metrics import (
@@ -216,13 +220,24 @@ class DeepReviewCrawlService:
         For a venue that already has stored reviews the cursor is the LATER of
         the window edge and the newest stored review, so an incremental
         re-crawl still fetches only what is genuinely new.
+
+        The value is ALWAYS pushed through `format_publish_time_for_actor`
+        before being returned — never a bare `.isoformat()`. That is the root
+        cause of a real outage: `.isoformat()` emits a `+00:00` offset (and,
+        for a stored cursor, microseconds too — `newest_publish_time` comes
+        back from the actor looking like
+        `2026-08-11T12:32:52.816000+00:00`), and the actor's own input
+        validation REJECTS that shape outright with an HTTP 400. A 150-venue
+        crawl built on the old `.isoformat()` cursor 400'd on every single
+        call. If a stored `newest_publish_time` cannot even be parsed, fall
+        back to the window edge rather than forward something unvalidated.
         """
         window_start = self._now() - timedelta(days=settings.reviews_deep_window_days)
-        window_start_iso = window_start.isoformat()
-        newest = getattr(existing, "newest_publish_time", None) if existing else None
-        if newest and str(newest) > window_start_iso:
-            return str(newest)
-        return window_start_iso
+        newest_raw = getattr(existing, "newest_publish_time", None) if existing else None
+        newest_dt = parse_publish_time(newest_raw) if newest_raw else None
+        if newest_dt is not None and newest_dt > window_start:
+            return format_publish_time_for_actor(newest_dt)
+        return format_publish_time_for_actor(window_start)
 
     # ── account headroom (gate 2) ────────────────────────────────────────────
     async def _account_headroom_usd(self) -> Optional[float]:
@@ -330,7 +345,24 @@ class DeepReviewCrawlService:
                     DEEP_REVIEW_CRAWL_VENUES_TOTAL.labels(outcome="error").inc()
                     continue
 
-                billed = len(raw_items or [])
+                # `None` is the client's own failure signal, distinct from a
+                # genuine empty `[]` result (HIT/MISS/FAILURE, mirroring
+                # get_fresh_venue_photos_many / redis_dao.get_venue_reviews_bulk).
+                # This is the exact seam a real outage exploited: every one of
+                # 150 actor calls 400'd, and coercing that failure into `[]`
+                # here (the old `raw_items or []`) is what let 150 failures
+                # get counted, billed nothing, and reported as `outcome: "ok"`.
+                # NEVER coerce None into an empty list past this point.
+                if raw_items is None:
+                    logger.error(
+                        f"[DeepReviewCrawl] actor call returned no result for {vid} "
+                        "(client-signalled failure, not a genuine empty result)"
+                    )
+                    summary["failed_venues"].append(vid)
+                    DEEP_REVIEW_CRAWL_VENUES_TOTAL.labels(outcome="error").inc()
+                    continue
+
+                billed = len(raw_items)
                 if billed:
                     new_total = self.budget_dao.increment_month(year_month, billed)
                     DEEP_REVIEW_CRAWL_COST_USD_TOTAL.inc(billed * settings.apify_review_cost_usd)
@@ -340,11 +372,21 @@ class DeepReviewCrawlService:
                     summary["reviews_billed_total"] += billed
 
                 try:
-                    outcome = self._store_venue_reviews(vid, existing, raw_items or [])
+                    outcome = self._store_venue_reviews(vid, existing, raw_items)
                 except Exception as e:
                     logger.error(f"[DeepReviewCrawl] failed to persist {vid}: {e}")
                     summary["failed_venues"].append(vid)
                     DEEP_REVIEW_CRAWL_VENUES_TOTAL.labels(outcome="error").inc()
+                    continue
+
+                if outcome == "empty":
+                    # Nothing fetched and no prior record: writing a row here
+                    # would pollute the Redis projection with an empty key and
+                    # make a future run believe this venue was already
+                    # crawled (Defect 3). Correctly processed, so counted
+                    # "ok" — just never added to stored_venues, since nothing
+                    # was actually stored.
+                    DEEP_REVIEW_CRAWL_VENUES_TOTAL.labels(outcome="ok").inc()
                     continue
 
                 summary["stored_venues"].append(vid)
@@ -358,10 +400,25 @@ class DeepReviewCrawlService:
         # budget stop mid-run or any per-venue failure makes the run
         # "partial" — never silently reported as a clean success (plan item 6:
         # "never silently truncate the selection").
-        if summary["outcome"] != "budget_stopped" and (
-            summary["not_reached_venues"] or summary["failed_venues"]
-        ):
-            summary["outcome"] = "partial"
+        #
+        # A stricter case gets its own outcome: every venue this run actually
+        # reached failed outright, with nothing stored and nothing left
+        # unreached by a budget stop. "partial" reads as "mostly worked" —
+        # too easy to skim past for the shape of the incident this fix
+        # exists for (a run that accomplished literally nothing, previously
+        # reported as `outcome: "ok"`). "error" reuses the same word this
+        # service already uses per-venue (DEEP_REVIEW_CRAWL_VENUES_TOTAL
+        # {outcome="error"}), so it stays inside the existing vocabulary
+        # rather than inventing a new one.
+        if summary["outcome"] != "budget_stopped":
+            if (
+                summary["failed_venues"]
+                and not summary["stored_venues"]
+                and not summary["not_reached_venues"]
+            ):
+                summary["outcome"] = "error"
+            elif summary["not_reached_venues"] or summary["failed_venues"]:
+                summary["outcome"] = "partial"
         duration = time.perf_counter() - start
         DEEP_REVIEW_CRAWL_DURATION_SECONDS.observe(duration)
         summary["duration_seconds"] = round(duration, 2)
@@ -373,13 +430,22 @@ class DeepReviewCrawlService:
         self, venue_id: str, existing: Optional[VenueReviewsDeep], raw_items: list[dict]
     ) -> str:
         """Merge freshly-fetched raw actor items into the venue's stored deep-
-        review corpus. Returns "truncated" or "ok".
+        review corpus. Returns "truncated", "ok", or "empty".
 
         Window and cap apply ONLY to newly fetched items — an existing stored
         review that has since aged out of the window is kept (plan item 5:
         aging out is not the same as expiring; a review already paid for is
         never worth re-fetching, and evidence a venue has, say, a covered
-        play area does not expire the way busyness does)."""
+        play area does not expire the way busyness does).
+
+        "empty" (Defect 3): a venue that fetched nothing new AND had no prior
+        record gets NO `venues.reviews_deep` row at all — writing one would
+        pollute the Redis projection with an empty key and make a future run
+        wrongly believe this venue was already crawled. An existing record is
+        never affected by this: `merged` can only be empty when both
+        `existing_reviews` and `added` are empty, so a venue with a real
+        prior record always falls through to the normal write below (even
+        when this run added nothing new to it)."""
         window_days = settings.reviews_deep_window_days
         cutoff = self._now() - timedelta(days=window_days)
         cap = settings.reviews_deep_max_per_venue
@@ -410,6 +476,8 @@ class DeepReviewCrawlService:
             DEEP_REVIEWS_FETCHED_TOTAL.labels(outcome="stored").inc()
 
         merged = existing_reviews + added
+        if not merged:
+            return "empty"
         truncated = len(merged) > cap
         if truncated:
             # Cap binds on the NEWEST reviews — the newest-first fetch order

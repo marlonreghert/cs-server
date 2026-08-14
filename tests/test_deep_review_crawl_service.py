@@ -149,8 +149,12 @@ class TestWindowBoundary:
             "place_v1", [_raw("r1", "A", "t", NOW - timedelta(days=window, seconds=1))]
         )
         _run(service.run(venue_ids=["v1"]))
+        # Defect 3: the only fetched item was out of window and there was no
+        # prior record, so nothing is written at all — not a record with an
+        # empty `reviews` list (which would pollute the projection and make a
+        # future run think this venue was already crawled).
         deep = repo.get_venue_reviews_deep("v1")
-        assert len(deep.reviews) == 0
+        assert deep is None
 
     def test_review_well_inside_the_window_is_kept(self, service, repo, apify):
         _seed(repo, "v1")
@@ -172,7 +176,9 @@ class TestIncrementalCursor:
         _seed(repo, "v1")
         apify.program("place_v1", [])
         _run(service.run(venue_ids=["v1"]))
-        expected = (NOW - timedelta(days=settings.reviews_deep_window_days)).isoformat()
+        expected = (NOW - timedelta(days=settings.reviews_deep_window_days)).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        )
         assert apify.calls[0]["since"] == expected
 
     def test_rerun_passes_the_stored_newest_publish_time_as_since(self, service, repo, apify):
@@ -192,7 +198,8 @@ class TestIncrementalCursor:
         repo.set_venue_reviews_deep(existing)
         apify.program("place_v1", [])
         _run(service.run(venue_ids=["v1"]))
-        assert apify.calls[0]["since"] == (NOW - timedelta(days=5)).isoformat()
+        expected = (NOW - timedelta(days=5)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        assert apify.calls[0]["since"] == expected
 
 
 # ── merge / dedup ────────────────────────────────────────────────────────────
@@ -443,6 +450,117 @@ class TestPerVenueIsolation:
         result = _run(service.run(venue_ids=["v1", "v2", "v3"]))
         assert set(result["stored_venues"]) == {"v1", "v3"}
         assert result["failed_venues"] == ["v2"]
+
+
+# ── Defect 2: a client failure (None) must never be read as a genuine empty
+# result ([]) — the exact seam that turned a total outage into a false
+# "outcome: ok" for 150 stored-empty venues ────────────────────────────────
+class TestClientFailureVsGenuineEmptyResult:
+    def test_a_none_result_from_the_client_is_a_failure_not_an_empty_success(
+        self, service, repo, apify
+    ):
+        """`fetch_reviews` returning None (its distinct failure signal, e.g.
+        every call 400ing on an invalid `reviewsStartDate`) must fail the
+        venue, not be coerced into `[]` and treated as "no new reviews"."""
+        _seed(repo, "v1")
+        apify.program("place_v1", None)
+        result = _run(service.run(venue_ids=["v1"]))
+        assert result["failed_venues"] == ["v1"]
+        assert result["stored_venues"] == []
+        assert repo.get_venue_reviews_deep("v1") is None
+
+    def test_a_genuine_empty_result_is_not_a_failure(self, service, repo, apify):
+        _seed(repo, "v1")
+        apify.program("place_v1", [])
+        result = _run(service.run(venue_ids=["v1"]))
+        assert result["failed_venues"] == []
+
+    def test_a_client_failure_does_not_bill_the_local_budget(
+        self, service, repo, apify, budget_dao
+    ):
+        _seed(repo, "v1")
+        apify.program("place_v1", None)
+        result = _run(service.run(venue_ids=["v1"]))
+        assert result["reviews_billed_total"] == 0
+
+
+# ── Defect 2: total failure must be loudly visible, never "ok" ─────────────
+class TestEveryVenueFails:
+    def test_every_venue_failing_produces_a_non_ok_outcome(self, service, repo, apify):
+        """The exact scenario that just shipped a false success: every venue
+        this run reached failed outright. The run must say so, not `ok`."""
+        vids = ["v1", "v2", "v3"]
+        for vid in vids:
+            _seed(repo, vid)
+            apify.program(f"place_{vid}", None)
+        result = _run(service.run(venue_ids=vids))
+        assert result["outcome"] != "ok"
+        assert result["outcome"] == "error"
+        assert set(result["failed_venues"]) == set(vids)
+        assert len(result["failed_venues"]) == len(vids)
+        assert result["stored_venues"] == []
+
+    def test_every_venue_failing_via_a_raised_exception_also_produces_a_non_ok_outcome(
+        self, service, repo, apify
+    ):
+        vids = ["v1", "v2"]
+        for vid in vids:
+            _seed(repo, vid)
+            apify.program(f"place_{vid}", RuntimeError("actor crashed"))
+        result = _run(service.run(venue_ids=vids))
+        assert result["outcome"] != "ok"
+        assert set(result["failed_venues"]) == set(vids)
+
+
+# ── Defect 3: no row for a venue that fetched nothing and had no prior
+# record; an existing record must survive a no-new-reviews re-crawl ────────
+class TestNoRowForEmptyResultWithNoPriorRecord:
+    def test_no_row_is_written_when_nothing_is_fetched_and_nothing_existed(
+        self, service, repo, apify
+    ):
+        _seed(repo, "v1")
+        apify.program("place_v1", [])
+        result = _run(service.run(venue_ids=["v1"]))
+        assert repo.get_venue_reviews_deep("v1") is None
+        assert "v1" not in result["stored_venues"]
+
+    def test_no_row_is_written_when_every_fetched_item_is_out_of_window(
+        self, service, repo, apify
+    ):
+        """Items were fetched, but all filtered out by the window — the net
+        effect is the same as fetching nothing: no prior record, no write."""
+        _seed(repo, "v1")
+        window = settings.reviews_deep_window_days
+        apify.program(
+            "place_v1", [_raw("r1", "A", "t", NOW - timedelta(days=window + 10))]
+        )
+        result = _run(service.run(venue_ids=["v1"]))
+        assert repo.get_venue_reviews_deep("v1") is None
+        assert "v1" not in result["stored_venues"]
+
+    def test_an_existing_record_survives_a_no_new_reviews_recrawl(
+        self, service, repo, apify
+    ):
+        _seed(repo, "v1")
+        existing = VenueReviewsDeep(
+            venue_id="v1",
+            reviews=[VenueReview(
+                author_name="A", rating=5, text="t", relative_time="",
+                publish_time=(NOW - timedelta(days=5)).isoformat(),
+                review_id="v1-r0", source="apify_gmaps",
+            )],
+            window_days=180, fetched_at=(NOW - timedelta(days=1)).isoformat(),
+            oldest_publish_time=(NOW - timedelta(days=5)).isoformat(),
+            newest_publish_time=(NOW - timedelta(days=5)).isoformat(),
+            truncated=False,
+        )
+        repo.set_venue_reviews_deep(existing)
+        apify.program("place_v1", [])
+        _run(service.run(venue_ids=["v1"]))
+        deep = repo.get_venue_reviews_deep("v1")
+        assert deep is not None
+        assert len(deep.reviews) == 1
+        assert deep.reviews[0].review_id == "v1-r0"
 
 
 # ── run records: GET /admin/jobs/runs/{job_id} must be able to find these ──

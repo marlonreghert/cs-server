@@ -78,6 +78,31 @@ def parse_publish_time(value) -> Optional[datetime]:
     return dt
 
 
+def format_publish_time_for_actor(dt: datetime) -> str:
+    """Render a datetime in the ONE shape the actor's `reviewsStartDate`
+    input validation accepts for an absolute timestamp:
+    `YYYY-MM-DDTHH:MM:SSZ` — UTC, a trailing `Z`, second precision, no
+    `+00:00` offset and no microseconds.
+
+    The actor's own validation regex (read verbatim off a live 400 body):
+    ``^(\\d{4})-(0[1-9]|1[0-2])-(0[1-9]|[12]\\d|3[01])(T[0-2]\\d:[0-5]\\d(:[0-5]\\d)?(\\.\\d+)?Z?)?$``
+    ``|^(\\d+)\\s*(minute|hour|day|week|month|year)s?$``
+
+    Python's `datetime.isoformat()` produces `+00:00`, which that pattern
+    REJECTS — this is the exact defect that made a real 150-venue crawl bill
+    $0 while reporting `outcome: "ok"`: every `reviewsStartDate` was invalid,
+    every actor call 400'd before a run ever started, and the client's own
+    error handling (fixed separately) swallowed the failure into an empty
+    result. Every value handed to the actor MUST be pushed through this
+    function first — never a bare `.isoformat()`.
+    """
+    if dt.tzinfo is not None:
+        dt = dt.astimezone(timezone.utc)
+    else:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 def parse_review(item: dict) -> Optional[VenueReview]:
     """Parse one dataset item into a `VenueReview`, or None when the item is
     unusable. An item without an author, review text, or a parseable publish
@@ -136,15 +161,29 @@ class ApifyGMapsReviewsClient:
         since: Optional[str] = None,
     ) -> Optional[list[dict]]:
         """Start a run over `place_ids`, sorted newest-first, and return its
-        raw dataset items (or None on a hard failure).
+        raw dataset items.
 
-        `since` (an ISO date) is the actor's own date filter under "Newest"
-        sort (plan Evidence: "date filtering works only under 'Newest'
-        sort") — passed when a venue already has a stored deep-review record,
-        so a re-run's actual bill reflects only what is genuinely new rather
-        than re-fetching (and re-billing for) the whole window. Field name
-        `reviewsStartDate` is the actor's DOCUMENTED input as of plan-time;
-        unverified against a live run (see the module docstring).
+        Returns `None` on a hard failure (a non-402 HTTP error starting the
+        run, a non-SUCCEEDED terminal status, or a failed dataset fetch) and
+        `[]` only for a GENUINE empty result — a run that actually succeeded
+        and legitimately found nothing. The caller (DeepReviewCrawlService)
+        depends on this distinction to tell "this venue has no new reviews"
+        apart from "the call failed": collapsing both into `[]` is exactly
+        what let a real outage (every call 400ing on an invalid
+        `reviewsStartDate`) get reported as a clean, zero-review success for
+        every one of 150 venues. NEVER let this method's happy path fall
+        back to `[]` on any error branch.
+
+        `since` (an ISO date, or the actor's relative-window shorthand) is
+        its own date filter under "Newest" sort (plan Evidence: "date
+        filtering works only under 'Newest' sort") — passed when a venue
+        already has a stored deep-review record, so a re-run's actual bill
+        reflects only what is genuinely new rather than re-fetching (and
+        re-billing for) the whole window. Field name `reviewsStartDate` is
+        the actor's DOCUMENTED input as of plan-time; unverified against a
+        live run (see the module docstring). The caller MUST have already
+        normalized `since` via `format_publish_time_for_actor` — this client
+        forwards it verbatim and does not itself validate the shape.
         """
         run_input = {
             "placeIds": place_ids,
@@ -180,8 +219,16 @@ class ApifyGMapsReviewsClient:
             APIFY_API_CALL_DURATION_SECONDS.labels(endpoint=endpoint_label).observe(
                 time.perf_counter() - start_time
             )
+            if items is None:
+                # _fetch_dataset's own failure signal — do NOT fold this into
+                # `[]`. A dataset fetch failing after the actor run itself
+                # SUCCEEDED is still a hard failure from the caller's point
+                # of view (no reviews were actually retrieved), and must
+                # never be mislabeled "success" the way `items or []` did.
+                APIFY_API_CALLS_TOTAL.labels(endpoint=endpoint_label, status="error").inc()
+                return None
             APIFY_API_CALLS_TOTAL.labels(endpoint=endpoint_label, status="success").inc()
-            return items or []
+            return items
         except ApifyCreditExhaustedError:
             raise
         except ApifyPollTimeoutError:
