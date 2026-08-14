@@ -1,23 +1,22 @@
 """Unit tests for the single-add-venue background job service.
 
 Mirrors tests/test_batch_add_service.py's harness shape (a scripted handler
-stub + fakeredis + a small task-draining helper), since AddVenueJobService
-is a sibling to BatchAddService with the same job-doc persistence pattern.
-See plans/260813_add-venue-async-job.md.
+stub + a small task-draining helper), since AddVenueJobService is a sibling
+to BatchAddService with the same job-doc persistence pattern — now backed by
+the shared RDS job store (tests.venue_add_job_fake.InMemoryVenueAddJobStore)
+instead of Redis. See plans/260813_add-venue-async-job.md and
+plans/260814_venue-add-job-rds-tracking.md.
 """
 import asyncio
 
-import fakeredis
 import pytest
 
 from app.handlers.add_venue_handler import AddVenueByAddressRequest, AddVenueOutcome
 from app.services.add_venue_job_service import (
     ADD_VENUE_RECENT_JOBS_CAP,
-    JOB_KEY_FMT,
-    JOB_TTL_SECONDS,
-    RECENT_JOBS_KEY,
     AddVenueJobService,
 )
+from tests.venue_add_job_fake import InMemoryVenueAddJobStore
 
 
 class _Handler:
@@ -37,9 +36,7 @@ class _Handler:
 
 
 def _service(handler):
-    return AddVenueJobService(
-        handler=handler, redis_client=fakeredis.FakeStrictRedis(decode_responses=False)
-    )
+    return AddVenueJobService(handler=handler, job_store=InMemoryVenueAddJobStore())
 
 
 def _req(name="A", address="addr A", lat=-9.6, lng=-35.7):
@@ -85,28 +82,43 @@ async def test_start_job_returns_immediately_and_persists_running_doc():
 
 
 @pytest.mark.asyncio
-async def test_start_job_sets_a_ttl_on_the_persisted_doc():
+async def test_start_job_stores_the_row_as_job_type_single():
+    """The job_store row must carry job_type="single" so shape_job_row
+    applies the single (not batch) API-shape rules — checked via the raw
+    stored row, since get_job() strips job_type from the API-facing dict by
+    design (it must never appear in an HTTP response)."""
     handler = _Handler(
         script={"A": AddVenueOutcome(201, {"status": "created", "venue_id": "vA"})}
     )
     svc = _service(handler)
     accepted = svc.start_job(_req())
-    ttl = svc.redis.ttl(JOB_KEY_FMT.format(job_id=accepted["job_id"]))
-    assert 0 < ttl <= JOB_TTL_SECONDS
+    stored = svc.job_store.rows[accepted["job_id"]]
+    assert stored["job_type"] == "single"
     await _drain(svc, accepted["job_id"])
 
 
 @pytest.mark.asyncio
-async def test_start_job_pushes_onto_the_recent_jobs_index():
+async def test_persist_failure_is_swallowed_and_recorded_but_job_still_runs():
+    """A job_store.save() failure must not crash the run (matches the
+    pre-RDS Redis _save's own except-and-continue behaviour) and must
+    increment VENUE_ADD_JOB_PERSIST_FAILURES_TOTAL{job_type="single"} so a
+    sustained RDS outage is observable."""
+    from app.metrics import VENUE_ADD_JOB_PERSIST_FAILURES_TOTAL
+
+    before = VENUE_ADD_JOB_PERSIST_FAILURES_TOTAL.labels(job_type="single")._value.get()
+
     handler = _Handler(
         script={"A": AddVenueOutcome(201, {"status": "created", "venue_id": "vA"})}
     )
     svc = _service(handler)
+    svc.job_store.fail_next_save(1)  # fails the very first (initial) save
     accepted = svc.start_job(_req())
-    ids = svc.redis.lrange(RECENT_JOBS_KEY, 0, -1)
-    ids = [i.decode("utf-8") if isinstance(i, bytes) else i for i in ids]
-    assert ids == [accepted["job_id"]]
     await _drain(svc, accepted["job_id"])
+
+    job = svc.get_job(accepted["job_id"])
+    assert job["status"] == "done"  # the run completed despite the one failed save
+    after = VENUE_ADD_JOB_PERSIST_FAILURES_TOTAL.labels(job_type="single")._value.get()
+    assert after == before + 1
 
 
 # ── _run_job ──────────────────────────────────────────────────────────────
@@ -150,6 +162,23 @@ async def test_run_job_catches_an_exception_and_persists_failed_never_raises():
 
 
 @pytest.mark.asyncio
+async def test_run_job_crash_path_resave_preserves_job_type():
+    """Regression test: the crash path re-fetches via self.get_job(job_id)
+    (job_type stripped by shape_job_row) before re-saving. _save() must
+    re-stamp job_type before writing back, or this second save would
+    silently drop the column (an explicit-column upsert, not a partial
+    patch)."""
+    handler = _Handler(raises={"A": RuntimeError("boom")})
+    svc = _service(handler)
+    accepted = svc.start_job(_req())
+    await _drain(svc, accepted["job_id"])
+
+    stored = svc.job_store.rows[accepted["job_id"]]
+    assert stored["job_type"] == "single"
+    assert stored["status"] == "failed"
+
+
+@pytest.mark.asyncio
 async def test_run_job_logs_the_crash_with_venue_context(caplog):
     handler = _Handler(raises={"A": RuntimeError("boom")})
     svc = _service(handler)
@@ -171,7 +200,7 @@ def test_get_job_unknown_returns_none():
 
 
 @pytest.mark.asyncio
-async def test_get_job_round_trips_through_redis_json():
+async def test_get_job_round_trips_through_the_job_store():
     handler = _Handler(
         script={"A": AddVenueOutcome(200, {"status": "already_exists", "venue_id": "vA"})}
     )
@@ -205,17 +234,34 @@ async def test_list_recent_is_newest_first():
     assert [j["job_id"] for j in jobs] == [second["job_id"], first["job_id"]]
 
 
-def test_list_recent_skips_a_missing_job_id_without_raising():
-    svc = _service(_Handler())
-    # Simulate an id that aged out past its TTL (or was trimmed): present in
-    # the index, but with no job doc behind it.
-    svc.redis.lpush(RECENT_JOBS_KEY, "ghost-job-id")
+@pytest.mark.asyncio
+async def test_list_recent_excludes_batch_jobs_sharing_the_same_store():
+    """The shared admin.venue_add_job_run table backs BOTH job types
+    (plans/260814_venue-add-job-rds-tracking.md); list_recent() must filter
+    to job_type="single" so a batch-add job never leaks into the single-add
+    recent-jobs list."""
+    handler = _Handler(
+        script={"A": AddVenueOutcome(201, {"status": "created", "venue_id": "vA"})}
+    )
+    svc = _service(handler)
+    svc.job_store.save({
+        "job_id": "a-batch-job", "job_type": "batch", "label": "L", "status": "done",
+        "total": 1, "processed": 1, "started_at": 999999.0, "finished_at": 999999.0,
+        "stopped_reason": None, "resolve_coords": False, "summary": {"created": 1},
+        "results": [], "budget_before": None, "budget_after": None,
+    })
+    accepted = svc.start_job(_req())
+    await _drain(svc, accepted["job_id"])
+
     jobs = svc.list_recent(limit=20)
-    assert jobs == []
+    assert [j["job_id"] for j in jobs] == [accepted["job_id"]]
 
 
 @pytest.mark.asyncio
-async def test_list_recent_respects_the_cap_under_ltrim():
+async def test_list_recent_respects_the_response_cap_regardless_of_storage_size():
+    """RDS storage is unbounded (no TTL, no capped index) — the response cap
+    is purely a response-shaping limit applied before the store is even
+    queried."""
     total = ADD_VENUE_RECENT_JOBS_CAP + 5
     handler = _Handler(
         script={
@@ -230,9 +276,13 @@ async def test_list_recent_respects_the_cap_under_ltrim():
         await _drain(svc, accepted["job_id"])
         job_ids.append(accepted["job_id"])
 
+    # All rows genuinely persist — nothing is trimmed from storage, unlike
+    # the old capped Redis LIST index.
+    assert len(svc.job_store.rows) == total
+
     jobs = svc.list_recent(limit=total)
     assert len(jobs) == ADD_VENUE_RECENT_JOBS_CAP
-    # Newest (last-started) first; the oldest 5 were trimmed off the index.
+    # Newest (last-started) first.
     assert jobs[0]["job_id"] == job_ids[-1]
     assert job_ids[0] not in [j["job_id"] for j in jobs]
 

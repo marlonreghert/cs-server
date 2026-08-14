@@ -718,6 +718,31 @@ async def startup_essential(settings: Settings):
     loop = asyncio.get_event_loop()
     await loop.run_in_executor(None, container.eligibility_rule_service.rehydrate_mirror)
 
+    # Reconcile any venue-add job row still "running" from a PRIOR process's
+    # lifetime (plans/260814_venue-add-job-rds-tracking.md) — deterministically
+    # correct in this single-process deployment (job_lock.py's own documented
+    # one-event-loop assumption): any row still "running" when THIS process
+    # starts cannot belong to it. This is a pure status-metadata UPDATE
+    # (admin.venue_add_job_run SET status='interrupted', ...) — it never
+    # touches AddVenueHandler, BestTime, Google, or Instagram, and re-runs
+    # nothing, so it does NOT conflict with startup_background_pipelines()'s
+    # "no pipeline runs on startup" policy below (2026-07-01 incident: a
+    # restart must never re-trigger paid work). Off the event loop (same
+    # run_in_executor pattern as rehydrate_mirror above) and defensively
+    # caught so an RDS hiccup during this one write degrades to "some old
+    # rows stay stuck a bit longer" rather than "the server fails to boot".
+    try:
+        fixed = await loop.run_in_executor(
+            None,
+            container.venue_add_job_store.reconcile_orphaned,
+            "process restarted while job was running",
+        )
+        logger.info(
+            f"[Main] Reconciled {fixed} orphaned venue-add job(s) from a previous process"
+        )
+    except Exception as e:
+        logger.error(f"[Main] Venue-add job reconciliation failed (non-fatal): {e}")
+
     logger.info("[Main] Essential startup completed — server is ready to serve")
 
 

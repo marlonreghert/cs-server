@@ -175,6 +175,19 @@ class Container:
         except Exception as e:
             logger.error(f"[Container] Failed to init RDS store: {e}")
             raise
+
+        # Venue-add job tracking's RDS-backed store (admin.venue_add_job_run
+        # — plans/260814_venue-add-job-rds-tracking.md): the sole store for
+        # both AddVenueJobService and BatchAddService's job docs. Reuses the
+        # same RDS connection settings as rds_store — no new config/secret.
+        from app.dao.venue_add_job_store import VenueAddJobStore
+
+        try:
+            self.venue_add_job_store = VenueAddJobStore(settings.rds_sqlalchemy_url)
+            logger.info("[Container] Venue-add job RDS store initialized")
+        except Exception as e:
+            logger.error(f"[Container] Failed to init venue-add job store: {e}")
+            raise
         # Pipelines receive this as their venue DAO: it reads its data inputs and
         # cache-freshness gating from RDS (truth) and writes RDS-only — the
         # scheduled projector is the sole Redis writer for pipeline data. Geo reads
@@ -969,10 +982,12 @@ class Container:
         )
 
         # Server-side batch venue-add: runs a curated list through the same
-        # add_venue_handler in one pollable background job.
+        # add_venue_handler in one pollable background job. Job state lives in
+        # the RDS venue_add_job_store, not Redis (plans/260814_venue-add-job-
+        # rds-tracking.md).
         self.batch_add_service = BatchAddService(
             handler=self.add_venue_handler,
-            redis_client=redis_internal_client,
+            job_store=self.venue_add_job_store,
             google_client=self.google_places_api,
             budget_service=self.venue_budget_service,
         )
@@ -981,10 +996,12 @@ class Container:
         # batch_add_service, not layered on it — see plans/260813_add-venue-
         # async-job.md). No new single-flight lock: the per-venue
         # VENUE_ADD_LOCK_KEY_V1 guard inside add_venue_handler already
-        # prevents a real double-spend.
+        # prevents a real double-spend. Job state lives in the RDS
+        # venue_add_job_store, not Redis (plans/260814_venue-add-job-rds-
+        # tracking.md).
         self.add_venue_job_service = AddVenueJobService(
             handler=self.add_venue_handler,
-            redis_client=redis_internal_client,
+            job_store=self.venue_add_job_store,
         )
 
         # Expose the budget service to the refresher so discovery can

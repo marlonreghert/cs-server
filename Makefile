@@ -27,6 +27,7 @@ test-unit:
 		tests/test_job_lock.py \
 		tests/test_batch_add_service.py \
 		tests/test_add_venue_job_service.py \
+		tests/test_venue_add_job_store.py \
 		tests/test_admin_venue_inventory.py \
 		tests/test_instagram_enrichment_service.py \
 		tests/test_instagram_validator.py \

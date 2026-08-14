@@ -170,11 +170,20 @@ def _build_test_app(context) -> None:
             google_places_client=context.google_places_client,
         )
 
+        # Venue-add job tracking's RDS-backed store (plans/260814_venue-add-
+        # job-rds-tracking.md) — one fake instance per scenario, shared by
+        # both job services below and exposed on context for the BDD steps
+        # that exercise reconciliation directly (see
+        # venue_add_job_rds_tracking_steps.py).
+        from tests.venue_add_job_fake import InMemoryVenueAddJobStore
+
+        context.venue_add_job_store = InMemoryVenueAddJobStore()
+
         from app.services.batch_add_service import BatchAddService
 
         context.batch_add_service = BatchAddService(
             handler=context.add_venue_handler,
-            redis_client=context.fake_redis,
+            job_store=context.venue_add_job_store,
             google_client=context.google_places_client,
             budget_service=context.budget_service,
         )
@@ -183,7 +192,7 @@ def _build_test_app(context) -> None:
 
         context.add_venue_job_service = AddVenueJobService(
             handler=context.add_venue_handler,
-            redis_client=context.fake_redis,
+            job_store=context.venue_add_job_store,
         )
 
         container = MagicMock()
@@ -196,6 +205,7 @@ def _build_test_app(context) -> None:
         container.venue_budget_service = context.budget_service
         container.batch_add_service = context.batch_add_service
         container.add_venue_job_service = context.add_venue_job_service
+        container.venue_add_job_store = context.venue_add_job_store
         try:
             set_admin_container(container)
         except Exception:

@@ -12,21 +12,24 @@ pacing is the client limiter's job.
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import time
 import uuid
 from typing import Optional
 
 from app.handlers.add_venue_handler import AddVenueByAddressRequest
+from app.metrics import VENUE_ADD_JOB_PERSIST_FAILURES_TOTAL
 from app.models.batch_add import BatchAddRequest, BatchAddRow
 from app.services import job_lock
 from app.services.add_venue_outcome_classify import classify as _classify
 
 logger = logging.getLogger(__name__)
 
-JOB_KEY_FMT = "admin:batch_add_job:{job_id}"
-JOB_TTL_SECONDS = 7 * 24 * 3600
+# Storage-layer discriminator on the shared admin.venue_add_job_run table
+# (plans/260814_venue-add-job-rds-tracking.md) — never surfaced in this
+# service's own API response; app.dao.venue_add_job_store.shape_job_row
+# strips it back out on every read.
+JOB_TYPE = "batch"
 
 # Single-flight lock name for batch-add (shares app/services/job_lock with the
 # scheduler+admin guard). Two concurrent batch jobs would interleave their
@@ -51,12 +54,12 @@ class BatchAddService:
     def __init__(
         self,
         handler,
-        redis_client,
+        job_store,
         google_client=None,
         budget_service=None,
     ) -> None:
         self.handler = handler
-        self.redis = redis_client
+        self.job_store = job_store
         self.google = google_client
         self.budget = budget_service
         # Keep task refs so background jobs are not garbage-collected.
@@ -79,23 +82,43 @@ class BatchAddService:
         }
 
     # ── persistence ──────────────────────────────────────────────────────────
-    def _save(self, job: dict) -> None:
+    def _persist(self, job: dict) -> None:
+        """Blocking write to the shared RDS job store (admin.venue_add_job_
+        run) — best-effort, matching the pre-RDS Redis _save's own
+        except-and-continue shape: a persistence hiccup must not crash the
+        run itself. Now a materially bigger deal than a missed Redis write
+        (RDS is the ONLY copy), so a sustained outage is visible via the
+        dedicated counter instead of silently degrading to "job ran, nothing
+        got recorded". Called directly (sync) from start_job()'s one initial
+        save and from _on_done()'s crash-path save — both are plain
+        synchronous call sites (start_job is not async, and a
+        done_callback cannot await) — and wrapped in run_in_executor by
+        _save() below for _run_job's per-row hot loop.
+
+        Always re-stamps job_type right before the write: _on_done's
+        crash-path job comes from self.get_job(job_id), and get_job() (via
+        the store's shape_job_row) strips job_type on every read — it must
+        never appear in an HTTP response. Re-saving that stripped dict
+        as-is would silently NULL the column on the real table (an
+        explicit-column upsert, not a partial patch) after the very first
+        write."""
+        job["job_type"] = JOB_TYPE
         try:
-            self.redis.setex(
-                JOB_KEY_FMT.format(job_id=job["job_id"]),
-                JOB_TTL_SECONDS,
-                json.dumps(job, ensure_ascii=False),
-            )
+            self.job_store.save(job)
         except Exception as e:  # noqa: BLE001
             logger.error(f"[BatchAddService] job persist failed: {e}")
+            VENUE_ADD_JOB_PERSIST_FAILURES_TOTAL.labels(job_type=JOB_TYPE).inc()
+
+    async def _save(self, job: dict) -> None:
+        """Off-loop write for _run_job's per-row hot path — a blocking
+        SQLAlchemy call must never stall the event loop on every processed
+        row (mirrors main.py:startup_essential's rehydrate_mirror
+        run_in_executor pattern)."""
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, self._persist, job)
 
     def get_job(self, job_id: str) -> Optional[dict]:
-        raw = self.redis.get(JOB_KEY_FMT.format(job_id=job_id))
-        if raw is None:
-            return None
-        if isinstance(raw, bytes):
-            raw = raw.decode("utf-8")
-        return json.loads(raw)
+        return self.job_store.get(job_id)
 
     # ── lifecycle ────────────────────────────────────────────────────────────
     def start_job(self, request: BatchAddRequest) -> dict:
@@ -110,6 +133,7 @@ class BatchAddService:
         job_id = uuid.uuid4().hex
         job = {
             "job_id": job_id,
+            "job_type": JOB_TYPE,
             "label": request.label,
             "status": "running",
             "total": len(request.venues),
@@ -123,7 +147,7 @@ class BatchAddService:
             "budget_before": self._budget_snapshot(),
             "budget_after": None,
         }
-        self._save(job)
+        self._persist(job)
         try:
             task = asyncio.create_task(self._run_job(job, list(request.venues)))
         except BaseException:
@@ -145,7 +169,7 @@ class BatchAddService:
                 job["status"] = "failed"
                 job["stopped_reason"] = f"{type(exc).__name__}: {exc}"[:300]
                 job["finished_at"] = time.time()
-                self._save(job)
+                self._persist(job)
 
     def _already_active_id(self, name: str, address: str) -> Optional[str]:
         """Cheap address-hash store check (handler step 1) — no coords, no
@@ -239,7 +263,7 @@ class BatchAddService:
             job["results"].append(result)
             job["processed"] = idx + 1
             job["summary"] = summary
-            self._save(job)
+            await self._save(job)
 
             # Steady pace on Google-touching rows: keeps the resolve rate under
             # the Places QPM quota so a burst never trips the cascade in the
@@ -254,7 +278,7 @@ class BatchAddService:
                 )
                 job["finished_at"] = time.time()
                 job["budget_after"] = self._budget_snapshot()
-                self._save(job)
+                await self._save(job)
                 logger.warning(
                     f"[BatchAddService] job {job['job_id']} stopped: "
                     f"{job['stopped_reason']}"
@@ -264,7 +288,7 @@ class BatchAddService:
         job["status"] = "done"
         job["finished_at"] = time.time()
         job["budget_after"] = self._budget_snapshot()
-        self._save(job)
+        await self._save(job)
         logger.info(
             f"[BatchAddService] job {job['job_id']} done: {summary}"
         )

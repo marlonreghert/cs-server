@@ -1,4 +1,3 @@
-@wip
 Feature: Venue-add job tracking on RDS, not Redis
   As the VibeSense platform
   Single-add and batch-add venue jobs (AddVenueJobService, BatchAddService) today
