@@ -289,10 +289,15 @@ def step_only_n_billed(context, n):
     assert context.run_result["reviews_billed_total"] == n, context.run_result
     # Test the platform, not our own callback: assert the incremental cursor
     # was actually PASSED to the client, not merely that the count matched by
-    # coincidence.
+    # coincidence. The value is the actor's own accepted format — UTC, `Z`
+    # suffix, no offset, no microseconds — not the stored review's raw
+    # `.isoformat()` string, which is exactly the shape the actor's input
+    # validation rejects.
     last_call = context.fake_apify_reviews.calls[-1]
-    existing_newest = max(r.publish_time for r in context.existing_reviews)
-    assert last_call["since"] == existing_newest, last_call
+    existing_newest = max(
+        datetime.fromisoformat(r.publish_time) for r in context.existing_reviews
+    )
+    assert last_call["since"] == existing_newest.strftime("%Y-%m-%dT%H:%M:%SZ"), last_call
 
 
 @then("the stored review count increases by {n:d}")
@@ -535,6 +540,67 @@ def step_first_and_third_stored(context):
 @then("the run summary names the failed venue")
 def step_summary_names_failed_venue(context):
     assert context.failed_venue_id in context.run_result["failed_venues"], context.run_result
+
+
+# ── Scenario: a client-level failure is stored as a failure, never an empty
+# success — the exact seam a real outage exploited: every one of 150 actor
+# calls failed at the HTTP boundary (an invalid `reviewsStartDate`), and the
+# failure signal (None) was coerced into `[]` and read as "no new reviews" ──
+@given("a venue whose actor call fails at the HTTP boundary")
+def step_venue_actor_call_fails_at_http_boundary(context):
+    vid = "venue-o"
+    context.venue_id = vid
+    _seed_venue(context, vid)
+    # None is the client's OWN failure signal (distinct from a genuine `[]`
+    # empty result) — programming it here exercises the fix at the exact
+    # seam where the incident happened, not merely a raised exception
+    # (already covered by "One venue's failure does not abort the run").
+    context.fake_apify_reviews.program(_place_id(vid), None)
+
+
+@then("that venue is reported in the run's failed venues")
+def step_venue_in_failed_venues(context):
+    assert context.venue_id in context.run_result["failed_venues"], context.run_result
+
+
+@then("no deep review row exists for that venue")
+def step_no_deep_review_row(context):
+    assert context.repository.get_venue_reviews_deep(context.venue_id) is None
+
+
+# ── Scenario: every venue failing is reported honestly, never as "ok" ──────
+@given("the actor fails for all three selected venues")
+def step_actor_fails_for_all_three(context):
+    vids = ["venue-p0", "venue-p1", "venue-p2"]
+    context.venue_ids = vids
+    for vid in vids:
+        _seed_venue(context, vid)
+        context.fake_apify_reviews.program(_place_id(vid), None)
+
+
+@then("the run summary names all three venues as failed")
+def step_summary_names_all_three_failed(context):
+    assert set(context.run_result["failed_venues"]) == set(context.venue_ids), context.run_result
+
+
+@then("the run outcome is not ok")
+def step_outcome_not_ok(context):
+    assert context.run_result["outcome"] != "ok", context.run_result
+
+
+# ── Scenario: a venue that fetches nothing and has no prior record gets no
+# stored row (Defect 3) ─────────────────────────────────────────────────────
+@given("a selected venue with no prior deep review record")
+def step_selected_venue_no_prior_record(context):
+    vid = "venue-q"
+    context.venue_id = vid
+    _seed_venue(context, vid)
+    assert context.repository.get_venue_reviews_deep(vid) is None
+
+
+@given("the actor returns no reviews for that venue")
+def step_actor_returns_no_reviews(context):
+    context.fake_apify_reviews.program(_place_id(context.venue_id), [])
 
 
 # ── Scenario: the existing Google Places review path is untouched ──────────

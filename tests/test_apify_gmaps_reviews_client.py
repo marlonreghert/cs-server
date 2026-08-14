@@ -10,9 +10,12 @@ from unittest.mock import patch
 
 import pytest
 
+from datetime import datetime, timedelta, timezone
+
 import app.api.apify_gmaps_reviews_client as mod
 from app.api.apify_gmaps_reviews_client import (
     ApifyGMapsReviewsClient,
+    format_publish_time_for_actor,
     parse_publish_time,
     parse_review,
 )
@@ -88,6 +91,32 @@ class TestParsePublishTime:
     def test_naive_datetime_is_treated_as_utc(self):
         dt = parse_publish_time("2026-01-01T00:00:00")
         assert dt.tzinfo is not None
+
+
+# ── format_publish_time_for_actor: the exact normalisation the outage needed ─
+class TestFormatPublishTimeForActor:
+    def test_utc_offset_is_rendered_as_a_bare_z_suffix(self):
+        """`datetime.isoformat()` emits `+00:00`, which the actor's own input
+        validation REJECTS. This is the root cause of a real outage: every
+        one of a 150-venue crawl's `reviewsStartDate` values 400'd."""
+        dt = datetime(2026, 2, 15, 10, 39, 0, tzinfo=timezone.utc)
+        assert dt.isoformat() == "2026-02-15T10:39:00+00:00"  # what NOT to send
+        assert format_publish_time_for_actor(dt) == "2026-02-15T10:39:00Z"
+
+    def test_microseconds_are_stripped(self):
+        """`newest_publish_time` comes back from a real Apify run looking
+        like `2026-08-11T12:32:52.816000+00:00` — equally invalid, and for
+        a second reason (microseconds) on top of the offset."""
+        dt = datetime(2026, 8, 11, 12, 32, 52, 816000, tzinfo=timezone.utc)
+        assert format_publish_time_for_actor(dt) == "2026-08-11T12:32:52Z"
+
+    def test_a_non_utc_offset_is_converted_to_utc_first(self):
+        dt = datetime(2026, 2, 15, 7, 39, 0, tzinfo=timezone(timedelta(hours=-3)))
+        assert format_publish_time_for_actor(dt) == "2026-02-15T10:39:00Z"
+
+    def test_a_naive_datetime_is_treated_as_already_utc(self):
+        dt = datetime(2026, 2, 15, 10, 39, 0)
+        assert format_publish_time_for_actor(dt) == "2026-02-15T10:39:00Z"
 
 
 # ── parse_review: malformed items are skipped, never raise ─────────────────
@@ -204,3 +233,52 @@ class TestFetchReviewsTerminalStatus:
                 patch.object(mod, "POLL_INTERVAL_SECONDS", INTERVAL):
             with pytest.raises(ApifyCreditExhaustedError):
                 _run(client.fetch_reviews(["place_1"], 10))
+
+
+# ── None (failure) vs [] (genuine empty result) — the exact seam a real
+# outage exploited: DeepReviewCrawlService cannot tell "no new reviews" apart
+# from "the call failed" unless this distinction actually holds ────────────
+class TestFailureVsGenuineEmptyResult:
+    def test_succeeded_with_a_genuinely_empty_dataset_returns_an_empty_list(self):
+        """A run that actually SUCCEEDED and found nothing must return `[]`,
+        not `None` — collapsing this into a failure would be just as wrong
+        as the reverse."""
+        http = _Http(["SUCCEEDED"], items=[])
+        client = _client(http)
+        with patch.object(mod, "MAX_POLL_ATTEMPTS", BASE), \
+                patch.object(mod, "POLL_INTERVAL_SECONDS", INTERVAL):
+            result = _run(client.fetch_reviews(["place_1"], 10))
+        assert result == []
+        assert result is not None
+
+    def test_a_dataset_fetch_failure_after_a_succeeded_run_returns_none_not_empty_list(self):
+        """The actor run itself SUCCEEDED, but fetching its dataset failed
+        (e.g. a transient 5xx). The old code (`return items or []`) folded
+        this straight into an empty success and even labeled the call
+        `status="success"` in metrics — exactly the shape that let a real
+        outage report `outcome: "ok"` while nothing was actually retrieved."""
+        class _BadDatasetHttp(_Http):
+            async def get(self, url, params=None, **kw):
+                if "/actor-runs/" in url:
+                    return await super().get(url, params=params, **kw)
+                return _Resp({"error": "gone"}, status_code=500)
+
+        http = _BadDatasetHttp(["SUCCEEDED"])
+        client = _client(http)
+        with patch.object(mod, "MAX_POLL_ATTEMPTS", BASE), \
+                patch.object(mod, "POLL_INTERVAL_SECONDS", INTERVAL):
+            result = _run(client.fetch_reviews(["place_1"], 10))
+        assert result is None
+
+    def test_a_non_402_http_error_starting_the_run_returns_none_not_empty_list(self):
+        """The exact defect this whole fix exists for: every one of a real
+        150-venue crawl's actor calls 400'd on an invalid `reviewsStartDate`
+        at run-creation time. That must surface as None, never `[]`."""
+        class _BadStartHttp(_Http):
+            async def post(self, url, params=None, json=None, **kw):
+                self.starts += 1
+                return _Resp({"error": "Invalid input"}, status_code=400)
+
+        client = _client(_BadStartHttp(["SUCCEEDED"]))
+        result = _run(client.fetch_reviews(["place_1"], 10))
+        assert result is None

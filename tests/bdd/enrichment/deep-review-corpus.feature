@@ -89,6 +89,24 @@ Feature: Capture a deep review corpus for operator-selected venues
     Then the first and third venues are stored
     And the run summary names the failed venue
 
+  Scenario: A client-level failure is stored as a failure, not as an empty success
+    Given a venue whose actor call fails at the HTTP boundary
+    When the operator runs a deep review crawl for that venue
+    Then that venue is reported in the run's failed venues
+    And no deep review row exists for that venue
+
+  Scenario: Every venue failing is reported honestly, never as a success
+    Given the actor fails for all three selected venues
+    When the operator runs a deep review crawl
+    Then the run summary names all three venues as failed
+    And the run outcome is not ok
+
+  Scenario: A venue that fetches nothing and has no prior record gets no stored row
+    Given a selected venue with no prior deep review record
+    And the actor returns no reviews for that venue
+    When the operator runs a deep review crawl for that venue
+    Then no deep review row exists for that venue
+
   Scenario: The existing Google Places review path is untouched
     Given a venue with five reviews from Google Places enrichment
     When the operator runs a deep review crawl for that venue
