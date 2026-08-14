@@ -477,8 +477,16 @@ class Settings(BaseSettings):
     # google_places.reviews (the free 5 Places-API reviews) — that path is
     # UNTOUCHED by this feature; this is a separate, paid, opt-in corpus.
     apify_reviews_actor: str = "compass~google-maps-reviews-scraper"
-    # Published at $0.30 per 1,000 scraped reviews (plan Evidence) = $0.0003/review.
-    apify_review_cost_usd: float = 0.0003
+    # Published at $0.30 per 1,000 scraped reviews = $0.0003/review — but the
+    # MEASURED all-in rate is higher, because the per-event price is not the
+    # whole bill. The 2026-08-14 trial billed 600 scraped reviews and moved the
+    # account's remaining headroom by $0.2704 ($16.5518 -> $16.2814), i.e.
+    # $0.00045/review once platform overhead (compute units, run startup) is
+    # included — 1.5x the published rate. Calibrated to the measurement rather
+    # than the rate card: this number gates real spend, so it must not
+    # understate. Re-measure the same way (headroom before/after a run divided
+    # by reviews_billed_total) if the actor or plan changes.
+    apify_review_cost_usd: float = 0.00045
     # How far back a deep crawl reaches, newest-first. Reviews already stored
     # that later fall outside this window are KEPT, never pruned (item 5 of
     # the plan's Desired Behavior) — this only bounds what a NEW fetch stores.

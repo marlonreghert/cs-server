@@ -201,6 +201,29 @@ class DeepReviewCrawlService:
         spent = self.budget_dao.get_month_count(year_month)
         return settings.reviews_deep_monthly_review_budget - spent
 
+    # ── fetch cursor ─────────────────────────────────────────────────────────
+    def _fetch_since(self, existing) -> str:
+        """The date to push down to the actor as `reviewsStartDate`.
+
+        ALWAYS set, never None. The window edge is a paid boundary, not a
+        local filter: measured on the 2026-08-14 trial, a first crawl with no
+        `since` scraped to `maxReviews` (300/venue) and was billed for all
+        600, of which only 67 fell inside the 180-day window and were kept —
+        we paid for 533 reviews we immediately discarded. Asking the actor to
+        stop at the window edge is the difference between $0.27 and roughly
+        $0.03 for that same run.
+
+        For a venue that already has stored reviews the cursor is the LATER of
+        the window edge and the newest stored review, so an incremental
+        re-crawl still fetches only what is genuinely new.
+        """
+        window_start = self._now() - timedelta(days=settings.reviews_deep_window_days)
+        window_start_iso = window_start.isoformat()
+        newest = getattr(existing, "newest_publish_time", None) if existing else None
+        if newest and str(newest) > window_start_iso:
+            return str(newest)
+        return window_start_iso
+
     # ── account headroom (gate 2) ────────────────────────────────────────────
     async def _account_headroom_usd(self) -> Optional[float]:
         try:
@@ -295,7 +318,7 @@ class DeepReviewCrawlService:
 
                 place_id = self._place_id_for(vid)
                 existing = self._get_deep(vid)
-                since = existing.newest_publish_time if existing else None
+                since = self._fetch_since(existing)
 
                 try:
                     raw_items = await self.apify_client.fetch_reviews(
