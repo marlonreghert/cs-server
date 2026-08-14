@@ -142,6 +142,7 @@ test-unit:
 		tests/test_redis_projection_reviews_deep.py \
 		tests/test_apify_account_usage_client.py \
 		tests/test_deep_review_window_pushdown.py \
+		tests/test_deep_review_crawl_tuning.py \
 		tests/test_deep_review_crawl_service.py \
 		tests/test_admin_jobs_run_record.py \
 		-v

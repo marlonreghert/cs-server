@@ -185,10 +185,20 @@ class ApifyGMapsReviewsClient:
         normalized `since` via `format_publish_time_for_actor` — this client
         forwards it verbatim and does not itself validate the shape.
         """
+        # Field names come from the actor's OWN published input schema (read
+        # from its latest build via the Apify API on 2026-08-14), not from the
+        # store page prose. The sort key is `reviewsSort` — we previously sent
+        # `sort`, which is not a field this actor has, so it was ignored and we
+        # were silently relying on the actor's default ordering. That matters:
+        # `reviewsStartDate` filtering is only meaningful under newest-first.
+        # The full field set is: startUrls, placeIds, maxReviews, reviewsSort,
+        # reviewsStartDate, reviewsFilterString, language, reviewsOrigin,
+        # personalData. There is NO server-side "only reviews with text"
+        # option — that filter has to run locally, after paying.
         run_input = {
             "placeIds": place_ids,
             "maxReviews": max_reviews,
-            "sort": "newest",
+            "reviewsSort": "newest",
             "language": language,
         }
         if since:

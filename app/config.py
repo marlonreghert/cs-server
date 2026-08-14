@@ -493,7 +493,17 @@ class Settings(BaseSettings):
     reviews_deep_window_days: int = 180
     # Per-venue ceiling, independent of the window: whichever binds first
     # stops the fetch. Hitting this (not the window) is what "truncated" means.
-    reviews_deep_max_per_venue: int = 300
+    #
+    # Lowered 300 -> 80 on 2026-08-14 after measuring what 300 actually buys.
+    # The venues worth crawling are the high-traffic ones, and for those 300
+    # reviews covers only DAYS: one Recife venue returned its full 300 with an
+    # oldest review 5 days old. Depth past that is redundant for evidence
+    # retrieval — a question about indoor play areas needs MANY venues to have
+    # SOME relevant sentences, not one venue to have 300 sentences about
+    # parking. Breadth per dollar is what matters: at 80, a 100-venue capture
+    # costs ~$3.60 against a shared $29/month Apify cap; at 300 the same money
+    # reaches roughly a quarter as many venues.
+    reviews_deep_max_per_venue: int = 80
     # Redis serving projection carries only the newest N per venue; RDS (via
     # VenueRepository) always holds the full stored corpus. Deliberately much
     # smaller than reviews_deep_max_per_venue: at the 300-review cap, all 1438

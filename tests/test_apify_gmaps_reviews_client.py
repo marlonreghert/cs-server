@@ -173,8 +173,13 @@ class TestFetchReviewsInputConstruction:
         with patch.object(mod, "MAX_POLL_ATTEMPTS", BASE), \
                 patch.object(mod, "POLL_INTERVAL_SECONDS", INTERVAL):
             _run(client.fetch_reviews(["place_1"], 300, language="pt-BR"))
+        # `reviewsSort`, not `sort`: the latter is not a field this actor has
+        # (checked against its published input schema on 2026-08-14), so it was
+        # silently ignored and ordering fell back to the actor's default. This
+        # assertion encoded that defect until the schema was actually read.
         assert sink[0] == {
-            "placeIds": ["place_1"], "maxReviews": 300, "sort": "newest", "language": "pt-BR",
+            "placeIds": ["place_1"], "maxReviews": 300, "reviewsSort": "newest",
+            "language": "pt-BR",
         }
 
     def test_includes_reviews_start_date_when_since_given(self):

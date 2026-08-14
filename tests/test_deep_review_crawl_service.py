@@ -649,3 +649,51 @@ class TestRunRecords:
         apify.program("place_v1", [_raw("r0", "A", "t", NOW - timedelta(days=1))])
         result = _run(svc.run(venue_ids=["v1"]))
         assert result["stored_venues"] == ["v1"]
+
+
+# ── rating-only reviews and cap-bound truncation (2026-08-14) ────────────────
+class TestTextOnlyAndTruncation:
+    """Both behaviours were measured wrong against production on 2026-08-14."""
+
+    def test_a_review_with_no_text_is_not_stored(self, service, repo, apify):
+        _seed(repo, "v1")
+        apify.program("place_v1", [
+            _raw("r1", "A", "boa comida e parquinho coberto", NOW - timedelta(days=1)),
+            _raw("r2", "B", "", NOW - timedelta(days=1)),
+            _raw("r3", "C", "   ", NOW - timedelta(days=1)),
+        ])
+        _run(service.run(venue_ids=["v1"]))
+        deep = repo.get_venue_reviews_deep("v1")
+        assert len(deep.reviews) == 1
+        assert deep.reviews[0].text.startswith("boa comida")
+
+    def test_a_venue_whose_reviews_are_all_ratings_only_stores_nothing(self, service, repo, apify):
+        _seed(repo, "v1")
+        apify.program("place_v1", [_raw(f"r{i}", "A", "", NOW - timedelta(days=1)) for i in range(5)])
+        _run(service.run(venue_ids=["v1"]))
+        assert repo.get_venue_reviews_deep("v1") is None
+
+    def test_a_fetch_that_hits_the_cap_is_truncated_even_after_dedup(self, service, repo, apify):
+        """The production regression: the actor returned its full requested
+        `cap`, duplicates knocked the stored count BELOW the cap, and the
+        record claimed truncated=False while covering only days of a
+        180-day window."""
+        cap = settings.reviews_deep_max_per_venue
+        _seed(repo, "v1")
+        items = [_raw(f"r{i}", "A", f"comentario {i}", NOW - timedelta(days=1)) for i in range(cap - 2)]
+        # Two duplicates: the actor returns `cap` items, only cap-2 survive.
+        items += [items[0], items[1]]
+        assert len(items) == cap
+        apify.program("place_v1", items)
+        _run(service.run(venue_ids=["v1"]))
+        deep = repo.get_venue_reviews_deep("v1")
+        assert len(deep.reviews) == cap - 2, "dedup must still drop the duplicates"
+        assert deep.truncated is True, "a fetch that hit the cap is truncated"
+
+    def test_a_fetch_short_of_the_cap_is_not_truncated(self, service, repo, apify):
+        _seed(repo, "v1")
+        apify.program("place_v1", [
+            _raw(f"r{i}", "A", f"comentario {i}", NOW - timedelta(days=1)) for i in range(3)
+        ])
+        _run(service.run(venue_ids=["v1"]))
+        assert repo.get_venue_reviews_deep("v1").truncated is False

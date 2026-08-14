@@ -467,6 +467,16 @@ class DeepReviewCrawlService:
             if published is not None and published < cutoff:
                 DEEP_REVIEWS_FETCHED_TOTAL.labels(outcome="out_of_window").inc()
                 continue
+            # A rating-only review (no text) is worthless as evidence — the
+            # whole point of this corpus is sentences the bot can quote — and
+            # storing it costs Redis and prompt budget for nothing. Dropped
+            # here rather than at fetch time because the actor has NO
+            # server-side "only reviews with text" option (confirmed against
+            # its published input schema), so we pay for these either way;
+            # what we can avoid is carrying them.
+            if not (review.text or "").strip():
+                DEEP_REVIEWS_FETCHED_TOTAL.labels(outcome="no_text").inc()
+                continue
             key = _dedup_key(review)
             if key in seen:
                 DEEP_REVIEWS_FETCHED_TOTAL.labels(outcome="duplicate").inc()
@@ -478,7 +488,21 @@ class DeepReviewCrawlService:
         merged = existing_reviews + added
         if not merged:
             return "empty"
-        truncated = len(merged) > cap
+        # Truncated means "the CAP bound before the window edge did" — i.e.
+        # there are more in-window reviews out there that we did not fetch.
+        #
+        # Judging that by `len(merged) > cap` alone is wrong, and measured
+        # wrong in production on 2026-08-14: a venue returned the full 300
+        # requested, 44 were dropped as duplicates, 256 were stored, and the
+        # record claimed `truncated: false` — while its OLDEST stored review
+        # was 5 days old inside a 180-day window. The actor had plainly hit
+        # its ceiling; the post-dedup count simply could not see that.
+        #
+        # The reliable signal is the FETCH: an actor asked for `cap` items
+        # that returns `cap` items stopped because of the limit, not because
+        # it ran out of reviews.
+        fetch_hit_cap = len(raw_items) >= cap
+        truncated = fetch_hit_cap or len(merged) > cap
         if truncated:
             # Cap binds on the NEWEST reviews — the newest-first fetch order
             # already means "whichever comes first" (window edge or cap) is
