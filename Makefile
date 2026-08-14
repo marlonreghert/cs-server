@@ -26,6 +26,7 @@ test-unit:
 		tests/test_google_places_search_place_id.py \
 		tests/test_job_lock.py \
 		tests/test_batch_add_service.py \
+		tests/test_add_venue_job_service.py \
 		tests/test_admin_venue_inventory.py \
 		tests/test_instagram_enrichment_service.py \
 		tests/test_instagram_validator.py \

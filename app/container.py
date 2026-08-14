@@ -14,6 +14,7 @@ from app.api import BestTimeAPIClient
 from app.api.google_places_client import GooglePlacesAPIClient
 from app.services import VenuesRefresherService, VenueBudgetService
 from app.handlers import AddVenueHandler
+from app.services.add_venue_job_service import AddVenueJobService
 from app.services.batch_add_service import BatchAddService
 from app.services.google_places_enrichment_service import GooglePlacesEnrichmentService
 from app.services.photo_classification_service import PhotoClassificationService
@@ -919,6 +920,16 @@ class Container:
             redis_client=redis_internal_client,
             google_client=self.google_places_api,
             budget_service=self.venue_budget_service,
+        )
+
+        # Single-venue add as a pollable background job (sibling to
+        # batch_add_service, not layered on it — see plans/260813_add-venue-
+        # async-job.md). No new single-flight lock: the per-venue
+        # VENUE_ADD_LOCK_KEY_V1 guard inside add_venue_handler already
+        # prevents a real double-spend.
+        self.add_venue_job_service = AddVenueJobService(
+            handler=self.add_venue_handler,
+            redis_client=redis_internal_client,
         )
 
         # Expose the budget service to the refresher so discovery can

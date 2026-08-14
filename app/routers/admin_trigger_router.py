@@ -582,6 +582,52 @@ async def get_batch_add_job(job_id: str):
     return job
 
 
+@router.post("/venues/add-job")
+async def start_add_venue_job(request: AddVenueByAddressRequest, response: Response):
+    """Start POST /venues/by-address as a pollable background job.
+
+    Same request body as POST /venues/by-address. Returns immediately with a
+    job_id — poll GET /venues/add-job/{job_id} for the outcome, which is
+    exactly what the synchronous route would have returned for the same
+    inputs, just delivered a poll away instead of holding the HTTP request
+    open for the full BestTime-create + enrichment + Instagram-discovery
+    duration. No new single-flight lock: see
+    app/services/add_venue_job_service.py.
+    """
+    service = require(
+        "add_venue_job_service", detail="add-venue job service not configured"
+    )
+    accepted = service.start_job(request)
+    response.status_code = 202
+    return accepted
+
+
+@router.get("/venues/add-job/{job_id}")
+async def get_add_venue_job(job_id: str):
+    """Poll a single-add job: {status, started_at, venue_name, venue_address}
+    while running; adds {finished_at, http_status, result} once done, or
+    {finished_at, error} if the job runner crashed."""
+    service = require(
+        "add_venue_job_service", detail="add-venue job service not configured"
+    )
+    job = service.get_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="job not found")
+    return job
+
+
+@router.get("/venues/add-jobs/recent")
+async def list_recent_add_venue_jobs(limit: int = Query(default=20, ge=1)):
+    """Recent single-add jobs, newest first, capped at
+    ADD_VENUE_RECENT_JOBS_CAP (50) regardless of `limit` — lets an operator
+    see the outcome (or failure reason) of any add started in the last 50
+    jobs / 24h without having kept a poll open on it."""
+    service = require(
+        "add_venue_job_service", detail="add-venue job service not configured"
+    )
+    return {"jobs": service.list_recent(limit=limit)}
+
+
 class GeoLinkUndoRequest(BaseModel):
     venue_id: str = Field(..., min_length=1)
 
