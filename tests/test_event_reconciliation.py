@@ -29,6 +29,7 @@ from app.services.event_reconciliation import (
     STATUS_SUPERSEDED,
     _TEXT_FIELDS,
     date_required_for_post_type,
+    find_successor_candidates,
     is_clean_extraction,
     reconcile_post_events,
 )
@@ -1500,3 +1501,248 @@ class TestSourceUploadedAtMetric:
         )
         assert self._snapshot("promoter_post", "present") == before_present
         assert self._snapshot("promoter_post", "null") == before_null
+
+
+class TestFindSuccessorCandidates:
+    """plans/260814_record-what-superseded-a-row.md §A: the predicate
+    shared, verbatim, by the re-extraction supersede loop below AND
+    `scripts.backfill_superseded_by`. Driven directly against plain dicts —
+    it needs no DAO at all."""
+
+    def test_zero_candidates_returns_empty(self):
+        candidates = [{"event_id": "evt_1", "title": "Something Else"}]
+        assert find_successor_candidates("Secret Club", candidates) == []
+
+    def test_one_matching_candidate_returns_it(self):
+        candidates = [
+            {"event_id": "evt_1", "title": "Something Else"},
+            {"event_id": "evt_2", "title": "Secret Club"},
+        ]
+        assert find_successor_candidates("Secret Club", candidates) == ["evt_2"]
+
+    def test_two_matching_candidates_returns_both(self):
+        candidates = [
+            {"event_id": "evt_1", "title": "Secret Club"},
+            {"event_id": "evt_2", "title": "secret club"},
+        ]
+        matches = find_successor_candidates("Secret Club", candidates)
+        assert set(matches) == {"evt_1", "evt_2"}
+        assert len(matches) == 2
+
+    def test_reuses_event_identity_normalize_title_not_a_second_comparison(self):
+        """Case, accents, and surrounding whitespace must be folded exactly
+        like `app.services.event_identity.normalize_title` folds them for
+        `compute_source_event_key` — proven here with an accent AND a case
+        difference at once, which a raw string comparison would treat as
+        two different titles."""
+        candidates = [{"event_id": "evt_1", "title": "  É Hoje "}]
+        assert find_successor_candidates("é hoje", candidates) == ["evt_1"]
+
+    def test_duplicate_event_id_among_candidates_counts_once(self):
+        """The SAME event appearing twice among candidates (e.g. a back-fill
+        candidate pool that happened to include one row twice) must still
+        read as exactly one match, not two — an implementation that counted
+        rows instead of distinct events would wrongly call this ambiguous."""
+        candidates = [
+            {"event_id": "evt_1", "title": "Secret Club"},
+            {"event_id": "evt_1", "title": "Secret Club"},
+        ]
+        assert find_successor_candidates("Secret Club", candidates) == ["evt_1"]
+
+    def test_a_candidate_with_no_event_id_is_never_matched(self):
+        candidates = [{"event_id": None, "title": "Secret Club"}]
+        assert find_successor_candidates("Secret Club", candidates) == []
+
+
+class TestRecordWhatSupersededARow:
+    """plans/260814_record-what-superseded-a-row.md §A: the re-extraction
+    supersede loop's own use of `find_successor_candidates` — driven
+    through `reconcile_post_events` exactly like `TestSupersession` above,
+    since the predicate's UNIT behaviour is already covered by
+    TestFindSuccessorCandidates; this class pins the WIRING (which
+    candidates it is given, and what it writes/counts as a result)."""
+
+    def _snapshot(self, outcome: str) -> float:
+        from prometheus_client import REGISTRY
+
+        return REGISTRY.get_sample_value(
+            "event_supersede_replacement_total", {"outcome": outcome},
+        ) or 0.0
+
+    def test_one_same_titled_successor_is_linked(self):
+        """The production case this plan exists for: 'SECRET CLUB' read
+        without a resolvable date, then re-extracted with one resolved —
+        the old, undated row must point at the new, dated one."""
+        dao = _dao()
+        reconcile_post_events(
+            venue_dao=dao, source_kind="venue_post", source_handle="h1",
+            source_shortcode="s_secret_club", source_permalink=None,
+            prepared_events=[_event("SECRET CLUB", None)], now=NOW,
+            attribute=_venue_attribute("v1"),
+        )
+        old_row = _rows(dao, "h1", "s_secret_club")[0]
+        before = self._snapshot("linked")
+
+        reconcile_post_events(
+            venue_dao=dao, source_kind="venue_post", source_handle="h1",
+            source_shortcode="s_secret_club", source_permalink=None,
+            prepared_events=[_event("SECRET CLUB", datetime(2026, 9, 5, tzinfo=timezone.utc))],
+            now=NOW, attribute=_venue_attribute("v1"),
+        )
+
+        after = dao.get_event(old_row["event_id"])
+        assert after["status"] == STATUS_SUPERSEDED, after
+        new_row = next(
+            r for r in _rows(dao, "h1", "s_secret_club")
+            if r["event_id"] != old_row["event_id"]
+        )
+        assert after.get("superseded_by") == new_row["event_id"], after
+        assert self._snapshot("linked") == before + 1
+
+    def test_no_matching_title_leaves_it_null_and_counted(self):
+        dao = _dao()
+        reconcile_post_events(
+            venue_dao=dao, source_kind="venue_post", source_handle="h1",
+            source_shortcode="s_no_match", source_permalink=None,
+            prepared_events=[_event("Old Night", None)], now=NOW,
+            attribute=_venue_attribute("v1"),
+        )
+        old_row = _rows(dao, "h1", "s_no_match")[0]
+        before = self._snapshot("unlinked_no_candidate")
+
+        reconcile_post_events(
+            venue_dao=dao, source_kind="venue_post", source_handle="h1",
+            source_shortcode="s_no_match", source_permalink=None,
+            prepared_events=[_event("Unrelated Night", datetime(2026, 9, 5, tzinfo=timezone.utc))],
+            now=NOW, attribute=_venue_attribute("v1"),
+        )
+
+        after = dao.get_event(old_row["event_id"])
+        assert after["status"] == STATUS_SUPERSEDED, after
+        assert after.get("superseded_by") is None, after
+        assert self._snapshot("unlinked_no_candidate") == before + 1
+
+    def test_two_matching_titles_leaves_it_null_and_counted_ambiguous(self):
+        """`oficina de sorvete`-shaped: a post's re-extraction now yields
+        TWO events sharing the retired row's title (two genuinely distinct
+        occurrences, or an ambiguous split) — never guess which one."""
+        dao = _dao()
+        reconcile_post_events(
+            venue_dao=dao, source_kind="venue_post", source_handle="h1",
+            source_shortcode="s_ambiguous", source_permalink=None,
+            prepared_events=[_event("Oficina De Sorvete", None)], now=NOW,
+            attribute=_venue_attribute("v1"),
+        )
+        old_row = _rows(dao, "h1", "s_ambiguous")[0]
+        before = self._snapshot("unlinked_ambiguous")
+
+        reconcile_post_events(
+            venue_dao=dao, source_kind="venue_post", source_handle="h1",
+            source_shortcode="s_ambiguous", source_permalink=None,
+            prepared_events=[
+                _event("Oficina De Sorvete", datetime(2026, 7, 8, tzinfo=timezone.utc)),
+                _event("Oficina De Sorvete", datetime(2026, 7, 10, tzinfo=timezone.utc)),
+            ],
+            now=NOW, attribute=_venue_attribute("v1"),
+        )
+
+        after = dao.get_event(old_row["event_id"])
+        assert after["status"] == STATUS_SUPERSEDED, after
+        assert after.get("superseded_by") is None, after
+        assert self._snapshot("unlinked_ambiguous") == before + 1
+
+    def test_never_links_to_a_different_posts_event(self):
+        dao = _dao()
+        reconcile_post_events(
+            venue_dao=dao, source_kind="venue_post", source_handle="h1",
+            source_shortcode="s_cross_post", source_permalink=None,
+            prepared_events=[_event("Shared Title", None)], now=NOW,
+            attribute=_venue_attribute("v1"),
+        )
+        old_row = _rows(dao, "h1", "s_cross_post")[0]
+
+        # A DIFFERENT post's live event happens to share the exact title —
+        # never a valid successor for THIS post's own orphaned row.
+        reconcile_post_events(
+            venue_dao=dao, source_kind="venue_post", source_handle="h2",
+            source_shortcode="s_other_post", source_permalink=None,
+            prepared_events=[_event("Shared Title", datetime(2026, 9, 5, tzinfo=timezone.utc))],
+            now=NOW, attribute=_venue_attribute("v1"),
+        )
+        other_row = _rows(dao, "h2", "s_other_post")[0]
+
+        reconcile_post_events(
+            venue_dao=dao, source_kind="venue_post", source_handle="h1",
+            source_shortcode="s_cross_post", source_permalink=None,
+            prepared_events=[], now=NOW, attribute=_venue_attribute("v1"),
+        )
+
+        after = dao.get_event(old_row["event_id"])
+        assert after["status"] == STATUS_SUPERSEDED, after
+        assert after.get("superseded_by") is None, after
+        assert after.get("superseded_by") != other_row["event_id"], after
+
+    def test_a_linked_and_an_unlinked_supersede_in_one_run_are_counted_separately(self):
+        dao = _dao()
+        reconcile_post_events(
+            venue_dao=dao, source_kind="venue_post", source_handle="h1",
+            source_shortcode="s_mixed", source_permalink=None,
+            prepared_events=[
+                _event("Linkable Night", None), _event("Ambiguous Night", None),
+            ],
+            now=NOW, attribute=_venue_attribute("v1"),
+        )
+        before_linked = self._snapshot("linked")
+        before_ambiguous = self._snapshot("unlinked_ambiguous")
+
+        reconcile_post_events(
+            venue_dao=dao, source_kind="venue_post", source_handle="h1",
+            source_shortcode="s_mixed", source_permalink=None,
+            prepared_events=[
+                _event("Linkable Night", datetime(2026, 9, 5, tzinfo=timezone.utc)),
+                _event("Ambiguous Night", datetime(2026, 9, 6, tzinfo=timezone.utc)),
+                _event("ambiguous night", datetime(2026, 9, 7, tzinfo=timezone.utc)),
+            ],
+            now=NOW, attribute=_venue_attribute("v1"),
+        )
+
+        assert self._snapshot("linked") == before_linked + 1
+        assert self._snapshot("unlinked_ambiguous") == before_ambiguous + 1
+
+    def test_a_confirmed_rows_own_re_extraction_still_contributes_its_fresh_title(self):
+        """A CONFIRMED sibling event, re-extracted in the SAME call that
+        supersedes an unrelated row, still counts as a produced event for
+        THAT row's own successor search — produced_this_run tracks every
+        persisted event, not only fresh inserts."""
+        dao = _dao()
+        reconcile_post_events(
+            venue_dao=dao, source_kind="venue_post", source_handle="h1",
+            source_shortcode="s_confirmed_sibling", source_permalink=None,
+            prepared_events=[
+                _event("Confirmed Anchor", datetime(2026, 8, 1, tzinfo=timezone.utc)),
+                _event("Retiring Night", None),
+            ],
+            now=NOW, attribute=_venue_attribute("v1"),
+        )
+        rows = _rows(dao, "h1", "s_confirmed_sibling")
+        anchor_row = next(r for r in rows if r["title"] == "Confirmed Anchor")
+        retiring_row = next(r for r in rows if r["title"] == "Retiring Night")
+        dao.update_event(anchor_row["event_id"], {"status": STATUS_CONFIRMED})
+
+        reconcile_post_events(
+            venue_dao=dao, source_kind="venue_post", source_handle="h1",
+            source_shortcode="s_confirmed_sibling", source_permalink=None,
+            prepared_events=[
+                _event("Confirmed Anchor", datetime(2026, 8, 1, tzinfo=timezone.utc)),
+                _event("Retiring Night Renamed", datetime(2026, 9, 5, tzinfo=timezone.utc)),
+            ],
+            now=NOW, attribute=_venue_attribute("v1"),
+        )
+
+        after = dao.get_event(retiring_row["event_id"])
+        assert after["status"] == STATUS_SUPERSEDED, after
+        # No candidate shares "Retiring Night"'s title (the confirmed
+        # anchor keeps its own unrelated title) -- left NULL, never guessed.
+        assert after.get("superseded_by") is None, after
+        after_anchor = dao.get_event(anchor_row["event_id"])
+        assert after_anchor["status"] == STATUS_CONFIRMED, after_anchor

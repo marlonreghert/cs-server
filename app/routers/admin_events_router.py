@@ -169,6 +169,18 @@ class EventOut(BaseModel):
     confidence: Optional[float] = None
     status: str
     review_reason: Optional[str] = None
+    # plans/260814_record-what-superseded-a-row.md §D: the event that
+    # replaced this one, when `status == 'superseded'` AND the replacement
+    # could be determined without guessing (app.services.event_merge's
+    # cross-post merge path, or app.services.event_reconciliation's
+    # re-extraction path via `find_successor_candidates` — see either's own
+    # docstring). NULL for every other status, and for a superseded row
+    # whose replacement is ambiguous or has no candidate at all. Additive —
+    # the column already exists and is already selected by the DAO; this is
+    # the first release that reads it back out. The console is not required
+    # to render it in this plan; exposing it is what makes that follow-up
+    # possible.
+    superseded_by: Optional[str] = None
     first_seen_at: Optional[datetime] = None
     last_seen_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None

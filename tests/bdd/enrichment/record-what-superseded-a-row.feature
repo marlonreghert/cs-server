@@ -1,4 +1,3 @@
-@wip
 Feature: A tombstone says what replaced it
   As the operator of the event pipeline
   I must be able to see which event replaced a superseded one, so that a row

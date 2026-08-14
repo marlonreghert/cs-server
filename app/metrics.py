@@ -1543,6 +1543,28 @@ EVENT_MERGE_TOTAL = Counter(
     #                 producing landfill, not decisions).
 )
 
+# plans/260814_record-what-superseded-a-row.md §B: every RE-EXTRACTION
+# supersede (app.services.event_reconciliation.reconcile_post_events' own
+# "existing key this run did not return" branch — distinct from
+# EVENT_MERGE_TOTAL above, which counts a CROSS-post merge's absorption,
+# already unconditionally recording its own superseded_by), by whether the
+# tombstone could name what replaced it. `linked`: exactly one event among
+# this SAME post's freshly-persisted events shared the superseded row's
+# normalised title. `unlinked_no_candidate`: none did — most commonly a
+# post that used to yield N events and now yields fewer, with nothing to
+# point the retired row at. `unlinked_ambiguous`: more than one did — two
+# genuinely distinct occurrences sharing a title (e.g. a recurring night
+# announced twice in one roundup), never guessed. Watch the unlinked share:
+# if it dominates, the plan's own "never guess" rule (exactly one same-
+# title candidate) is too narrow, and that should show up here before it
+# shows up as another confusing pair in the console.
+EVENT_SUPERSEDE_REPLACEMENT_TOTAL = Counter(
+    "event_supersede_replacement_total",
+    "Re-extraction supersedes, by whether the retired row's replacement could be recorded",
+    ["outcome"],
+    # outcome: linked, unlinked_no_candidate, unlinked_ambiguous
+)
+
 # plans/260814_seeded-state-and-config-validation.md §D: `load_dedup_config`
 # must not coerce a wrong-typed stored value into a plausible-looking answer
 # (`bool("false")` was the trap — it silently ENABLES auto-merge). A value
