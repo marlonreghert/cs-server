@@ -1814,6 +1814,15 @@ class RdsVenueStore:
         # sticky like `last_failure_kind` (see the migration's own
         # docstring for why neither existing column could carry this).
         "posts_dormant",
+        # plans/260814_seeded-state-and-config-validation.md §A (migration
+        # 0041): whether the reels stream has reached its one-time seed to
+        # COMPLETION — success, or a genuine empty result, both. Distinct
+        # from `cursor_reels_at` (the newest reel actually reached, still
+        # NULL when nothing was reached): an empty-but-successful seed has
+        # no timestamp to write there, so gating "seeded" on the cursor
+        # alone re-buys the seed forever on an empty account. See
+        # `app.services.instagram_crawl_service.reels_already_seeded`.
+        "reels_seeded_at",
     )
     _CRAWL_TARGET_SELECT = (
         "SELECT handle, kind, enabled, cron, timezone, crawl_reels, "
@@ -1822,7 +1831,8 @@ class RdsVenueStore:
         "cursor_posts_at, cursor_reels_at, last_run_at, last_run_results, "
         "last_run_cost_usd, consecutive_failures, notes, "
         "last_run_reels_fetched, last_run_reels_new, "
-        "last_failure_kind, last_failure_at, posts_dormant, created_at, updated_at "
+        "last_failure_kind, last_failure_at, posts_dormant, reels_seeded_at, "
+        "created_at, updated_at "
         "FROM events.crawl_target"
     )
 

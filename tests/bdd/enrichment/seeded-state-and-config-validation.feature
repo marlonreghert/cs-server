@@ -1,4 +1,3 @@
-@wip
 Feature: Stop reading absence as an answer
   As the operator of the event pipeline
   I must have a reels stream that ran and found nothing recorded as seeded, and

@@ -1004,6 +1004,12 @@ class InMemoryRdsVenueStore:
                 # its first run — mirrors the real column's
                 # `NOT NULL DEFAULT false`.
                 "posts_dormant": False,
+                # plans/260814_seeded-state-and-config-validation.md §A
+                # (migration 0041): NULL until a run whose reels stream
+                # reaches a trustworthy conclusion (success or empty) writes
+                # it — never invented, mirrors `last_failure_kind`'s own
+                # "NULL until something real happens" convention.
+                "reels_seeded_at": None,
                 "created_at": now, "updated_at": now,
             }
             row.update({k: v for k, v in fields.items() if k != "handle"})

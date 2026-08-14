@@ -46,6 +46,14 @@ def step_given_reels_enabled_already_seeded(context):
         context, "reelsalreadyseededtarget", crawl_reels=True,
         cursor_reels_at=_OLD_REELS_CURSOR,
     )
+    # plans/260814_seeded-state-and-config-validation.md §A: "seeded" is now
+    # gated on `reels_seeded_at`, a fact recorded separately from
+    # `cursor_reels_at` (which keeps its own, unchanged meaning — the
+    # newest reel actually reached). A real completed non-empty seed leaves
+    # both behind together; arranged the same way here.
+    context.ic_dao.update_crawl_target(
+        context.ic_handle, {"reels_seeded_at": _OLD_REELS_CURSOR},
+    )
 
 
 @given("a crawl target with reels disabled that has never run")

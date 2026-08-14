@@ -321,6 +321,14 @@ def _build_rds_layer(context) -> None:
     from app.services.vibe_modes_config import validate_vibe_modes_config
     from app.models.venue_category import validate_category_map_config
     from app.services.config_validation import validate_instagram_discovery_config
+    from app.services.event_dedup import (
+        validate_auto_merge_enabled_config,
+        validate_candidate_window_hours_config,
+        validate_generic_vocabulary_config,
+        validate_lineup_threshold_config,
+        validate_stopwords_config,
+        validate_undated_window_days_config,
+    )
 
     def _validate_eligibility(value):
         # Validate (raise on invalid) but persist the RAW body, byte-compatible
@@ -337,6 +345,17 @@ def _build_rds_layer(context) -> None:
             "vibe_modes": validate_vibe_modes_config,
             "venue_category_map": validate_category_map_config,
             "instagram_discovery": validate_instagram_discovery_config,
+            # plans/260814_seeded-state-and-config-validation.md §C: mirrors
+            # app.container's own registration (the production wiring) so
+            # BDD scenarios exercise the SAME validate-before-write path a
+            # real admin write goes through, not a harness that silently
+            # accepts what production would reject.
+            "event_dedup_generic_vocabulary": validate_generic_vocabulary_config,
+            "event_dedup_stopwords": validate_stopwords_config,
+            "event_dedup_lineup_threshold": validate_lineup_threshold_config,
+            "event_dedup_candidate_window_hours": validate_candidate_window_hours_config,
+            "event_dedup_undated_window_days": validate_undated_window_days_config,
+            "event_dedup_auto_merge_enabled": validate_auto_merge_enabled_config,
         },
     )
     # The generic PUT/GET /admin/config/{key} routes read the service off the
