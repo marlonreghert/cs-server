@@ -28,6 +28,7 @@ from datetime import datetime, timedelta, timezone
 import fakeredis
 import pytest
 
+from app.config import settings
 from app.dao.review_crawl_budget_dao import ReviewCrawlBudgetDao
 from app.dao.venue_repository import VenueRepository
 from app.db.geo_redis_client import GeoRedisClient
@@ -160,11 +161,19 @@ class TestWindowBoundary:
 
 # ── incremental cursor ───────────────────────────────────────────────────────
 class TestIncrementalCursor:
-    def test_first_run_passes_no_since(self, service, repo, apify):
+    def test_first_run_passes_the_window_edge_as_since(self, service, repo, apify):
+        """Was `assert since is None` until the 2026-08-14 trial.
+
+        Passing no `since` meant no `reviewsStartDate` reached the actor, so a
+        first crawl scraped to `maxReviews` and the 180-day window was applied
+        locally — after paying. That run billed 600 reviews to store 67. The
+        window edge is a PAID boundary, so it is always sent.
+        """
         _seed(repo, "v1")
         apify.program("place_v1", [])
         _run(service.run(venue_ids=["v1"]))
-        assert apify.calls[0]["since"] is None
+        expected = (NOW - timedelta(days=settings.reviews_deep_window_days)).isoformat()
+        assert apify.calls[0]["since"] == expected
 
     def test_rerun_passes_the_stored_newest_publish_time_as_since(self, service, repo, apify):
         _seed(repo, "v1")
