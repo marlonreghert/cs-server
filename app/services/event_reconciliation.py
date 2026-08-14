@@ -75,6 +75,7 @@ from typing import Callable, Optional
 from app.metrics import (
     EVENT_EXTRACTION_EVENTS_PER_POST,
     EVENT_SOURCE_UPLOADED_AT_TOTAL,
+    EVENT_SUPERSEDE_REPLACEMENT_TOTAL,
     EVENTS_TOTAL,
     MENU_ITEM_FRESHNESS_TOTAL,
 )
@@ -623,6 +624,38 @@ def _plausibly_same_event(existing: dict, prepared: dict) -> bool:
     return same_title != same_date
 
 
+def find_successor_candidates(title: Optional[str], candidates: list) -> list:
+    """plans/260814_record-what-superseded-a-row.md §A: the distinct event
+    ids among `candidates` — each a dict carrying at least `event_id`/
+    `title` — whose title normalises to the same value as `title`. Shared,
+    verbatim, by two callers that must never drift on what "the same
+    title" means: the re-extraction supersede loop below (`candidates` is
+    THIS SAME POST's freshly-persisted events, `produced_this_run`) and
+    `scripts.backfill_superseded_by`'s identical predicate over already-
+    stored, currently-live siblings of an orphaned row. Reuses `normalize_
+    title` (app.services.event_identity) — the SAME normalisation
+    `compute_source_event_key` hashes — never a second, drifting
+    comparison.
+
+    Exactly one match is what makes a supersede's replacement UNAMBIGUOUS.
+    Zero or several is the caller's cue to record nothing rather than
+    guess: a post that used to yield three events and now yields two has a
+    retired row with no successor at all, and two genuinely distinct
+    occurrences sharing one title (an event announced twice in one post for
+    two different dates) must never be collapsed onto each other."""
+    normalized = normalize_title(title)
+    seen: set = set()
+    matches: list = []
+    for candidate in candidates:
+        if normalize_title(candidate.get("title")) != normalized:
+            continue
+        event_id = candidate.get("event_id")
+        if event_id is not None and event_id not in seen:
+            seen.add(event_id)
+            matches.append(event_id)
+    return matches
+
+
 def reconcile_post_events(
     *,
     venue_dao,
@@ -687,6 +720,16 @@ def reconcile_post_events(
     }
     handled_event_ids: set[str] = set()
     persisted = 0
+    # plans/260814_record-what-superseded-a-row.md §A: every event THIS
+    # POST persists this run (matched-existing update or fresh insert
+    # alike), as the minimal `{event_id, title}` `find_successor_
+    # candidates` needs — read by the supersede loop at the bottom of this
+    # function to find a retired row's unambiguous replacement, if one
+    # exists among what this SAME post just produced. Scoped to this one
+    # call (never module/global state), so a different post's events can
+    # never leak in here by construction — the "never link across posts"
+    # guarantee costs nothing extra to hold.
+    produced_this_run: list[dict] = []
 
     def _persist(existing: Optional[dict], prepared: dict, index: int, key: str) -> None:
         nonlocal persisted
@@ -725,6 +768,12 @@ def reconcile_post_events(
             persisted += 1
             if touched_event_ids is not None:
                 touched_event_ids.append(existing["event_id"])
+            # See produced_this_run's own docstring, above — a confirmed
+            # row's PREPARED (fresh, this-run) title, never the possibly
+            # protection-frozen stored one: this is what the post ACTUALLY
+            # produced this run, which is the question find_successor_
+            # candidates answers for a sibling row retired in this same call.
+            produced_this_run.append({"event_id": existing["event_id"], "title": prepared.get("title")})
             return
 
         # A manual link outranks the model too: a later run of the same post
@@ -874,6 +923,8 @@ def reconcile_post_events(
         persisted += 1
         if touched_event_ids is not None:
             touched_event_ids.append(event_id)
+        # See produced_this_run's own docstring, above.
+        produced_this_run.append({"event_id": event_id, "title": prepared.get("title")})
 
     unmatched: list[tuple[int, dict, str]] = []
     seen_keys_this_run: set[str] = set()
@@ -974,7 +1025,24 @@ def reconcile_post_events(
                 "source_shortcode": row.get("source_shortcode"),
             })
             continue
-        venue_dao.update_event(row["event_id"], {"status": STATUS_SUPERSEDED})
+        # plans/260814_record-what-superseded-a-row.md §A: a RE-EXTRACTION
+        # supersede (this branch — distinct from app.services.event_merge's
+        # cross-post merge, which already records its own superseded_by
+        # unconditionally) can name its replacement only when exactly ONE
+        # event this SAME post just produced (produced_this_run) shares
+        # this row's normalised title. Zero or several: never guess, leave
+        # superseded_by NULL and count it — see find_successor_candidates.
+        candidates = find_successor_candidates(row.get("title"), produced_this_run)
+        if len(candidates) == 1:
+            successor_id, outcome = candidates[0], "linked"
+        elif not candidates:
+            successor_id, outcome = None, "unlinked_no_candidate"
+        else:
+            successor_id, outcome = None, "unlinked_ambiguous"
+        venue_dao.update_event(row["event_id"], {
+            "status": STATUS_SUPERSEDED, "superseded_by": successor_id,
+        })
+        EVENT_SUPERSEDE_REPLACEMENT_TOTAL.labels(outcome=outcome).inc()
 
     # A post collapsing back to fewer events than it used to is exactly the
     # regression this feature exists to prevent — visible only in this
@@ -1038,4 +1106,7 @@ __all__ = [
     "PROTECTABLE_EVENT_FIELDS", "event_field_is_absent", "event_time_known",
     "event_unread_time",
     "union_lineup", "union_attractions", "apply_operator_field_protection",
+    # plans/260814_record-what-superseded-a-row.md §A/§C: shared, verbatim,
+    # by scripts.backfill_superseded_by — see this function's own docstring.
+    "find_successor_candidates",
 ]

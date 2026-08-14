@@ -111,6 +111,7 @@ test-unit:
 		tests/test_backfill_source_provenance.py \
 		tests/test_backfill_reels_seeded.py \
 		tests/test_repair_event_dates.py \
+		tests/test_backfill_superseded_by.py \
 		tests/test_event_sources_migration.py \
 		tests/test_post_items_migration.py \
 		tests/test_post_category.py \
