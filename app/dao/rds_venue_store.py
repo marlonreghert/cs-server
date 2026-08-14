@@ -597,6 +597,17 @@ class RdsVenueStore:
         "LEFT JOIN venues.venue v ON v.venue_id = e.venue_id"
     )
 
+    # `_EVENT_SOURCE_SELECT` widened with the source row's own `id` — neither
+    # that query nor `list_event_sources`'s bespoke one carries BOTH the
+    # post_item content AND the source's own primary key at once.
+    # plans/260812_history-repair-dates.md needs both: `id` to resume by and
+    # to target ONE specific source row, the post_item content to decide
+    # whether that row's parent is protected (confirmed/operator-edited/
+    # superseded) — string-built from `_EVENT_SOURCE_SELECT` so the column
+    # list can never drift from the one `list_events_by_source` already
+    # trusts.
+    _EVENT_SOURCE_SELECT_WITH_ID = "SELECT es.id, " + _EVENT_SOURCE_SELECT[len("SELECT "):]
+
     def get_event(self, event_id: str) -> Optional[dict]:
         with self.engine.connect() as conn:
             row = conn.execute(
@@ -659,6 +670,27 @@ class RdsVenueStore:
                     "source_media_type, source_uploaded_at "
                     "FROM events.post_item_source ORDER BY first_seen_at, id"
                 )
+            ).mappings()
+            return [dict(r) for r in rows]
+
+    def list_all_event_sources_with_context(self) -> list[dict]:
+        """Every `events.post_item_source` row across the WHOLE table, each
+        joined with its OWN post_item's content/protection fields — the same
+        per-source projection `list_events_by_source` trusts
+        (`_EVENT_SOURCE_SELECT`), widened with the source's own `id` and with
+        no WHERE clause. `list_all_event_sources` (scripts.
+        backfill_source_provenance's own whole-table read) deliberately omits
+        `raw_extraction`/`date_interpretation`/`title`/`status`/
+        `operator_edited_fields`; `list_events`/`get_event` only ever surface
+        the PRIMARY (most recently seen) source. `scripts.repair_event_dates`
+        (plans/260812_history-repair-dates.md) needs EVERY source's own
+        `raw_extraction.date_text`/`.time_text`, `source_uploaded_at`, and
+        `date_interpretation`, plus its parent post_item's `status`/
+        `operator_edited_fields`/`post_type` to decide whether it may be
+        touched at all — no other existing read gives all of that at once."""
+        with self.engine.connect() as conn:
+            rows = conn.execute(
+                text(f"{self._EVENT_SOURCE_SELECT_WITH_ID} ORDER BY es.first_seen_at, es.id")
             ).mappings()
             return [dict(r) for r in rows]
 

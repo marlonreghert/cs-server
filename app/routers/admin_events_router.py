@@ -26,6 +26,7 @@ from app.models.event_kind import KIND_MENU
 from app.models.menu_lifecycle import is_menu_item_current, load_menu_expiry_days
 from app.models.promoter_event_visibility import is_promoter_only_item, load_hide_promoter_events
 from app.services.event_merge import apply_merge_suggestion, reject_merge_suggestion, reverse_title_similarity_merge
+from app.services.event_reconciliation import event_unread_time
 from app.services.promoter_registry_service import InvalidPromoterAccount, PromoterRegistryService
 
 logger = logging.getLogger(__name__)
@@ -141,6 +142,15 @@ class EventOut(BaseModel):
     # asserting a start that was never read would be the exact mislabelling
     # this field exists to prevent.
     time_known: bool = False
+    # plans/260813_review-gate-and-date-vocabulary.md §D: whether the
+    # flyer's own classification said a clock time was printed on it and the
+    # extractor did not read one — no longer a review reason (an event whose
+    # DATE resolved is not held up by a clock time alone), so this is how
+    # the console can still show "the flyer named a time we did not read" as
+    # an annotation. Defaults False, never invented, for every row that
+    # predates this field. Additive — the admin console is a released N-1
+    # client, and this only ever GAINS a field, never removes or narrows one.
+    unread_time: bool = False
     is_recurring: bool = False
     recurrence_text: Optional[str] = None
     title: Optional[str] = None
@@ -260,6 +270,7 @@ def _to_out(dao, row: dict, sources: Optional[list[dict]] = None) -> EventOut:
         **row, "lineup": row.get("lineup") or [],
         "attractions": row.get("attractions") or [], "sources": source_outs,
         "is_current": _menu_is_current(row),
+        "unread_time": event_unread_time(row),
     })
 
 
@@ -505,6 +516,7 @@ def review_queue():
                 **row, "lineup": row.get("lineup") or [],
                 "attractions": row.get("attractions") or [],
                 "is_current": _menu_is_current(row),
+                "unread_time": event_unread_time(row),
             },
             candidates=candidates, sources=source_outs,
             merge_suggestions=_merge_suggestions_for(dao, row["event_id"]),

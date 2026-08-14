@@ -105,6 +105,7 @@ test-unit:
 		tests/test_event_dedup_merge.py \
 		tests/test_backfill_event_venue_links.py \
 		tests/test_backfill_source_provenance.py \
+		tests/test_repair_event_dates.py \
 		tests/test_event_sources_migration.py \
 		tests/test_post_items_migration.py \
 		tests/test_post_category.py \
