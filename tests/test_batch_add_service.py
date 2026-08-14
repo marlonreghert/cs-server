@@ -1,13 +1,13 @@
 """Unit tests for the server-side batch venue-add service."""
 import asyncio
 
-import fakeredis
 import pytest
 
 from app.handlers.add_venue_handler import AddVenueOutcome
 from app.models.batch_add import BatchAddRequest
 import app.services.batch_add_service as bas
 from app.services.batch_add_service import BatchAddService, _classify
+from tests.venue_add_job_fake import InMemoryVenueAddJobStore
 
 
 @pytest.fixture(autouse=True)
@@ -191,7 +191,7 @@ class _Google:
 def _service(handler, google=None, budget=None):
     return BatchAddService(
         handler=handler,
-        redis_client=fakeredis.FakeStrictRedis(decode_responses=False),
+        job_store=InMemoryVenueAddJobStore(),
         google_client=google,
         budget_service=budget or _Budget(),
     )
@@ -398,3 +398,91 @@ async def test_second_batch_refused_while_one_is_running():
     # A new batch may start now that the first finished.
     third = svc.start_job(req)
     assert third["status"] == "running"
+
+    # Drain it too — an undrained task here is a pre-existing loop/task leak
+    # (harmless to this test's own assertions, but it gets garbage-collected
+    # at an unpredictable later point, which pytest-asyncio flags with a
+    # "Task was destroyed but it is pending!" warning wherever that GC happens
+    # to land, potentially confusing an unrelated later test).
+    for _ in range(200):
+        task = svc._tasks.get(third["job_id"])
+        if task is None or task.done():
+            break
+        await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
+
+# ── RDS job store: persistence + job_type (plans/260814_venue-add-job-rds-
+# tracking.md) ────────────────────────────────────────────────────────────────
+@pytest.mark.asyncio
+async def test_job_is_stored_as_job_type_batch():
+    """The job_store row must carry job_type="batch" so
+    VenueAddJobStore/InMemoryVenueAddJobStore's shape_job_row applies the
+    batch (not single) API-shape rules — checked here via the raw stored row
+    (job_store.rows), since get_job()/shape_job_row strip job_type from the
+    API-facing dict by design."""
+    handler = _Handler({"A": AddVenueOutcome(201, {"status": "created", "venue_id": "vA"})})
+    svc = _service(handler, _Google({"A": (-9.6, -35.7)}))
+    req = BatchAddRequest(venues=[{"venue_name": "A", "venue_address": "a"}])
+    job = await _run_to_completion(svc, req)
+    stored = svc.job_store.rows[job["job_id"]]
+    assert stored["job_type"] == "batch"
+
+
+@pytest.mark.asyncio
+async def test_persist_failure_is_swallowed_and_recorded_but_run_continues():
+    """A job_store.save() failure must not crash the run (matches the
+    pre-RDS Redis _save's own except-and-continue behaviour) and must
+    increment VENUE_ADD_JOB_PERSIST_FAILURES_TOTAL{job_type="batch"} so a
+    sustained RDS outage is observable."""
+    from app.metrics import VENUE_ADD_JOB_PERSIST_FAILURES_TOTAL
+
+    before = VENUE_ADD_JOB_PERSIST_FAILURES_TOTAL.labels(job_type="batch")._value.get()
+
+    handler = _Handler({"A": AddVenueOutcome(201, {"status": "created", "venue_id": "vA"})})
+    svc = _service(handler, _Google({"A": (-9.6, -35.7)}))
+    svc.job_store.fail_next_save(1)  # fails the very first (initial) save
+    req = BatchAddRequest(venues=[{"venue_name": "A", "venue_address": "a"}])
+    job = await _run_to_completion(svc, req)
+
+    assert job["status"] == "done"  # the run completed despite the one failed save
+    after = VENUE_ADD_JOB_PERSIST_FAILURES_TOTAL.labels(job_type="batch")._value.get()
+    assert after == before + 1
+
+
+class _FakeCrashedTask:
+    """Minimal asyncio.Task stand-in for _on_done: claims to have crashed
+    with a RuntimeError, without actually having to force _run_job's own
+    per-row try/except (which swallows everything handler.add can raise) to
+    leak all the way out — _on_done is the unit under test here, not
+    _run_job."""
+    def cancelled(self):
+        return False
+
+    def exception(self):
+        return RuntimeError("simulated unexpected crash")
+
+
+def test_on_done_crash_path_resave_preserves_job_type():
+    """Regression test: _on_done's crash-path job comes from
+    self.get_job(job_id), whose result has job_type stripped (shape_job_row
+    — job_type must never appear in an HTTP response). _persist() must
+    re-stamp job_type before writing back, or this crash-path save would
+    silently drop the column (an explicit-column upsert, not a partial
+    patch) after the very first save."""
+    handler = _Handler({"A": AddVenueOutcome(201, {"status": "created", "venue_id": "vA"})})
+    svc = _service(handler)
+    job_id = "crash-test-job"
+    svc.job_store.save({
+        "job_id": job_id, "job_type": "batch", "label": None, "status": "running",
+        "total": 1, "processed": 0, "started_at": 0.0, "finished_at": None,
+        "stopped_reason": None, "resolve_coords": False, "summary": {}, "results": [],
+        "budget_before": None, "budget_after": None,
+    })
+
+    svc._on_done(job_id, _FakeCrashedTask())
+
+    stored = svc.job_store.rows[job_id]
+    assert stored["job_type"] == "batch"
+    assert stored["status"] == "failed"
+    assert "RuntimeError" in stored["stopped_reason"]

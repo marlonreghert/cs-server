@@ -1050,6 +1050,18 @@ ADD_VENUE_INSTAGRAM_TOTAL = Counter(
     ["result"],  # found | low_confidence | not_found | timeout | skipped | error
 )
 
+# plans/260814_venue-add-job-rds-tracking.md: venue-add job tracking
+# (AddVenueJobService + BatchAddService) moved off Redis onto the RDS
+# admin.venue_add_job_run table, which is now the ONLY copy of a job's state.
+# A save() failure used to be a missed cache write (best-effort, harmless); it
+# is now a genuinely lost record, so a sustained run of these means "jobs ran,
+# nothing got durably recorded" — worth alerting on, unlike the old Redis path.
+VENUE_ADD_JOB_PERSIST_FAILURES_TOTAL = Counter(
+    "venue_add_job_persist_failures_total",
+    "Failed writes of a venue-add job doc to the RDS job store (admin.venue_add_job_run)",
+    ["job_type"],  # single | batch
+)
+
 INVENTORY_SYNC_VENUES_TOTAL = Counter(
     "inventory_sync_venues_total",
     "Per-venue outcomes during the monthly BestTime inventory sync",
