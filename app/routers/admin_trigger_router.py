@@ -15,7 +15,7 @@ from app.handlers.add_venue_handler import (
 )
 from app.models.batch_add import BatchAddRequest
 from app.services.archive_sources import public_catalog
-from app.services.venue_photo_archive_service import InvalidArchivePath
+from app.services.venue_photo_archive_service import InvalidArchivePath, parse_venue_ids
 from app.services.venue_eligibility import (
     ADMIN_CONFIG_ELIGIBILITY_KEY,
     ADMIN_CONFIG_GEOFENCE_KEY,
@@ -326,6 +326,23 @@ JOB_REGISTRY = {
         "unavailable_detail": "Promoter crawl not configured (needs Apify API token)",
         "runner": lambda c, cfg: c.promoter_crawl_service.run(cfg),
     },
+    "reviews_deep_crawl": {
+        "label": "Deep Review Corpus Crawl",
+        "description": "Capture every Google review newer than a configurable "
+        "window (default 180 days) for operator-selected venues, via a paid "
+        "Apify actor. Gated by a local monthly review budget AND the shared "
+        "Apify account's remaining headroom — a run never spends the "
+        "production Instagram/events crawl's quota. Not scheduled: "
+        "operator-driven only, no cron.",
+        "default_config": {"venue_ids": "", "filter": None},
+        "service_attr": "deep_review_crawl_service",
+        "unavailable_detail": "Deep review crawl not configured (needs Apify API token)",
+        "runner": lambda c, cfg: c.deep_review_crawl_service.run(
+            venue_ids=parse_venue_ids(cfg.get("venue_ids")) or None,
+            filter_spec=cfg.get("filter"),
+            job_id=cfg.get("job_id"),
+        ),
+    },
 }
 
 
@@ -507,6 +524,32 @@ def _photo_archive_service():
     return service
 
 
+def _deep_review_crawl_service():
+    service = getattr(_container, "deep_review_crawl_service", None)
+    if service is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Deep review crawl not configured (needs Apify API token)",
+        )
+    return service
+
+
+@router.post("/reviews-deep/estimate")
+async def estimate_deep_review_crawl(config: Optional[dict] = None):
+    """Price a deep review crawl WITHOUT making a single Apify request — the
+    id-list-is-authoritative selection rule (a filter may narrow, never
+    widen) applies here exactly as it does to the real run, and the reported
+    review/cost figures are an explicit UPPER BOUND (see DeepReviewCrawlService.
+    estimate), not a prediction: how many reviews actually fall inside the
+    window is unknowable without crawling."""
+    require()
+    cfg = config or {}
+    return _deep_review_crawl_service().estimate(
+        venue_ids=parse_venue_ids(cfg.get("venue_ids")) or None,
+        filter_spec=cfg.get("filter"),
+    )
+
+
 @router.post("/trigger/venue_photo_archive/estimate")
 async def estimate_photo_archive(config: Optional[dict] = None):
     """Price a photo archive run WITHOUT making a single Google request.
@@ -526,14 +569,36 @@ async def estimate_photo_archive(config: Optional[dict] = None):
         raise HTTPException(status_code=400, detail=str(e))
 
 
+# Container attributes of every job-type service that persists its own run
+# records (get_run_record(job_id) -> dict | None, same shape as
+# VenuePhotoArchiveService's — see that service's "run records" section).
+# GET /admin/jobs/runs/{job_id} tries each in turn: a job_id is opaque to the
+# caller (it does not encode which job type minted it), so the lookup must
+# not assume a single owning service. Extend this tuple, not the endpoint
+# itself, when a new job type gains its own run-record store.
+_RUN_RECORD_SERVICE_ATTRS = ("venue_photo_archive_service", "deep_review_crawl_service")
+
+
 @router.get("/jobs/runs/{job_id}")
 async def get_job_run(job_id: str):
-    """What a specific run did, by the job id its trigger returned."""
+    """What a specific run did, by the job id its trigger returned.
+
+    Tries every _RUN_RECORD_SERVICE_ATTRS service in order and returns the
+    first hit. A service that is entirely unconfigured (e.g. no Apify token,
+    no Google Places key) is skipped rather than raising — with more than one
+    possible source, "not configured" and "no record under this id" are no
+    longer the same 503 one owning service used to report; both now correctly
+    resolve to a plain 404.
+    """
     require()
-    record = _photo_archive_service().get_run_record(job_id)
-    if record is None:
-        raise HTTPException(status_code=404, detail=f"No run record for {job_id}")
-    return record
+    for attr in _RUN_RECORD_SERVICE_ATTRS:
+        service = getattr(_container, attr, None)
+        if service is None:
+            continue
+        record = service.get_run_record(job_id)
+        if record is not None:
+            return record
+    raise HTTPException(status_code=404, detail=f"No run record for {job_id}")
 
 
 @router.post("/venues/by-address")
@@ -1112,6 +1177,7 @@ def _venue_cache_flags_bulk(
     hours_map = venue_dao.get_opening_hours_bulk(venue_ids)
     ig_map = venue_dao.get_venue_instagram_bulk(venue_ids)
     reviews_map = venue_dao.get_venue_reviews_bulk(venue_ids)
+    reviews_deep_map = venue_dao.get_venue_reviews_deep_bulk(venue_ids)
     menu_photos_map = venue_dao.get_venue_menu_photos_bulk(venue_ids)
     menu_data_map = venue_dao.get_venue_menu_data_bulk(venue_ids)
     vibe_profile_map = venue_dao.get_venue_vibe_profile_bulk(venue_ids)
@@ -1130,6 +1196,10 @@ def _venue_cache_flags_bulk(
             # boolean.
             "instagram": vid in ig_map,
             "reviews": vid in reviews_map,
+            # Presence in the Redis serving projection only, matching every
+            # other flag here — a venue can hold a much larger corpus in RDS
+            # than this reflects (the projector caps what reaches Redis).
+            "reviews_deep": vid in reviews_deep_map,
             "menu_photos": vid in menu_photos_map,
             "menu_data": vid in menu_data_map,
             "vibe_profile": vid in vibe_profile_map,

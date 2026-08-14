@@ -135,6 +135,12 @@ test-unit:
 		tests/test_menu_item_lifecycle.py \
 		tests/test_source_media_type_migration.py \
 		tests/test_promoter_event_visibility.py \
+		tests/test_reviews_deep_migration.py \
+		tests/test_review_crawl_budget_dao.py \
+		tests/test_apify_gmaps_reviews_client.py \
+		tests/test_redis_projection_reviews_deep.py \
+		tests/test_deep_review_crawl_service.py \
+		tests/test_admin_jobs_run_record.py \
 		-v
 
 test-integration:

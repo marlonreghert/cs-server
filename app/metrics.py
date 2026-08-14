@@ -1637,6 +1637,63 @@ CRAWL_VENUE_ATTRIBUTION_TOTAL = Counter(
 )
 
 # =============================================================================
+# DEEP REVIEW CORPUS (plans/260813_deep-review-corpus.md)
+# =============================================================================
+
+# Individual reviews, by what happened to each one this run. `out_of_window`
+# and `duplicate` are NOT errors — an actor call correctly returning reviews
+# older than the window, or reviews already stored, is the incremental-cursor
+# design working, not failing.
+DEEP_REVIEWS_FETCHED_TOTAL = Counter(
+    "deep_reviews_fetched_total",
+    "Deep-review-corpus reviews processed, by outcome",
+    ["outcome"],
+    # outcome: stored, duplicate, out_of_window
+)
+
+# Per-venue outcome of a deep review crawl. `truncated` is additive with `ok`
+# semantics (a truncated venue still stored what it could) — watched
+# separately because "we have 6 months for this venue" must never be assumed
+# when the per-venue cap, not the window, is what stopped the fetch.
+DEEP_REVIEW_CRAWL_VENUES_TOTAL = Counter(
+    "deep_review_crawl_venues_total",
+    "Deep review crawl venues processed, by outcome",
+    ["outcome"],
+    # outcome: ok, skipped_no_place_id, truncated, error, budget_stopped
+)
+
+# The number that maps to money: every review actually billed by Apify this
+# run (the actor's returned count, mirroring CrawlBudgetDao's own "actual
+# billed count, not the requested cap" discipline).
+DEEP_REVIEW_CRAWL_COST_USD_TOTAL = Counter(
+    "deep_review_crawl_cost_usd_total",
+    "Cumulative USD spent on the deep review crawl (billed reviews x apify_review_cost_usd)",
+)
+
+# Sampled after every local-budget gate check (spend or refusal) — a
+# dashboard shows the SAME number the next gate check will compare against,
+# mirroring CRAWL_BUDGET_REMAINING's own reasoning.
+DEEP_REVIEW_BUDGET_REMAINING = Gauge(
+    "deep_review_budget_remaining",
+    "Reviews remaining in this calendar month's deep-review-crawl budget",
+)
+
+DEEP_REVIEW_CRAWL_DURATION_SECONDS = Histogram(
+    "deep_review_crawl_duration_seconds",
+    "Deep review crawl run duration in seconds",
+    buckets=(1.0, 5.0, 15.0, 30.0, 60.0, 120.0, 300.0, 600.0, 1800.0),
+)
+
+# Set by the projector (RedisProjectionService), not the crawl service: how
+# many venues carry a projected deep-review slice in Redis right now — the
+# number that matters for the "one way this feature could hurt production"
+# memory risk (see reviews_deep_projection_max in app/config.py).
+DEEP_REVIEWS_PROJECTED_VENUES = Gauge(
+    "deep_reviews_projected_venues",
+    "Venues with a deep-review projection slice currently in Redis",
+)
+
+# =============================================================================
 # APPLICATION INFO
 # =============================================================================
 
