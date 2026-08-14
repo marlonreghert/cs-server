@@ -56,6 +56,7 @@ from app.metrics import (
     DEEP_REVIEWS_FETCHED_TOTAL,
 )
 from app.models.venue_review import VenueReview, VenueReviewsDeep
+from app.services.pipeline_run_registry import new_run_id
 
 logger = logging.getLogger(__name__)
 
@@ -84,12 +85,34 @@ class DeepReviewCrawlService:
         budget_dao: ReviewCrawlBudgetDao,
         account_usage_client,
         now_fn=None,
+        run_record_store=None,
     ):
         self.repo = repo  # VenueRepository (RDS system of record + Redis serving)
         self.apify_client = apify_client
         self.budget_dao = budget_dao
         self.account_usage_client = account_usage_client
         self._now = now_fn or (lambda: datetime.now(timezone.utc))
+        # Same pattern as VenuePhotoArchiveService.get_run_record/_save_run_
+        # record: an in-memory dict by default (this deployment is one
+        # process, no worker fan-out — see that service's own docstring),
+        # injectable so a future shared store can back both without either
+        # service inventing a second pattern. A lost record must never fail
+        # a run that already spent money — see _save_run_record.
+        self._records = run_record_store if run_record_store is not None else {}
+
+    # ── run records (GET /admin/jobs/runs/{job_id}) ──────────────────────────
+    def get_run_record(self, job_id: str) -> Optional[dict]:
+        try:
+            return self._records.get(job_id)
+        except Exception as e:
+            logger.warning(f"[DeepReviewCrawl] run record read failed: {e}")
+            return None
+
+    def _save_run_record(self, job_id: str, record: dict) -> None:
+        try:
+            self._records[job_id] = record
+        except Exception as e:
+            logger.warning(f"[DeepReviewCrawl] run record write failed: {e}")
 
     # ── candidate resolution ─────────────────────────────────────────────────
     def resolve_candidates(
@@ -190,14 +213,23 @@ class DeepReviewCrawlService:
 
     # ── run (spends money, gated) ────────────────────────────────────────────
     async def run(
-        self, venue_ids: Optional[list[str]] = None, filter_spec: Optional[dict] = None
+        self,
+        venue_ids: Optional[list[str]] = None,
+        filter_spec: Optional[dict] = None,
+        job_id: Optional[str] = None,
     ) -> dict:
+        # The job id IS the run id, mirroring VenuePhotoArchiveService.run:
+        # admin_trigger_router mints one at trigger time and threads it
+        # through `cfg["job_id"]`; a caller with none (a direct/test call)
+        # gets a fresh time-ordered one rather than an unqueryable run.
+        job_id = job_id or new_run_id(self._now())
         start = time.perf_counter()
         selection = self.resolve_candidates(venue_ids, filter_spec)
         for _ in selection.skipped_no_place_id:
             DEEP_REVIEW_CRAWL_VENUES_TOTAL.labels(outcome="skipped_no_place_id").inc()
 
         summary = {
+            "job_id": job_id,
             "outcome": "ok",
             "stored_venues": [],
             "truncated_venues": [],
@@ -211,19 +243,24 @@ class DeepReviewCrawlService:
         candidates = list(selection.candidates)
         if not candidates:
             DEEP_REVIEW_CRAWL_DURATION_SECONDS.observe(time.perf_counter() - start)
+            summary["duration_seconds"] = round(time.perf_counter() - start, 2)
+            self._save_run_record(job_id, summary)
             return summary
 
         year_month = ReviewCrawlBudgetDao.current_year_month_utc(self._now())
 
         # Gate 1, up front: a monthly budget already exhausted means no actor
         # run is ever started (plan scenario: "The budget is checked before
-        # the paid call").
+        # the paid call"). This is the run a budget-stopped operator most
+        # needs to retrieve later — persisted here, not only on the happy path.
         if self._local_remaining(year_month) <= 0:
             summary["outcome"] = "budget_stopped"
             summary["budget_stopped"] = True
             summary["not_reached_venues"] = list(candidates)
             DEEP_REVIEW_BUDGET_REMAINING.set(max(self._local_remaining(year_month), 0))
             DEEP_REVIEW_CRAWL_DURATION_SECONDS.observe(time.perf_counter() - start)
+            summary["duration_seconds"] = round(time.perf_counter() - start, 2)
+            self._save_run_record(job_id, summary)
             return summary
 
         batch_size = max(1, settings.reviews_deep_batch_size)
@@ -302,7 +339,10 @@ class DeepReviewCrawlService:
             summary["not_reached_venues"] or summary["failed_venues"]
         ):
             summary["outcome"] = "partial"
-        DEEP_REVIEW_CRAWL_DURATION_SECONDS.observe(time.perf_counter() - start)
+        duration = time.perf_counter() - start
+        DEEP_REVIEW_CRAWL_DURATION_SECONDS.observe(duration)
+        summary["duration_seconds"] = round(duration, 2)
+        self._save_run_record(job_id, summary)
         return summary
 
     # ── merge / dedup / window / cap ─────────────────────────────────────────

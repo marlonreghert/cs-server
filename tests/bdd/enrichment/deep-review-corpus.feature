@@ -64,6 +64,18 @@ Feature: Capture a deep review corpus for operator-selected venues
     Then no actor run is started
     And the run reports that the budget stopped it
 
+  Scenario: A batch is refused when it would leave less than the reserved Apify headroom
+    Given the shared Apify account headroom would fall below the reserved minimum after this batch
+    When the operator runs a deep review crawl
+    Then no actor run is started
+    And the run reports that the budget stopped it
+
+  Scenario: An Apify usage lookup failure refuses the batch rather than letting it pass
+    Given the Apify account usage lookup fails
+    When the operator runs a deep review crawl
+    Then no actor run is started
+    And the run reports that the budget stopped it
+
   Scenario: A run that would cross the budget stops at the boundary
     Given the remaining monthly budget covers only the first two of five venues
     When the operator runs a deep review crawl for the five venues

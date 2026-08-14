@@ -138,6 +138,7 @@ test-unit:
 		tests/test_apify_gmaps_reviews_client.py \
 		tests/test_redis_projection_reviews_deep.py \
 		tests/test_deep_review_crawl_service.py \
+		tests/test_admin_jobs_run_record.py \
 		-v
 
 test-integration:

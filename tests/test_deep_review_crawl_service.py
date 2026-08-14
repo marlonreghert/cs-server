@@ -434,3 +434,91 @@ class TestPerVenueIsolation:
         result = _run(service.run(venue_ids=["v1", "v2", "v3"]))
         assert set(result["stored_venues"]) == {"v1", "v3"}
         assert result["failed_venues"] == ["v2"]
+
+
+# ── run records: GET /admin/jobs/runs/{job_id} must be able to find these ──
+class TestRunRecords:
+    """plan Desired Behavior #6 requires a run to report exactly which
+    venues it did not reach; the job is launched as a fire-and-forget
+    background task that returns only a job_id, so that report is USELESS
+    unless the summary can be retrieved by that id afterwards. Mirrors
+    VenuePhotoArchiveService's get_run_record/_save_run_record shape exactly
+    (see admin_trigger_router._RUN_RECORD_SERVICE_ATTRS)."""
+
+    def test_a_completed_run_is_retrievable_by_its_job_id(self, service, repo, apify):
+        _seed(repo, "v1")
+        apify.program("place_v1", [_raw("r0", "A", "t", NOW - timedelta(days=1))])
+        result = _run(service.run(venue_ids=["v1"], job_id="job-abc"))
+        assert result["job_id"] == "job-abc"
+
+        record = service.get_run_record("job-abc")
+        assert record is not None
+        assert record["job_id"] == "job-abc"
+        assert record["stored_venues"] == ["v1"]
+        assert "duration_seconds" in record
+
+    def test_a_budget_stopped_run_is_still_retrievable(self, service, repo, apify, budget_dao):
+        """The case the operator most needs: a run that never even started
+        must not vanish into an unqueryable job_id — the whole point of
+        persisting a record on every exit path, not only the happy one."""
+        _seed(repo, "v1")
+        year_month = ReviewCrawlBudgetDao.current_year_month_utc(NOW)
+        budget_dao.increment_month(year_month, settings.reviews_deep_monthly_review_budget)
+
+        result = _run(service.run(venue_ids=["v1"], job_id="job-budget-stopped"))
+        assert result["outcome"] == "budget_stopped"
+
+        record = service.get_run_record("job-budget-stopped")
+        assert record is not None
+        assert record["outcome"] == "budget_stopped"
+        assert record["not_reached_venues"] == ["v1"]
+
+    def test_an_account_headroom_refusal_is_also_retrievable(self, repo, apify, budget_dao):
+        account_usage = _FakeAccountUsage(headroom=settings.reviews_deep_reserved_headroom_usd)
+        svc = DeepReviewCrawlService(
+            repo=repo, apify_client=apify, budget_dao=budget_dao,
+            account_usage_client=account_usage, now_fn=lambda: NOW,
+        )
+        _seed(repo, "v1")
+        apify.program("place_v1", [_raw("r0", "A", "t", NOW - timedelta(days=1))])
+        result = _run(svc.run(venue_ids=["v1"], job_id="job-headroom-stopped"))
+        assert result["outcome"] == "partial"
+
+        record = svc.get_run_record("job-headroom-stopped")
+        assert record is not None
+        assert record["not_reached_venues"] == ["v1"]
+
+    def test_no_record_for_an_unknown_job_id(self, service):
+        assert service.get_run_record("no-such-job") is None
+
+    def test_a_caller_that_omits_job_id_still_gets_a_retrievable_record(self, service, repo, apify):
+        """Mirrors VenuePhotoArchiveService.run: a caller with no job_id (a
+        direct/test call, not routed through admin_trigger_router's minted
+        id) still gets a real, retrievable run rather than one silently
+        discarded."""
+        _seed(repo, "v1")
+        apify.program("place_v1", [_raw("r0", "A", "t", NOW - timedelta(days=1))])
+        result = _run(service.run(venue_ids=["v1"]))
+        assert result["job_id"]
+        assert service.get_run_record(result["job_id"]) is not None
+
+    def test_a_run_record_store_write_failure_never_fails_the_run(self, repo, apify, budget_dao, account_usage):
+        """Mirrors VenuePhotoArchiveService's own reasoning: a lost record
+        must never fail a run that already spent money / already decided an
+        outcome."""
+        class _BrokenStore:
+            def __setitem__(self, key, value):
+                raise ConnectionError("store unavailable")
+
+            def get(self, key):
+                return None
+
+        svc = DeepReviewCrawlService(
+            repo=repo, apify_client=apify, budget_dao=budget_dao,
+            account_usage_client=account_usage, now_fn=lambda: NOW,
+            run_record_store=_BrokenStore(),
+        )
+        _seed(repo, "v1")
+        apify.program("place_v1", [_raw("r0", "A", "t", NOW - timedelta(days=1))])
+        result = _run(svc.run(venue_ids=["v1"]))
+        assert result["stored_venues"] == ["v1"]

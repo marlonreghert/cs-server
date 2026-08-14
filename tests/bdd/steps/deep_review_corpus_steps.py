@@ -440,6 +440,36 @@ def step_run_reports_budget_stopped(context):
     assert context.run_result["budget_stopped"] is True, context.run_result
 
 
+# ── Scenario: a batch is refused when it would leave less than the reserved
+# Apify headroom, even though the LOCAL review budget still allows it (gate 2,
+# not gate 1 — the local counter is untouched here) ─────────────────────────
+@given("the shared Apify account headroom would fall below the reserved minimum after this batch")
+def step_insufficient_account_headroom(context):
+    vid = "venue-m"
+    context.venue_id = vid
+    _seed_venue(context, vid)
+    # headroom == the reserve exactly: headroom - batch_cost is ALWAYS < the
+    # reserve as long as the batch costs anything at all, so this refuses
+    # regardless of the cap/cost settings in effect for this scenario.
+    context.fake_account_usage.headroom_usd = settings.reviews_deep_reserved_headroom_usd
+    context.fake_apify_reviews.program(
+        _place_id(vid), [_raw_item(f"{vid}-r0", "A", "t", context.now - timedelta(days=1))]
+    )
+
+
+# ── Scenario: an Apify usage lookup failure refuses the batch rather than
+# letting it pass — "unknown headroom" must never be read as "safe" ────────
+@given("the Apify account usage lookup fails")
+def step_account_usage_lookup_fails(context):
+    vid = "venue-n"
+    context.venue_id = vid
+    _seed_venue(context, vid)
+    context.fake_account_usage.fail = True
+    context.fake_apify_reviews.program(
+        _place_id(vid), [_raw_item(f"{vid}-r0", "A", "t", context.now - timedelta(days=1))]
+    )
+
+
 # ── Scenario: a run that would cross the budget stops at the boundary ──────
 @given("the remaining monthly budget covers only the first two of five venues")
 def step_budget_covers_first_two_of_five(context):

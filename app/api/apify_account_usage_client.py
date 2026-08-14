@@ -14,6 +14,17 @@ Two calls, per Apify's REST API: `GET /v2/users/me` for the account's
 `totalUsageCreditsUsdBeforeVolumeDiscount` (usage already billed this
 cycle). Both are read-only and spend nothing themselves.
 
+Both field names are CONFIRMED, not assumed: read directly off the live prod
+Apify account on 2026-08-13 (STARTER plan, `maxMonthlyUsageUsd: 29`, the
+2026-07-29 -> 2026-08-28 cycle showing `totalUsageCreditsUsdBeforeVolumeDiscount`
+of $12.45 — the exact numbers plans/260813_deep-review-corpus.md's Evidence
+section cites). This is unlike the reviews actor's dataset item shape
+(app/api/apify_gmaps_reviews_client.py), which genuinely is unverified pending
+the plan's 2b one-venue trial. The defensive `limit is None or used is None`
+fallback below stays regardless — a confirmed shape today does not guarantee
+Apify never adds/renames a field later, and "unknown headroom" must still
+refuse rather than guess.
+
 `get_headroom_usd` returns None on ANY failure — a bad token, a timeout, an
 unexpected response shape. The caller MUST treat None as ZERO headroom and
 refuse the batch: an unknown headroom is the one case where guessing "it's

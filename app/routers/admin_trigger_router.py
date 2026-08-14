@@ -338,7 +338,9 @@ JOB_REGISTRY = {
         "service_attr": "deep_review_crawl_service",
         "unavailable_detail": "Deep review crawl not configured (needs Apify API token)",
         "runner": lambda c, cfg: c.deep_review_crawl_service.run(
-            venue_ids=parse_venue_ids(cfg.get("venue_ids")) or None, filter_spec=cfg.get("filter"),
+            venue_ids=parse_venue_ids(cfg.get("venue_ids")) or None,
+            filter_spec=cfg.get("filter"),
+            job_id=cfg.get("job_id"),
         ),
     },
 }
@@ -567,14 +569,36 @@ async def estimate_photo_archive(config: Optional[dict] = None):
         raise HTTPException(status_code=400, detail=str(e))
 
 
+# Container attributes of every job-type service that persists its own run
+# records (get_run_record(job_id) -> dict | None, same shape as
+# VenuePhotoArchiveService's — see that service's "run records" section).
+# GET /admin/jobs/runs/{job_id} tries each in turn: a job_id is opaque to the
+# caller (it does not encode which job type minted it), so the lookup must
+# not assume a single owning service. Extend this tuple, not the endpoint
+# itself, when a new job type gains its own run-record store.
+_RUN_RECORD_SERVICE_ATTRS = ("venue_photo_archive_service", "deep_review_crawl_service")
+
+
 @router.get("/jobs/runs/{job_id}")
 async def get_job_run(job_id: str):
-    """What a specific run did, by the job id its trigger returned."""
+    """What a specific run did, by the job id its trigger returned.
+
+    Tries every _RUN_RECORD_SERVICE_ATTRS service in order and returns the
+    first hit. A service that is entirely unconfigured (e.g. no Apify token,
+    no Google Places key) is skipped rather than raising — with more than one
+    possible source, "not configured" and "no record under this id" are no
+    longer the same 503 one owning service used to report; both now correctly
+    resolve to a plain 404.
+    """
     require()
-    record = _photo_archive_service().get_run_record(job_id)
-    if record is None:
-        raise HTTPException(status_code=404, detail=f"No run record for {job_id}")
-    return record
+    for attr in _RUN_RECORD_SERVICE_ATTRS:
+        service = getattr(_container, attr, None)
+        if service is None:
+            continue
+        record = service.get_run_record(job_id)
+        if record is not None:
+            return record
+    raise HTTPException(status_code=404, detail=f"No run record for {job_id}")
 
 
 @router.post("/venues/by-address")
