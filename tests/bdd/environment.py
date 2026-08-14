@@ -8,6 +8,7 @@ Builds a self-contained FastAPI app per scenario with:
 """
 from __future__ import annotations
 
+import asyncio
 import importlib
 import sys
 from typing import Any
@@ -38,11 +39,18 @@ class _ProgrammableBestTime:
         self.programmed_week_forecast: Any = None
         self.programmed_venue_filter: Any = None
         self.programmed_inventory_pages: list[list[dict]] | None = None
+        # Optional artificial delay before add_venue_to_account resolves —
+        # lets a scenario observe a job while its BestTime create is still
+        # in flight (tests/bdd/api/add-venue-async-job.feature). 0 (default)
+        # skips the sleep entirely so every other scenario is unaffected.
+        self.programmed_add_venue_delay_seconds: float = 0.0
 
     async def add_venue_to_account(self, venue_name: str, venue_address: str):
         self.calls.append(
             {"method": "add_venue_to_account", "venue_name": venue_name, "venue_address": venue_address}
         )
+        if self.programmed_add_venue_delay_seconds:
+            await asyncio.sleep(self.programmed_add_venue_delay_seconds)
         if self.programmed_add_venue is None:
             raise RuntimeError("BDD harness: programmed_add_venue not set")
         if isinstance(self.programmed_add_venue, Exception):
@@ -149,6 +157,11 @@ def _build_test_app(context) -> None:
         # a /venues/filter transport failure must not poison every later
         # scenario's filter call in the same behave process.
         context.besttime_filter_http_error = None
+        # Same leak risk for add_venue_async_job_steps._start_job_via_http's
+        # "a Given already programmed something special" marker: a scenario
+        # whose Given raises before a job start consumes the flag must not
+        # leave it stuck True for the next scenario's first job start.
+        context._besttime_special_programmed = False
         context.add_venue_handler = AddVenueHandler(
             venue_dao=context.venue_dao,
             besttime_api=context.besttime,
@@ -166,6 +179,13 @@ def _build_test_app(context) -> None:
             budget_service=context.budget_service,
         )
 
+        from app.services.add_venue_job_service import AddVenueJobService
+
+        context.add_venue_job_service = AddVenueJobService(
+            handler=context.add_venue_handler,
+            redis_client=context.fake_redis,
+        )
+
         container = MagicMock()
         container.venue_dao = context.venue_dao
         container.pipeline_repository = context.venue_dao
@@ -175,6 +195,7 @@ def _build_test_app(context) -> None:
         container.add_venue_handler = context.add_venue_handler
         container.venue_budget_service = context.budget_service
         container.batch_add_service = context.batch_add_service
+        container.add_venue_job_service = context.add_venue_job_service
         try:
             set_admin_container(container)
         except Exception:
@@ -189,7 +210,19 @@ def _build_test_app(context) -> None:
         pass
 
     context.app = app
+    # Entered as a context manager (not bare TestClient(app)) so the anyio
+    # BlockingPortal — and the event loop it runs — persists for the whole
+    # scenario instead of being recreated (and torn down) for every single
+    # request. Without this, an asyncio.create_task() background job started
+    # by one request is permanently orphaned the moment that request's
+    # response is sent — its owning loop is gone — so it can never be
+    # observed reaching a later state by a subsequent request/poll (see
+    # tests/bdd/steps/add_venue_async_job_steps.py's step_batch_job_running
+    # docstring for the concrete failure this caused). A persistent portal
+    # matches how the real app actually runs (uvicorn: one process-lifetime
+    # event loop), so this is a correctness fix, not just a workaround.
     context.client = TestClient(app)
+    context.client.__enter__()
 
 
 def before_feature(context, feature):
@@ -329,8 +362,12 @@ def _build_rds_layer(context) -> None:
 
 
 def after_scenario(context, scenario):
+    # __exit__ (not close()) — the client was entered as a context manager
+    # in _build_test_app to get a persistent portal; __exit__ is what tears
+    # that portal (and its event loop / lifespan) down. Plain close() only
+    # closes the underlying httpx transport and would leak the portal.
     try:
-        context.client.close()
+        context.client.__exit__(None, None, None)
     except Exception:
         pass
     # Drop cached app modules with mutable global state so the next scenario

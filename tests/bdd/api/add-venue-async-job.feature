@@ -1,4 +1,3 @@
-@wip
 Feature: Add venue as a pollable background job
   The synchronous add-venue call can legitimately run for minutes once BestTime
   pacing, the BestTime create timeout, Google enrichment, and Instagram

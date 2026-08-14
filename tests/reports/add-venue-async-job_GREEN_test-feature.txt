@@ -1,0 +1,467 @@
+.venv/bin/python -m behave "tests/bdd/api/add-venue-async-job.feature"
+USING RUNNER: behave.runner:Runner
+Feature: Add venue as a pollable background job # tests/bdd/api/add-venue-async-job.feature:1
+  The synchronous add-venue call can legitimately run for minutes once BestTime
+  pacing, the BestTime create timeout, Google enrichment, and Instagram
+  discovery are all accounted for, and no fixed HTTP timeout can safely bound
+  that. Operators must be able to start an add and poll for its outcome
+  instead of holding one HTTP request open for the whole duration, without
+  losing any of the existing outcome detail the synchronous endpoint reports.
+  Operators must also be able to see recent add attempts and their outcomes —
+  including a failure's reason — without having kept a poll open on them.
+  Feature: Add venue as a pollable background job  # tests/bdd/api/add-venue-async-job.feature:1
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: Starting an add job returns immediately with a job id                                                                                            # tests/bdd/api/add-venue-async-job.feature:17
+    Given the monthly new venue quota is configured to 500                                                                                                   # tests/bdd/steps/add_venue_by_address_steps.py:83
+    And the manual add reserve is configured to 10                                                                                                           # tests/bdd/steps/add_venue_by_address_steps.py:93
+    And the current calendar month is "2026-05"                                                                                                              # tests/bdd/steps/add_venue_by_address_steps.py:102
+    And every add-venue request includes "venue_name", "venue_address", "venue_lat", and "venue_lng" sourced from a Google Places candidate                  # tests/bdd/steps/add_venue_by_address_steps.py:110
+    Given the BestTime account inventory does not contain the submitted address                                                                              # tests/bdd/steps/add_venue_by_address_steps.py:122
+    And BestTime's response to the create call is delayed                                                                                                    # tests/bdd/steps/add_venue_async_job_steps.py:170
+    When the operator starts an add job for venue_name "Bar do Joao", venue_address "Rua das Flores 123, Recife - PE", venue_lat -8.05, and venue_lng -34.88 # tests/bdd/steps/add_venue_async_job_steps.py:301
+LOG_INFO:app.dao.redis_venue_dao: Getting nearby venues
+LOG_INFO:httpx: HTTP Request: POST http://testserver/admin/venues/add-job "HTTP/1.1 202 Accepted"
+LOG_INFO:app.dao.redis_venue_dao: Finished getting nearby venues: found 0
+    Then the start response status must be 202                                                                                                               # tests/bdd/steps/add_venue_async_job_steps.py:376
+    And the start response body must include a "job_id"                                                                                                      # tests/bdd/steps/add_venue_async_job_steps.py:384
+    And the start response body must indicate status "running"                                                                                               # tests/bdd/steps/add_venue_async_job_steps.py:390
+    And the start response must not wait for the BestTime create to resolve                                                                                  # tests/bdd/steps/add_venue_async_job_steps.py:396
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: Polling a job before it finishes reports it is still running                                                                    # tests/bdd/api/add-venue-async-job.feature:26
+    Given the monthly new venue quota is configured to 500                                                                                  # tests/bdd/steps/add_venue_by_address_steps.py:83
+    And the manual add reserve is configured to 10                                                                                          # tests/bdd/steps/add_venue_by_address_steps.py:93
+    And the current calendar month is "2026-05"                                                                                             # tests/bdd/steps/add_venue_by_address_steps.py:102
+    And every add-venue request includes "venue_name", "venue_address", "venue_lat", and "venue_lng" sourced from a Google Places candidate # tests/bdd/steps/add_venue_by_address_steps.py:110
+    Given the BestTime account inventory does not contain the submitted address                                                             # tests/bdd/steps/add_venue_by_address_steps.py:122
+    And BestTime's response to the create call is delayed                                                                                   # tests/bdd/steps/add_venue_async_job_steps.py:170
+    And the operator has started an add job for a new venue                                                                                 # tests/bdd/steps/add_venue_async_job_steps.py:328
+LOG_INFO:app.dao.redis_venue_dao: Getting nearby venues
+LOG_INFO:httpx: HTTP Request: POST http://testserver/admin/venues/add-job "HTTP/1.1 202 Accepted"
+LOG_INFO:app.dao.redis_venue_dao: Finished getting nearby venues: found 0
+    When the operator polls the job before BestTime responds                                                                                # tests/bdd/steps/add_venue_async_job_steps.py:339
+LOG_INFO:httpx: HTTP Request: GET http://testserver/admin/venues/add-job/7ddfc5bc15404838b5b0d919d09865a8 "HTTP/1.1 200 OK"
+    Then the poll response status must be 200                                                                                               # tests/bdd/steps/add_venue_async_job_steps.py:415
+    And the poll response body must indicate status "running"                                                                               # tests/bdd/steps/add_venue_async_job_steps.py:423
+    And the poll response body must not yet include a "result"                                                                              # tests/bdd/steps/add_venue_async_job_steps.py:429
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: Polling a finished job reports the same outcome the synchronous add would have                                                                       # tests/bdd/api/add-venue-async-job.feature:35
+    Given the monthly new venue quota is configured to 500                                                                                                       # tests/bdd/steps/add_venue_by_address_steps.py:83
+    And the manual add reserve is configured to 10                                                                                                               # tests/bdd/steps/add_venue_by_address_steps.py:93
+    And the current calendar month is "2026-05"                                                                                                                  # tests/bdd/steps/add_venue_by_address_steps.py:102
+    And every add-venue request includes "venue_name", "venue_address", "venue_lat", and "venue_lng" sourced from a Google Places candidate                      # tests/bdd/steps/add_venue_by_address_steps.py:110
+    Given the BestTime account inventory does not contain the submitted address                                                                                  # tests/bdd/steps/add_venue_by_address_steps.py:122
+    And the operator has started an add job for venue_name "Bar do Joao", venue_address "Rua das Flores 123, Recife - PE", venue_lat -8.05, and venue_lng -34.88 # tests/bdd/steps/add_venue_async_job_steps.py:301
+LOG_INFO:app.dao.redis_venue_dao: Getting nearby venues
+LOG_INFO:httpx: HTTP Request: POST http://testserver/admin/venues/add-job "HTTP/1.1 202 Accepted"
+LOG_INFO:app.dao.redis_venue_dao: Finished getting nearby venues: found 0
+    When the job finishes and the operator polls it                                                                                                              # tests/bdd/steps/add_venue_async_job_steps.py:344
+LOG_INFO:httpx: HTTP Request: GET http://testserver/admin/venues/add-job/7d4c86d6ad6a47b1b125d5befa92c7f0 "HTTP/1.1 200 OK"
+LOG_INFO:httpx: HTTP Request: GET http://testserver/admin/venues/add-job/7d4c86d6ad6a47b1b125d5befa92c7f0 "HTTP/1.1 200 OK"
+LOG_INFO:httpx: HTTP Request: GET http://testserver/admin/venues/add-job/7d4c86d6ad6a47b1b125d5befa92c7f0 "HTTP/1.1 200 OK"
+LOG_INFO:httpx: HTTP Request: GET http://testserver/admin/venues/add-job/7d4c86d6ad6a47b1b125d5befa92c7f0 "HTTP/1.1 200 OK"
+    Then the poll response status must be 200                                                                                                                    # tests/bdd/steps/add_venue_async_job_steps.py:415
+    And the poll response body must indicate status "done"                                                                                                       # tests/bdd/steps/add_venue_async_job_steps.py:423
+    And the poll response "http_status" must be 201                                                                                                              # tests/bdd/steps/add_venue_async_job_steps.py:435
+    And the poll response "result" must include the returned "venue_id"                                                                                          # tests/bdd/steps/add_venue_async_job_steps.py:443
+    And the poll response "result" must include "source" equal to "besttime_new"                                                                                 # tests/bdd/steps/add_venue_async_job_steps.py:449
+    And a metric "add_venue_by_address_total{result=\"created\"}" must be incremented                                                                            # tests/bdd/steps/add_venue_by_address_steps.py:780
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: Polling a finished job that recovered from a BestTime timeout still reports the recovery                                        # tests/bdd/api/add-venue-async-job.feature:46
+    Given the monthly new venue quota is configured to 500                                                                                  # tests/bdd/steps/add_venue_by_address_steps.py:83
+    And the manual add reserve is configured to 10                                                                                          # tests/bdd/steps/add_venue_by_address_steps.py:93
+    And the current calendar month is "2026-05"                                                                                             # tests/bdd/steps/add_venue_by_address_steps.py:102
+    And every add-venue request includes "venue_name", "venue_address", "venue_lat", and "venue_lng" sourced from a Google Places candidate # tests/bdd/steps/add_venue_by_address_steps.py:110
+    Given a venue create that exceeds the BestTime timeout                                                                                  # tests/bdd/steps/add_venue_timeout_recovery_steps.py:45
+    And the venue appears in the BestTime account inventory                                                                                 # tests/bdd/steps/add_venue_timeout_recovery_steps.py:52
+    And the operator has started an add job for a new venue                                                                                 # tests/bdd/steps/add_venue_async_job_steps.py:328
+LOG_INFO:app.dao.redis_venue_dao: Getting nearby venues
+LOG_INFO:httpx: HTTP Request: POST http://testserver/admin/venues/add-job "HTTP/1.1 202 Accepted"
+LOG_INFO:app.dao.redis_venue_dao: Finished getting nearby venues: found 0
+LOG_WARNING:app.handlers.add_venue_handler: [AddVenueHandler] BestTime create timed out after 0.0s for 'Laca Burguer Boa Viagem'; reconciling against the account inventory
+LOG_WARNING:app.handlers.add_venue_handler: [AddVenueHandler] recovered timed-out create: ven_recovered_timeout_001 ('LAÇA BURGUER, BOA VIAGEM') found in the account inventory after a 0.0s create timeout; completing the add
+    When the job finishes and the operator polls it                                                                                         # tests/bdd/steps/add_venue_async_job_steps.py:344
+LOG_INFO:httpx: HTTP Request: GET http://testserver/admin/venues/add-job/b16ea05fd89b45bbb7e084d204571396 "HTTP/1.1 200 OK"
+    Then the poll response "http_status" must be 201                                                                                        # tests/bdd/steps/add_venue_async_job_steps.py:435
+    And the poll response "result" must indicate "recovered_from_timeout" is true                                                           # tests/bdd/steps/add_venue_async_job_steps.py:457
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: Polling a finished job that matched via geo fallback reports the same decision detail                                           # tests/bdd/api/add-venue-async-job.feature:54
+    Given the monthly new venue quota is configured to 500                                                                                  # tests/bdd/steps/add_venue_by_address_steps.py:83
+    And the manual add reserve is configured to 10                                                                                          # tests/bdd/steps/add_venue_by_address_steps.py:93
+    And the current calendar month is "2026-05"                                                                                             # tests/bdd/steps/add_venue_by_address_steps.py:102
+    And every add-venue request includes "venue_name", "venue_address", "venue_lat", and "venue_lng" sourced from a Google Places candidate # tests/bdd/steps/add_venue_by_address_steps.py:110
+    Given the BestTime account inventory already contains a venue matching the submitted coordinates but not the submitted address          # tests/bdd/steps/add_venue_async_job_steps.py:175
+    And the operator has started an add job for a new venue                                                                                 # tests/bdd/steps/add_venue_async_job_steps.py:328
+LOG_INFO:app.dao.redis_venue_dao: Getting nearby venues
+LOG_INFO:httpx: HTTP Request: POST http://testserver/admin/venues/add-job "HTTP/1.1 202 Accepted"
+LOG_INFO:app.dao.redis_venue_dao: Finished getting nearby venues: found 0
+    When the job finishes and the operator polls it                                                                                         # tests/bdd/steps/add_venue_async_job_steps.py:344
+LOG_INFO:httpx: HTTP Request: GET http://testserver/admin/venues/add-job/4d9814520bc645fca5bcca331bab993e "HTTP/1.1 200 OK"
+    Then the poll response "http_status" must be 200                                                                                        # tests/bdd/steps/add_venue_async_job_steps.py:435
+    And the poll response "result" must indicate "matched_via_geo_fallback" with "newly_linked" true                                        # tests/bdd/steps/add_venue_async_job_steps.py:463
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: Polling a finished job that failed reports BestTime's own message                                                               # tests/bdd/api/add-venue-async-job.feature:61
+    Given the monthly new venue quota is configured to 500                                                                                  # tests/bdd/steps/add_venue_by_address_steps.py:83
+    And the manual add reserve is configured to 10                                                                                          # tests/bdd/steps/add_venue_by_address_steps.py:93
+    And the current calendar month is "2026-05"                                                                                             # tests/bdd/steps/add_venue_by_address_steps.py:102
+    And every add-venue request includes "venue_name", "venue_address", "venue_lat", and "venue_lng" sourced from a Google Places candidate # tests/bdd/steps/add_venue_by_address_steps.py:110
+    Given BestTime rejects a venue create with an explanatory message                                                                       # tests/bdd/steps/add_venue_timeout_recovery_steps.py:69
+    And the operator has started an add job for a new venue                                                                                 # tests/bdd/steps/add_venue_async_job_steps.py:328
+LOG_INFO:app.dao.redis_venue_dao: Getting nearby venues
+LOG_INFO:httpx: HTTP Request: POST http://testserver/admin/venues/add-job "HTTP/1.1 202 Accepted"
+LOG_INFO:app.dao.redis_venue_dao: Finished getting nearby venues: found 0
+LOG_ERROR:app.handlers.add_venue_handler: [AddVenueHandler] geo fallback /venues/filter failed: BDD harness: programmed_venue_filter not set
+    When the job finishes and the operator polls it                                                                                         # tests/bdd/steps/add_venue_async_job_steps.py:344
+LOG_INFO:httpx: HTTP Request: GET http://testserver/admin/venues/add-job/8c400f5f790447feb9864927d765f00c "HTTP/1.1 200 OK"
+    Then the poll response "http_status" must be 502                                                                                        # tests/bdd/steps/add_venue_async_job_steps.py:435
+    And the poll response "result" must include the BestTime rejection message                                                              # tests/bdd/steps/add_venue_async_job_steps.py:473
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: Polling an unknown job id                                                                                                       # tests/bdd/api/add-venue-async-job.feature:68
+    Given the monthly new venue quota is configured to 500                                                                                  # tests/bdd/steps/add_venue_by_address_steps.py:83
+    And the manual add reserve is configured to 10                                                                                          # tests/bdd/steps/add_venue_by_address_steps.py:93
+    And the current calendar month is "2026-05"                                                                                             # tests/bdd/steps/add_venue_by_address_steps.py:102
+    And every add-venue request includes "venue_name", "venue_address", "venue_lat", and "venue_lng" sourced from a Google Places candidate # tests/bdd/steps/add_venue_by_address_steps.py:110
+    When the operator polls a job id that was never started                                                                                 # tests/bdd/steps/add_venue_async_job_steps.py:349
+LOG_INFO:httpx: HTTP Request: GET http://testserver/admin/venues/add-job/does-not-exist-job-id "HTTP/1.1 404 Not Found"
+    Then the poll response status must be 404                                                                                               # tests/bdd/steps/add_venue_async_job_steps.py:415
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: Two add jobs for different venues started back to back both complete                                                                                             # tests/bdd/api/add-venue-async-job.feature:72
+    Given the monthly new venue quota is configured to 500                                                                                                                   # tests/bdd/steps/add_venue_by_address_steps.py:83
+    And the manual add reserve is configured to 10                                                                                                                           # tests/bdd/steps/add_venue_by_address_steps.py:93
+    And the current calendar month is "2026-05"                                                                                                                              # tests/bdd/steps/add_venue_by_address_steps.py:102
+    And every add-venue request includes "venue_name", "venue_address", "venue_lat", and "venue_lng" sourced from a Google Places candidate                                  # tests/bdd/steps/add_venue_by_address_steps.py:110
+    Given the BestTime account inventory does not contain either submitted address                                                                                           # tests/bdd/steps/add_venue_async_job_steps.py:165
+    When the operator starts an add job for venue_name "Bar do Joao", venue_address "Rua das Flores 123, Recife - PE", venue_lat -8.05, and venue_lng -34.88                 # tests/bdd/steps/add_venue_async_job_steps.py:301
+LOG_INFO:app.dao.redis_venue_dao: Getting nearby venues
+LOG_INFO:httpx: HTTP Request: POST http://testserver/admin/venues/add-job "HTTP/1.1 202 Accepted"
+LOG_INFO:app.dao.redis_venue_dao: Finished getting nearby venues: found 0
+    And the operator starts a second add job for venue_name "Laca Burguer", venue_address "Av. Conselheiro Aguiar 123, Recife - PE", venue_lat -8.119, and venue_lng -34.904 # tests/bdd/steps/add_venue_async_job_steps.py:315
+LOG_INFO:app.dao.redis_venue_dao: Getting nearby venues
+LOG_INFO:httpx: HTTP Request: POST http://testserver/admin/venues/add-job "HTTP/1.1 202 Accepted"
+LOG_INFO:app.dao.redis_venue_dao: Finished getting nearby venues: found 0
+    Then both jobs must finish with status "done"                                                                                                                            # tests/bdd/steps/add_venue_async_job_steps.py:487
+LOG_INFO:httpx: HTTP Request: GET http://testserver/admin/venues/add-job/c629704e418148b2baf30865aabcdce5 "HTTP/1.1 200 OK"
+LOG_INFO:httpx: HTTP Request: GET http://testserver/admin/venues/add-job/c629704e418148b2baf30865aabcdce5 "HTTP/1.1 200 OK"
+LOG_INFO:httpx: HTTP Request: GET http://testserver/admin/venues/add-job/c629704e418148b2baf30865aabcdce5 "HTTP/1.1 200 OK"
+LOG_INFO:httpx: HTTP Request: GET http://testserver/admin/venues/add-job/c629704e418148b2baf30865aabcdce5 "HTTP/1.1 200 OK"
+LOG_INFO:httpx: HTTP Request: GET http://testserver/admin/venues/add-job/59c966af142e4117a8c0b3b094f7891e "HTTP/1.1 200 OK"
+    And neither job's start response must indicate it was refused as already running                                                                                         # tests/bdd/steps/add_venue_async_job_steps.py:495
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: An add job started while a batch-add job is running still completes                                                             # tests/bdd/api/add-venue-async-job.feature:79
+    Given the monthly new venue quota is configured to 500                                                                                  # tests/bdd/steps/add_venue_by_address_steps.py:83
+    And the manual add reserve is configured to 10                                                                                          # tests/bdd/steps/add_venue_by_address_steps.py:93
+    And the current calendar month is "2026-05"                                                                                             # tests/bdd/steps/add_venue_by_address_steps.py:102
+    And every add-venue request includes "venue_name", "venue_address", "venue_lat", and "venue_lng" sourced from a Google Places candidate # tests/bdd/steps/add_venue_by_address_steps.py:110
+    Given a batch-add job is already running                                                                                                # tests/bdd/steps/add_venue_async_job_steps.py:199
+LOG_INFO:app.dao.redis_venue_dao: Getting nearby venues
+LOG_INFO:httpx: HTTP Request: POST http://testserver/admin/venues/batch-add "HTTP/1.1 202 Accepted"
+LOG_INFO:app.dao.redis_venue_dao: Finished getting nearby venues: found 0
+LOG_INFO:app.services.batch_add_service: [BatchAddService] job 2e32e0e257494b82bbde4606775aa41d done: {'created': 1}
+    When the operator starts an add job for a new venue                                                                                     # tests/bdd/steps/add_venue_async_job_steps.py:328
+LOG_INFO:app.dao.redis_venue_dao: Getting nearby venues
+LOG_INFO:httpx: HTTP Request: POST http://testserver/admin/venues/add-job "HTTP/1.1 202 Accepted"
+LOG_INFO:app.dao.redis_venue_dao: Finished getting nearby venues: found 0
+    Then the add job's start response status must be 202                                                                                    # tests/bdd/steps/add_venue_async_job_steps.py:405
+    And the add job must finish with status "done"                                                                                          # tests/bdd/steps/add_venue_async_job_steps.py:503
+LOG_INFO:httpx: HTTP Request: GET http://testserver/admin/venues/add-job/6be65238fe414764a58e4c2511c6d7fe "HTTP/1.1 200 OK"
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: A just-started job appears in the recent-jobs list as running                                                                   # tests/bdd/api/add-venue-async-job.feature:85
+    Given the monthly new venue quota is configured to 500                                                                                  # tests/bdd/steps/add_venue_by_address_steps.py:83
+    And the manual add reserve is configured to 10                                                                                          # tests/bdd/steps/add_venue_by_address_steps.py:93
+    And the current calendar month is "2026-05"                                                                                             # tests/bdd/steps/add_venue_by_address_steps.py:102
+    And every add-venue request includes "venue_name", "venue_address", "venue_lat", and "venue_lng" sourced from a Google Places candidate # tests/bdd/steps/add_venue_by_address_steps.py:110
+    Given the operator has started an add job for a new venue                                                                               # tests/bdd/steps/add_venue_async_job_steps.py:328
+LOG_INFO:app.dao.redis_venue_dao: Getting nearby venues
+LOG_INFO:httpx: HTTP Request: POST http://testserver/admin/venues/add-job "HTTP/1.1 202 Accepted"
+LOG_INFO:app.dao.redis_venue_dao: Finished getting nearby venues: found 0
+    When the operator lists recent add jobs                                                                                                 # tests/bdd/steps/add_venue_async_job_steps.py:361
+LOG_INFO:httpx: HTTP Request: GET http://testserver/admin/venues/add-jobs/recent?limit=100 "HTTP/1.1 200 OK"
+    Then the recent-jobs response status must be 200                                                                                        # tests/bdd/steps/add_venue_async_job_steps.py:525
+    And the recent-jobs list must include that job with status "running"                                                                    # tests/bdd/steps/add_venue_async_job_steps.py:566
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: A finished created job appears in the recent-jobs list with its outcome                                                                              # tests/bdd/api/add-venue-async-job.feature:91
+    Given the monthly new venue quota is configured to 500                                                                                                       # tests/bdd/steps/add_venue_by_address_steps.py:83
+    And the manual add reserve is configured to 10                                                                                                               # tests/bdd/steps/add_venue_by_address_steps.py:93
+    And the current calendar month is "2026-05"                                                                                                                  # tests/bdd/steps/add_venue_by_address_steps.py:102
+    And every add-venue request includes "venue_name", "venue_address", "venue_lat", and "venue_lng" sourced from a Google Places candidate                      # tests/bdd/steps/add_venue_by_address_steps.py:110
+    Given the BestTime account inventory does not contain the submitted address                                                                                  # tests/bdd/steps/add_venue_by_address_steps.py:122
+    And the operator has started an add job for venue_name "Bar do Joao", venue_address "Rua das Flores 123, Recife - PE", venue_lat -8.05, and venue_lng -34.88 # tests/bdd/steps/add_venue_async_job_steps.py:301
+LOG_INFO:app.dao.redis_venue_dao: Getting nearby venues
+LOG_INFO:httpx: HTTP Request: POST http://testserver/admin/venues/add-job "HTTP/1.1 202 Accepted"
+LOG_INFO:app.dao.redis_venue_dao: Finished getting nearby venues: found 0
+    And the job has finished                                                                                                                                     # tests/bdd/steps/add_venue_async_job_steps.py:356
+LOG_INFO:httpx: HTTP Request: GET http://testserver/admin/venues/add-job/3cdc8754eff74e1a8f3eb77ba1b38eff "HTTP/1.1 200 OK"
+LOG_INFO:httpx: HTTP Request: GET http://testserver/admin/venues/add-job/3cdc8754eff74e1a8f3eb77ba1b38eff "HTTP/1.1 200 OK"
+LOG_INFO:httpx: HTTP Request: GET http://testserver/admin/venues/add-job/3cdc8754eff74e1a8f3eb77ba1b38eff "HTTP/1.1 200 OK"
+LOG_INFO:httpx: HTTP Request: GET http://testserver/admin/venues/add-job/3cdc8754eff74e1a8f3eb77ba1b38eff "HTTP/1.1 200 OK"
+    When the operator lists recent add jobs                                                                                                                      # tests/bdd/steps/add_venue_async_job_steps.py:361
+LOG_INFO:httpx: HTTP Request: GET http://testserver/admin/venues/add-jobs/recent?limit=100 "HTTP/1.1 200 OK"
+    Then the recent-jobs list must include that job with status "done" and outcome "created"                                                                     # tests/bdd/steps/add_venue_async_job_steps.py:546
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: A job BestTime rejected appears in the recent-jobs list with the rejection message as its reason                                # tests/bdd/api/add-venue-async-job.feature:98
+    Given the monthly new venue quota is configured to 500                                                                                  # tests/bdd/steps/add_venue_by_address_steps.py:83
+    And the manual add reserve is configured to 10                                                                                          # tests/bdd/steps/add_venue_by_address_steps.py:93
+    And the current calendar month is "2026-05"                                                                                             # tests/bdd/steps/add_venue_by_address_steps.py:102
+    And every add-venue request includes "venue_name", "venue_address", "venue_lat", and "venue_lng" sourced from a Google Places candidate # tests/bdd/steps/add_venue_by_address_steps.py:110
+    Given BestTime rejects a venue create with an explanatory message                                                                       # tests/bdd/steps/add_venue_timeout_recovery_steps.py:69
+    And the operator has started an add job for a new venue                                                                                 # tests/bdd/steps/add_venue_async_job_steps.py:328
+LOG_INFO:app.dao.redis_venue_dao: Getting nearby venues
+LOG_INFO:app.dao.redis_venue_dao: Finished getting nearby venues: found 0
+LOG_ERROR:app.handlers.add_venue_handler: [AddVenueHandler] geo fallback /venues/filter failed: BDD harness: programmed_venue_filter not set
+LOG_INFO:httpx: HTTP Request: POST http://testserver/admin/venues/add-job "HTTP/1.1 202 Accepted"
+    And the job has finished                                                                                                                # tests/bdd/steps/add_venue_async_job_steps.py:356
+LOG_INFO:httpx: HTTP Request: GET http://testserver/admin/venues/add-job/9c64e1277ab34e2db97d79e4d75df535 "HTTP/1.1 200 OK"
+    When the operator lists recent add jobs                                                                                                 # tests/bdd/steps/add_venue_async_job_steps.py:361
+LOG_INFO:httpx: HTTP Request: GET http://testserver/admin/venues/add-jobs/recent?limit=100 "HTTP/1.1 200 OK"
+    Then the recent-jobs list must include that job showing the BestTime rejection message as its failure reason                            # tests/bdd/steps/add_venue_async_job_steps.py:572
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: A crashed job appears in the recent-jobs list as failed with its error                                                          # tests/bdd/api/add-venue-async-job.feature:105
+    Given the monthly new venue quota is configured to 500                                                                                  # tests/bdd/steps/add_venue_by_address_steps.py:83
+    And the manual add reserve is configured to 10                                                                                          # tests/bdd/steps/add_venue_by_address_steps.py:93
+    And the current calendar month is "2026-05"                                                                                             # tests/bdd/steps/add_venue_by_address_steps.py:102
+    And every add-venue request includes "venue_name", "venue_address", "venue_lat", and "venue_lng" sourced from a Google Places candidate # tests/bdd/steps/add_venue_by_address_steps.py:110
+    Given the add job's runner crashes unexpectedly                                                                                         # tests/bdd/steps/add_venue_async_job_steps.py:254
+    And the operator has started an add job for a new venue                                                                                 # tests/bdd/steps/add_venue_async_job_steps.py:328
+LOG_ERROR:app.services.add_venue_job_service: [AddVenueJobService] job 5deefb2eeff24125b1c7d8d6e60b3134 crashed for 'Laca Burguer Boa Viagem' / 'Av. Conselheiro Aguiar 123, Recife - PE, Brazil': RuntimeError: simulated add-venue crash
+LOG_INFO:httpx: HTTP Request: POST http://testserver/admin/venues/add-job "HTTP/1.1 202 Accepted"
+    And the job has finished                                                                                                                # tests/bdd/steps/add_venue_async_job_steps.py:356
+LOG_INFO:httpx: HTTP Request: GET http://testserver/admin/venues/add-job/5deefb2eeff24125b1c7d8d6e60b3134 "HTTP/1.1 200 OK"
+    When the operator lists recent add jobs                                                                                                 # tests/bdd/steps/add_venue_async_job_steps.py:361
+LOG_INFO:httpx: HTTP Request: GET http://testserver/admin/venues/add-jobs/recent?limit=100 "HTTP/1.1 200 OK"
+    Then the recent-jobs list must include that job with status "failed" and its error text                                                 # tests/bdd/steps/add_venue_async_job_steps.py:556
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: The recent-jobs list never exceeds its cap                                                                                      # tests/bdd/api/add-venue-async-job.feature:112
+    Given the monthly new venue quota is configured to 500                                                                                  # tests/bdd/steps/add_venue_by_address_steps.py:83
+    And the manual add reserve is configured to 10                                                                                          # tests/bdd/steps/add_venue_by_address_steps.py:93
+    And the current calendar month is "2026-05"                                                                                             # tests/bdd/steps/add_venue_by_address_steps.py:102
+    And every add-venue request includes "venue_name", "venue_address", "venue_lat", and "venue_lng" sourced from a Google Places candidate # tests/bdd/steps/add_venue_by_address_steps.py:110
+    Given more add jobs have been started than the recent-jobs cap allows                                                                   # tests/bdd/steps/add_venue_async_job_steps.py:262
+LOG_INFO:app.dao.redis_venue_dao: Getting nearby venues
+LOG_INFO:httpx: HTTP Request: POST http://testserver/admin/venues/add-job "HTTP/1.1 202 Accepted"
+LOG_INFO:app.dao.redis_venue_dao: Finished getting nearby venues: found 0
+LOG_INFO:app.dao.redis_venue_dao: Getting nearby venues
+LOG_INFO:httpx: HTTP Request: POST http://testserver/admin/venues/add-job "HTTP/1.1 202 Accepted"
+LOG_INFO:app.dao.redis_venue_dao: Finished getting nearby venues: found 1
+LOG_INFO:app.dao.redis_venue_dao: Getting nearby venues
+LOG_INFO:app.dao.redis_venue_dao: Finished getting nearby venues: found 1
+LOG_INFO:httpx: HTTP Request: POST http://testserver/admin/venues/add-job "HTTP/1.1 202 Accepted"
+LOG_INFO:app.dao.redis_venue_dao: Getting nearby venues
+LOG_INFO:httpx: HTTP Request: POST http://testserver/admin/venues/add-job "HTTP/1.1 202 Accepted"
+LOG_INFO:app.dao.redis_venue_dao: Finished getting nearby venues: found 1
+LOG_INFO:app.dao.redis_venue_dao: Getting nearby venues
+LOG_INFO:httpx: HTTP Request: POST http://testserver/admin/venues/add-job "HTTP/1.1 202 Accepted"
+LOG_INFO:app.dao.redis_venue_dao: Finished getting nearby venues: found 1
+LOG_INFO:app.dao.redis_venue_dao: Getting nearby venues
+LOG_INFO:httpx: HTTP Request: POST http://testserver/admin/venues/add-job "HTTP/1.1 202 Accepted"
+LOG_INFO:app.dao.redis_venue_dao: Finished getting nearby venues: found 1
+LOG_INFO:app.dao.redis_venue_dao: Getting nearby venues
+LOG_INFO:httpx: HTTP Request: POST http://testserver/admin/venues/add-job "HTTP/1.1 202 Accepted"
+LOG_INFO:app.dao.redis_venue_dao: Finished getting nearby venues: found 1
+LOG_INFO:app.dao.redis_venue_dao: Getting nearby venues
+LOG_INFO:httpx: HTTP Request: POST http://testserver/admin/venues/add-job "HTTP/1.1 202 Accepted"
+LOG_INFO:app.dao.redis_venue_dao: Finished getting nearby venues: found 1
+LOG_INFO:app.dao.redis_venue_dao: Getting nearby venues
+LOG_INFO:httpx: HTTP Request: POST http://testserver/admin/venues/add-job "HTTP/1.1 202 Accepted"
+LOG_INFO:app.dao.redis_venue_dao: Finished getting nearby venues: found 1
+LOG_INFO:app.dao.redis_venue_dao: Getting nearby venues
+LOG_INFO:app.dao.redis_venue_dao: Finished getting nearby venues: found 1
+LOG_INFO:httpx: HTTP Request: POST http://testserver/admin/venues/add-job "HTTP/1.1 202 Accepted"
+LOG_INFO:app.dao.redis_venue_dao: Getting nearby venues
+LOG_INFO:httpx: HTTP Request: POST http://testserver/admin/venues/add-job "HTTP/1.1 202 Accepted"
+LOG_INFO:app.dao.redis_venue_dao: Finished getting nearby venues: found 1
+LOG_INFO:app.dao.redis_venue_dao: Getting nearby venues
+LOG_INFO:httpx: HTTP Request: POST http://testserver/admin/venues/add-job "HTTP/1.1 202 Accepted"
+LOG_INFO:app.dao.redis_venue_dao: Finished getting nearby venues: found 1
+LOG_INFO:app.dao.redis_venue_dao: Getting nearby venues
+LOG_INFO:httpx: HTTP Request: POST http://testserver/admin/venues/add-job "HTTP/1.1 202 Accepted"
+LOG_INFO:app.dao.redis_venue_dao: Finished getting nearby venues: found 1
+LOG_INFO:app.dao.redis_venue_dao: Getting nearby venues
+LOG_INFO:httpx: HTTP Request: POST http://testserver/admin/venues/add-job "HTTP/1.1 202 Accepted"
+LOG_INFO:app.dao.redis_venue_dao: Finished getting nearby venues: found 1
+LOG_INFO:app.dao.redis_venue_dao: Getting nearby venues
+LOG_INFO:httpx: HTTP Request: POST http://testserver/admin/venues/add-job "HTTP/1.1 202 Accepted"
+LOG_INFO:app.dao.redis_venue_dao: Finished getting nearby venues: found 1
+LOG_INFO:app.dao.redis_venue_dao: Getting nearby venues
+LOG_INFO:httpx: HTTP Request: POST http://testserver/admin/venues/add-job "HTTP/1.1 202 Accepted"
+LOG_INFO:app.dao.redis_venue_dao: Finished getting nearby venues: found 1
+LOG_INFO:app.dao.redis_venue_dao: Getting nearby venues
+LOG_INFO:httpx: HTTP Request: POST http://testserver/admin/venues/add-job "HTTP/1.1 202 Accepted"
+LOG_INFO:app.dao.redis_venue_dao: Finished getting nearby venues: found 1
+LOG_INFO:app.dao.redis_venue_dao: Getting nearby venues
+LOG_INFO:httpx: HTTP Request: POST http://testserver/admin/venues/add-job "HTTP/1.1 202 Accepted"
+LOG_INFO:app.dao.redis_venue_dao: Finished getting nearby venues: found 1
+LOG_INFO:app.dao.redis_venue_dao: Getting nearby venues
+LOG_INFO:httpx: HTTP Request: POST http://testserver/admin/venues/add-job "HTTP/1.1 202 Accepted"
+LOG_INFO:app.dao.redis_venue_dao: Finished getting nearby venues: found 1
+LOG_INFO:app.dao.redis_venue_dao: Getting nearby venues
+LOG_INFO:httpx: HTTP Request: POST http://testserver/admin/venues/add-job "HTTP/1.1 202 Accepted"
+LOG_INFO:app.dao.redis_venue_dao: Finished getting nearby venues: found 1
+LOG_INFO:app.dao.redis_venue_dao: Getting nearby venues
+LOG_INFO:httpx: HTTP Request: POST http://testserver/admin/venues/add-job "HTTP/1.1 202 Accepted"
+LOG_INFO:app.dao.redis_venue_dao: Finished getting nearby venues: found 1
+LOG_INFO:app.dao.redis_venue_dao: Getting nearby venues
+LOG_INFO:httpx: HTTP Request: POST http://testserver/admin/venues/add-job "HTTP/1.1 202 Accepted"
+LOG_INFO:app.dao.redis_venue_dao: Finished getting nearby venues: found 1
+LOG_INFO:app.dao.redis_venue_dao: Getting nearby venues
+LOG_INFO:httpx: HTTP Request: POST http://testserver/admin/venues/add-job "HTTP/1.1 202 Accepted"
+LOG_INFO:app.dao.redis_venue_dao: Finished getting nearby venues: found 1
+LOG_INFO:app.dao.redis_venue_dao: Getting nearby venues
+LOG_INFO:httpx: HTTP Request: POST http://testserver/admin/venues/add-job "HTTP/1.1 202 Accepted"
+LOG_INFO:app.dao.redis_venue_dao: Finished getting nearby venues: found 1
+LOG_INFO:app.dao.redis_venue_dao: Getting nearby venues
+LOG_INFO:httpx: HTTP Request: POST http://testserver/admin/venues/add-job "HTTP/1.1 202 Accepted"
+LOG_INFO:app.dao.redis_venue_dao: Finished getting nearby venues: found 1
+LOG_INFO:app.dao.redis_venue_dao: Getting nearby venues
+LOG_INFO:httpx: HTTP Request: POST http://testserver/admin/venues/add-job "HTTP/1.1 202 Accepted"
+LOG_INFO:app.dao.redis_venue_dao: Finished getting nearby venues: found 1
+LOG_INFO:app.dao.redis_venue_dao: Getting nearby venues
+LOG_INFO:httpx: HTTP Request: POST http://testserver/admin/venues/add-job "HTTP/1.1 202 Accepted"
+LOG_INFO:app.dao.redis_venue_dao: Finished getting nearby venues: found 1
+LOG_INFO:app.dao.redis_venue_dao: Getting nearby venues
+LOG_INFO:httpx: HTTP Request: POST http://testserver/admin/venues/add-job "HTTP/1.1 202 Accepted"
+LOG_INFO:app.dao.redis_venue_dao: Finished getting nearby venues: found 1
+LOG_INFO:app.dao.redis_venue_dao: Getting nearby venues
+LOG_INFO:httpx: HTTP Request: POST http://testserver/admin/venues/add-job "HTTP/1.1 202 Accepted"
+LOG_INFO:app.dao.redis_venue_dao: Finished getting nearby venues: found 1
+LOG_INFO:app.dao.redis_venue_dao: Getting nearby venues
+LOG_INFO:httpx: HTTP Request: POST http://testserver/admin/venues/add-job "HTTP/1.1 202 Accepted"
+LOG_INFO:app.dao.redis_venue_dao: Finished getting nearby venues: found 1
+LOG_INFO:app.dao.redis_venue_dao: Getting nearby venues
+LOG_INFO:httpx: HTTP Request: POST http://testserver/admin/venues/add-job "HTTP/1.1 202 Accepted"
+LOG_INFO:app.dao.redis_venue_dao: Finished getting nearby venues: found 1
+LOG_INFO:app.dao.redis_venue_dao: Getting nearby venues
+LOG_INFO:httpx: HTTP Request: POST http://testserver/admin/venues/add-job "HTTP/1.1 202 Accepted"
+LOG_INFO:app.dao.redis_venue_dao: Finished getting nearby venues: found 1
+LOG_INFO:app.dao.redis_venue_dao: Getting nearby venues
+LOG_INFO:httpx: HTTP Request: POST http://testserver/admin/venues/add-job "HTTP/1.1 202 Accepted"
+LOG_INFO:app.dao.redis_venue_dao: Finished getting nearby venues: found 1
+LOG_INFO:app.dao.redis_venue_dao: Getting nearby venues
+LOG_INFO:httpx: HTTP Request: POST http://testserver/admin/venues/add-job "HTTP/1.1 202 Accepted"
+LOG_INFO:app.dao.redis_venue_dao: Finished getting nearby venues: found 1
+LOG_INFO:app.dao.redis_venue_dao: Getting nearby venues
+LOG_INFO:httpx: HTTP Request: POST http://testserver/admin/venues/add-job "HTTP/1.1 202 Accepted"
+LOG_INFO:app.dao.redis_venue_dao: Finished getting nearby venues: found 1
+LOG_INFO:app.dao.redis_venue_dao: Getting nearby venues
+LOG_INFO:httpx: HTTP Request: POST http://testserver/admin/venues/add-job "HTTP/1.1 202 Accepted"
+LOG_INFO:app.dao.redis_venue_dao: Finished getting nearby venues: found 1
+LOG_INFO:app.dao.redis_venue_dao: Getting nearby venues
+LOG_INFO:httpx: HTTP Request: POST http://testserver/admin/venues/add-job "HTTP/1.1 202 Accepted"
+LOG_INFO:app.dao.redis_venue_dao: Finished getting nearby venues: found 1
+LOG_INFO:app.dao.redis_venue_dao: Getting nearby venues
+LOG_INFO:httpx: HTTP Request: POST http://testserver/admin/venues/add-job "HTTP/1.1 202 Accepted"
+LOG_INFO:app.dao.redis_venue_dao: Finished getting nearby venues: found 1
+LOG_INFO:app.dao.redis_venue_dao: Getting nearby venues
+LOG_INFO:httpx: HTTP Request: POST http://testserver/admin/venues/add-job "HTTP/1.1 202 Accepted"
+LOG_INFO:app.dao.redis_venue_dao: Finished getting nearby venues: found 1
+LOG_INFO:app.dao.redis_venue_dao: Getting nearby venues
+LOG_INFO:httpx: HTTP Request: POST http://testserver/admin/venues/add-job "HTTP/1.1 202 Accepted"
+LOG_INFO:app.dao.redis_venue_dao: Finished getting nearby venues: found 1
+LOG_INFO:app.dao.redis_venue_dao: Getting nearby venues
+LOG_INFO:httpx: HTTP Request: POST http://testserver/admin/venues/add-job "HTTP/1.1 202 Accepted"
+LOG_INFO:app.dao.redis_venue_dao: Finished getting nearby venues: found 1
+LOG_INFO:app.dao.redis_venue_dao: Getting nearby venues
+LOG_INFO:httpx: HTTP Request: POST http://testserver/admin/venues/add-job "HTTP/1.1 202 Accepted"
+LOG_INFO:app.dao.redis_venue_dao: Finished getting nearby venues: found 1
+LOG_INFO:app.dao.redis_venue_dao: Getting nearby venues
+LOG_INFO:httpx: HTTP Request: POST http://testserver/admin/venues/add-job "HTTP/1.1 202 Accepted"
+LOG_INFO:app.dao.redis_venue_dao: Finished getting nearby venues: found 1
+LOG_INFO:app.dao.redis_venue_dao: Getting nearby venues
+LOG_INFO:httpx: HTTP Request: POST http://testserver/admin/venues/add-job "HTTP/1.1 202 Accepted"
+LOG_INFO:app.dao.redis_venue_dao: Finished getting nearby venues: found 1
+LOG_INFO:app.dao.redis_venue_dao: Getting nearby venues
+LOG_INFO:httpx: HTTP Request: POST http://testserver/admin/venues/add-job "HTTP/1.1 202 Accepted"
+LOG_INFO:app.dao.redis_venue_dao: Finished getting nearby venues: found 1
+LOG_INFO:app.dao.redis_venue_dao: Getting nearby venues
+LOG_INFO:httpx: HTTP Request: POST http://testserver/admin/venues/add-job "HTTP/1.1 202 Accepted"
+LOG_INFO:app.dao.redis_venue_dao: Finished getting nearby venues: found 1
+LOG_INFO:app.dao.redis_venue_dao: Getting nearby venues
+LOG_INFO:httpx: HTTP Request: POST http://testserver/admin/venues/add-job "HTTP/1.1 202 Accepted"
+LOG_INFO:app.dao.redis_venue_dao: Finished getting nearby venues: found 1
+LOG_INFO:app.dao.redis_venue_dao: Getting nearby venues
+LOG_INFO:httpx: HTTP Request: POST http://testserver/admin/venues/add-job "HTTP/1.1 202 Accepted"
+LOG_INFO:app.dao.redis_venue_dao: Finished getting nearby venues: found 1
+LOG_INFO:app.dao.redis_venue_dao: Getting nearby venues
+LOG_INFO:httpx: HTTP Request: POST http://testserver/admin/venues/add-job "HTTP/1.1 202 Accepted"
+LOG_INFO:app.dao.redis_venue_dao: Finished getting nearby venues: found 1
+LOG_INFO:app.dao.redis_venue_dao: Getting nearby venues
+LOG_INFO:httpx: HTTP Request: POST http://testserver/admin/venues/add-job "HTTP/1.1 202 Accepted"
+LOG_INFO:app.dao.redis_venue_dao: Finished getting nearby venues: found 1
+LOG_INFO:app.dao.redis_venue_dao: Getting nearby venues
+LOG_INFO:httpx: HTTP Request: POST http://testserver/admin/venues/add-job "HTTP/1.1 202 Accepted"
+LOG_INFO:app.dao.redis_venue_dao: Finished getting nearby venues: found 1
+LOG_INFO:app.dao.redis_venue_dao: Getting nearby venues
+LOG_INFO:httpx: HTTP Request: POST http://testserver/admin/venues/add-job "HTTP/1.1 202 Accepted"
+LOG_INFO:app.dao.redis_venue_dao: Finished getting nearby venues: found 1
+LOG_INFO:app.dao.redis_venue_dao: Getting nearby venues
+LOG_INFO:httpx: HTTP Request: POST http://testserver/admin/venues/add-job "HTTP/1.1 202 Accepted"
+LOG_INFO:app.dao.redis_venue_dao: Finished getting nearby venues: found 1
+LOG_INFO:app.dao.redis_venue_dao: Getting nearby venues
+LOG_INFO:httpx: HTTP Request: POST http://testserver/admin/venues/add-job "HTTP/1.1 202 Accepted"
+LOG_INFO:app.dao.redis_venue_dao: Finished getting nearby venues: found 1
+LOG_INFO:app.dao.redis_venue_dao: Getting nearby venues
+LOG_INFO:httpx: HTTP Request: POST http://testserver/admin/venues/add-job "HTTP/1.1 202 Accepted"
+LOG_INFO:app.dao.redis_venue_dao: Finished getting nearby venues: found 1
+    When the operator lists recent add jobs                                                                                                 # tests/bdd/steps/add_venue_async_job_steps.py:361
+LOG_INFO:httpx: HTTP Request: GET http://testserver/admin/venues/add-jobs/recent?limit=100 "HTTP/1.1 200 OK"
+    Then the recent-jobs list must contain at most the capped number of entries                                                             # tests/bdd/steps/add_venue_async_job_steps.py:586
+    And the recent-jobs list must show the most recently started jobs, not the oldest                                                       # tests/bdd/steps/add_venue_async_job_steps.py:594
+
+1 feature passed, 0 failed, 0 skipped
+14 scenarios passed, 0 failed, 0 skipped
+129 steps passed, 0 failed, 0 skipped
+Took 0min 0.381s
