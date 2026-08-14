@@ -1,4 +1,3 @@
-@wip
 Feature: Show every archived image behind an event
   As the operator of the event pipeline
   I must be able to see every image the pipeline archived for an event, grouped
