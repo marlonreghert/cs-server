@@ -18,9 +18,13 @@ forever.
   `app/services/job_lock.py` — it is explicitly documented as correct for
   this single-process deployment and already self-heals on restart (a fresh
   process boots with an empty lock set).
-- No backfill of historical job records already sitting in Redis at the time
-  this ships — RDS tracking starts from this feature's rollout forward, not
-  retroactively.
+- No general backfill of historical job records already sitting in Redis at
+  the time this ships — RDS tracking starts from this feature's rollout
+  forward, not retroactively. The one exception is the specific stuck
+  record from the 2026-08-14 incident, corrected out-of-band per
+  "Incident Remediation" below — that is a one-time, scripted correction of
+  one known-bad record, not a general migration mechanism, and does not
+  wait for this plan's code changes to ship.
 - No change to the public API/response contract of `POST /venues/add-job`,
   `GET /venues/add-job/{job_id}`, `GET /venues/add-jobs/recent`,
   `POST /venues/batch-add`, `GET /venues/batch-add/{job_id}` — vibes_bot's
@@ -124,6 +128,20 @@ worker fan-out) any row still `"running"` at boot time cannot belong to the
 process now starting. No job is ever resumed or re-run automatically — the
 reconciliation only marks the row as interrupted, exactly matching the "no
 pipeline runs on startup" policy for spend-worthy work.
+
+## Incident Remediation
+Independent of the code changes below, and not blocked on them: the specific
+Redis record left by the 2026-08-14 incident
+(`admin:batch_add_job:2d07cf4450ea466ea6a7b8b95fc11211`, stuck at
+`"status": "running", "processed": 26` after an unrelated deploy recycled
+the container mid-run) is corrected directly in prod Redis, once, by hand —
+setting `status` to `"interrupted"`, `stopped_reason` to a factual note that
+the process restarted mid-run and the remaining rows were completed via the
+manual follow-up job `f9d717036dae4cb590bb52ebfdcf5f56`, and `finished_at`
+to the correction time. This is a targeted fix for one known-bad record so
+it does not read as permanently "running" for the remainder of its 7-day
+TTL — not a general-purpose backfill tool, and not a precedent for
+recovering any other historical Redis job record.
 
 ## Implementation Approach
 - **Migration** (`migrations/versions/00NN_venue_add_job_run.py`): `CREATE
