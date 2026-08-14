@@ -216,6 +216,19 @@ class CrawlTargetOut(BaseModel):
     # account dormant" instead of leaving an operator to guess whether a
     # never-seeded target is dormant or broken.
     posts_dormant: bool = False
+    # plans/260814_seeded-state-and-config-validation.md §A (migration
+    # 0041): when the reels stream reached its one-time seed to
+    # COMPLETION — success, or a genuine empty result, both. Raw stored
+    # value, alongside the derived `reels_seeded` boolean below (the SAME
+    # `stored-column` + `derived-flag` pairing `cursor_posts_at` /
+    # `posts_never_seeded` already use on this model).
+    reels_seeded_at: Optional[datetime] = None
+    # DERIVED (never stored under this name) via `reels_already_seeded` —
+    # the SAME gate `run_target` itself resolves and the cost estimate
+    # below already reads, so this can never disagree with either. Desired
+    # Behavior #3: "Whether a stream returned zero items is visible without
+    # reading code."
+    reels_seeded: bool = False
     notes: Optional[str] = None
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
@@ -304,6 +317,7 @@ def _to_out(dao, row: dict) -> dict:
     out["venues"] = _venue_coverage(dao, row["handle"])
     out["running"] = _is_running(row["handle"])
     out["posts_never_seeded"] = posts_never_seeded(row)
+    out["reels_seeded"] = reels_already_seeded(row)
     config = _resolved_config()
     out["effective_results_limit"] = resolve_results_limit(row, STREAM_POSTS, is_seed=False, config=config)
     out["effective_seed_results_limit"] = resolve_results_limit(row, STREAM_POSTS, is_seed=True, config=config)

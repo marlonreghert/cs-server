@@ -293,3 +293,136 @@ class TestConfigLoadAndValidate:
             event_dedup.validate_candidate_window_hours_config(-1)
         with pytest.raises(TypeError):
             event_dedup.validate_generic_vocabulary_config("festa")
+
+
+# ── §D: load_dedup_config trusts the validated value, never coerces ─────────
+class _FakeRedis:
+    def __init__(self):
+        self.store: dict[str, str] = {}
+
+    def get(self, key):
+        return self.store.get(key)
+
+    def set_raw(self, key: str, value) -> None:
+        """Writes RAW JSON directly, bypassing AdminConfigService.set — this
+        is exactly how a value stored BEFORE the §C validators were
+        registered (or hand-edited in RDS) would look: valid JSON, wrong
+        TYPE for the key."""
+        self.store[key] = json.dumps(value)
+
+
+def _fallback_count(key: str) -> float:
+    return event_dedup.EVENT_DEDUP_CONFIG_TYPE_FALLBACK_TOTAL.labels(key=key)._value.get()
+
+
+class TestLoadDedupConfigNeverCoercesAWrongTypedValue:
+    """plans/260814_seeded-state-and-config-validation.md §D. Before this
+    plan, `load_dedup_config` coerced with `bool()`/`int()`/`tuple()` —
+    `bool("false")` is True, so the stored STRING "false" silently ENABLED
+    auto-merge. Every case here proves the opposite: a wrong-typed stored
+    value falls back to the shipped default and is never reinterpreted."""
+
+    def test_the_string_false_never_enables_auto_merge(self):
+        """The plan's own headline scenario, pinned directly against the
+        reader (§C's write-time rejection is pinned separately, at the BDD
+        layer, against AdminConfigService.set)."""
+        redis_like = _FakeRedis()
+        redis_like.set_raw(event_dedup.ADMIN_CONFIG_AUTO_MERGE_ENABLED_KEY, "false")
+
+        before = _fallback_count(event_dedup.ADMIN_CONFIG_AUTO_MERGE_ENABLED_KEY)
+        config = event_dedup.load_dedup_config(redis_like)
+        after = _fallback_count(event_dedup.ADMIN_CONFIG_AUTO_MERGE_ENABLED_KEY)
+
+        assert config.auto_merge_enabled is False
+        assert config.auto_merge_enabled == event_dedup.DEFAULT_AUTO_MERGE_ENABLED
+        assert after == before + 1, "the type fallback must be counted"
+
+    def test_a_wrong_typed_value_falls_back_to_default_for_every_key(self):
+        cases = [
+            (event_dedup.ADMIN_CONFIG_GENERIC_VOCABULARY_KEY, "not-a-list",
+             list(event_dedup.DEFAULT_GENERIC_VOCABULARY)),
+            (event_dedup.ADMIN_CONFIG_STOPWORDS_KEY, "not-a-list",
+             list(event_dedup.DEFAULT_STOPWORDS)),
+            (event_dedup.ADMIN_CONFIG_LINEUP_THRESHOLD_KEY, "two",
+             event_dedup.DEFAULT_LINEUP_THRESHOLD),
+            (event_dedup.ADMIN_CONFIG_CANDIDATE_WINDOW_HOURS_KEY, "eight",
+             event_dedup.DEFAULT_CANDIDATE_WINDOW_HOURS),
+            (event_dedup.ADMIN_CONFIG_UNDATED_WINDOW_DAYS_KEY, "fourteen",
+             event_dedup.DEFAULT_UNDATED_WINDOW_DAYS),
+            (event_dedup.ADMIN_CONFIG_AUTO_MERGE_ENABLED_KEY, "true",
+             event_dedup.DEFAULT_AUTO_MERGE_ENABLED),
+        ]
+        for key, bad_value, default in cases:
+            redis_like = _FakeRedis()
+            redis_like.set_raw(key, bad_value)
+            before = _fallback_count(key)
+
+            config = event_dedup.load_dedup_config(redis_like)
+
+            after = _fallback_count(key)
+            assert after == before + 1, key
+            field = {
+                event_dedup.ADMIN_CONFIG_GENERIC_VOCABULARY_KEY: "generic_vocabulary",
+                event_dedup.ADMIN_CONFIG_STOPWORDS_KEY: "stopwords",
+                event_dedup.ADMIN_CONFIG_LINEUP_THRESHOLD_KEY: "lineup_threshold",
+                event_dedup.ADMIN_CONFIG_CANDIDATE_WINDOW_HOURS_KEY: "candidate_window_hours",
+                event_dedup.ADMIN_CONFIG_UNDATED_WINDOW_DAYS_KEY: "undated_window_days",
+                event_dedup.ADMIN_CONFIG_AUTO_MERGE_ENABLED_KEY: "auto_merge_enabled",
+            }[key]
+            actual = getattr(config, field)
+            expected = tuple(default) if isinstance(default, list) else default
+            assert actual == expected, (key, actual, expected)
+
+    def test_one_keys_bad_value_never_disturbs_another_keys_good_override(self):
+        """Mirrors `_load_json_config`'s own "one key's bad value never
+        disables another's override" guarantee — proven here across the
+        validate boundary too, not just the read-failure boundary."""
+        redis_like = _FakeRedis()
+        redis_like.set_raw(event_dedup.ADMIN_CONFIG_AUTO_MERGE_ENABLED_KEY, "false")  # bad
+        redis_like.set_raw(event_dedup.ADMIN_CONFIG_LINEUP_THRESHOLD_KEY, 5)  # good
+
+        config = event_dedup.load_dedup_config(redis_like)
+
+        assert config.auto_merge_enabled is False  # fell back to default
+        assert config.lineup_threshold == 5  # untouched, its own valid value
+
+    def test_a_valid_value_is_used_exactly_as_validated_no_coercion(self):
+        """The positive case: `int`/`bool` values are NEVER passed through
+        `int()`/`bool()` — they are exactly what the validator returned.
+        Proven by an integer that would look identical whether or not a
+        redundant int() ran (so this alone would not catch a regression to
+        coercion) COMBINED with the type-fallback tests above, which WOULD
+        catch it; kept as a readable, explicit "the happy path still
+        works" companion."""
+        redis_like = _FakeRedis()
+        redis_like.set_raw(event_dedup.ADMIN_CONFIG_LINEUP_THRESHOLD_KEY, 7)
+        redis_like.set_raw(event_dedup.ADMIN_CONFIG_AUTO_MERGE_ENABLED_KEY, True)
+
+        config = event_dedup.load_dedup_config(redis_like)
+
+        assert config.lineup_threshold == 7
+        assert config.auto_merge_enabled is True
+
+    def test_no_fallback_is_counted_for_a_valid_value(self):
+        redis_like = _FakeRedis()
+        redis_like.set_raw(event_dedup.ADMIN_CONFIG_UNDATED_WINDOW_DAYS_KEY, 21)
+        before = _fallback_count(event_dedup.ADMIN_CONFIG_UNDATED_WINDOW_DAYS_KEY)
+
+        config = event_dedup.load_dedup_config(redis_like)
+
+        after = _fallback_count(event_dedup.ADMIN_CONFIG_UNDATED_WINDOW_DAYS_KEY)
+        assert config.undated_window_days == 21
+        assert after == before
+
+    def test_an_absent_key_uses_the_default_without_being_counted_as_a_fallback(self):
+        """A key that was simply never written is not a "bad value" — no
+        type fallback should be counted for it, only for a value that WAS
+        read and failed validation."""
+        redis_like = _FakeRedis()  # nothing stored at all
+        before = _fallback_count(event_dedup.ADMIN_CONFIG_AUTO_MERGE_ENABLED_KEY)
+
+        config = event_dedup.load_dedup_config(redis_like)
+
+        after = _fallback_count(event_dedup.ADMIN_CONFIG_AUTO_MERGE_ENABLED_KEY)
+        assert config.auto_merge_enabled == event_dedup.DEFAULT_AUTO_MERGE_ENABLED
+        assert after == before

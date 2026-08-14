@@ -1531,6 +1531,21 @@ EVENT_MERGE_TOTAL = Counter(
     #                 producing landfill, not decisions).
 )
 
+# plans/260814_seeded-state-and-config-validation.md §D: `load_dedup_config`
+# must not coerce a wrong-typed stored value into a plausible-looking answer
+# (`bool("false")` was the trap — it silently ENABLES auto-merge). A value
+# that fails its own registered validator on READ falls back to the shipped
+# default instead, and that fallback is counted here, by key, so a bad
+# stored value is visible on a dashboard instead of silently changing
+# behaviour. Distinct from `EVENT_TARGETING_CONFIG_FALLBACK_TOTAL` above —
+# that one is unreadable-Redis/invalid-JSON; this one is specifically "we
+# read valid JSON, but it was the wrong TYPE for this key."
+EVENT_DEDUP_CONFIG_TYPE_FALLBACK_TOTAL = Counter(
+    "event_dedup_config_type_fallback_total",
+    "Times an event-dedup admin-config value failed its type validator on read and fell back to the shipped default",
+    ["key"],
+)
+
 # Snapshot of events.post_item (post_type="menu" only) by current-vs-expired
 # state, using the DEFAULT expiry window (app.models.menu_lifecycle.
 # DEFAULT_MENU_EXPIRY_DAYS) as an approximation — deliberately NOT the live

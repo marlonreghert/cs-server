@@ -164,6 +164,41 @@ OUTCOME_HANDLE_NOT_FOUND = "handle_not_found"
 # stream, not a failure) or a skip/credit-exhaustion outcome (never even
 # attempted, or stopped before an answer was known).
 FAILURE_OUTCOMES = (OUTCOME_FAILED, OUTCOME_BLOCKED, OUTCOME_HANDLE_NOT_FOUND)
+# plans/260814_seeded-state-and-config-validation.md §A: outcomes where the
+# reels stream was never actually asked to a trustworthy conclusion at all —
+# refused before ever calling Apify (the monthly budget was already
+# exhausted) or cut short mid-flight (Apify credit ran out). Neither a
+# completed seed NOR a failure (FAILURE_OUTCOMES already owns "asked and got
+# a bad answer") — nothing was learned about this target's reels either way,
+# so a future retry must still be allowed. Kept separate from
+# FAILURE_OUTCOMES rather than folded into it: these two are not retried
+# because something went WRONG, they simply never ran to completion this
+# call.
+_REELS_SEED_REFUSED_OUTCOMES = (OUTCOME_CREDIT_EXHAUSTED, OUTCOME_SKIPPED_BUDGET)
+
+
+def is_reels_seed_completion(outcome: str) -> bool:
+    """Whether a reels stream's per-call outcome means its ONE-TIME seed is
+    DONE and must never be re-attempted — success, or a genuine EMPTY
+    result, both count. §A's whole defect: `cursor_reels_at` answers "what
+    is the newest reel we reached", and an empty-but-successful run has no
+    timestamp to write there at all, so gating "seeded" on the cursor reads
+    that same empty state as a FAILURE and retries it forever. This
+    predicate answers the OTHER question — "did the stream reach a
+    trustworthy, billed conclusion" — directly, never by proxy through a
+    field that cannot represent "nothing, on purpose."
+
+    Derived by EXCLUSION from `FAILURE_OUTCOMES` — never a hand-enumerated
+    `outcome in (OUTCOME_SUCCESS, OUTCOME_EMPTY)` allow-list — so a future
+    outcome added to `FAILURE_OUTCOMES` is automatically excluded here too,
+    with no second edit and no chance of the two sets silently drifting
+    apart (the plan's own requirement). `_REELS_SEED_REFUSED_OUTCOMES` is
+    excluded alongside it for the separate reason given on its own
+    docstring: neither a failure nor a completion.
+    """
+    return outcome not in FAILURE_OUTCOMES and outcome not in _REELS_SEED_REFUSED_OUTCOMES
+
+
 # `start_run`-only reason: the admin run-now endpoint's fast refusal when
 # the per-handle lock (`lock_name_for`) is already held — by a scheduled
 # fire or by another run-now call for the same handle. Never an `OUTCOME_*`
@@ -917,24 +952,39 @@ def resolve_results_limit(
 
 
 def reels_already_seeded(target: dict) -> bool:
-    """Whether this target's reels stream has already produced its one-time
-    seed cursor (`cursor_reels_at` set). plans/260811_reels-on-seed-only.md:
-    a reel is also a grid post, so once the posts stream has run once, it
-    already carries almost every reel Apify would return again — measured
-    on a real target at 32 reels results for 1 genuinely new post. Reels are
-    worth paying for only on the seed, when their own cap can reach history
-    the posts seed cap cannot.
+    """Whether this target's reels stream has already reached its one-time
+    seed to completion. plans/260811_reels-on-seed-only.md: a reel is also
+    a grid post, so once the posts stream has run once, it already carries
+    almost every reel Apify would return again — measured on a real target
+    at 32 reels results for 1 genuinely new post. Reels are worth paying
+    for only on the seed, when their own cap can reach history the posts
+    seed cap cannot.
 
-    Gated on the CURSOR itself — never a separate "has run" flag — because
-    the cursor stays null until a run's bookkeeping write actually succeeds
-    (see `run_target`'s `OUTCOME_BOOKKEEPING_FAILED` handling below). A
-    flag would have to be unset by hand on every failure path to keep a
+    Gated on `reels_seeded_at` (migration 0041) — a fact recorded
+    separately from `cursor_reels_at`, NOT the cursor itself.
+    plans/260814_seeded-state-and-config-validation.md §A: `cursor_reels_at`
+    answers a DIFFERENT question — "what is the newest reel we reached" —
+    and an empty-but-successful reels run has no timestamp to write there,
+    so it used to land in the same NULL state as a genuine failure and
+    retry forever (`burburinhobar`/`downtownrecife` in production, three
+    scheduled runs a week each, indefinitely). `reels_seeded_at` is written
+    whenever `run_target` sees `is_reels_seed_completion(outcome)` — success
+    OR a genuine empty result, both — so an empty seed is recorded as DONE
+    even though it advances no cursor. `cursor_reels_at` keeps its own,
+    unchanged meaning (NULL when nothing was reached) — two facts, two
+    fields.
+
+    Both fields still stay null until a run's bookkeeping write actually
+    succeeds (see `run_target`'s `OUTCOME_BOOKKEEPING_FAILED` handling
+    below, and `_REELS_SEED_REFUSED_OUTCOMES`'s docstring for why a
+    budget-refused or credit-exhausted call never counts as seeded either).
+    A flag would have to be unset by hand on every failure path to keep a
     failed seed retryable; this project has already shipped a bookkeeping
     write that failed and left a target looking permanently healthy
     (2026-08-09, entreamigos.praia). Deliberately reads ONLY the reels
-    cursor — the posts cursor advancing must never suppress a reels seed,
-    and the two streams' cursors stay fully independent."""
-    return _as_utc_dt(target.get("cursor_reels_at")) is not None
+    seed fact — the posts cursor advancing must never suppress a reels
+    seed, and the two streams stay fully independent."""
+    return _as_utc_dt(target.get("reels_seeded_at")) is not None
 
 
 def reels_skip_reason(target: dict) -> Optional[str]:
@@ -1188,10 +1238,20 @@ class ScheduledInstagramCrawlService:
 
         if not kept:
             # §A/§B (plans/260812_crawl-error-visibility.md): an error item
-            # present (even alongside zero KEPT posts — e.g. every returned
-            # post was pinned-and-dropped is NOT this branch, since `kept`
-            # empty here means raw_posts itself yielded nothing usable)
-            # changes what "nothing came back" MEANS. `not_found` is
+            # present changes what "nothing came back" MEANS. `kept` empty
+            # here has TWO different causes that this branch does not (and
+            # need not) distinguish: `raw_posts` itself came back empty, OR
+            # raw_posts held real, BILLED items that were every one pinned
+            # AND older than the cutoff (_split_kept_and_dropped drops on
+            # that combination only — a NON-pinned post can never be
+            # dropped, so "merely older than the cutoff" alone can never
+            # empty `kept` on its own; see TestSplitKeptAndDropped). An
+            # all-pinned-and-dropped fetch DOES reach this same branch —
+            # plans/260814_seeded-state-and-config-validation.md's own open
+            # question confirmed it, by reading this exact function; an
+            # earlier version of this comment claimed the opposite and was
+            # wrong. Both shapes of "nothing kept" are classified the SAME
+            # way, from `error_code` alone, below: `not_found` is
             # permanent; `no_items` with request errors is a transient
             # block; `no_items` with none is a genuinely empty/private
             # stream (still OUTCOME_EMPTY); anything else — an Apify code
@@ -1201,7 +1261,10 @@ class ScheduledInstagramCrawlService:
             # transient failure, never silently folded into "empty" (the
             # whole defect 260812 exists to close, and 260813 closes for the
             # transport layer specifically: a timeout is not an empty
-            # account either).
+            # account either). No error item at all — whether raw_posts was
+            # genuinely empty or fully pinned-and-dropped — reaches
+            # OUTCOME_EMPTY either way, and 260814 §A treats that as a
+            # COMPLETED, billed answer worth seeding, not a reason to retry.
             if error_code == "not_found":
                 outcome = OUTCOME_HANDLE_NOT_FOUND
             elif error_code == "no_items":
@@ -1303,6 +1366,21 @@ class ScheduledInstagramCrawlService:
                 field_name = "cursor_posts_at" if stream == STREAM_POSTS else "cursor_reels_at"
                 cursor_updates[field_name] = stream_report["new_cursor"]
                 new_posts_by_stream[stream] = stream_report["kept"]
+            # §A: the reels seed is DONE the moment the stream reaches a
+            # trustworthy conclusion — success OR a genuine empty result,
+            # both (`is_reels_seed_completion`) — never only on
+            # OUTCOME_SUCCESS above, which is exactly the bug: an empty
+            # seed has no cursor to advance and used to be indistinguishable
+            # from a failure. Folded into `cursor_updates` (despite not
+            # being a cursor) so it rides the SAME single bookkeeping write
+            # `updates` becomes below — never a separate write, so a write
+            # that fails leaves `reels_seeded_at` unset exactly like it
+            # leaves the cursor unset (the OUTCOME_BOOKKEEPING_FAILED
+            # non-negotiable: a seed marker written before its own
+            # bookkeeping commits would reintroduce the 2026-08-09
+            # entreamigos.praia incident).
+            if stream == STREAM_REELS and is_reels_seed_completion(outcome):
+                cursor_updates["reels_seeded_at"] = now
 
         # §Reels-on-seed-only §Error Handling: a zero-reels run must be
         # legible without reading code — record WHY reels never ran

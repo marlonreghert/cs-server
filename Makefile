@@ -41,6 +41,7 @@ test-unit:
 		tests/test_rds_repository.py \
 		tests/test_rds_store_contract.py \
 		tests/test_admin_config.py \
+		tests/test_admin_config_validator_registration.py \
 		tests/test_force_update_validator.py \
 		tests/test_vibe_modes_config.py \
 		tests/test_config_validation.py \
@@ -107,6 +108,7 @@ test-unit:
 		tests/test_event_dedup_merge.py \
 		tests/test_backfill_event_venue_links.py \
 		tests/test_backfill_source_provenance.py \
+		tests/test_backfill_reels_seeded.py \
 		tests/test_repair_event_dates.py \
 		tests/test_event_sources_migration.py \
 		tests/test_post_items_migration.py \
@@ -125,6 +127,7 @@ test-unit:
 		tests/test_crawl_target_reels_caps_migration.py \
 		tests/test_crawl_target_reels_overlap_migration.py \
 		tests/test_crawl_target_posts_dormant_migration.py \
+		tests/test_crawl_target_reels_seeded_migration.py \
 		tests/test_crawl_target_dao.py \
 		tests/test_instagram_crawl_service.py \
 		tests/test_extract_by_handle.py \

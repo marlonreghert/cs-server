@@ -600,6 +600,14 @@ class Container:
         )
         from app.models.promoter_event_visibility import validate_hide_promoter_events_config
         from app.models.crawl_seed_lookback import validate_crawl_seed_lookback_config
+        from app.services.event_dedup import (
+            validate_auto_merge_enabled_config,
+            validate_candidate_window_hours_config,
+            validate_generic_vocabulary_config,
+            validate_lineup_threshold_config,
+            validate_stopwords_config,
+            validate_undated_window_days_config,
+        )
 
         def _validate_eligibility_config(value):
             EligibilityConfig.from_dict(value, from_admin_override=True)  # raises on invalid
@@ -652,6 +660,22 @@ class Container:
                 # endpoint. Resolved fresh per run by
                 # ScheduledInstagramCrawlService._resolve_seed_lookback.
                 "crawl_seed_lookback": validate_crawl_seed_lookback_config,
+                # plans/260814_seeded-state-and-config-validation.md §C: six
+                # validators that already existed in app.services.event_dedup
+                # (plans/260812_event-dedup-fuzzy-title.md) but were never
+                # registered here — the generic admin-config CRUD route
+                # accepted any value for these six keys, unvalidated. Every
+                # value stored through this route now goes through the SAME
+                # validator `load_dedup_config` (§D) trusts on read, so a
+                # malformed write is rejected at write time, before it ever
+                # reaches RDS or Redis, instead of silently reinterpreted
+                # (`bool("false")` -> True) the next time it is read.
+                "event_dedup_generic_vocabulary": validate_generic_vocabulary_config,
+                "event_dedup_stopwords": validate_stopwords_config,
+                "event_dedup_lineup_threshold": validate_lineup_threshold_config,
+                "event_dedup_candidate_window_hours": validate_candidate_window_hours_config,
+                "event_dedup_undated_window_days": validate_undated_window_days_config,
+                "event_dedup_auto_merge_enabled": validate_auto_merge_enabled_config,
             },
         )
 

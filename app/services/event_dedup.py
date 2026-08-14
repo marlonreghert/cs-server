@@ -40,6 +40,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Optional
 
+from app.metrics import EVENT_DEDUP_CONFIG_TYPE_FALLBACK_TOTAL
 from app.services.event_date_resolver import RECIFE_TZ
 from app.services.event_identity import normalize_title
 
@@ -168,38 +169,83 @@ class DedupConfig:
     auto_merge_enabled: bool
 
 
+def _load_validated_config(redis_like, key: str, default, *, validator, module_tag: str):
+    """Read one key, then TRUST the validated value instead of coercing it
+    (plan §D — `bool("false")` was the coercion this replaces: storing the
+    string `"false"` through the generic CRUD route used to yield
+    `bool("false")` -> True, silently ENABLING auto-merge).
+
+    `_load_json_config` (unchanged) already falls back to `default` when
+    Redis is unreadable, the key is absent, or the mirror JSON is corrupt —
+    those cases return `default` BY IDENTITY (the same object this call
+    passed in), so they are recognised here with `is` rather than re-run
+    through `validator`, which may legitimately require a different runtime
+    shape than the shipped default happens to be stored in (e.g. a
+    list-only validator against a `tuple` default).
+
+    A value that WAS read (valid JSON, present) but fails its own
+    registered validator — the wrong type, e.g. a stored string where a
+    bool belongs — is the specific case this function exists for: it is
+    never coerced into a plausible-looking answer. It falls back to
+    `default` and counts `EVENT_DEDUP_CONFIG_TYPE_FALLBACK_TOTAL` by key, so
+    a bad stored value is visible on a dashboard instead of silently
+    changing behaviour.
+    """
+    raw, reason = _load_json_config(redis_like, key, default, module_tag=module_tag)
+    if reason is not None or raw is default:
+        return default
+    try:
+        return validator(raw)
+    except (TypeError, ValueError) as e:
+        logger.warning(
+            f"[{module_tag}] stored value for {key} failed its validator on "
+            f"read ({e}); using the shipped default instead of coercing it"
+        )
+        EVENT_DEDUP_CONFIG_TYPE_FALLBACK_TOTAL.labels(key=key).inc()
+        return default
+
+
 def load_dedup_config(redis_like) -> DedupConfig:
     """Read every event-dedup admin-config override, falling back to the
     shipped defaults independently per key — one key's bad value never
     disables another's override. `redis_like=None` (a caller with no wired
     Redis client, e.g. a bare unit test) returns every shipped default,
-    matching every sibling loader in this codebase."""
-    generic, _ = _load_json_config(
+    matching every sibling loader in this codebase.
+
+    Every value is TRUSTED as whatever its own validator returns (§D) —
+    never re-derived with `bool()`/`int()`/`tuple()` on a value whose type
+    was never actually confirmed. `generic_vocabulary`/`stopwords` still
+    become tuples at the end for `DedupConfig`'s declared shape — that is
+    adapting an ALREADY-validated list to the dataclass's field type, not
+    coercing an unknown one."""
+    generic = _load_validated_config(
         redis_like, ADMIN_CONFIG_GENERIC_VOCABULARY_KEY, list(DEFAULT_GENERIC_VOCABULARY),
-        module_tag="event_dedup",
+        validator=validate_generic_vocabulary_config, module_tag="event_dedup",
     )
-    stopwords, _ = _load_json_config(
-        redis_like, ADMIN_CONFIG_STOPWORDS_KEY, list(DEFAULT_STOPWORDS), module_tag="event_dedup",
+    stopwords = _load_validated_config(
+        redis_like, ADMIN_CONFIG_STOPWORDS_KEY, list(DEFAULT_STOPWORDS),
+        validator=validate_stopwords_config, module_tag="event_dedup",
     )
-    threshold, _ = _load_json_config(
-        redis_like, ADMIN_CONFIG_LINEUP_THRESHOLD_KEY, DEFAULT_LINEUP_THRESHOLD, module_tag="event_dedup",
+    threshold = _load_validated_config(
+        redis_like, ADMIN_CONFIG_LINEUP_THRESHOLD_KEY, DEFAULT_LINEUP_THRESHOLD,
+        validator=validate_lineup_threshold_config, module_tag="event_dedup",
     )
-    window_hours, _ = _load_json_config(
+    window_hours = _load_validated_config(
         redis_like, ADMIN_CONFIG_CANDIDATE_WINDOW_HOURS_KEY, DEFAULT_CANDIDATE_WINDOW_HOURS,
-        module_tag="event_dedup",
+        validator=validate_candidate_window_hours_config, module_tag="event_dedup",
     )
-    undated_days, _ = _load_json_config(
+    undated_days = _load_validated_config(
         redis_like, ADMIN_CONFIG_UNDATED_WINDOW_DAYS_KEY, DEFAULT_UNDATED_WINDOW_DAYS,
-        module_tag="event_dedup",
+        validator=validate_undated_window_days_config, module_tag="event_dedup",
     )
-    auto_enabled, _ = _load_json_config(
+    auto_enabled = _load_validated_config(
         redis_like, ADMIN_CONFIG_AUTO_MERGE_ENABLED_KEY, DEFAULT_AUTO_MERGE_ENABLED,
-        module_tag="event_dedup",
+        validator=validate_auto_merge_enabled_config, module_tag="event_dedup",
     )
     return DedupConfig(
         generic_vocabulary=tuple(generic), stopwords=tuple(stopwords),
-        lineup_threshold=int(threshold), candidate_window_hours=int(window_hours),
-        undated_window_days=int(undated_days), auto_merge_enabled=bool(auto_enabled),
+        lineup_threshold=threshold, candidate_window_hours=window_hours,
+        undated_window_days=undated_days, auto_merge_enabled=auto_enabled,
     )
 
 

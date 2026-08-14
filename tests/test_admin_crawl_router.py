@@ -179,11 +179,14 @@ def test_effective_caps_resolve_the_fallback_chain_the_console_can_use_for_a_wor
 
 def test_effective_reels_caps_are_zero_once_reels_have_already_seeded():
     """plans/260811_reels-on-seed-only.md: reels crawl exactly once, on the
-    seed run, and never again once `cursor_reels_at` is set — an operator
-    sizing the NEXT run must be quoted 0 for reels, not a resolved-but-
-    now-unreachable cap for a stream that will not run. Posts' own caps
-    are untouched — the two streams' cost estimates stay independent, same
-    as their cursors."""
+    seed run, and never again once seeded — an operator sizing the NEXT run
+    must be quoted 0 for reels, not a resolved-but-now-unreachable cap for
+    a stream that will not run. Posts' own caps are untouched — the two
+    streams' cost estimates stay independent, same as their cursors.
+
+    plans/260814_seeded-state-and-config-validation.md §A: "seeded" is now
+    `reels_seeded_at`, not `cursor_reels_at` alone — both are set here,
+    exactly like a real completed seed leaves both behind together."""
     client, dao = _client()
     resp = client.post("/admin/crawl-targets", json={
         "handle": "alreadyseededreels", "kind": "venue", "cron": "0 22 * * *",
@@ -197,6 +200,7 @@ def test_effective_reels_caps_are_zero_once_reels_have_already_seeded():
 
     dao.update_crawl_target("alreadyseededreels", {
         "cursor_reels_at": datetime(2026, 8, 1, tzinfo=timezone.utc),
+        "reels_seeded_at": datetime(2026, 8, 1, tzinfo=timezone.utc),
     })
     resp2 = client.get("/admin/crawl-targets/alreadyseededreels")
     assert resp2.status_code == 200, resp2.text
@@ -205,6 +209,53 @@ def test_effective_reels_caps_are_zero_once_reels_have_already_seeded():
     assert body2["effective_reels_results_limit"] == 0
     # Posts' own caps are unaffected by the reels-side cursor.
     assert body2["effective_seed_results_limit"] == 90
+
+
+# ── plans/260814_seeded-state-and-config-validation.md §A ───────────────────
+def test_reels_seeded_is_false_for_a_brand_new_target():
+    client, _ = _client()
+    resp = client.post("/admin/crawl-targets", json={
+        "handle": "reelsneverseeded", "kind": "venue", "cron": "0 22 * * *", "crawl_reels": True,
+    })
+    assert resp.status_code == 201, resp.text
+    assert resp.json()["reels_seeded"] is False
+    assert resp.json()["reels_seeded_at"] is None
+
+
+def test_reels_seeded_is_true_once_an_empty_seed_completed():
+    """The exact fact §A exists to surface: an EMPTY reels result still
+    counts as seeded — `reels_seeded` must read True with no
+    `cursor_reels_at` at all."""
+    client, dao = _client()
+    dao.upsert_crawl_target(
+        "reelsemptyseeded", {"kind": "venue", "cron": "0 22 * * *", "crawl_reels": True},
+    )
+    dao.update_crawl_target(
+        "reelsemptyseeded", {"reels_seeded_at": datetime(2026, 8, 1, tzinfo=timezone.utc)},
+    )
+    resp = client.get("/admin/crawl-targets/reelsemptyseeded")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["reels_seeded"] is True
+    assert body["reels_seeded_at"] is not None
+    assert body["cursor_reels_at"] is None  # nothing was ever reached
+
+
+def test_reels_seeded_is_false_with_a_cursor_alone_and_no_seeded_at():
+    """Regression pin for §A's own defect: a row carrying `cursor_reels_at`
+    but no `reels_seeded_at` (a shape that should not occur going forward,
+    but did for every pre-existing row before this migration) must NOT
+    read as seeded through the admin API either."""
+    client, dao = _client()
+    dao.upsert_crawl_target(
+        "cursoronlyreels", {"kind": "venue", "cron": "0 22 * * *", "crawl_reels": True},
+    )
+    dao.update_crawl_target(
+        "cursoronlyreels", {"cursor_reels_at": datetime(2026, 8, 1, tzinfo=timezone.utc)},
+    )
+    resp = client.get("/admin/crawl-targets/cursoronlyreels")
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["reels_seeded"] is False
 
 
 # ── plans/260813_crawl-transport-failure-visibility.md §E ───────────────────

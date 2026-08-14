@@ -36,8 +36,13 @@ from app.models.instagram import VenueInstagram
 from app.models.venue import Venue
 from app.services import job_lock
 from app.services.instagram_crawl_service import (
+    FAILURE_OUTCOMES,
+    OUTCOME_CREDIT_EXHAUSTED,
+    OUTCOME_EMPTY,
+    OUTCOME_SKIPPED_BUDGET,
     OUTCOME_SKIPPED_DISABLED,
     OUTCOME_SKIPPED_SEEDED,
+    OUTCOME_SUCCESS,
     STREAM_POSTS,
     STREAM_REELS,
     CrawlServiceConfig,
@@ -51,6 +56,7 @@ from app.services.instagram_crawl_service import (
     dedupe_posts_by_shortcode,
     group_venue_ids_by_handle,
     is_posts_dormant,
+    is_reels_seed_completion,
     lock_name_for,
     posts_never_seeded,
     reels_already_seeded,
@@ -152,6 +158,82 @@ class TestSplitKeptAndDropped:
         posts = [{"shortcode": "a", "timestamp": "2020-01-01T00:00:00.000Z", "is_pinned": True}]
         kept, dropped = _split_kept_and_dropped(posts, None)
         assert kept == posts and dropped == 0
+
+    def test_all_pinned_and_dropped_posts_leave_kept_empty(self):
+        """plans/260814_seeded-state-and-config-validation.md §A's open
+        question, answered directly at the pure-function level: a raw_posts
+        list that is real and non-empty, but every item is pinned AND
+        older than the cutoff, produces `kept == []` — the exact same
+        falsy shape `_run_stream`'s `if not kept:` treats a genuinely empty
+        `raw_posts` as. An inline comment on that branch used to claim this
+        case was unreachable there ("is NOT this branch"); it is reachable,
+        and this is the test that pins it. See
+        TestPinnedCommentOpenQuestion below for the same fact proven at the
+        `run_target` level."""
+        cutoff = datetime(2026, 8, 1, 0, 0, tzinfo=timezone.utc)
+        posts = [
+            {"shortcode": "p1", "timestamp": "2023-01-01T00:00:00.000Z", "is_pinned": True},
+            {"shortcode": "p2", "timestamp": "2022-06-01T00:00:00.000Z", "is_pinned": True},
+        ]
+        kept, dropped = _split_kept_and_dropped(posts, cutoff)
+        assert kept == []
+        assert not kept  # the exact falsy check `_run_stream` performs
+        assert dropped == 2
+
+    def test_all_older_than_cutoff_but_not_pinned_is_never_dropped(self):
+        """The other half of the same open question: "all older than the
+        cutoff" ALONE (no pinning) can never empty `kept` — only a PINNED
+        post can be older than the bound at all (a non-pinned one is
+        already excluded by the actor's own filter), so this shape cannot
+        occur from a real Apify response, and if it somehow did, every
+        item would still be kept, not dropped."""
+        cutoff = datetime(2026, 8, 1, 0, 0, tzinfo=timezone.utc)
+        posts = [
+            {"shortcode": "p1", "timestamp": "2023-01-01T00:00:00.000Z", "is_pinned": False},
+            {"shortcode": "p2", "timestamp": "2022-06-01T00:00:00.000Z", "is_pinned": False},
+        ]
+        kept, dropped = _split_kept_and_dropped(posts, cutoff)
+        assert len(kept) == 2
+        assert dropped == 0
+
+
+# ── plans/260814_seeded-state-and-config-validation.md §A: the seeded
+# predicate, derived from FAILURE_OUTCOMES rather than a hand-rolled
+# allow-list of "these outcomes seed" ─────────────────────────────────────
+class TestIsReelsSeedCompletion:
+    def test_every_failure_outcome_does_not_complete_the_seed(self):
+        for outcome in FAILURE_OUTCOMES:
+            assert is_reels_seed_completion(outcome) is False, outcome
+
+    def test_success_and_empty_both_complete_the_seed(self):
+        """§A's own headline fact: an EMPTY result completes the seed
+        exactly like a SUCCESS one — that is the whole defect being
+        fixed."""
+        assert is_reels_seed_completion(OUTCOME_SUCCESS) is True
+        assert is_reels_seed_completion(OUTCOME_EMPTY) is True
+
+    def test_credit_exhausted_and_skipped_budget_do_not_complete_the_seed(self):
+        """Neither a failure nor a completion — the call never reached a
+        trustworthy answer at all (refused before Apify, or cut short
+        mid-flight), so nothing was learned and a retry must stay
+        possible."""
+        assert is_reels_seed_completion(OUTCOME_CREDIT_EXHAUSTED) is False
+        assert is_reels_seed_completion(OUTCOME_SKIPPED_BUDGET) is False
+
+    def test_a_future_failure_outcome_is_excluded_automatically(self):
+        """Proves the DERIVATION, not just today's fixed set: a
+        hypothetical outcome added to FAILURE_OUTCOMES is excluded here
+        with NO second edit to this module — the plan's own requirement
+        ("a future outcome cannot silently start counting as a successful
+        seed")."""
+        import app.services.instagram_crawl_service as m
+
+        original = m.FAILURE_OUTCOMES
+        try:
+            m.FAILURE_OUTCOMES = original + ("rate_limited",)
+            assert m.is_reels_seed_completion("rate_limited") is False
+        finally:
+            m.FAILURE_OUTCOMES = original
 
 
 # ── crontab validation at write time ─────────────────────────────────────────
@@ -781,6 +863,9 @@ class TestReelsSpecificCaps:
             "kind": "venue", "cron": "0 22 * * *", "crawl_reels": True, "results_limit": 8,
             "cursor_posts_at": datetime(2026, 8, 1, tzinfo=timezone.utc),
             "cursor_reels_at": datetime(2026, 8, 1, tzinfo=timezone.utc),
+            # plans/260814_seeded-state-and-config-validation.md §A: "already
+            # seeded" is now gated on THIS field, not the cursor alone.
+            "reels_seeded_at": datetime(2026, 8, 1, tzinfo=timezone.utc),
         })
         apify = _FakeApifyClient()
         service = _service(dao, apify, _FakeBudgetDao())
@@ -805,6 +890,9 @@ class TestReelsSpecificCaps:
             "results_limit": 8, "reels_results_limit": 3,
             "cursor_posts_at": datetime(2026, 8, 1, tzinfo=timezone.utc),
             "cursor_reels_at": datetime(2026, 8, 1, tzinfo=timezone.utc),
+            # plans/260814_seeded-state-and-config-validation.md §A: "already
+            # seeded" is now gated on THIS field, not the cursor alone.
+            "reels_seeded_at": datetime(2026, 8, 1, tzinfo=timezone.utc),
         })
         apify = _FakeApifyClient()
         service = _service(dao, apify, _FakeBudgetDao())
@@ -899,45 +987,63 @@ class TestReelsOnSeedOnlyGate:
     target dict — the ONE place this gate is computed, shared by
     `run_target` (what actually runs) and the admin read model's cost
     estimate. Covers the plan's own unit test plan: "The gate: reels
-    cursor null, set, and set-with-posts-cursor-null."."""
+    cursor null, set, and set-with-posts-cursor-null." — and, since
+    plans/260814_seeded-state-and-config-validation.md §A moved the gate
+    from `cursor_reels_at` to `reels_seeded_at`, the corresponding cases for
+    the NEW field plus an explicit pin of the old defect."""
 
-    def test_runs_when_the_reels_cursor_is_null(self):
-        target = {"crawl_reels": True, "cursor_reels_at": None}
+    def test_runs_when_reels_has_never_been_seeded(self):
+        target = {"crawl_reels": True, "reels_seeded_at": None}
         assert reels_skip_reason(target) is None
         assert reels_already_seeded(target) is False
 
-    def test_skips_once_the_reels_cursor_is_set(self):
+    def test_skips_once_reels_seeded_at_is_set(self):
         target = {
             "crawl_reels": True,
-            "cursor_reels_at": datetime(2026, 8, 1, tzinfo=timezone.utc),
+            "reels_seeded_at": datetime(2026, 8, 1, tzinfo=timezone.utc),
         }
         assert reels_skip_reason(target) == OUTCOME_SKIPPED_SEEDED
         assert reels_already_seeded(target) is True
+
+    def test_a_cursor_alone_without_reels_seeded_at_does_not_count_as_seeded(self):
+        """§A's own defect, pinned directly: `cursor_reels_at` set with
+        `reels_seeded_at` still null must NOT read as seeded — the whole
+        point of separating the two fields is that the cursor answers a
+        DIFFERENT question ("what did we reach") and must never be
+        consulted for this one again. Before this plan, `reels_already_
+        seeded` read `cursor_reels_at` directly and this exact shape would
+        have (wrongly) reported seeded=True."""
+        target = {
+            "crawl_reels": True, "reels_seeded_at": None,
+            "cursor_reels_at": datetime(2026, 8, 1, tzinfo=timezone.utc),
+        }
+        assert reels_already_seeded(target) is False
+        assert reels_skip_reason(target) is None
 
     def test_the_posts_cursor_never_suppresses_a_reels_seed(self):
         """The two streams keep fully independent gates, matching their
         independent cursors — the posts cursor advancing must never
         suppress a reels seed, and this is the case that would prove it
-        wrong: posts already has a cursor, reels does not."""
+        wrong: posts already has a cursor, reels has never been seeded."""
         target = {
-            "crawl_reels": True, "cursor_reels_at": None,
+            "crawl_reels": True, "reels_seeded_at": None,
             "cursor_posts_at": datetime(2026, 8, 1, tzinfo=timezone.utc),
         }
         assert reels_skip_reason(target) is None
 
     def test_disabled_is_reported_distinctly_from_already_seeded(self):
         assert reels_skip_reason({"crawl_reels": False}) == OUTCOME_SKIPPED_DISABLED
-        assert reels_skip_reason({"crawl_reels": False, "cursor_reels_at": None}) == (
+        assert reels_skip_reason({"crawl_reels": False, "reels_seeded_at": None}) == (
             OUTCOME_SKIPPED_DISABLED
         )
 
-    def test_an_unparseable_cursor_string_is_treated_as_unset(self):
-        """Mirrors `_as_utc_dt`'s own "a corrupt cursor must not crash the
+    def test_an_unparseable_reels_seeded_at_string_is_treated_as_unset(self):
+        """Mirrors `_as_utc_dt`'s own "a corrupt value must not crash the
         crawl, only be treated as absent" convention — a target read back
         through a JSON boundary (e.g. the admin API) with a garbled
-        `cursor_reels_at` must still be seedable, not stuck skipped
+        `reels_seeded_at` must still be seedable, not stuck skipped
         forever."""
-        target = {"crawl_reels": True, "cursor_reels_at": "not-a-date"}
+        target = {"crawl_reels": True, "reels_seeded_at": "not-a-date"}
         assert reels_skip_reason(target) is None
 
 
@@ -1009,6 +1115,11 @@ def test_a_failed_seeds_bookkeeping_write_leaves_the_reels_cursor_null_and_the_r
     row = inner.get_crawl_target("reelsretry")
     assert row["cursor_reels_at"] is None
     assert row["cursor_posts_at"] is None
+    # plans/260814_seeded-state-and-config-validation.md §A non-negotiable:
+    # a seed marker written before its own bookkeeping commits would
+    # reintroduce the 2026-08-09 entreamigos.praia incident. `reels_seeded_
+    # at` rides the SAME failed write as the cursor, so it must be null too.
+    assert row["reels_seeded_at"] is None
 
     # The retry: the same wrapper's failure is a one-shot (it is now
     # disarmed), so this second call's bookkeeping write lands for real.
@@ -1016,6 +1127,101 @@ def test_a_failed_seeds_bookkeeping_write_leaves_the_reels_cursor_null_and_the_r
 
     retry_calls = apify.calls[2:]  # after the two calls the first attempt made
     assert {c["results_type"] for c in retry_calls} == {"posts", "reels"}, retry_calls
+    assert inner.get_crawl_target("reelsretry")["reels_seeded_at"] is not None
+
+
+def test_a_failed_bookkeeping_write_leaves_an_empty_reels_seed_unset_too():
+    """The EMPTY-specific twin of the test above: §A's new write path
+    (`reels_seeded_at` on OUTCOME_EMPTY, not just OUTCOME_SUCCESS) must
+    honour the SAME non-negotiable — results were already scraped and
+    billed, but if the bookkeeping write that would record the seed as
+    done fails, the target must stay retryable, exactly like a failed
+    write leaves a non-empty seed's cursor unset."""
+    inner = _venue_dao()
+    inner.upsert_venue(Venue(venue_id="v1", venue_name="V1", venue_lat=-8.0, venue_lng=-34.9))
+    inner.set_venue_instagram(VenueInstagram(venue_id="v1", instagram_handle="emptyseedretry", status="found"))
+    inner.upsert_crawl_target("emptyseedretry", {"kind": "venue", "cron": "0 22 * * *", "crawl_reels": True})
+    dao = _BookkeepingFailsOnceDao(inner)
+    apify = _FakeApifyClient()
+    # Posts unprogrammed -> empty too; reels explicitly empty -- both
+    # streams reach a trustworthy OUTCOME_EMPTY, nothing to keep.
+    apify.program("emptyseedretry", "reels", [])
+    service = _service(dao, apify, _FakeBudgetDao())
+
+    with pytest.raises(RuntimeError):
+        _run(service.run_target("emptyseedretry"))
+
+    row = inner.get_crawl_target("emptyseedretry")
+    assert row["reels_seeded_at"] is None, (
+        "a bookkeeping failure must leave the seed retryable even though "
+        "the (empty) scrape itself succeeded and was billed"
+    )
+
+    # The retry lands for real (the fake's failure is a one-shot).
+    _run(service.run_target("emptyseedretry"))
+    assert inner.get_crawl_target("emptyseedretry")["reels_seeded_at"] is not None
+
+
+class TestPinnedCommentOpenQuestion:
+    """plans/260814_seeded-state-and-config-validation.md's own open
+    question, pinned at the full `run_target` level (TestSplitKeptAndDropped
+    already pins the same fact at the pure-function level): does a reels
+    result whose raw posts are ALL pinned-and-dropped reach the same early
+    return, and the same seeded outcome, as a genuinely empty result? Yes —
+    both collapse to `kept == []`, `error_code is None`, OUTCOME_EMPTY."""
+
+    def test_all_pinned_and_dropped_reels_posts_are_classified_empty_and_seeded(self):
+        dao = _venue_dao()
+        dao.upsert_venue(Venue(venue_id="v1", venue_name="V1", venue_lat=-8.0, venue_lng=-34.9))
+        dao.set_venue_instagram(VenueInstagram(venue_id="v1", instagram_handle="allpinnedreels", status="found"))
+        dao.upsert_crawl_target("allpinnedreels", {"kind": "venue", "cron": "0 22 * * *", "crawl_reels": True})
+        apify = _FakeApifyClient()
+        # A SEED run (no cursor yet): the default "3 months" lookback still
+        # produces a real cutoff (compute_bound's seed path), so these
+        # pinned, years-old posts are dropped by _split_kept_and_dropped
+        # exactly like a steady-state run's would be.
+        apify.program("allpinnedreels", "reels", [
+            {"shortcode": "op1", "timestamp": "2023-01-01T00:00:00.000Z", "is_pinned": True},
+            {"shortcode": "op2", "timestamp": "2022-06-01T00:00:00.000Z", "is_pinned": True},
+        ])
+        service = _service(dao, apify, _FakeBudgetDao())
+
+        report = _run(service.run_target("allpinnedreels"))
+
+        assert report["streams"]["reels"]["outcome"] == OUTCOME_EMPTY, report["streams"]["reels"]
+        assert report["streams"]["reels"]["dropped_pinned"] == 2
+        row = dao.get_crawl_target("allpinnedreels")
+        assert row["reels_seeded_at"] is not None, (
+            "an all-pinned-and-dropped result is a real, billed answer and "
+            "must count as a completed seed, exactly like a genuinely "
+            "empty one"
+        )
+        assert row["cursor_reels_at"] is None, "no timestamp was actually reached"
+
+    def test_an_all_pinned_and_dropped_result_matches_a_genuinely_empty_one(self):
+        """Same classification, same seeded outcome, for BOTH shapes of
+        'nothing kept' -- proven side by side so a future change that
+        treats them differently is caught by a diff, not just an absolute
+        assertion."""
+        def _run_with_reels(handle: str, reels_posts: list[dict]) -> dict:
+            dao = _venue_dao()
+            dao.upsert_venue(Venue(venue_id="v1", venue_name="V1", venue_lat=-8.0, venue_lng=-34.9))
+            dao.set_venue_instagram(VenueInstagram(venue_id="v1", instagram_handle=handle, status="found"))
+            dao.upsert_crawl_target(handle, {"kind": "venue", "cron": "0 22 * * *", "crawl_reels": True})
+            apify = _FakeApifyClient()
+            apify.program(handle, "reels", reels_posts)
+            service = _service(dao, apify, _FakeBudgetDao())
+            report = _run(service.run_target(handle))
+            return {
+                "outcome": report["streams"]["reels"]["outcome"],
+                "seeded": dao.get_crawl_target(handle)["reels_seeded_at"] is not None,
+            }
+
+        genuinely_empty = _run_with_reels("genuinelyemptyreels", [])
+        all_pinned_dropped = _run_with_reels("allpinneddroppedreels", [
+            {"shortcode": "op1", "timestamp": "2023-01-01T00:00:00.000Z", "is_pinned": True},
+        ])
+        assert genuinely_empty == all_pinned_dropped == {"outcome": OUTCOME_EMPTY, "seeded": True}
 
 
 # ── the budget IS re-read between streams within one run ────────────────────
@@ -1076,6 +1282,98 @@ def test_reels_and_posts_cursors_move_independently():
     row = dao.get_crawl_target("reelshandle")
     assert row["cursor_posts_at"] == datetime(2026, 8, 5, 9, 0, tzinfo=timezone.utc)
     assert row["cursor_reels_at"] is None
+    # plans/260814_seeded-state-and-config-validation.md §A: the empty
+    # reels result still completed -- it must be recorded as seeded even
+    # though (as asserted just above) it advances no cursor.
+    assert row["reels_seeded_at"] is not None
+
+
+class TestReelsSeededStateEndToEnd:
+    """plans/260814_seeded-state-and-config-validation.md §A, driven
+    through the full `run_target` orchestration (not just the pure
+    predicates TestIsReelsSeedCompletion/TestReelsOnSeedOnlyGate cover) —
+    the plan's own acceptance criteria: "A reels stream that completes with
+    zero items is never re-run for that target" and "A failed reels stream
+    is still retried.\""""
+
+    def test_an_empty_reels_seed_is_never_run_again(self):
+        dao = _venue_dao()
+        dao.upsert_venue(Venue(venue_id="v1", venue_name="V1", venue_lat=-8.0, venue_lng=-34.9))
+        dao.set_venue_instagram(VenueInstagram(venue_id="v1", instagram_handle="neverrepeat", status="found"))
+        dao.upsert_crawl_target("neverrepeat", {"kind": "venue", "cron": "0 22 * * *", "crawl_reels": True})
+        apify = _FakeApifyClient()
+        apify.program("neverrepeat", "reels", [])
+        service = _service(dao, apify, _FakeBudgetDao())
+
+        _run(service.run_target("neverrepeat"))
+        first_reels_calls = [c for c in apify.calls if c["results_type"] == "reels"]
+        assert len(first_reels_calls) == 1
+
+        # A second scheduled fire for the same target.
+        report = _run(service.run_target("neverrepeat"))
+
+        reels_calls = [c for c in apify.calls if c["results_type"] == "reels"]
+        assert len(reels_calls) == 1, "reels must not be called again once seeded empty"
+        assert report["streams"]["reels"]["outcome"] == OUTCOME_SKIPPED_SEEDED
+
+    def test_a_blocked_reels_seed_is_retried_on_the_next_run(self):
+        dao = _venue_dao()
+        dao.upsert_venue(Venue(venue_id="v1", venue_name="V1", venue_lat=-8.0, venue_lng=-34.9))
+        dao.set_venue_instagram(VenueInstagram(venue_id="v1", instagram_handle="blockedretry", status="found"))
+        dao.upsert_crawl_target("blockedretry", {"kind": "venue", "cron": "0 22 * * *", "crawl_reels": True})
+        apify = _FakeApifyClient()
+        apify.program_error("blockedretry", "reels", code="no_items", request_error_count=5)
+        service = _service(dao, apify, _FakeBudgetDao())
+
+        report1 = _run(service.run_target("blockedretry"))
+        assert report1["streams"]["reels"]["outcome"] == "blocked"
+        assert dao.get_crawl_target("blockedretry")["reels_seeded_at"] is None
+
+        # Blocked was transient; the next fire genuinely reaches Apify again.
+        apify.program_error("blockedretry", "reels", code="no_items", request_error_count=0)
+        report2 = _run(service.run_target("blockedretry"))
+
+        reels_calls = [c for c in apify.calls if c["results_type"] == "reels"]
+        assert len(reels_calls) == 2, "a blocked seed must still be retried"
+        assert report2["streams"]["reels"]["outcome"] == OUTCOME_EMPTY
+        assert dao.get_crawl_target("blockedretry")["reels_seeded_at"] is not None
+
+    def test_a_handle_not_found_reels_result_stays_unseeded(self):
+        dao = _venue_dao()
+        dao.upsert_venue(Venue(venue_id="v1", venue_name="V1", venue_lat=-8.0, venue_lng=-34.9))
+        dao.set_venue_instagram(VenueInstagram(venue_id="v1", instagram_handle="notfoundreels", status="found"))
+        dao.upsert_crawl_target("notfoundreels", {"kind": "venue", "cron": "0 22 * * *", "crawl_reels": True})
+        apify = _FakeApifyClient()
+        apify.program_error("notfoundreels", "reels", code="not_found")
+        service = _service(dao, apify, _FakeBudgetDao())
+
+        report = _run(service.run_target("notfoundreels"))
+
+        assert report["streams"]["reels"]["outcome"] == "handle_not_found"
+        assert dao.get_crawl_target("notfoundreels")["reels_seeded_at"] is None
+
+    def test_a_timed_out_reels_result_stays_unseeded(self):
+        """A transport failure (§260813) -- an in-process exception or one
+        of FetchPostsResult's own transport codes -- must leave the seed
+        unset exactly like a dataset-level failure does."""
+        dao = _venue_dao()
+        dao.upsert_venue(Venue(venue_id="v1", venue_name="V1", venue_lat=-8.0, venue_lng=-34.9))
+        dao.set_venue_instagram(VenueInstagram(venue_id="v1", instagram_handle="timeoutreels", status="found"))
+        dao.upsert_crawl_target("timeoutreels", {"kind": "venue", "cron": "0 22 * * *", "crawl_reels": True})
+        apify = _FakeApifyClient()
+        apify.program_error("timeoutreels", "reels", code="timeout", request_error_count=0)
+        service = _service(dao, apify, _FakeBudgetDao())
+
+        report = _run(service.run_target("timeoutreels"))
+
+        assert report["streams"]["reels"]["outcome"] == "failed"
+        assert dao.get_crawl_target("timeoutreels")["reels_seeded_at"] is None
+
+    # Admin-read-model coverage for `reels_seeded`/`reels_seeded_at` lives
+    # in tests/test_admin_crawl_router.py (the router's own test module),
+    # not here — CLAUDE.md's "keep tests close to the behavior they
+    # protect." See test_reels_seeded_is_true_once_an_empty_seed_completed
+    # and its siblings there.
 
 
 def test_credit_exhaustion_is_reported_and_does_not_raise():
