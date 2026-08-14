@@ -307,7 +307,8 @@ Pytest unit tests:
   is reversible.
 
 Manual or integration checks:
-- **A one-venue trial run before any batch.** Confirm the actor's real output
+- **A couple-of-venues trial run in production, and nothing larger** (see the
+  2c cancellation below). Confirm the actor's real output
   field names, the effect of newest-sort plus the date filter, and the actual
   billed count against `apify_review_cost_usd` — the cost model is only as good
   as that first invoice line.
@@ -344,7 +345,34 @@ None. Both were answered on 2026-08-13:
    the reason a production crawl is refused.
 
 **Scheduling consequence (not a blocker for 2a/2b).** With ~$4.5 of projected
-headroom left in the current cycle, the 2c backfill must not run before the
-next cycle opens on **2026-08-29** — or must be sized to the measured headroom
-at the time. 2a (build) and 2b (the one-venue trial, ~50 reviews ≈ $0.015) are
-unaffected and can proceed immediately.
+headroom left in the current cycle, no large batch may run before the next
+cycle opens on **2026-08-29**, or it must be sized to the measured headroom at
+the time. 2a (build) and 2b are unaffected and can proceed immediately.
+
+### 2c is cancelled as specified — no full-catalog backfill (operator, 2026-08-13)
+
+The original 2c was "batched backfill of an operator-selected subset", sized in
+the Evidence section against the whole catalog. **That is explicitly not
+happening.** The operator's direction: implement the capability, capture
+reviews for **a couple of venues in production** to prove the pipeline end to
+end, and stop there — a prioritisation scheme for *which* venues deserve a
+deep corpus is a separate decision they want to make deliberately, informed by
+which venues actually matter, not by "all of them".
+
+Consequences for this plan:
+
+- **2b widens slightly**: a couple of venues rather than one, still trivial
+  spend (2 venues × the 300 cap × `apify_review_cost_usd` ≈ **$0.18** worst
+  case, and realistically far less). It comfortably clears the
+  `reviews_deep_reserved_headroom_usd` reserve against currently measured
+  headroom, so it does **not** need to wait for the 2026-08-29 cycle.
+- **2c becomes: nothing, pending a prioritisation rule.** The
+  `reviews_deep_monthly_review_budget` of 30,000 stays as the safety ceiling —
+  it is a limit, never a target, and nothing in this plan now intends to
+  approach it.
+- **The full-catalog arithmetic in the Evidence section is retained as
+  sizing context only.** It justified the design (bounded projection, two-gate
+  budget, per-venue caps); it is not a commitment to crawl 1438 venues, and a
+  later reader must not treat it as one.
+- Nothing about the **code** changes. Selection was always explicit and
+  operator-driven; this narrows only what gets selected.
