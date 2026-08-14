@@ -1,0 +1,248 @@
+.venv/bin/python -m behave "tests/bdd/enrichment/history-repair-dates.feature"
+USING RUNNER: behave.runner:Runner
+Feature: History repair — dates # tests/bdd/enrichment/history-repair-dates.feature:1
+  Re-resolve every stored date expression with the current resolver, using only
+  data already in RDS. No model call, no Apify. A repaired date moves the row's
+  content identity with it, and an operator's own answer is never overwritten.
+  Feature: History repair — dates  # tests/bdd/enrichment/history-repair-dates.feature:1
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: Repair a row whose date text the resolver can now read  # tests/bdd/enrichment/history-repair-dates.feature:12
+    Given the date repair script is available                       # tests/bdd/steps/history_repair_dates_steps.py:168
+    And every source carries the post's own upload timestamp        # tests/bdd/steps/history_repair_dates_steps.py:173
+    Given a stored item with date text "É HOJE" and no start date   # tests/bdd/steps/history_repair_dates_steps.py:184
+    And its post was uploaded on 2026-08-07                         # None
+    When the repair runs with apply                                 # None
+    Then the item starts on 2026-08-07                              # None
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+----
+CAPTURED LOG: before_scenario
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+---- CAPTURED_SCENARIO_OUTPUT_END ----
+
+  Scenario: Correct a row whose year was rolled forward wrongly       # tests/bdd/enrichment/history-repair-dates.feature:18
+    Given the date repair script is available                         # tests/bdd/steps/history_repair_dates_steps.py:168
+    And every source carries the post's own upload timestamp          # tests/bdd/steps/history_repair_dates_steps.py:173
+    Given a stored item with date text "08/08" starting on 2027-08-09 # tests/bdd/steps/history_repair_dates_steps.py:189
+    And its post was uploaded on 2026-08-12                           # None
+    When the repair runs with apply                                   # None
+    Then the item starts on 2026-08-08                                # None
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+----
+CAPTURED LOG: before_scenario
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+---- CAPTURED_SCENARIO_OUTPUT_END ----
+
+  Scenario: Correct a range that was resolved to its last day                           # tests/bdd/enrichment/history-repair-dates.feature:24
+    Given the date repair script is available                                           # tests/bdd/steps/history_repair_dates_steps.py:168
+    And every source carries the post's own upload timestamp                            # tests/bdd/steps/history_repair_dates_steps.py:173
+    Given a stored item with date text "De 06 a 09 de fevereiro" starting on 2027-02-09 # tests/bdd/steps/history_repair_dates_steps.py:189
+    When the repair runs with apply                                                     # tests/bdd/steps/history_repair_dates_steps.py:316
+    Then the item starts on 2027-02-06                                                  # tests/bdd/steps/history_repair_dates_steps.py:332
+    And the item is flagged as a collapsed range                                        # tests/bdd/steps/history_repair_dates_steps.py:340
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: Leave a row whose date text is empty undated and queued    # tests/bdd/enrichment/history-repair-dates.feature:30
+    Given the date repair script is available                          # tests/bdd/steps/history_repair_dates_steps.py:168
+    And every source carries the post's own upload timestamp           # tests/bdd/steps/history_repair_dates_steps.py:173
+    Given a stored item with no date text and no start date            # tests/bdd/steps/history_repair_dates_steps.py:194
+    When the repair runs with apply                                    # tests/bdd/steps/history_repair_dates_steps.py:316
+    Then the item still has no start date                              # tests/bdd/steps/history_repair_dates_steps.py:346
+    And the item is still queued for review with reason "missing_date" # tests/bdd/steps/history_repair_dates_steps.py:352
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: Leave a row with no stored anchor untouched                              # tests/bdd/enrichment/history-repair-dates.feature:36
+    Given the date repair script is available                                        # tests/bdd/steps/history_repair_dates_steps.py:168
+    And every source carries the post's own upload timestamp                         # tests/bdd/steps/history_repair_dates_steps.py:173
+    Given a stored item with date text "É HOJE" whose source has no upload timestamp # tests/bdd/steps/history_repair_dates_steps.py:199
+    When the repair runs with apply                                                  # tests/bdd/steps/history_repair_dates_steps.py:316
+    Then the item still has no start date                                            # tests/bdd/steps/history_repair_dates_steps.py:346
+    And the report records it as skipped for a missing anchor                        # tests/bdd/steps/history_repair_dates_steps.py:359
+      ASSERT FAILED: 1/1 selected sources (100.0%) have no source_uploaded_at — exceeds the configured 20% ceiling. The source_uploaded_at back-fill (plans/260812_crawl-error-visibility.md §C) looks incomplete for this slice; refusing to run before touching any row.
+
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+----
+CAPTURED LOG: before_scenario
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+---- CAPTURED_SCENARIO_OUTPUT_END ----
+
+  Scenario: Never change a date an operator edited                 # tests/bdd/enrichment/history-repair-dates.feature:44
+    Given the date repair script is available                      # tests/bdd/steps/history_repair_dates_steps.py:168
+    And every source carries the post's own upload timestamp       # tests/bdd/steps/history_repair_dates_steps.py:173
+    Given a stored item whose start date was edited by an operator # tests/bdd/steps/history_repair_dates_steps.py:204
+    When the repair runs with apply                                # tests/bdd/steps/history_repair_dates_steps.py:316
+    Then the item's start date is unchanged                        # tests/bdd/steps/history_repair_dates_steps.py:365
+    And the report records it as skipped for an operator edit      # tests/bdd/steps/history_repair_dates_steps.py:374
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: Never change a confirmed row and report the disagreement         # tests/bdd/enrichment/history-repair-dates.feature:50
+    Given the date repair script is available                                # tests/bdd/steps/history_repair_dates_steps.py:168
+    And every source carries the post's own upload timestamp                 # tests/bdd/steps/history_repair_dates_steps.py:173
+    Given a confirmed item whose stored date the resolver now disagrees with # tests/bdd/steps/history_repair_dates_steps.py:213
+    When the repair runs with apply                                          # tests/bdd/steps/history_repair_dates_steps.py:316
+    Then the item's start date is unchanged                                  # tests/bdd/steps/history_repair_dates_steps.py:365
+    And the report lists it as a confirmed conflict                          # tests/bdd/steps/history_repair_dates_steps.py:380
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: Skip a superseded row                                # tests/bdd/enrichment/history-repair-dates.feature:56
+    Given the date repair script is available                    # tests/bdd/steps/history_repair_dates_steps.py:168
+    And every source carries the post's own upload timestamp     # tests/bdd/steps/history_repair_dates_steps.py:173
+    Given a superseded item whose date the resolver can now read # tests/bdd/steps/history_repair_dates_steps.py:222
+    When the repair runs with apply                              # tests/bdd/steps/history_repair_dates_steps.py:316
+    Then the item's start date is unchanged                      # tests/bdd/steps/history_repair_dates_steps.py:365
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: Drop the missing date reason when the date resolves      # tests/bdd/enrichment/history-repair-dates.feature:63
+    Given the date repair script is available                        # tests/bdd/steps/history_repair_dates_steps.py:168
+    And every source carries the post's own upload timestamp         # tests/bdd/steps/history_repair_dates_steps.py:173
+    Given a stored item queued for review with reason "missing_date" # tests/bdd/steps/history_repair_dates_steps.py:227
+    And its date text can now be resolved                            # tests/bdd/steps/history_repair_dates_steps.py:240
+    When the repair runs with apply                                  # tests/bdd/steps/history_repair_dates_steps.py:316
+    Then the item is no longer queued for "missing_date"             # tests/bdd/steps/history_repair_dates_steps.py:386
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: Keep a row queued for a different reason when its date resolves                  # tests/bdd/enrichment/history-repair-dates.feature:69
+    Given the date repair script is available                                                # tests/bdd/steps/history_repair_dates_steps.py:168
+    And every source carries the post's own upload timestamp                                 # tests/bdd/steps/history_repair_dates_steps.py:173
+    Given a stored item queued for review with reasons "missing_date" and "unresolved_venue" # tests/bdd/steps/history_repair_dates_steps.py:232
+    And its date text can now be resolved                                                    # tests/bdd/steps/history_repair_dates_steps.py:240
+    When the repair runs with apply                                                          # tests/bdd/steps/history_repair_dates_steps.py:316
+    Then the item is no longer queued for "missing_date"                                     # tests/bdd/steps/history_repair_dates_steps.py:386
+    And the item is still queued for "unresolved_venue"                                      # tests/bdd/steps/history_repair_dates_steps.py:392
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: Add the inferred year reason when the repair had to guess  # tests/bdd/enrichment/history-repair-dates.feature:76
+    Given the date repair script is available                          # tests/bdd/steps/history_repair_dates_steps.py:168
+    And every source carries the post's own upload timestamp           # tests/bdd/steps/history_repair_dates_steps.py:173
+    Given a stored item whose date text states no year                 # tests/bdd/steps/history_repair_dates_steps.py:245
+    And resolving it requires rolling the year forward                 # tests/bdd/steps/history_repair_dates_steps.py:250
+    When the repair runs with apply                                    # tests/bdd/steps/history_repair_dates_steps.py:316
+    Then the item is queued for review with reason "year_inferred"     # tests/bdd/steps/history_repair_dates_steps.py:398
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: Rewrite the source event key together with the date               # tests/bdd/enrichment/history-repair-dates.feature:84
+    Given the date repair script is available                                 # tests/bdd/steps/history_repair_dates_steps.py:168
+    And every source carries the post's own upload timestamp                  # tests/bdd/steps/history_repair_dates_steps.py:173
+    Given a stored item whose date the repair will change                     # tests/bdd/steps/history_repair_dates_steps.py:258
+    When the repair runs with apply                                           # tests/bdd/steps/history_repair_dates_steps.py:316
+    Then the source event key equals the key a fresh extraction would compute # tests/bdd/steps/history_repair_dates_steps.py:404
+    And the key and the start date were written in one transaction            # tests/bdd/steps/history_repair_dates_steps.py:411
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: Hand a key collision to the merge layer instead of failing                     # tests/bdd/enrichment/history-repair-dates.feature:90
+    Given the date repair script is available                                              # tests/bdd/steps/history_repair_dates_steps.py:168
+    And every source carries the post's own upload timestamp                               # tests/bdd/steps/history_repair_dates_steps.py:173
+    Given two sources of one post whose repaired dates give them the same content identity # tests/bdd/steps/history_repair_dates_steps.py:263
+    When the repair runs with apply                                                        # tests/bdd/steps/history_repair_dates_steps.py:316
+    Then the repair does not raise                                                         # tests/bdd/steps/history_repair_dates_steps.py:424
+    And the pair is reported as a merge candidate                                          # tests/bdd/steps/history_repair_dates_steps.py:429
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: Report every change and write nothing without apply    # tests/bdd/enrichment/history-repair-dates.feature:98
+    Given the date repair script is available                      # tests/bdd/steps/history_repair_dates_steps.py:168
+    And every source carries the post's own upload timestamp       # tests/bdd/steps/history_repair_dates_steps.py:173
+    Given several stored items whose dates the repair would change # tests/bdd/steps/history_repair_dates_steps.py:284
+    When the repair runs without apply                             # tests/bdd/steps/history_repair_dates_steps.py:321
+    Then no item's start date changes                              # tests/bdd/steps/history_repair_dates_steps.py:439
+    And the report lists each item's stored date and resolved date # tests/bdd/steps/history_repair_dates_steps.py:446
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: Group the report by date text shape                # tests/bdd/enrichment/history-repair-dates.feature:104
+    Given the date repair script is available                  # tests/bdd/steps/history_repair_dates_steps.py:168
+    And every source carries the post's own upload timestamp   # tests/bdd/steps/history_repair_dates_steps.py:173
+    Given stored items with several different date text shapes # tests/bdd/steps/history_repair_dates_steps.py:297
+    When the repair runs without apply                         # tests/bdd/steps/history_repair_dates_steps.py:321
+    Then the report groups the changes by date text shape      # tests/bdd/steps/history_repair_dates_steps.py:459
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: Change nothing on a second apply                 # tests/bdd/enrichment/history-repair-dates.feature:109
+    Given the date repair script is available                # tests/bdd/steps/history_repair_dates_steps.py:168
+    And every source carries the post's own upload timestamp # tests/bdd/steps/history_repair_dates_steps.py:173
+    Given the repair has already been applied                # tests/bdd/steps/history_repair_dates_steps.py:306
+    When the repair runs with apply again                    # tests/bdd/steps/history_repair_dates_steps.py:326
+    Then no item changes                                     # tests/bdd/steps/history_repair_dates_steps.py:472
+
+
+You can implement step definitions for undefined steps with these snippets:
+
+from behave.api.pending_step import StepNotImplementedError
+@given(u'its post was uploaded on 2026-08-07')
+def step_impl(context):
+    raise StepNotImplementedError(u'Given its post was uploaded on 2026-08-07')
+
+
+@given(u'its post was uploaded on 2026-08-12')
+def step_impl(context):
+    raise StepNotImplementedError(u'Given its post was uploaded on 2026-08-12')
+
+
+
+Failing scenarios:
+  tests/bdd/enrichment/history-repair-dates.feature:36  Leave a row with no stored anchor untouched
+
+Errored scenarios:
+  tests/bdd/enrichment/history-repair-dates.feature:12  Repair a row whose date text the resolver can now read
+  tests/bdd/enrichment/history-repair-dates.feature:18  Correct a row whose year was rolled forward wrongly
+
+0 features passed, 0 failed, 1 error, 0 skipped
+13 scenarios passed, 1 failed, 2 error, 0 skipped
+87 steps passed, 1 failed, 4 skipped, 2 undefined
+Took 0min 0.017s
+make: *** [Makefile:156: test-feature] Error 1

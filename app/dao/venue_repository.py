@@ -181,6 +181,15 @@ class VenueRepository(RedisVenueDAO):
         (plans/260813_backfill-source-provenance.md)."""
         return self.rds_store.list_all_event_sources()
 
+    def list_all_event_sources_with_context(self):
+        """Every `events.post_item_source` row across the whole table,
+        joined with its own post_item's content/protection fields —
+        `scripts.repair_event_dates`'s candidate set (plans/260812_history-
+        repair-dates.md), which needs every source's own raw_extraction/
+        date_interpretation/source_uploaded_at plus its parent's status/
+        operator_edited_fields/post_type."""
+        return self.rds_store.list_all_event_sources_with_context()
+
     def update_event_source_provenance(
         self, source_id: str, *, source_uploaded_at=None, source_media_type=None,
     ):
