@@ -59,7 +59,15 @@ class ApifyAccountUsageClient:
                 f"{APIFY_API_BASE}/users/me", params={"token": self.api_token}
             )
             me.raise_for_status()
-            limit = (me.json() or {}).get("data", {}).get("maxMonthlyUsageUsd")
+            # `maxMonthlyUsageUsd` lives on data.PLAN, not on data directly.
+            # Confirmed against the live prod account on 2026-08-14, when the
+            # 2b trial's first run refused with `headroom=None`: reading it off
+            # `data` yielded None on every call, so the gate could never open.
+            # The top-level read is kept as a fallback in case the shape ever
+            # flattens; `plan` wins when both are present.
+            me_data = (me.json() or {}).get("data") or {}
+            plan = me_data.get("plan") or {}
+            limit = plan.get("maxMonthlyUsageUsd", me_data.get("maxMonthlyUsageUsd"))
 
             usage = await self.client.get(
                 f"{APIFY_API_BASE}/users/me/usage/monthly",
