@@ -1426,6 +1426,43 @@ EVENT_COVER_PRESIGN_TOTAL = Counter(
     ["result"],
 )
 
+# plans/260813_event-source-media.md (GET /admin/events/{event_id}/media) —
+# one label per RESPONSE, not per source/manifest-read: `manifest_read`
+# (every source's manifest resolved without a fallback and at least one
+# image came back), `manifest_fallback` (at least one source fell back to
+# its stored cover_photo_key because a run manifest could not be read —
+# "A rising manifest_fallback means archived manifests are going
+# unreadable, which is invisible everywhere else"), `no_media` (the event
+# has nothing archived at all). Deliberately its own counter rather than
+# reusing EVENT_COVER_PRESIGN_TOTAL's `result` values, which mean something
+# unrelated (signed/no_key/not_found/failed for the single-cover route).
+EVENT_MEDIA_TOTAL = Counter(
+    "event_media_total",
+    "GET /admin/events/{event_id}/media outcomes, by result",
+    ["result"],
+)
+
+# Per-IMAGE presign outcome — distinct from EVENT_MEDIA_TOTAL's per-response
+# outcome above: one manifest_fallback response can still contain several
+# images, and a signing failure on ONE of them must not be lost in (or
+# confused with) the response-level label. "A per-image signing failure
+# omits that image and is counted; it must not fail the whole response and
+# lose the images that did sign" (plan Error Handling).
+EVENT_MEDIA_IMAGE_SIGN_TOTAL = Counter(
+    "event_media_image_sign_total",
+    "Event source-media per-image presign outcomes",
+    ["result"],
+)
+
+# "count images returned per response" (plan Error Handling) — the running
+# total of images actually delivered across every /media response, i.e.
+# AFTER omitting whatever EVENT_MEDIA_IMAGE_SIGN_TOTAL{result="failed"}
+# already excluded.
+EVENT_MEDIA_IMAGES_RETURNED_TOTAL = Counter(
+    "event_media_images_returned_total",
+    "Total images returned across all GET /admin/events/{event_id}/media responses",
+)
+
 # =============================================================================
 # ONE EVENT, MANY POSTS (plans/260807_one-event-many-posts.md)
 # =============================================================================

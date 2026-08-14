@@ -1,0 +1,290 @@
+/media/mario/ssd/projects/vibesense_wrapper/cs-server/.claude/worktrees/provenance/.venv/bin/python -m behave "tests/bdd/api/event-source-media.feature"
+USING RUNNER: behave.runner:Runner
+Feature: Show every archived image behind an event # tests/bdd/api/event-source-media.feature:1
+  As the operator of the event pipeline
+  I must be able to see every image the pipeline archived for an event, grouped
+  by the post it came from and marked with the one the extractor actually read,
+  so that I can tell whether merging several posts into one item combined their
+  information or quietly dropped a flyer nobody ever looked at.
+  Feature: Show every archived image behind an event  # tests/bdd/api/event-source-media.feature:1
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: Return every archived image for the event                     # tests/bdd/api/event-source-media.feature:12
+    Given an event announced by three posts on the same venue account     # tests/bdd/steps/event_source_media_steps.py:224
+    And the archive holds five classified images across those three posts # tests/bdd/steps/event_source_media_steps.py:290
+    When the event's media is requested                                   # tests/bdd/steps/event_source_media_steps.py:357
+LOG_INFO:httpx: HTTP Request: GET http://testserver/admin/events/evt-noite-da-patroa/media "HTTP/1.1 404 Not Found"
+    Then five images are returned                                         # tests/bdd/steps/event_source_media_steps.py:396
+      ASSERT FAILED: {"detail":"Not Found"}
+
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+----
+CAPTURED LOG: before_scenario
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+---- CAPTURED_SCENARIO_OUTPUT_END ----
+
+  Scenario: Group the images under the post each came from                # tests/bdd/api/event-source-media.feature:16
+    Given an event announced by three posts on the same venue account     # tests/bdd/steps/event_source_media_steps.py:224
+    And the archive holds five classified images across those three posts # tests/bdd/steps/event_source_media_steps.py:290
+    When the event's media is requested                                   # tests/bdd/steps/event_source_media_steps.py:357
+LOG_INFO:httpx: HTTP Request: GET http://testserver/admin/events/evt-noite-da-patroa/media "HTTP/1.1 404 Not Found"
+    Then each image is reported under its own post's shortcode            # tests/bdd/steps/event_source_media_steps.py:403
+      ASSERT FAILED: {"detail":"Not Found"}
+
+    And no image is reported under a post it does not belong to           # None
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+----
+CAPTURED LOG: before_scenario
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+---- CAPTURED_SCENARIO_OUTPUT_END ----
+
+  Scenario: Order the posts oldest first                                  # tests/bdd/api/event-source-media.feature:21
+    Given an event announced by three posts on the same venue account     # tests/bdd/steps/event_source_media_steps.py:224
+    And the archive holds five classified images across those three posts # tests/bdd/steps/event_source_media_steps.py:290
+    When the event's media is requested                                   # tests/bdd/steps/event_source_media_steps.py:357
+LOG_INFO:httpx: HTTP Request: GET http://testserver/admin/events/evt-noite-da-patroa/media "HTTP/1.1 404 Not Found"
+    Then the posts are ordered by when they were published, oldest first  # tests/bdd/steps/event_source_media_steps.py:434
+      ASSERT FAILED: {"detail":"Not Found"}
+
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+----
+CAPTURED LOG: before_scenario
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+---- CAPTURED_SCENARIO_OUTPUT_END ----
+
+  Scenario: Mark the image the extractor read                                   # tests/bdd/api/event-source-media.feature:25
+    Given an event announced by three posts on the same venue account           # tests/bdd/steps/event_source_media_steps.py:224
+    And the archive holds five classified images across those three posts       # tests/bdd/steps/event_source_media_steps.py:290
+    When the event's media is requested                                         # tests/bdd/steps/event_source_media_steps.py:357
+LOG_INFO:httpx: HTTP Request: GET http://testserver/admin/events/evt-noite-da-patroa/media "HTTP/1.1 404 Not Found"
+    Then exactly one image per post is marked as the one the extractor read     # tests/bdd/steps/event_source_media_steps.py:442
+      ASSERT FAILED: {"detail":"Not Found"}
+
+    And the image classified as a flyer that was never read is marked as unread # None
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+----
+CAPTURED LOG: before_scenario
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+---- CAPTURED_SCENARIO_OUTPUT_END ----
+
+  Scenario: Report each image's classification                            # tests/bdd/api/event-source-media.feature:30
+    Given an event announced by three posts on the same venue account     # tests/bdd/steps/event_source_media_steps.py:224
+    And the archive holds five classified images across those three posts # tests/bdd/steps/event_source_media_steps.py:290
+    When the event's media is requested                                   # tests/bdd/steps/event_source_media_steps.py:357
+LOG_INFO:httpx: HTTP Request: GET http://testserver/admin/events/evt-noite-da-patroa/media "HTTP/1.1 404 Not Found"
+    Then each image reports its classified category and its confidence    # tests/bdd/steps/event_source_media_steps.py:465
+      ASSERT FAILED: {"detail":"Not Found"}
+
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+----
+CAPTURED LOG: before_scenario
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+---- CAPTURED_SCENARIO_OUTPUT_END ----
+
+  Scenario: Report an event with no archived media as empty, not as an error  # tests/bdd/api/event-source-media.feature:34
+    Given an event announced by three posts on the same venue account         # tests/bdd/steps/event_source_media_steps.py:224
+    And the archive holds five classified images across those three posts     # tests/bdd/steps/event_source_media_steps.py:290
+    Given an event whose posts archived no images at all                      # tests/bdd/steps/event_source_media_steps.py:311
+    When the event's media is requested                                       # tests/bdd/steps/event_source_media_steps.py:357
+LOG_INFO:httpx: HTTP Request: GET http://testserver/admin/events/evt-noite-da-patroa/media "HTTP/1.1 404 Not Found"
+    Then the request succeeds                                                 # tests/bdd/steps/event_source_media_steps.py:485
+      ASSERT FAILED: {"detail":"Not Found"}
+
+    And no images are returned                                                # None
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+----
+CAPTURED LOG: before_scenario
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+---- CAPTURED_SCENARIO_OUTPUT_END ----
+
+  Scenario: Fall back to the stored cover when a run manifest cannot be read  # tests/bdd/api/event-source-media.feature:40
+    Given an event announced by three posts on the same venue account         # tests/bdd/steps/event_source_media_steps.py:224
+    And the archive holds five classified images across those three posts     # tests/bdd/steps/event_source_media_steps.py:290
+    Given the archived manifest for one of the posts cannot be read           # tests/bdd/steps/event_source_media_steps.py:318
+    When the event's media is requested                                       # tests/bdd/steps/event_source_media_steps.py:357
+LOG_INFO:httpx: HTTP Request: GET http://testserver/admin/events/evt-noite-da-patroa/media "HTTP/1.1 404 Not Found"
+    Then that post still reports its stored cover image                       # tests/bdd/steps/event_source_media_steps.py:496
+      ASSERT FAILED: {"detail":"Not Found"}
+
+    And the manifest fallback is counted                                      # None
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+----
+CAPTURED LOG: before_scenario
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+---- CAPTURED_SCENARIO_OUTPUT_END ----
+
+  Scenario: Omit an image that could not be signed and return the rest    # tests/bdd/api/event-source-media.feature:46
+    Given an event announced by three posts on the same venue account     # tests/bdd/steps/event_source_media_steps.py:224
+    And the archive holds five classified images across those three posts # tests/bdd/steps/event_source_media_steps.py:290
+    Given one image's url cannot be signed                                # tests/bdd/steps/event_source_media_steps.py:333
+    When the event's media is requested                                   # tests/bdd/steps/event_source_media_steps.py:357
+LOG_INFO:httpx: HTTP Request: GET http://testserver/admin/events/evt-noite-da-patroa/media "HTTP/1.1 404 Not Found"
+    Then the remaining images are still returned                          # tests/bdd/steps/event_source_media_steps.py:515
+      ASSERT FAILED: {"detail":"Not Found"}
+
+    And the signing failure is counted                                    # None
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+----
+CAPTURED LOG: before_scenario
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+---- CAPTURED_SCENARIO_OUTPUT_END ----
+
+  Scenario: Read one manifest per run when several posts share a run      # tests/bdd/api/event-source-media.feature:52
+    Given an event announced by three posts on the same venue account     # tests/bdd/steps/event_source_media_steps.py:224
+    And the archive holds five classified images across those three posts # tests/bdd/steps/event_source_media_steps.py:290
+    Given all three posts were archived in the same run                   # tests/bdd/steps/event_source_media_steps.py:342
+    When the event's media is requested                                   # tests/bdd/steps/event_source_media_steps.py:357
+LOG_INFO:httpx: HTTP Request: GET http://testserver/admin/events/evt-noite-da-patroa/media "HTTP/1.1 404 Not Found"
+    Then the archive is read once                                         # tests/bdd/steps/event_source_media_steps.py:533
+      ASSERT FAILED: {"detail":"Not Found"}
+
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+----
+CAPTURED LOG: before_scenario
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+---- CAPTURED_SCENARIO_OUTPUT_END ----
+
+  Scenario: Refuse the request without the admin credential               # tests/bdd/api/event-source-media.feature:57
+    Given an event announced by three posts on the same venue account     # tests/bdd/steps/event_source_media_steps.py:224
+    And the archive holds five classified images across those three posts # tests/bdd/steps/event_source_media_steps.py:290
+    When the event's media is requested without the admin credential      # tests/bdd/steps/event_source_media_steps.py:362
+LOG_INFO:httpx: HTTP Request: GET http://testserver/admin/events/evt-noite-da-patroa/media "HTTP/1.1 404 Not Found"
+    Then the request is refused                                           # tests/bdd/steps/event_source_media_steps.py:539
+      ASSERT FAILED: {"detail":"Not Found"}
+
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+----
+CAPTURED LOG: before_scenario
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+---- CAPTURED_SCENARIO_OUTPUT_END ----
+
+  Scenario: Never sign a key supplied by the caller                       # tests/bdd/api/event-source-media.feature:61
+    Given an event announced by three posts on the same venue account     # tests/bdd/steps/event_source_media_steps.py:224
+    And the archive holds five classified images across those three posts # tests/bdd/steps/event_source_media_steps.py:290
+    When the event's media is requested with a storage key in the request # tests/bdd/steps/event_source_media_steps.py:369
+LOG_INFO:httpx: HTTP Request: GET http://testserver/admin/events/evt-noite-da-patroa/media?key=raw%2Fsource%3Dattacker%2Fyear%3D2099%2Fmonth%3D01%2Fday%3D01%2Frun_id%3DEVIL%2Fall-events.json.gz&object_key=raw%2Fsource%3Dattacker%2Fyear%3D2099%2Fmonth%3D01%2Fday%3D01%2Frun_id%3DEVIL%2Fall-events.json.gz&s3_key=raw%2Fsource%3Dattacker%2Fyear%3D2099%2Fmonth%3D01%2Fday%3D01%2Frun_id%3DEVIL%2Fall-events.json.gz&cover_photo_key=raw%2Fsource%3Dattacker%2Fyear%3D2099%2Fmonth%3D01%2Fday%3D01%2Frun_id%3DEVIL%2Fall-events.json.gz "HTTP/1.1 404 Not Found"
+    Then no url is signed for that key                                    # tests/bdd/steps/event_source_media_steps.py:544
+      ASSERT FAILED: {"detail":"Not Found"}
+
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+----
+CAPTURED LOG: before_scenario
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+---- CAPTURED_SCENARIO_OUTPUT_END ----
+
+  Scenario: Report an unknown event as not found                          # tests/bdd/api/event-source-media.feature:65
+    Given an event announced by three posts on the same venue account     # tests/bdd/steps/event_source_media_steps.py:224
+    And the archive holds five classified images across those three posts # tests/bdd/steps/event_source_media_steps.py:290
+    When media is requested for an event that does not exist              # tests/bdd/steps/event_source_media_steps.py:382
+LOG_INFO:httpx: HTTP Request: GET http://testserver/admin/events/evt-does-not-exist/media "HTTP/1.1 404 Not Found"
+    Then the request reports the event was not found                      # tests/bdd/steps/event_source_media_steps.py:555
+      ASSERT FAILED: {"detail":"Not Found"}
+
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+----
+CAPTURED LOG: before_scenario
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+---- CAPTURED_SCENARIO_OUTPUT_END ----
+
+  Scenario: Leave the existing cover endpoint unchanged                   # tests/bdd/api/event-source-media.feature:69
+    Given an event announced by three posts on the same venue account     # tests/bdd/steps/event_source_media_steps.py:224
+    And the archive holds five classified images across those three posts # tests/bdd/steps/event_source_media_steps.py:290
+    When the event's cover is requested                                   # tests/bdd/steps/event_source_media_steps.py:387
+LOG_INFO:httpx: HTTP Request: GET http://testserver/admin/events/evt-noite-da-patroa/cover "HTTP/1.1 200 OK"
+    Then a single signed url for the event's own cover is returned        # tests/bdd/steps/event_source_media_steps.py:561
+
+
+Failing scenarios:
+  tests/bdd/api/event-source-media.feature:12  Return every archived image for the event
+  tests/bdd/api/event-source-media.feature:16  Group the images under the post each came from
+  tests/bdd/api/event-source-media.feature:21  Order the posts oldest first
+  tests/bdd/api/event-source-media.feature:25  Mark the image the extractor read
+  tests/bdd/api/event-source-media.feature:30  Report each image's classification
+  tests/bdd/api/event-source-media.feature:34  Report an event with no archived media as empty, not as an error
+  tests/bdd/api/event-source-media.feature:40  Fall back to the stored cover when a run manifest cannot be read
+  tests/bdd/api/event-source-media.feature:46  Omit an image that could not be signed and return the rest
+  tests/bdd/api/event-source-media.feature:52  Read one manifest per run when several posts share a run
+  tests/bdd/api/event-source-media.feature:57  Refuse the request without the admin credential
+  tests/bdd/api/event-source-media.feature:61  Never sign a key supplied by the caller
+  tests/bdd/api/event-source-media.feature:65  Report an unknown event as not found
+
+0 features passed, 1 failed, 0 skipped
+1 scenario passed, 12 failed, 0 skipped
+44 steps passed, 12 failed, 5 skipped
+Took 0min 0.281s
+make: *** [Makefile:157: test-feature] Error 1

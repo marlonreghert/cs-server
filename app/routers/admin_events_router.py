@@ -20,13 +20,15 @@ from pydantic import BaseModel, Field
 from app.config import settings
 from app.metrics import (
     ADMIN_EVENTS_PROMOTER_HIDDEN_TOTAL, ADMIN_EVENTS_READ_TOTAL,
-    EVENT_COVER_PRESIGN_TOTAL, EVENT_VENUE_LINK_TOTAL,
+    EVENT_COVER_PRESIGN_TOTAL, EVENT_MEDIA_IMAGES_RETURNED_TOTAL,
+    EVENT_MEDIA_TOTAL, EVENT_VENUE_LINK_TOTAL,
 )
 from app.models.event_kind import KIND_MENU
 from app.models.menu_lifecycle import is_menu_item_current, load_menu_expiry_days
 from app.models.promoter_event_visibility import is_promoter_only_item, load_hide_promoter_events
 from app.services.event_merge import apply_merge_suggestion, reject_merge_suggestion, reverse_title_similarity_merge
 from app.services.event_reconciliation import event_unread_time
+from app.services.event_source_media import resolve_event_media
 from app.services.promoter_registry_service import InvalidPromoterAccount, PromoterRegistryService
 
 logger = logging.getLogger(__name__)
@@ -620,6 +622,65 @@ async def get_event_cover(event_id: str, _admin: None = Depends(_require_admin))
     EVENT_COVER_PRESIGN_TOTAL.labels(result="signed").inc()
     expires_at = datetime.now(timezone.utc) + timedelta(seconds=expires_in)
     return EventCoverOut(url=url, expires_at=expires_at, expires_in=expires_in)
+
+
+class EventMediaImageOut(BaseModel):
+    url: str
+    category: Optional[str] = None
+    confidence: Optional[float] = None
+    read_by_extractor: bool = False
+
+
+class EventSourceMediaOut(BaseModel):
+    source_shortcode: str
+    source_handle: Optional[str] = None
+    source_permalink: Optional[str] = None
+    source_media_type: Optional[str] = None
+    source_uploaded_at: Optional[datetime] = None
+    images: list[EventMediaImageOut] = Field(default_factory=list)
+
+
+# ── every archived image behind an event (plans/260813_event-source-
+# media.md) — also registered before "/{event_id}" for the same reason as
+# /promoters, /review, /config and /cover above: "/{event_id}/media" is two
+# path segments, so it can never collide with the single-segment
+# "/{event_id}" pattern regardless of registration order, but the
+# convention is kept for a consistent, easy-to-audit router. ──────────────
+@router.get("/{event_id}/media", response_model=list[EventSourceMediaOut])
+async def get_event_media(event_id: str, _admin: None = Depends(_require_admin)):
+    """Every archived image behind one event, grouped by the post (source)
+    it came from, oldest post first, each marked with whether it is the one
+    the extractor actually read.
+
+    Every key signed here is resolved from the event's OWN
+    `post_item_source` rows — never from anything in the request, exactly
+    like `/cover`. See app.services.event_source_media for how each
+    source's own `cover_photo_key` is turned back into its run's manifest,
+    and plans/260813_event-source-media.md for why: a merged item can drop
+    a flyer nobody ever looked at, and this is the only way to see it.
+    """
+    dao = _dao()
+    row = dao.get_event(event_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Event not found")
+
+    sources = dao.list_event_sources(event_id)
+    store = _media_store()
+    resolved = await resolve_event_media(
+        store, sources, presign_expires_in=settings.event_cover_presign_expires_seconds,
+    )
+
+    total_images = sum(len(s["images"]) for s in resolved)
+    any_fallback = any(s["used_fallback"] for s in resolved)
+    if total_images == 0:
+        EVENT_MEDIA_TOTAL.labels(result="no_media").inc()
+    elif any_fallback:
+        EVENT_MEDIA_TOTAL.labels(result="manifest_fallback").inc()
+    else:
+        EVENT_MEDIA_TOTAL.labels(result="manifest_read").inc()
+    EVENT_MEDIA_IMAGES_RETURNED_TOTAL.inc(total_images)
+
+    return [EventSourceMediaOut(**s) for s in resolved]
 
 
 @router.get("/{event_id}", response_model=EventOut)
