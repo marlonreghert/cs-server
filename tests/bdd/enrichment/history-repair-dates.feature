@@ -73,6 +73,23 @@ Feature: History repair — dates
     Then the item is no longer queued for "missing_date"
     And the item is still queued for "unresolved_venue"
 
+  # `unread_time` stopped being a review reason at all when the review gate
+  # was corrected. Nothing re-extracts a post whose crawl cursor has already
+  # moved past it, so a row queued under the old rule would stay queued
+  # forever unless this repair clears the retired token.
+  Scenario: Clear a retired review reason the pipeline no longer writes
+    Given a stored item queued for review with reason "unread_time"
+    And its date text can now be resolved
+    When the repair runs with apply
+    Then the item is no longer queued for "unread_time"
+
+  Scenario: Clear a retired reason without un-queueing a row held for another
+    Given a stored item queued for review with reasons "unread_time" and "unresolved_venue"
+    And its date text can now be resolved
+    When the repair runs with apply
+    Then the item is no longer queued for "unread_time"
+    And the item is still queued for "unresolved_venue"
+
   Scenario: Add the inferred year reason when the repair had to guess
     Given a stored item whose date text states no year
     And resolving it requires rolling the year forward

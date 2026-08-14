@@ -130,6 +130,7 @@ from app.services.event_date_resolver import (
 )
 from app.services.event_identity import compute_source_event_key
 from app.services.event_merge import merge_event_fields
+from app.services.event_extraction_service import REVIEW_REASON_UNREAD_TIME
 from app.services.event_reconciliation import (
     REVIEW_REASON_NEEDS_REVIEW,
     STATUS_ACCEPTED,
@@ -173,6 +174,20 @@ _UNTOUCHED_STATUSES = frozenset({"extraction_failed", "rejected"})
 _DATE_REASON_TOKENS = frozenset({
     REASON_MISSING_DATE, REASON_WEEKDAY_MISMATCH, REASON_YEAR_INFERRED, REASON_DATE_RANGE,
 })
+
+# RETIRED reasons: tokens the pipeline no longer writes at all, so any stored
+# copy is a leftover from a run under the old rules. Dropped unconditionally
+# and never re-added — unlike `_DATE_REASON_TOKENS`, which are removed only to
+# be recomputed.
+#
+# `unread_time` was retired by plans/260813_review-gate-and-date-vocabulary.md
+# §D: an event whose DATE resolved is no longer held up by a clock time alone,
+# and the signal now rides on the admin API as a flag instead. Without this,
+# a row queued under the old rule stays queued forever for a reason nothing
+# will ever recompute — nothing re-extracts a post whose crawl cursor has
+# already moved past it, which is exactly the "the queue shows defects that
+# were already fixed" trap this whole plan exists to clear.
+_RETIRED_REASON_TOKENS = frozenset({REVIEW_REASON_UNREAD_TIME})
 
 DEFAULT_MAX_NULL_ANCHOR_SHARE = 0.2
 # Below this many selected candidates, a share is noise, not a signal — one
@@ -366,10 +381,16 @@ def _fold_date_reasons(existing_reason: Optional[str], new_date_reasons: list) -
     produced — a non-date reason (`unresolved_venue`, `sources_disagree`,
     ...) is never touched, never reordered relative to itself, and a row
     still undecided for a different reason is never un-queued by this
-    alone."""
+    alone.
+
+    A RETIRED token (`_RETIRED_REASON_TOKENS`) is dropped too, and never
+    re-appended: the pipeline stopped writing it, so a stored copy is stale
+    by definition and no other path will ever clear it."""
     tokens = [
         token for token in (existing_reason or "").split("; ")
-        if token and token not in _DATE_REASON_TOKENS
+        if token
+        and token not in _DATE_REASON_TOKENS
+        and token not in _RETIRED_REASON_TOKENS
     ]
     for reason in new_date_reasons:
         if reason not in tokens:

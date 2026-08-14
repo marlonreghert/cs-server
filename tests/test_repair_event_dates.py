@@ -22,6 +22,8 @@ file adds the lower-level layers the plan's Test Plan calls out by name:
 """
 from __future__ import annotations
 
+import inspect
+
 from datetime import datetime, timezone
 
 import pytest
@@ -37,6 +39,8 @@ from scripts.repair_event_dates import (
     DependencyNotLanded,
     Report,
     ArithmeticImbalance,
+    _DATE_REASON_TOKENS,
+    _RETIRED_REASON_TOKENS,
     _candidate_fields,
     _check_and_register_key,
     _date_reasons_for,
@@ -642,3 +646,46 @@ class TestDryRun:
         assert decision.action == "repaired"
         assert decision.new_starts_at == datetime(2026, 8, 7, 0, 0, tzinfo=RECIFE_TZ)
         assert decision.old_starts_at is None
+
+
+class TestRetiredReviewReasons:
+    """plans/260813_review-gate-and-date-vocabulary.md §D retired
+    `unread_time`: the pipeline no longer writes it, and an event whose date
+    resolved is no longer held up by a clock time alone.
+
+    A row queued under the OLD rule keeps the stale token forever unless this
+    repair clears it — nothing re-extracts a post whose crawl cursor has
+    already moved past it. Production has exactly such a row (NOITE DA PATROA
+    at Club Metrópole: a correct 2026-08-08 date, queued on `unread_time`
+    alone), which is why this is the repair's job and not a re-extraction's.
+
+    Distinct from `_DATE_REASON_TOKENS`, which are dropped only to be
+    RECOMPUTED — a retired token is dropped and never re-added.
+    """
+
+    def test_a_retired_token_is_dropped_outright(self):
+        assert _fold_date_reasons("unread_time", []) is None
+
+    def test_a_retired_token_never_comes_back(self):
+        assert _fold_date_reasons("unread_time", ["year_inferred"]) == "year_inferred"
+
+    def test_a_reason_held_for_something_else_survives(self):
+        assert _fold_date_reasons("unread_time; unresolved_venue", []) == "unresolved_venue"
+
+    def test_a_retired_token_is_dropped_from_any_position(self):
+        assert _fold_date_reasons("unresolved_venue; unread_time", []) == "unresolved_venue"
+        assert _fold_date_reasons("unread_time; missing_date", []) is None
+
+    def test_the_retired_set_and_the_date_set_do_not_overlap(self):
+        """A token in both would be dropped and then recomputed back in,
+        which is the opposite of retiring it."""
+        assert not (_RETIRED_REASON_TOKENS & _DATE_REASON_TOKENS)
+
+    def test_every_retired_token_is_one_the_pipeline_stopped_writing(self):
+        """Guards against retiring a reason that is still live: if this
+        fails, either the token was retired by mistake or the extraction path
+        started writing it again."""
+        import app.services.event_extraction_service as ees
+        source = inspect.getsource(ees)
+        for token in _RETIRED_REASON_TOKENS:
+            assert f'reasons.append(REVIEW_REASON_UNREAD_TIME)' not in source, token
