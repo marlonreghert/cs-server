@@ -89,7 +89,9 @@ DISPOSITION_LEAVE_UNSEEDED = "leave_unseeded"
 DISPOSITION_AMBIGUOUS = "ambiguous"
 
 REASON_REELS_DISABLED = "crawl_reels is off"
-REASON_CURSOR_ALREADY_SET = "cursor_reels_at already set (already correctly seeded)"
+REASON_CURSOR_ALREADY_SET = (
+    "cursor_reels_at already set -- the seed provably completed, so record it"
+)
 REASON_ALREADY_MARKED = "reels_seeded_at already set (idempotent no-op)"
 REASON_TRUSTWORTHY_ANSWER_ON_RECORD = "last_run_reels_fetched is set -- a trustworthy reels answer was recorded"
 REASON_NEVER_RUN = "never run (last_run_at is null)"
@@ -124,10 +126,21 @@ def classify_target(target: dict) -> Decision:
 
     if not target.get("crawl_reels"):
         return Decision(handle, DISPOSITION_NOT_CANDIDATE, REASON_REELS_DISABLED, **common)
-    if target.get("cursor_reels_at") is not None:
-        return Decision(handle, DISPOSITION_NOT_CANDIDATE, REASON_CURSOR_ALREADY_SET, **common)
+    # Idempotency first: an already-marked row is a no-op regardless of what
+    # else it carries, so this check must precede the cursor branch below (a
+    # row this script marked on a prior --apply may also have a cursor).
     if target.get("reels_seeded_at") is not None:
         return Decision(handle, DISPOSITION_NOT_CANDIDATE, REASON_ALREADY_MARKED, **common)
+    # A SET cursor is unambiguous proof the seed completed: `cursor_reels_at`
+    # is only ever written from a stream whose outcome was OUTCOME_SUCCESS.
+    # These rows must be MARKED, not skipped. `reels_already_seeded` now reads
+    # `reels_seeded_at` ALONE, so leaving them unmarked would make every
+    # healthy target look unseeded and fire one more paid reels run apiece on
+    # its next scheduled crawl -- 8 targets in production the day this
+    # shipped, several with a 50-result seed cap. That is precisely the waste
+    # this plan exists to stop, re-introduced by the fix for it.
+    if target.get("cursor_reels_at") is not None:
+        return Decision(handle, DISPOSITION_MARK_SEEDED, REASON_CURSOR_ALREADY_SET, **common)
 
     if target.get("last_run_reels_fetched") is not None:
         return Decision(

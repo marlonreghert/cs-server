@@ -50,11 +50,14 @@ class TestClassifyTarget:
         d = classify_target(_target("h", crawl_reels=False))
         assert d.disposition == DISPOSITION_NOT_CANDIDATE
 
-    def test_a_cursor_already_set_is_not_a_candidate(self):
-        """Already correctly seeded even under the OLD gate -- nothing for
-        this script to do."""
+    def test_a_cursor_already_set_is_marked_seeded(self):
+        """`cursor_reels_at` is only ever written from an OUTCOME_SUCCESS
+        stream, so a set cursor PROVES the seed completed. It must be
+        recorded, not skipped: `reels_already_seeded` now reads
+        `reels_seeded_at` alone, so leaving these unmarked would make every
+        healthy target fire one more paid reels run on its next crawl."""
         d = classify_target(_target("h", cursor_reels_at=RAN_AT))
-        assert d.disposition == DISPOSITION_NOT_CANDIDATE
+        assert d.disposition == DISPOSITION_MARK_SEEDED
 
     def test_an_already_marked_target_is_not_a_candidate(self):
         """Idempotency: a target this script (or a real run) already
@@ -259,7 +262,10 @@ class TestRunBackfill:
         assert report.ambiguous_handles == ["confusing"]
         assert dao.get_crawl_target("confusing")["reels_seeded_at"] is None
 
-    def test_unaffected_targets_are_not_candidates_and_untouched(self):
+    def test_a_reels_disabled_target_is_left_alone_but_a_cursored_one_is_marked(self):
+        """The two must not be conflated: `crawl_reels=False` is genuinely
+        nothing to do, while a cursored target is a healthy seed whose
+        completion was never written down."""
         dao = _dao()
         dao.upsert_crawl_target("reelsoff", {"kind": "venue", "cron": "0 3 * * *", "crawl_reels": False})
         dao.upsert_crawl_target("alreadygood", {"kind": "venue", "cron": "0 3 * * *", "crawl_reels": True})
@@ -267,9 +273,27 @@ class TestRunBackfill:
 
         report = run_backfill(dao, apply=True, now_provider=lambda: NOW)
 
-        assert report.marked_handles == []
+        assert report.marked_handles == ["alreadygood"]
         assert report.ambiguous_handles == []
-        assert report.dispositions[DISPOSITION_NOT_CANDIDATE] == 2
+        assert report.dispositions[DISPOSITION_NOT_CANDIDATE] == 1
+        assert dao.get_crawl_target("alreadygood")["reels_seeded_at"] == NOW
+        # Never invented for a target that does not crawl reels at all.
+        assert dao.get_crawl_target("reelsoff")["reels_seeded_at"] is None
+        # The cursor itself is never touched -- two facts, two fields.
+        assert dao.get_crawl_target("alreadygood")["cursor_reels_at"] == RAN_AT
+
+    def test_marking_a_cursored_target_is_idempotent(self):
+        """The already-marked gate must be checked BEFORE the cursor gate,
+        or a second --apply would re-mark (and re-stamp) the same row."""
+        dao = _dao()
+        dao.upsert_crawl_target("alreadygood", {"kind": "venue", "cron": "0 3 * * *", "crawl_reels": True})
+        dao.update_crawl_target("alreadygood", {"cursor_reels_at": RAN_AT})
+
+        run_backfill(dao, apply=True, now_provider=lambda: NOW)
+        second = run_backfill(dao, apply=True, now_provider=lambda: NOW)
+
+        assert second.marked_handles == []
+        assert second.dispositions[DISPOSITION_NOT_CANDIDATE] == 1
 
     def test_report_is_balanced_across_every_target(self):
         dao = _dao()
