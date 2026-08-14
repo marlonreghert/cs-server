@@ -134,8 +134,19 @@ run summary and the truncation rule need: `window_days`, `fetched_at`,
 extractor client's structure verbatim — same start/poll/fetch shape, same
 `POLL_BUDGET_EXHAUSTED` sentinel distinction, same error type. Input is a place
 id list with `maxReviews`, newest sort, and `language` from the existing
-`LANGUAGE_CODE`. Batching several place ids per run is what keeps Apify's
-per-run overhead off the per-venue cost.
+`LANGUAGE_CODE`.
+
+**Amended during execution (2026-08-13): one actor run per venue, not batched
+place ids.** The original text called for batching several place ids per run to
+amortise Apify's per-run overhead. That is incompatible with this plan's own
+approved scenario *"One venue's failure does not abort the run"*: a single Apify
+run returns ONE terminal status covering every place id it was given, so it
+cannot fail for one venue and succeed for the others. The Gherkin wins — the
+actor bills per review event, so per-venue runs cost no more in event terms, and
+one bad place id destroying fifty venues' worth of paid work is a far worse
+failure than slower throughput on a one-off backfill. `reviews_deep_batch_size`
+consequently means "how many venues share one account-headroom lookup", not
+"place ids per run"; see `deep_review_crawl_service.py`'s module docstring.
 
 **Service.** New `app/services/deep_review_crawl_service.py` owning: candidate
 resolution (id list ∩ filter, place-id lookup, skip-and-report for anything
