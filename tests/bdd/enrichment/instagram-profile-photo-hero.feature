@@ -5,6 +5,12 @@ Feature: Instagram profile photo as the venue list hero
   serve-time Google call. Spending is gated before every billed call, and an
   absent photo is a normal absence, never an error.
 
+  The scheduled job is BACKFILL-ONLY. A profile picture, once captured, is good
+  indefinitely, so a venue that already has one is skipped however old it is —
+  there is no time-based refresh and no recurring catalog-wide spend. Replacing
+  photos the catalog already holds is an explicit operator action with a cost
+  estimate in front of it, never a cron.
+
   Background:
     Given the Instagram profile photo job is enabled
     And the media bucket and CDN base URL are configured
@@ -19,13 +25,19 @@ Feature: Instagram profile photo as the venue list hero
     And the Redis key "venue_profile_photo_v1:v-alpha" holds that CDN URL
     And the run summary counts venue "v-alpha" as "stored"
 
-  Scenario: A venue whose stored photo is still fresh is never billed
+  Scenario: A venue that already has a profile photo is never billed again
     Given a servable venue "v-bravo" with the confirmed Instagram handle "bravobar"
     And venue "v-bravo" already has a profile photo stored 3 days ago
-    And the refresh window is 30 days
     When the profile photo job runs
     Then no profile scrape is requested for venue "v-bravo"
-    And the run summary counts venue "v-bravo" as "skipped_fresh"
+    And the run summary counts venue "v-bravo" as "skipped_has_photo"
+
+  Scenario: A profile photo old enough to have expired under any refresh window is still not re-scraped
+    Given a servable venue "v-romeo" with the confirmed Instagram handle "romeobar"
+    And venue "v-romeo" already has a profile photo stored 400 days ago
+    When the profile photo job runs
+    Then no profile scrape is requested for venue "v-romeo"
+    And the run summary counts venue "v-romeo" as "skipped_has_photo"
 
   Scenario: A profile carrying no picture is not re-scraped within the retry window
     Given a servable venue "v-mike" with the confirmed Instagram handle "mikebar"
@@ -48,10 +60,9 @@ Feature: Instagram profile photo as the venue list hero
     Then the number of profile scrapes for venue "v-november" is 2
     And the run summary counts venue "v-november" as "stored"
 
-  Scenario: A venue whose Instagram handle changed is re-fetched despite a fresh row
+  Scenario: A venue whose Instagram handle changed is re-fetched despite already having a photo
     Given a servable venue "v-oscar" with the confirmed Instagram handle "oscarbar"
     And venue "v-oscar" already has a profile photo stored 3 days ago
-    And the refresh window is 30 days
     And the confirmed Instagram handle for venue "v-oscar" is corrected to "oscarbaroficial"
     And the profile scrape returns a profile picture
     When the profile photo job runs
@@ -59,19 +70,55 @@ Feature: Instagram profile photo as the venue list hero
     And the run summary counts venue "v-oscar" as "stored"
     And the Redis key "venue_profile_photo_v1:v-oscar" holds that CDN URL
 
+  Scenario: An explicit refresh_all re-scrapes a venue the scheduled job skips
+    Given a servable venue "v-sierra" with the confirmed Instagram handle "sierrabar"
+    And venue "v-sierra" already has a profile photo stored 3 days ago
+    And the profile scrape returns a profile picture
+    When the profile photo job runs
+    Then no profile scrape is requested for venue "v-sierra"
+    When the profile photo job runs in "refresh_all" mode
+    Then the number of profile scrapes for venue "v-sierra" is 1
+    And the run summary counts venue "v-sierra" as "stored"
+
+  Scenario: The cost estimate spends nothing and counts exactly what the run scrapes
+    Given a servable venue "v-tango" with the confirmed Instagram handle "tangobar"
+    And the profile scrape returns a profile picture
+    And a servable venue "v-uniform" with the confirmed Instagram handle "uniformbar"
+    And venue "v-uniform" already has a profile photo stored 400 days ago
+    And a servable venue "v-victor" with no confirmed Instagram handle
+    When the cost estimate is requested for "backfill" mode
+    Then no profile scrape is requested for the estimated venues
+    And the estimate reports 1 venue to scrape
+    And the estimate reports the cost of 1 profile scrape
+    And the estimate carries no warning
+    When the profile photo job runs
+    Then the number of billed profile scrapes equals the estimated venue count
+
+  Scenario: The refresh_all estimate carries a warning and prices every stored photo
+    Given a servable venue "v-whiskey" with the confirmed Instagram handle "whiskeybar"
+    And venue "v-whiskey" already has a profile photo stored 3 days ago
+    And the profile scrape returns a profile picture
+    When the cost estimate is requested for "refresh_all" mode
+    Then no profile scrape is requested for the estimated venues
+    And the estimate reports 1 venue to scrape
+    And the estimate reports the cost of 1 profile scrape
+    And the estimate carries a warning
+    When the profile photo job runs in "refresh_all" mode
+    Then the number of billed profile scrapes equals the estimated venue count
+
   Scenario: A failed refresh keeps the venue's existing hero projected
     Given a servable venue "v-papa" with the confirmed Instagram handle "papabar"
-    And venue "v-papa" already has a profile photo stored beyond the refresh window
+    And venue "v-papa" already has a profile photo stored 400 days ago
     And the profile scrape fails for venue "v-papa"
-    When the profile photo job runs
+    When the profile photo job runs in "refresh_all" mode
     Then the run summary counts venue "v-papa" as "fetch_failed"
     And the CDN URL projected for venue "v-papa" is unchanged
 
   Scenario: An unchanged photo re-uploads nothing and keeps the served URL identical
     Given a servable venue "v-charlie" with the confirmed Instagram handle "charliebar"
-    And venue "v-charlie" already has a profile photo stored beyond the refresh window
+    And venue "v-charlie" already has a profile photo stored 400 days ago
     And the profile scrape returns a profile picture whose bytes are unchanged
-    When the profile photo job runs
+    When the profile photo job runs in "refresh_all" mode
     Then no object is uploaded to the media bucket
     And the CDN URL projected for venue "v-charlie" is unchanged
     And the run summary counts venue "v-charlie" as "unchanged"

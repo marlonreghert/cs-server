@@ -291,7 +291,6 @@ def step_media_configured(context):
         context, "media_cdn_base_url", "https://media.apivibesensemiddleware.click"
     )
     # Generous defaults so only the scenarios that are ABOUT a limit hit one.
-    _override_setting(context, "instagram_profile_photo_refresh_days", 30)
     _override_setting(context, "instagram_profile_photo_max_venues_per_run", 50)
     _override_setting(context, "instagram_profile_photo_max_bytes", 5_000_000)
 
@@ -398,23 +397,13 @@ def step_scrape_credit_exhausted(context):
 
 @given('venue "{vid}" already has a profile photo stored {days:d} days ago')
 def step_photo_stored_days_ago(context, vid, days):
-    context.stored_url = _seed_photo_row(
-        context, vid, f"stored-bytes-{vid}".encode(), days_old=days
-    )
-
-
-@given('venue "{vid}" already has a profile photo stored beyond the refresh window')
-def step_photo_stored_stale(context, vid):
+    """The age stays a parameter even though the scheduled job no longer reads
+    it: the scenarios that pass 400 days assert that age has STOPPED mattering,
+    which is only meaningful if the row really is that old."""
     context.unchanged_bytes = f"stored-bytes-{vid}".encode()
     context.stored_url = _seed_photo_row(
-        context, vid, context.unchanged_bytes,
-        days_old=settings.instagram_profile_photo_refresh_days + 30,
+        context, vid, context.unchanged_bytes, days_old=days
     )
-
-
-@given("the refresh window is {days:d} days")
-def step_refresh_window(context, days):
-    _override_setting(context, "instagram_profile_photo_refresh_days", days)
 
 
 @given("the retry window is {days:d} days")
@@ -491,11 +480,35 @@ def step_venue_has_google_photos(context, vid):
 
 @when("the profile photo job runs")
 def step_run_job(context):
+    """The SCHEDULED shape of the run: no config at all, i.e. backfill."""
     service = _service(context)
     if service is None:
         context.profile_photo_summary = {}
         return
     context.profile_photo_summary = _run(service.run())
+
+
+@when('the profile photo job runs in "{mode}" mode')
+def step_run_job_in_mode(context, mode):
+    """The MANUAL shape: an operator-chosen mode, the only way refresh_all is
+    ever reachable. Tolerant of `run` not yet accepting a mode (true RED) — the
+    scenario must then fail on the observable absence of a second billed
+    scrape, not on a TypeError inside a When."""
+    service = _service(context)
+    if service is None:
+        context.profile_photo_summary = {}
+        return
+    context.profile_photo_summary = _run(service.run({"mode": mode}))
+
+
+@when('the cost estimate is requested for "{mode}" mode')
+def step_request_estimate(context, mode):
+    """Price a run without buying one. Tolerant of `estimate` not existing yet
+    (true RED): the scenario then fails on the estimate's venue count, which is
+    the observable state under test."""
+    service = _service(context)
+    estimate = getattr(service, "estimate", None) if service is not None else None
+    context.estimate = estimate({"mode": mode}) if estimate is not None else {}
 
 
 # "When the Redis projection rebuild runs" is NOT redefined here — it already
@@ -602,6 +615,69 @@ def step_scrape_used_handle(context, vid, handle):
     assert handle in apify.calls, (
         f"{vid} was never scraped with @{handle}; calls={apify.calls}"
     )
+
+
+@then("no profile scrape is requested for the estimated venues")
+def step_estimate_spends_nothing(context):
+    """The whole point of a separate estimate endpoint: pricing a run must not
+    be able to start one. Asserted as zero billed Apify calls, not as a flag."""
+    apify, fetcher = _boundaries(context)
+    assert apify.calls == [], f"the estimate made billed scrapes: {apify.calls}"
+    assert fetcher.calls == [], f"the estimate downloaded images: {fetcher.calls}"
+    assert not _puts(context), "the estimate uploaded to the media bucket"
+
+
+@then("the estimate reports {count:d} venue to scrape")
+def step_estimate_count(context, count):
+    estimate = getattr(context, "estimate", None) or {}
+    assert estimate.get("venues_to_scrape") == count, (
+        f"estimate said {estimate.get('venues_to_scrape')!r} venues, "
+        f"expected {count} (estimate={estimate})"
+    )
+
+
+@then("the estimate reports the cost of {count:d} profile scrape")
+def step_estimate_cost(context, count):
+    estimate = getattr(context, "estimate", None) or {}
+    unit = settings.apify_instagram_profile_cost_usd
+    assert estimate.get("unit_cost_usd") == unit, (
+        f"unit cost {estimate.get('unit_cost_usd')!r} != {unit}"
+    )
+    assert abs((estimate.get("est_cost_usd") or 0) - count * unit) < 1e-9, (
+        f"estimate={estimate}, expected {count} x {unit}"
+    )
+
+
+@then("the estimate carries a warning")
+def step_estimate_has_warning(context):
+    """refresh_all re-buys photos the catalog already has, so the admin UI must
+    be handed something to put a warning sign next to."""
+    estimate = getattr(context, "estimate", None) or {}
+    assert estimate.get("warning"), f"no warning on a refresh_all estimate: {estimate}"
+
+
+@then("the estimate carries no warning")
+def step_estimate_has_no_warning(context):
+    estimate = getattr(context, "estimate", None) or {}
+    assert not estimate.get("warning"), (
+        f"backfill is the free, routine mode and must not cry wolf: {estimate}"
+    )
+
+
+@then("the number of billed profile scrapes equals the estimated venue count")
+def step_run_matches_estimate(context):
+    """The invariant that keeps the estimate honest: estimate and run share ONE
+    selection function, so the number the operator approved is the number of
+    Apify units the run actually buys."""
+    estimate = getattr(context, "estimate", None) or {}
+    apify, _ = _boundaries(context)
+    expected = estimate.get("venues_to_scrape")
+    assert expected is not None, f"the estimate reported no count: {estimate}"
+    assert len(apify.calls) == expected, (
+        f"the run made {len(apify.calls)} billed scrapes ({apify.calls}) but the "
+        f"estimate promised {expected}"
+    )
+    assert _summary(context).get("apify_calls") == expected, _summary(context)
 
 
 @then("no profile scrape is requested for the remaining venues")

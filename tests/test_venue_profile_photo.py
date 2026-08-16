@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import fakeredis
@@ -42,12 +43,15 @@ from app.models.venue import Venue
 from app.services.redis_projection_service import _REBUILD_MODELS, RedisProjectionService
 from app.services.venue_profile_photo_service import (
     ALLOWED_IMAGE_CONTENT_TYPES,
+    MODE_BACKFILL,
+    MODE_REFRESH_ALL,
+    InvalidProfilePhotoMode,
     OUTCOME_CREDIT_EXHAUSTED,
     OUTCOME_DOWNLOAD_FAILED,
     OUTCOME_FETCH_FAILED,
     OUTCOME_NO_HANDLE,
     OUTCOME_NO_PIC,
-    OUTCOME_SKIPPED_FRESH,
+    OUTCOME_SKIPPED_HAS_PHOTO,
     OUTCOME_SKIPPED_RECENT_FAILURE,
     OUTCOME_STORED,
     OUTCOME_UNCHANGED,
@@ -55,6 +59,7 @@ from app.services.venue_profile_photo_service import (
     PROFILE_PHOTO_ATTEMPT_TABLE,
     PROFILE_PHOTO_TABLE,
     VenueProfilePhotoService,
+    parse_mode,
 )
 from tests.rds_fake import InMemoryRdsVenueStore
 
@@ -70,7 +75,6 @@ def restore_settings():
     a flag into the rest of the suite."""
     names = (
         "instagram_profile_photo_enabled",
-        "instagram_profile_photo_refresh_days",
         "instagram_profile_photo_retry_days",
         "instagram_profile_photo_max_venues_per_run",
         "instagram_profile_photo_max_bytes",
@@ -79,7 +83,6 @@ def restore_settings():
     )
     saved = {n: getattr(settings, n) for n in names}
     settings.instagram_profile_photo_enabled = True
-    settings.instagram_profile_photo_refresh_days = 30
     settings.instagram_profile_photo_retry_days = 7
     settings.instagram_profile_photo_max_venues_per_run = 50
     settings.instagram_profile_photo_max_bytes = 5_000_000
@@ -358,7 +361,7 @@ def test_missing_cdn_base_is_treated_as_not_configured(restore_settings):
     assert apify.calls == []
 
 
-def test_fresh_row_is_skipped_before_any_billed_call(restore_settings):
+def test_a_stored_photo_is_skipped_before_any_billed_call(restore_settings):
     _, _, store, repo = _harness()
     _seed(store, repo, "v-1", "bar")
     store.upsert_enrichment(
@@ -367,22 +370,28 @@ def test_fresh_row_is_skipped_before_any_billed_call(restore_settings):
     apify, s3 = _FakeApify(), _RecordingS3()
     media = VenueMediaStore(bucket="b", region="us-east-1", cdn_base_url=_CDN, s3_client=s3)
     summary = asyncio.run(_service(store, repo, apify, media, {}).run())
-    assert summary["outcomes"]["v-1"] == OUTCOME_SKIPPED_FRESH
+    assert summary["outcomes"]["v-1"] == OUTCOME_SKIPPED_HAS_PHOTO
     # The cost gate, asserted as the absence of a billed call.
     assert apify.calls == []
     assert summary["apify_calls"] == 0
     assert summary["estimated_cost_usd"] == 0.0
 
 
-def test_row_older_than_the_window_is_refreshed(restore_settings):
+@pytest.mark.parametrize("age_days", [31, 365, 3650])
+def test_a_stored_photo_is_never_re_scraped_however_old_it_is(
+    restore_settings, age_days
+):
+    """The operator decision this feature turns on: a captured profile photo is
+    good indefinitely, so the scheduled job must never re-buy one on a clock.
+
+    Parameterised past every window this job ever had (30 days), and past any
+    window someone might reintroduce, because the whole point is that no
+    threshold exists — a single 31-day case would still pass under a 90-day
+    refresh window, which is exactly the regression this guards.
+    """
     _, _, store, repo = _harness()
     _seed(store, repo, "v-1", "bar")
-    store.upsert_enrichment(
-        PROFILE_PHOTO_TABLE, "v-1", {"content_hash": "old"}, history=False
-    )
-    store.enrichment[PROFILE_PHOTO_TABLE]["v-1"]["updated_at"] = (
-        datetime.now(timezone.utc) - timedelta(days=31)
-    ).isoformat()
+    _seed_photo_row(store, "v-1", "bar", b"long-ago", days_old=age_days)
     apify, s3 = _FakeApify(), _RecordingS3()
     apify.programmed["bar"] = ProfileFetchResult(
         username="bar", profile_pic_url=_pic("bar")
@@ -391,8 +400,64 @@ def test_row_older_than_the_window_is_refreshed(restore_settings):
     summary = asyncio.run(
         _service(store, repo, apify, media, {_pic("bar"): (b"new", "image/jpeg")}).run()
     )
-    assert summary["outcomes"]["v-1"] == OUTCOME_STORED
+    assert summary["outcomes"]["v-1"] == OUTCOME_SKIPPED_HAS_PHOTO
+    assert apify.calls == [], "an aged photo was re-bought; the refresh window is back"
+    assert summary["estimated_cost_usd"] == 0.0
+
+
+def test_refresh_all_re_scrapes_a_venue_backfill_skips(restore_settings):
+    """The manual escape hatch. Same fixture as the test above, one config key
+    apart, so the pair pins that the mode — not the age — is what decides."""
+    _, _, store, repo = _harness()
+    _seed(store, repo, "v-1", "bar")
+    old_url = _seed_photo_row(store, "v-1", "bar", b"long-ago", days_old=3)
+    apify, s3 = _FakeApify(), _RecordingS3()
+    apify.programmed["bar"] = ProfileFetchResult(
+        username="bar", profile_pic_url=_pic("bar")
+    )
+    media = VenueMediaStore(bucket="b", region="us-east-1", cdn_base_url=_CDN, s3_client=s3)
+    service = _service(store, repo, apify, media, {_pic("bar"): (b"new", "image/jpeg")})
+
+    backfill = asyncio.run(service.run())
+    assert backfill["outcomes"]["v-1"] == OUTCOME_SKIPPED_HAS_PHOTO
+    assert apify.calls == []
+
+    refreshed = asyncio.run(service.run({"mode": MODE_REFRESH_ALL}))
+    assert refreshed["mode"] == MODE_REFRESH_ALL
+    assert refreshed["outcomes"]["v-1"] == OUTCOME_STORED
     assert apify.calls == ["bar"]
+    assert store.get_enrichment(PROFILE_PHOTO_TABLE, "v-1")["payload"]["photo_url"] != (
+        old_url
+    )
+
+
+def test_refresh_all_still_honours_the_negative_cache(restore_settings):
+    """The documented decision (see the service module docstring): refresh_all
+    replaces photos the catalog HAS, and a suppressed venue has none — so
+    bypassing the negative cache would inflate the bill the operator is being
+    asked to approve to buy a scrape the next backfill makes anyway. The
+    intended lever for that is retry_days=0, asserted below."""
+    settings.instagram_profile_photo_retry_days = 7
+    _, _, store, repo = _harness()
+    _seed(store, repo, "v-1", "bar")
+    store.upsert_enrichment(
+        PROFILE_PHOTO_ATTEMPT_TABLE, "v-1",
+        {"venue_id": "v-1", "instagram_handle": "bar", "outcome": OUTCOME_NO_PIC},
+        history=False,
+    )
+    apify, s3 = _FakeApify(), _RecordingS3()
+    media = VenueMediaStore(bucket="b", region="us-east-1", cdn_base_url=_CDN, s3_client=s3)
+    service = _service(store, repo, apify, media, {})
+    summary = asyncio.run(service.run({"mode": MODE_REFRESH_ALL}))
+    assert summary["outcomes"]["v-1"] == OUTCOME_SKIPPED_RECENT_FAILURE
+    assert apify.calls == []
+
+    settings.instagram_profile_photo_retry_days = 0
+    apify.programmed["bar"] = ProfileFetchResult(
+        username="bar", profile_pic_url=_pic("bar")
+    )
+    service = _service(store, repo, apify, media, {_pic("bar"): (b"x", "image/jpeg")})
+    assert asyncio.run(service.run())["outcomes"]["v-1"] == OUTCOME_STORED
 
 
 def test_a_soft_deleted_row_is_never_treated_as_fresh(restore_settings):
@@ -416,6 +481,10 @@ def test_a_soft_deleted_row_is_never_treated_as_fresh(restore_settings):
 
 
 def test_unchanged_bytes_upload_nothing_and_keep_the_url(restore_settings):
+    """Driven in refresh_all, the only mode that reaches a venue which already
+    has a photo — and the mode where this short-circuit earns its keep, because
+    most avatars in a catalog-wide re-scrape come back byte-identical and must
+    cost zero S3 writes and zero cache invalidations."""
     _, _, store, repo = _harness()
     _seed(store, repo, "v-1", "bar")
     data = b"identical-bytes"
@@ -437,14 +506,14 @@ def test_unchanged_bytes_upload_nothing_and_keep_the_url(restore_settings):
     )
     media = VenueMediaStore(bucket="b", region="us-east-1", cdn_base_url=_CDN, s3_client=s3)
     summary = asyncio.run(
-        _service(store, repo, apify, media, {_pic("bar"): (data, "image/jpeg")}).run()
+        _service(store, repo, apify, media, {_pic("bar"): (data, "image/jpeg")}).run(
+            {"mode": MODE_REFRESH_ALL}
+        )
     )
     assert summary["outcomes"]["v-1"] == OUTCOME_UNCHANGED
     assert s3.puts == []
     row = store.get_enrichment(PROFILE_PHOTO_TABLE, "v-1")
     assert row["payload"]["photo_url"] == url
-    # The row IS re-asserted, restarting the freshness clock so an unchanged
-    # avatar is not re-scraped on the very next cycle.
     assert row["payload"]["content_hash"] == digest
 
 
@@ -631,7 +700,7 @@ def test_the_per_run_cap_bounds_venues_that_actually_cost_money(restore_settings
     media = VenueMediaStore(bucket="b", region="us-east-1", cdn_base_url=_CDN, s3_client=s3)
     payloads = {_pic(h): (b"x", "image/jpeg") for h in ("duea", "dueb")}
     summary = asyncio.run(_service(store, repo, apify, media, payloads).run())
-    assert summary["outcomes"]["v-fresh"] == OUTCOME_SKIPPED_FRESH
+    assert summary["outcomes"]["v-fresh"] == OUTCOME_SKIPPED_HAS_PHOTO
     assert summary["venues_selected"] == 1
     # The bound, in money: exactly one of the two due venues was billed for,
     # and the other was left for the next run entirely untouched.
@@ -841,7 +910,9 @@ def test_a_failed_refresh_leaves_the_existing_hero_intact(restore_settings):
     apify, s3 = _FakeApify(), _RecordingS3()
     apify.programmed["bar"] = ProfileFetchResult(username="bar", error_code="http_error")
     media = VenueMediaStore(bucket="b", region="us-east-1", cdn_base_url=_CDN, s3_client=s3)
-    summary = asyncio.run(_service(store, repo, apify, media, {}).run())
+    summary = asyncio.run(
+        _service(store, repo, apify, media, {}).run({"mode": MODE_REFRESH_ALL})
+    )
     assert summary["outcomes"]["v-1"] == OUTCOME_FETCH_FAILED
 
     row = store.get_enrichment(PROFILE_PHOTO_TABLE, "v-1")
@@ -930,7 +1001,7 @@ def test_a_recased_handle_is_not_treated_as_a_change(restore_settings):
     apify, s3 = _FakeApify(), _RecordingS3()
     media = VenueMediaStore(bucket="b", region="us-east-1", cdn_base_url=_CDN, s3_client=s3)
     summary = asyncio.run(_service(store, repo, apify, media, {}).run())
-    assert summary["outcomes"]["v-1"] == OUTCOME_SKIPPED_FRESH
+    assert summary["outcomes"]["v-1"] == OUTCOME_SKIPPED_HAS_PHOTO
     assert apify.calls == []
 
 
@@ -945,7 +1016,7 @@ def test_a_row_with_no_recorded_handle_stays_fresh(restore_settings):
     apify, s3 = _FakeApify(), _RecordingS3()
     media = VenueMediaStore(bucket="b", region="us-east-1", cdn_base_url=_CDN, s3_client=s3)
     summary = asyncio.run(_service(store, repo, apify, media, {}).run())
-    assert summary["outcomes"]["v-1"] == OUTCOME_SKIPPED_FRESH
+    assert summary["outcomes"]["v-1"] == OUTCOME_SKIPPED_HAS_PHOTO
     assert apify.calls == []
 
 
@@ -1089,3 +1160,327 @@ def test_the_google_detail_photo_path_is_untouched():
     assert dao.get_venue_photos("v-1") == photos
     # ...and the detail cache still expires, unlike the hero key.
     assert redis_client.ttl("venue_photos_v1:v-1") > 0
+
+
+# ── modes: the scheduled job can only ever backfill ─────────────────────────
+
+
+@pytest.mark.parametrize("config", [None, {}, {"mode": None}, {"mode": ""}])
+def test_parse_mode_defaults_to_backfill(config):
+    """The scheduler calls `run()` with no mode, so the default must be the
+    free one. Any other default would turn the cron into catalog-wide spend."""
+    assert parse_mode(config) == MODE_BACKFILL
+
+
+@pytest.mark.parametrize("raw", ["REFRESH_ALL", " refresh_all ", "Backfill"])
+def test_parse_mode_is_case_and_whitespace_tolerant(raw):
+    assert parse_mode({"mode": raw}) in (MODE_BACKFILL, MODE_REFRESH_ALL)
+
+
+@pytest.mark.parametrize("raw", ["refreshall", "refresh-all", "all", "yes"])
+def test_an_unknown_mode_is_rejected_not_defaulted(raw):
+    """Rejected rather than resolved: the two modes differ by the whole
+    catalog's worth of Apify units, so a typo must not silently pick one."""
+    with pytest.raises(InvalidProfilePhotoMode):
+        parse_mode({"mode": raw})
+
+
+def test_a_run_with_an_unknown_mode_spends_nothing(restore_settings):
+    _, _, store, repo = _harness()
+    _seed(store, repo, "v-1", "bar")
+    apify, s3 = _FakeApify(), _RecordingS3()
+    media = VenueMediaStore(bucket="b", region="us-east-1", cdn_base_url=_CDN, s3_client=s3)
+    summary = asyncio.run(
+        _service(store, repo, apify, media, {}).run({"mode": "refresh-everything"})
+    )
+    assert summary["status"] == "invalid_mode"
+    assert apify.calls == []
+    assert summary["apify_calls"] == 0
+
+
+def test_the_scheduled_job_asks_for_backfill_explicitly():
+    """The APScheduler path must be unable to reach refresh_all, and must not
+    merely rely on the service's default staying cheap — that default is one
+    edit away from being changed. `main.py` names the mode, and this asserts
+    the name that actually arrives at the service."""
+    import main as main_module
+
+    recorded = {}
+
+    class _Recorder:
+        async def run(self, config=None):
+            recorded["config"] = config
+            return {"status": "success", "counts": {}}
+
+    saved = main_module.container
+    main_module.container = SimpleNamespace(venue_profile_photo_service=_Recorder())
+    try:
+        asyncio.run(main_module.run_instagram_profile_photo_job())
+    finally:
+        main_module.container = saved
+
+    assert recorded["config"] == {"mode": MODE_BACKFILL}
+    assert parse_mode(recorded["config"]) == MODE_BACKFILL
+
+
+def test_the_admin_dialog_defaults_to_backfill():
+    """The registry's default_config is what the admin panel pre-fills, so an
+    operator who clicks Run without touching anything gets the free mode."""
+    import importlib
+
+    router_module = importlib.import_module("app.routers.admin_trigger_router")
+    entry = router_module.JOB_REGISTRY["instagram_profile_photos"]
+    assert entry["default_config"] == {"mode": MODE_BACKFILL}
+
+
+# ── the estimate: priced from the same selection, and free ──────────────────
+
+
+def _mixed_catalog(store, repo):
+    """One venue in each selection state, so an estimate over it exercises
+    every gate at once. Returns the ids that should actually be scraped."""
+    _seed(store, repo, "v-new", "newbar")
+    _seed(store, repo, "v-new-2", "newbar2")
+    _seed(store, repo, "v-has-photo", "photobar")
+    _seed_photo_row(store, "v-has-photo", "photobar", b"already", days_old=400)
+    _seed(store, repo, "v-no-handle")
+    _seed(store, repo, "v-recent-fail", "failbar")
+    store.upsert_enrichment(
+        PROFILE_PHOTO_ATTEMPT_TABLE, "v-recent-fail",
+        {"venue_id": "v-recent-fail", "instagram_handle": "failbar",
+         "outcome": OUTCOME_NO_PIC},
+        history=False,
+    )
+    return ["v-new", "v-new-2"]
+
+
+def _all_programmed(apify, payloads, handles):
+    for handle in handles:
+        apify.programmed[handle] = ProfileFetchResult(
+            username=handle, profile_pic_url=_pic(handle)
+        )
+        payloads[_pic(handle)] = (f"bytes-{handle}".encode(), "image/jpeg")
+
+
+def test_the_estimate_makes_no_billed_call_of_any_kind(restore_settings):
+    """A separate endpoint from the trigger exists so an estimate can never
+    start a run; this asserts the same thing one layer down, on the counters
+    that represent money."""
+    _, _, store, repo = _harness()
+    _mixed_catalog(store, repo)
+    apify, s3 = _FakeApify(), _RecordingS3()
+    payloads: dict = {}
+    _all_programmed(apify, payloads, ["newbar", "newbar2"])
+    media = VenueMediaStore(bucket="b", region="us-east-1", cdn_base_url=_CDN, s3_client=s3)
+    service = _service(store, repo, apify, media, payloads)
+
+    for mode in (MODE_BACKFILL, MODE_REFRESH_ALL):
+        estimate = service.estimate({"mode": mode})
+        assert estimate["venues_to_scrape"] > 0  # it really did select something
+    assert apify.calls == [], apify.calls
+    assert s3.puts == []
+    # And it cannot spend by accident later either: there is no await in it.
+    assert not asyncio.iscoroutinefunction(service.estimate)
+
+
+def test_the_estimate_count_equals_what_the_run_scrapes(restore_settings):
+    """THE anti-drift assertion. An estimate an operator approves is worthless
+    if the run can scrape a different set, so the promised number and the
+    billed number are compared directly over one fixture."""
+    _, _, store, repo = _harness()
+    expected = _mixed_catalog(store, repo)
+    apify, s3 = _FakeApify(), _RecordingS3()
+    payloads: dict = {}
+    _all_programmed(apify, payloads, ["newbar", "newbar2"])
+    media = VenueMediaStore(bucket="b", region="us-east-1", cdn_base_url=_CDN, s3_client=s3)
+    service = _service(store, repo, apify, media, payloads)
+
+    estimate = service.estimate({"mode": MODE_BACKFILL})
+    assert estimate["venues_to_scrape"] == len(expected)
+    assert estimate["skipped"] == {
+        OUTCOME_NO_HANDLE: 1,
+        OUTCOME_SKIPPED_HAS_PHOTO: 1,
+        OUTCOME_SKIPPED_RECENT_FAILURE: 1,
+    }
+
+    summary = asyncio.run(service.run())
+    assert summary["apify_calls"] == estimate["venues_to_scrape"]
+    assert len(apify.calls) == estimate["venues_to_scrape"]
+    assert summary["estimated_cost_usd"] == pytest.approx(estimate["est_cost_usd"])
+    assert sorted(v for v, o in summary["outcomes"].items() if o == OUTCOME_STORED) == (
+        sorted(expected)
+    )
+
+
+def test_the_refresh_all_estimate_counts_what_that_run_scrapes(restore_settings):
+    """Same assertion for the expensive mode, which is the one an operator is
+    actually deciding about."""
+    _, _, store, repo = _harness()
+    _mixed_catalog(store, repo)
+    apify, s3 = _FakeApify(), _RecordingS3()
+    payloads: dict = {}
+    _all_programmed(apify, payloads, ["newbar", "newbar2", "photobar"])
+    media = VenueMediaStore(bucket="b", region="us-east-1", cdn_base_url=_CDN, s3_client=s3)
+    service = _service(store, repo, apify, media, payloads)
+
+    estimate = service.estimate({"mode": MODE_REFRESH_ALL})
+    # The venue that already has a photo is now in scope; the negative-cached
+    # one still is not (documented decision, see the service module docstring).
+    assert estimate["venues_to_scrape"] == 3
+    assert estimate["skipped"] == {
+        OUTCOME_NO_HANDLE: 1, OUTCOME_SKIPPED_RECENT_FAILURE: 1,
+    }
+
+    summary = asyncio.run(service.run({"mode": MODE_REFRESH_ALL}))
+    assert summary["apify_calls"] == estimate["venues_to_scrape"] == len(apify.calls)
+
+
+def test_the_estimate_and_the_run_go_through_the_same_selection_function(
+    restore_settings,
+):
+    """Structural, not incidental. Counting equal on one fixture could be luck;
+    this pins that there is only ONE gate, so a future edit to it moves the
+    estimate and the run together or not at all."""
+    _, _, store, repo = _harness()
+    _mixed_catalog(store, repo)
+    apify, s3 = _FakeApify(), _RecordingS3()
+    payloads: dict = {}
+    _all_programmed(apify, payloads, ["newbar", "newbar2", "photobar"])
+    media = VenueMediaStore(bucket="b", region="us-east-1", cdn_base_url=_CDN, s3_client=s3)
+    service = _service(store, repo, apify, media, payloads)
+
+    seen: list[str] = []
+    original = service.select
+
+    def _spy(mode=MODE_BACKFILL):
+        seen.append(mode)
+        return original(mode)
+
+    service.select = _spy
+    service.estimate({"mode": MODE_REFRESH_ALL})
+    asyncio.run(service.run({"mode": MODE_REFRESH_ALL}))
+    assert seen == [MODE_REFRESH_ALL, MODE_REFRESH_ALL]
+
+
+def test_the_estimate_never_promises_more_than_the_per_run_cap_allows(
+    restore_settings,
+):
+    """The cap truncates the run, so an estimate that reported the uncapped
+    figure would overstate this run's cost and understate how many runs the
+    backfill takes. Both numbers are reported, and the headline one is the
+    number of scrapes this run will actually make."""
+    settings.instagram_profile_photo_max_venues_per_run = 1
+    _, _, store, repo = _harness()
+    _mixed_catalog(store, repo)
+    apify, s3 = _FakeApify(), _RecordingS3()
+    payloads: dict = {}
+    _all_programmed(apify, payloads, ["newbar", "newbar2"])
+    media = VenueMediaStore(bucket="b", region="us-east-1", cdn_base_url=_CDN, s3_client=s3)
+    service = _service(store, repo, apify, media, payloads)
+
+    estimate = service.estimate({"mode": MODE_BACKFILL})
+    assert estimate["venues_due"] == 2
+    assert estimate["venues_to_scrape"] == 1
+    assert estimate["venues_deferred"] == 1
+    assert estimate["est_cost_usd_all_due"] == pytest.approx(
+        2 * settings.apify_instagram_profile_cost_usd
+    )
+
+    summary = asyncio.run(service.run())
+    assert len(apify.calls) == estimate["venues_to_scrape"]
+    assert summary["apify_calls"] == estimate["venues_to_scrape"]
+
+
+def test_the_estimate_prices_at_the_profile_unit_cost(restore_settings):
+    _, _, store, repo = _harness()
+    _seed(store, repo, "v-1", "one")
+    _seed(store, repo, "v-2", "two")
+    apify, s3 = _FakeApify(), _RecordingS3()
+    media = VenueMediaStore(bucket="b", region="us-east-1", cdn_base_url=_CDN, s3_client=s3)
+    estimate = _service(store, repo, apify, media, {}).estimate()
+    unit = settings.apify_instagram_profile_cost_usd
+    assert estimate["unit_cost_usd"] == unit
+    assert estimate["est_cost_usd"] == pytest.approx(2 * unit)
+    assert estimate["mode"] == MODE_BACKFILL
+
+
+def test_only_refresh_all_carries_a_warning(restore_settings):
+    """The operator asked for a warning sign with the cost estimate. Backfill
+    deliberately has none: it is the free routine mode, and a warning shown on
+    every run is a warning nobody reads."""
+    _, _, store, repo = _harness()
+    _mixed_catalog(store, repo)
+    apify, s3 = _FakeApify(), _RecordingS3()
+    media = VenueMediaStore(bucket="b", region="us-east-1", cdn_base_url=_CDN, s3_client=s3)
+    service = _service(store, repo, apify, media, {})
+
+    assert not service.estimate({"mode": MODE_BACKFILL})["warning"]
+    warning = service.estimate({"mode": MODE_REFRESH_ALL})["warning"]
+    assert warning
+    assert "refresh_all" in warning
+    # The cost has to be IN the warning: a warning sign without the number is
+    # not the thing that was asked for.
+    assert "$" in warning
+
+
+def test_an_inert_run_is_explained_rather_than_priced_at_zero(restore_settings):
+    """"$0.00, 0 venues" reads identically to "nothing to do" and to "the flag
+    is off"; only one of those is a problem, so the estimate says which."""
+    settings.instagram_profile_photo_enabled = False
+    _, _, store, repo = _harness()
+    _mixed_catalog(store, repo)
+    apify, s3 = _FakeApify(), _RecordingS3()
+    media = VenueMediaStore(bucket="b", region="us-east-1", cdn_base_url=_CDN, s3_client=s3)
+    estimate = _service(store, repo, apify, media, {}).estimate()
+    assert estimate["status"] == "disabled"
+    assert estimate["venues_to_scrape"] == 0
+    assert estimate["est_cost_usd"] == 0
+    assert "INSTAGRAM_PROFILE_PHOTO_ENABLED" in estimate["warning"]
+
+
+def test_the_estimate_route_is_separate_from_the_trigger_route():
+    """Mirrors POST /trigger/venue_photo_archive/estimate: pricing a run lives
+    on its own path so it can never accidentally start one. Both the
+    underscore form (what the admin panel builds from the job name) and the
+    hyphenated alias must resolve."""
+    import importlib
+
+    router_module = importlib.import_module("app.routers.admin_trigger_router")
+    paths = {r.path for r in router_module.router.routes}
+    assert "/admin/trigger/instagram_profile_photos/estimate" in paths
+    assert "/admin/trigger/instagram-profile-photos/estimate" in paths
+
+
+def test_the_estimate_endpoint_returns_the_service_estimate():
+    import importlib
+
+    router_module = importlib.import_module("app.routers.admin_trigger_router")
+
+    class _Service:
+        def estimate(self, config=None):
+            return {"mode": (config or {}).get("mode"), "venues_to_scrape": 7}
+
+    router_module.set_container(SimpleNamespace(venue_profile_photo_service=_Service()))
+    result = asyncio.new_event_loop().run_until_complete(
+        router_module.estimate_instagram_profile_photos({"mode": MODE_REFRESH_ALL})
+    )
+    assert result == {"mode": MODE_REFRESH_ALL, "venues_to_scrape": 7}
+
+
+def test_the_estimate_endpoint_rejects_an_unknown_mode():
+    import importlib
+
+    from fastapi import HTTPException
+
+    router_module = importlib.import_module("app.routers.admin_trigger_router")
+
+    class _Service:
+        def estimate(self, config=None):
+            return parse_mode(config)
+
+    router_module.set_container(SimpleNamespace(venue_profile_photo_service=_Service()))
+    with pytest.raises(HTTPException) as excinfo:
+        asyncio.new_event_loop().run_until_complete(
+            router_module.estimate_instagram_profile_photos({"mode": "nope"})
+        )
+    assert excinfo.value.status_code == 400

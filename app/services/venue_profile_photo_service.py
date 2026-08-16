@@ -9,6 +9,26 @@ the media bucket, and persist the resulting CloudFront URL to
 `venue_profile_photo_v1:{venue_id}` so vibes_bot can put a photo on a list card
 with no serve-time Google call at all.
 
+## The scheduled job is BACKFILL-ONLY (operator decision, 2026-08-16)
+
+A profile picture, once captured, is good indefinitely. There is therefore NO
+time-based refresh window: a venue that already has a photo row is skipped
+however old that row is (`skipped_has_photo`). The 30-day re-scrape this job
+originally shipped with bought almost nothing and cost the whole catalog in
+Apify units every month, so it was deleted outright rather than defaulted off —
+a dead `instagram_profile_photo_refresh_days` setting would still read like a
+promise that a monthly refresh happens, and it would not.
+
+Steady state after the backfill completes is therefore ≈$0/month. The only
+recurring spend left is genuinely new venues, retries of past failures once
+their negative-cache window expires, and venues whose handle was corrected.
+
+Replacing photos the catalog already holds is an explicit operator action —
+`MODE_REFRESH_ALL`, reachable only from the admin trigger and priced first by
+`estimate()`. `run()` defaults to `MODE_BACKFILL`, and the APScheduler job in
+`main.py` passes `MODE_BACKFILL` explicitly, so a cron can never widen the
+spend.
+
 ## The ordering that carries the cost guarantee (do not rearrange)
 
 Inherited verbatim from `VenuePhotoArchiveService`, whose module docstring
@@ -16,19 +36,32 @@ states it as a rule the archive pipeline must not violate:
 
 1. Configuration is validated BEFORE any billed call, so a misconfigured run
    costs nothing.
-2. **The already-stored freshness check runs BEFORE the paid scrape.** A skip
-   that happens after the fetch has already spent the money it was meant to
-   save.
+2. **The already-stored check runs BEFORE the paid scrape.** A skip that
+   happens after the fetch has already spent the money it was meant to save.
 
-Here that means the freshness gate runs during SELECTION — one bulk RDS read,
-zero provider calls — and only the venues that survive it are ever handed to
-Apify. `venue_profile_photo_apify_calls_total` is the proof: a venue skipped by
-the gate cannot move that counter, which is why the acceptance criterion is
-written against the counter and not against a log line.
+Here that means every gate runs inside `select()` — bulk RDS reads, zero
+provider calls — and only the venues that survive it are ever handed to Apify.
+`venue_profile_photo_apify_calls_total` is the proof: a venue skipped by the
+gate cannot move that counter, which is why the acceptance criterion is written
+against the counter and not against a log line.
 
-The per-run cap is applied to the survivors of that gate, not to the raw
-servable list. Capping earlier would let a catalog of already-fresh venues
-consume the whole run budget and refresh nothing.
+The per-run cap is applied to the survivors of those gates, not to the raw
+servable list. Capping earlier would let a catalog of already-photographed
+venues consume the whole run budget and back-fill nothing.
+
+## One selection function, shared by the estimate and the run
+
+`select()` is the ONLY place that decides which venues cost money, and both
+`run()` and `estimate()` call it. That is deliberate and load-bearing: an
+estimate the operator approves is worthless if the run can scrape a different
+set, and two copies of a gate drift the moment one of them is edited. The BDD
+asserts the equality directly — the number of billed Apify calls a run makes
+equals the `venues_to_scrape` the estimate reported for the same fixture.
+
+`estimate()` performs no `await` at all and touches no provider client, so
+"the estimate spends nothing" is a structural property of the code, not a
+convention. It also lives on its own admin route rather than as a flag on the
+trigger, so an estimate can never accidentally start a run.
 
 ## The negative cache (the other half of the cost gate)
 
@@ -54,6 +87,18 @@ produce a Redis key at all.
 A stored photo clears the attempt row, and a handle change ignores it: an old
 failure says nothing about a handle that has since been corrected.
 
+The negative cache applies in BOTH modes, `refresh_all` included. Reasoning,
+recorded because the opposite choice is defensible: `refresh_all` exists to
+replace photos the catalog HAS, and a venue in the negative cache has none —
+so bypassing it would buy a scrape that the next scheduled backfill will make
+anyway once the window expires, while inflating the very bill the operator is
+being asked to approve. The escape hatch for the other intent already exists
+and is deliberately a settings change rather than a dialog click: set
+`instagram_profile_photo_retry_days` to 0 to retry every failed venue now
+(e.g. straight after fixing a bucket policy that failed the whole catalog).
+The estimate reports the suppressed count under `skipped_recent_failure`, so
+the choice is visible rather than silent.
+
 ## What is never a failure
 
 A venue with no handle, a profile with no picture, or a failed fetch produces
@@ -71,6 +116,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import time
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
@@ -82,6 +128,7 @@ from app.metrics import (
     VENUE_PROFILE_PHOTO_APIFY_CALLS_TOTAL,
     VENUE_PROFILE_PHOTO_BYTES_STORED_TOTAL,
     VENUE_PROFILE_PHOTO_ESTIMATED_COST_USD,
+    VENUE_PROFILE_PHOTO_ESTIMATE_COST_USD,
     VENUE_PROFILE_PHOTO_RUNS_TOTAL,
     VENUE_PROFILE_PHOTO_RUN_DURATION_SECONDS,
     VENUE_PROFILE_PHOTO_VENUES_TOTAL,
@@ -97,17 +144,55 @@ logger = logging.getLogger(__name__)
 PROFILE_PHOTO_TABLE = "instagram.profile_photo"
 PROFILE_PHOTO_ATTEMPT_TABLE = "instagram.profile_photo_attempt"
 
+# ── modes ───────────────────────────────────────────────────────────────────
+# The scheduled job runs BACKFILL and nothing else. `refresh_all` is manual by
+# construction: `main.py` passes MODE_BACKFILL explicitly to the APScheduler
+# job, and the only other way in is the admin trigger, which an operator
+# reaches after `estimate()` has priced the run.
+MODE_BACKFILL = "backfill"
+MODE_REFRESH_ALL = "refresh_all"
+MODES = (MODE_BACKFILL, MODE_REFRESH_ALL)
+
+
+class InvalidProfilePhotoMode(ValueError):
+    """An unrecognised mode. Raised instead of quietly defaulting: the two
+    modes differ by the entire catalog's worth of Apify units, so a typo must
+    be rejected rather than resolved."""
+
+
+def parse_mode(config: Optional[dict]) -> str:
+    """The one place a mode is read, shared by the run and the estimate.
+
+    Absent config means MODE_BACKFILL — that is the scheduler's call shape, so
+    the default has to be the free one.
+    """
+    raw = (config or {}).get("mode")
+    if raw is None or raw == "":
+        return MODE_BACKFILL
+    mode = str(raw).strip().lower()
+    if mode not in MODES:
+        raise InvalidProfilePhotoMode(
+            f"unknown mode {raw!r}; expected one of {', '.join(MODES)}"
+        )
+    return mode
+
+
 # Outcome buckets. Every venue the run touches lands in exactly one, and the
 # set is closed — an outcome label that never appears in Prometheus is itself
 # the diagnostic that its code path never ran.
 OUTCOME_STORED = "stored"
 OUTCOME_UNCHANGED = "unchanged"
-OUTCOME_SKIPPED_FRESH = "skipped_fresh"
+# Skipped because the venue ALREADY has a stored profile photo for its current
+# handle. Not "fresh": there is no clock any more. A captured avatar is good
+# indefinitely, so this venue is done — permanently, in backfill mode.
+OUTCOME_SKIPPED_HAS_PHOTO = "skipped_has_photo"
 # Skipped because the venue's LAST attempt produced no photo and is still
-# inside the retry window. Distinct from skipped_fresh on purpose: one venue
-# is skipped because it already has what we wanted, the other because we
+# inside the retry window. Distinct from skipped_has_photo on purpose: one
+# venue is skipped because it already has what we wanted, the other because we
 # already paid to find out it has nothing, and only the second one is
-# coverage that is missing rather than coverage that is done.
+# coverage that is missing rather than coverage that is done. With the refresh
+# window gone this is the ONLY recurring spend the job makes, so its size is
+# the number to watch.
 OUTCOME_SKIPPED_RECENT_FAILURE = "skipped_recent_failure"
 OUTCOME_NO_HANDLE = "no_handle"
 OUTCOME_NO_PIC = "no_pic"
@@ -139,6 +224,46 @@ ATTEMPT_RECORDED_OUTCOMES = frozenset({
 ALLOWED_IMAGE_CONTENT_TYPES = frozenset(
     {"image/jpeg", "image/jpg", "image/png", "image/webp"}
 )
+
+
+@dataclass
+class ProfilePhotoSelection:
+    """What `select()` decided, and the ONLY description of who costs money.
+
+    Returned to both `run()` and `estimate()` so neither can hold its own idea
+    of the venue set. `selected` is the exact list the run hands to Apify, so
+    `len(selected)` is simultaneously the estimate's headline count and the
+    run's billed-call count — the two cannot drift without this list changing
+    for both of them at once.
+
+    `skipped` is returned rather than recorded here on purpose: `select()` must
+    stay free of side effects so an estimate does not move a Prometheus
+    counter. `run()` is what turns those entries into metrics.
+    """
+
+    mode: str
+    # "ok", or the terminal run status that stopped selection before it began
+    # ("disabled", "not_configured", "error").
+    status: str = "ok"
+    venues_servable: int = 0
+    venues_with_handle: int = 0
+    # Survivors of every gate, BEFORE the per-run cap.
+    due: list[tuple[str, str]] = field(default_factory=list)
+    # Survivors after the cap: precisely what will be scraped.
+    selected: list[tuple[str, str]] = field(default_factory=list)
+    # venue_id -> outcome, for venues the gates removed (no metric touched).
+    skipped: dict[str, str] = field(default_factory=dict)
+    counts: dict[str, int] = field(default_factory=dict)
+    # Bulk-read rows the run still needs: the existing photo row feeds the
+    # unchanged-hash short-circuit, and the attempt ids tell `_note_attempt`
+    # whether there is a negative-cache row to clear on success.
+    existing: dict[str, dict] = field(default_factory=dict)
+    attempt_ids: frozenset = field(default_factory=frozenset)
+
+    @property
+    def deferred(self) -> int:
+        """Due venues the per-run cap left for a later run."""
+        return max(len(self.due) - len(self.selected), 0)
 
 
 def _now() -> datetime:
@@ -237,18 +362,218 @@ class VenueProfilePhotoService:
         except Exception as e:  # pragma: no cover - defensive
             logger.warning(f"[ProfilePhoto] run record write failed: {e}")
 
+    # ── selection: the one gate, shared by the run and the estimate ─────────
+    def select(self, mode: str = MODE_BACKFILL) -> ProfilePhotoSelection:
+        """Decide exactly which venues this run would pay to scrape.
+
+        Free by construction: bulk RDS reads only, no provider client is even
+        referenced, and nothing is recorded or persisted. That is what lets
+        `estimate()` call it and what makes "the estimate spends nothing" a
+        property of the code rather than a promise.
+
+        `run()` calls the same function, so the count an operator approved in
+        the estimate is the count of Apify units the run buys. Two copies of
+        this gate would drift the first time either was edited; there is one.
+        """
+        selection = ProfilePhotoSelection(mode=mode)
+
+        # ── gate 1: configuration, BEFORE anything can be billed ────────────
+        if not settings.instagram_profile_photo_enabled:
+            # Inert, not broken: no scrape, no upload, no row. The flag ships
+            # false and prod turns it on only after infra/media/ is applied and
+            # verified, because a bucket-policy gap fails the write AFTER the
+            # scrape has been paid for.
+            selection.status = "disabled"
+            return selection
+
+        if self.media_store is None or not settings.media_cdn_base_url:
+            logger.warning(
+                "[ProfilePhoto] not configured (media bucket / CDN base URL "
+                "missing); no venue was scraped"
+            )
+            selection.status = "not_configured"
+            return selection
+
+        if self.rds_store is None:  # pragma: no cover - defensive
+            logger.error("[ProfilePhoto] no RDS store on the repository")
+            selection.status = "error"
+            return selection
+
+        # ── the reads: free ────────────────────────────────────────────────
+        try:
+            servable_ids = list(self.rds_store.list_servable_venue_ids())
+            handles = self.rds_store.list_instagram_handles()
+            existing = self.rds_store.get_enrichment_bulk(
+                PROFILE_PHOTO_TABLE, servable_ids
+            )
+            # The negative cache. One more bulk read, still zero provider
+            # calls — and it is what keeps a permanently photo-less venue from
+            # being re-billed on every run.
+            attempts = self.rds_store.get_enrichment_bulk(
+                PROFILE_PHOTO_ATTEMPT_TABLE, servable_ids
+            )
+        except Exception as e:
+            logger.error(f"[ProfilePhoto] selection failed; nothing spent: {e}")
+            selection.status = "error"
+            return selection
+
+        selection.venues_servable = len(servable_ids)
+        selection.existing = existing
+        selection.attempt_ids = frozenset(attempts.keys())
+        retry_days = settings.instagram_profile_photo_retry_days
+        # retry_days <= 0 disables the negative cache outright: the escape
+        # hatch for retrying the whole catalog right after fixing an
+        # infrastructure-wide failure, instead of waiting the window out. It
+        # is also the deliberate way to make refresh_all re-try known failures,
+        # which refresh_all alone does not do (see the module docstring).
+        retry_cutoff = (
+            self._now() - timedelta(days=retry_days) if retry_days > 0 else None
+        )
+
+        def skip(venue_id: str, outcome: str) -> None:
+            selection.skipped[venue_id] = outcome
+            selection.counts[outcome] = selection.counts.get(outcome, 0) + 1
+
+        for venue_id in servable_ids:
+            handle = handles.get(venue_id)
+            if not handle:
+                # Never fetched, never billed — the venue simply has nothing to
+                # scrape. Handle discovery is a different pipeline's job.
+                skip(venue_id, OUTCOME_NO_HANDLE)
+                continue
+            selection.venues_with_handle += 1
+            row = existing.get(venue_id)
+            # BACKFILL: a venue that already has a photo for its current handle
+            # is done, whatever the row's age. REFRESH_ALL: the operator asked
+            # for a new photo regardless, so this gate is skipped entirely.
+            if (
+                mode != MODE_REFRESH_ALL
+                and row is not None
+                and self._has_current_photo(row, handle)
+            ):
+                skip(venue_id, OUTCOME_SKIPPED_HAS_PHOTO)
+                continue
+            attempt = attempts.get(venue_id)
+            if (
+                retry_cutoff is not None
+                and attempt is not None
+                and self._attempt_suppresses(attempt, retry_cutoff, handle)
+            ):
+                skip(venue_id, OUTCOME_SKIPPED_RECENT_FAILURE)
+                continue
+            selection.due.append((venue_id, handle))
+
+        # The cap bounds the survivors, not the raw servable list: capping
+        # earlier would let already-photographed venues eat the run budget.
+        cap = settings.instagram_profile_photo_max_venues_per_run
+        selection.selected = (
+            selection.due[:cap] if cap and cap > 0 else list(selection.due)
+        )
+        return selection
+
+    # ── the estimate: price a run without buying one ────────────────────────
+    def estimate(self, config: Optional[dict] = None) -> dict:
+        """What a run in this mode would scrape, and what it would cost.
+
+        Synchronous and provider-free on purpose: there is no `await` in this
+        method and no client is touched, so it cannot spend even by accident.
+        It also lives behind its own admin route rather than a flag on the
+        trigger, mirroring `POST /trigger/venue_photo_archive/estimate` — an
+        estimate must never be one mistyped field away from starting a run.
+
+        `venues_to_scrape` is `len(selection.selected)`, the same list `run()`
+        iterates, which is why the two can never disagree.
+        """
+        mode = parse_mode(config)
+        selection = self.select(mode)
+        to_scrape = len(selection.selected)
+        unit = settings.apify_instagram_profile_cost_usd
+        cost = round(to_scrape * unit, 4)
+
+        warning = None
+        if selection.status == "disabled":
+            warning = (
+                "The job is disabled (INSTAGRAM_PROFILE_PHOTO_ENABLED=false); a "
+                "run right now would scrape nothing."
+            )
+        elif selection.status == "not_configured":
+            warning = (
+                "The media bucket / CDN base URL is not configured; a run right "
+                "now would scrape nothing."
+            )
+        elif selection.status != "ok":
+            warning = (
+                "Venue selection failed, so this estimate is not a real figure; "
+                "check the logs before triggering a run."
+            )
+        elif mode == MODE_REFRESH_ALL:
+            # The "warning sign with cost estimative" the operator asked for.
+            # Backfill deliberately carries none: it is the free, routine mode,
+            # and a warning shown on every run is a warning nobody reads.
+            warning = (
+                f"refresh_all re-scrapes {to_scrape} venue(s) that already have "
+                f"a stored profile photo — about ${cost:.2f} of Apify spend that "
+                "backfill would not make. A captured profile photo stays valid "
+                "indefinitely, so run this only when the stored photos are known "
+                "to be wrong or outdated."
+            )
+            if selection.deferred:
+                warning += (
+                    f" The per-run cap of "
+                    f"{settings.instagram_profile_photo_max_venues_per_run} leaves "
+                    f"{selection.deferred} more for later runs, at the same unit "
+                    "cost each."
+                )
+
+        estimate = {
+            "mode": mode,
+            "status": selection.status,
+            "venues_servable": selection.venues_servable,
+            "venues_with_handle": selection.venues_with_handle,
+            "venues_due": len(selection.due),
+            # THE number: what this run would actually scrape, and what the
+            # run's billed-call count is asserted equal to.
+            "venues_to_scrape": to_scrape,
+            "venues_deferred": selection.deferred,
+            "max_venues_per_run": settings.instagram_profile_photo_max_venues_per_run,
+            "unit_cost_usd": unit,
+            "est_cost_usd": cost,
+            "est_cost_usd_all_due": round(len(selection.due) * unit, 4),
+            "skipped": dict(selection.counts),
+            "warning": warning,
+            # `venues_selected` / `venues_after_skip` / `caveat` mirror the
+            # field names POST /trigger/venue_photo_archive/estimate already
+            # returns, because the admin panel's generic estimate renderer
+            # reads exactly those. Aliases, not a second source of truth: both
+            # are derived from the same selection.
+            "venues_selected": len(selection.due),
+            "venues_after_skip": to_scrape,
+            "caveat": warning or (
+                "Backfill only: venues that already have a profile photo are "
+                "not re-scraped at any age, so this cost does not recur."
+            ),
+        }
+        VENUE_PROFILE_PHOTO_ESTIMATE_COST_USD.labels(mode=mode).set(cost)
+        logger.info(
+            f"[ProfilePhoto] estimate mode={mode} status={selection.status} "
+            f"due={len(selection.due)} to_scrape={to_scrape} cost=${cost}"
+        )
+        return estimate
+
     # ── the run ─────────────────────────────────────────────────────────────
     async def run(self, config: Optional[dict] = None) -> dict:
-        # `config` is accepted (the JOB_REGISTRY runner signature passes the
-        # admin dialog's options through) and deliberately ignored: this job has
-        # no per-run knobs. Every bound that matters — the enable flag, the
-        # refresh window, the venue cap, the byte cap — is a setting, so an
-        # operator cannot widen a spend limit from a trigger dialog.
-        del config
+        """Backfill by default; `{"mode": "refresh_all"}` only from an operator.
+
+        `config` carries exactly ONE knob — the mode. Every spend bound (the
+        enable flag, the retry window, the venue cap, the byte cap) stays a
+        setting, so a trigger dialog can choose what to scrape but can never
+        widen how much.
+        """
         started = time.perf_counter()
         job_id = new_run_id()
         summary: dict = {
             "job_id": job_id,
+            "mode": MODE_BACKFILL,
             "status": "success",
             "stopped_reason": None,
             "venues_servable": 0,
@@ -265,82 +590,34 @@ class VenueProfilePhotoService:
             summary["counts"][outcome] = summary["counts"].get(outcome, 0) + 1
             VENUE_PROFILE_PHOTO_VENUES_TOTAL.labels(outcome=outcome).inc()
 
-        # ── gate 1: configuration, BEFORE anything can be billed ────────────
-        if not settings.instagram_profile_photo_enabled:
-            # Inert, not broken: no scrape, no upload, no row. The flag ships
-            # false and prod turns it on only after infra/media/ is applied and
-            # verified, because a bucket-policy gap fails the write AFTER the
-            # scrape has been paid for.
-            return self._finish(summary, "disabled", started, job_id)
-
-        if self.media_store is None or not settings.media_cdn_base_url:
-            logger.warning(
-                "[ProfilePhoto] not configured (media bucket / CDN base URL "
-                "missing); no venue was scraped"
-            )
-            return self._finish(summary, "not_configured", started, job_id)
-
-        if self.rds_store is None:  # pragma: no cover - defensive
-            logger.error("[ProfilePhoto] no RDS store on the repository")
-            return self._finish(summary, "error", started, job_id)
-
-        # ── selection: free reads only ─────────────────────────────────────
         try:
-            servable_ids = list(self.rds_store.list_servable_venue_ids())
-            handles = self.rds_store.list_instagram_handles()
-            existing = self.rds_store.get_enrichment_bulk(
-                PROFILE_PHOTO_TABLE, servable_ids
-            )
-            # The negative cache. One more bulk read, still zero provider
-            # calls — and it is what keeps a permanently photo-less venue from
-            # being re-billed on every run.
-            attempts = self.rds_store.get_enrichment_bulk(
-                PROFILE_PHOTO_ATTEMPT_TABLE, servable_ids
-            )
-        except Exception as e:
-            logger.error(f"[ProfilePhoto] selection failed; nothing spent: {e}")
-            return self._finish(summary, "error", started, job_id)
+            mode = parse_mode(config)
+        except InvalidProfilePhotoMode as e:
+            # Rejected before selection, so nothing was read and nothing spent.
+            logger.error(f"[ProfilePhoto] job={job_id} not started: {e}")
+            summary["stopped_reason"] = str(e)
+            return self._finish(summary, "invalid_mode", started, job_id)
+        summary["mode"] = mode
 
-        summary["venues_servable"] = len(servable_ids)
-        now = self._now()
-        refresh_cutoff = now - timedelta(
-            days=settings.instagram_profile_photo_refresh_days
-        )
-        retry_days = settings.instagram_profile_photo_retry_days
-        # retry_days <= 0 disables the negative cache outright: the escape
-        # hatch for retrying the whole catalog right after fixing an
-        # infrastructure-wide failure, instead of waiting the window out.
-        retry_cutoff = now - timedelta(days=retry_days) if retry_days > 0 else None
+        selection = self.select(mode)
+        if selection.status != "ok":
+            return self._finish(summary, selection.status, started, job_id)
 
-        due: list[tuple[str, str]] = []
-        for venue_id in servable_ids:
-            handle = handles.get(venue_id)
-            if not handle:
-                # Never fetched, never billed — the venue simply has nothing to
-                # scrape. Handle discovery is a different pipeline's job.
-                record(venue_id, OUTCOME_NO_HANDLE)
-                continue
-            row = existing.get(venue_id)
-            if row is not None and self._is_fresh(row, refresh_cutoff, handle):
-                record(venue_id, OUTCOME_SKIPPED_FRESH)
-                continue
-            attempt = attempts.get(venue_id)
-            if (
-                retry_cutoff is not None
-                and attempt is not None
-                and self._attempt_suppresses(attempt, retry_cutoff, handle)
-            ):
-                record(venue_id, OUTCOME_SKIPPED_RECENT_FAILURE)
-                continue
-            due.append((venue_id, handle))
+        summary["venues_servable"] = selection.venues_servable
+        # The gates' verdicts become metrics HERE and only here: `select()`
+        # stays side-effect free so the estimate cannot move a counter.
+        for venue_id, outcome in selection.skipped.items():
+            record(venue_id, outcome)
 
-        cap = settings.instagram_profile_photo_max_venues_per_run
-        selected = due[:cap] if cap and cap > 0 else due
+        existing = selection.existing
+        selected = selection.selected
         summary["venues_selected"] = len(selected)
         logger.info(
-            f"[ProfilePhoto] job={job_id} servable={len(servable_ids)} "
-            f"due={len(due)} selected={len(selected)} "
-            f"skipped_fresh={summary['counts'].get(OUTCOME_SKIPPED_FRESH, 0)} "
+            f"[ProfilePhoto] job={job_id} mode={mode} "
+            f"servable={selection.venues_servable} "
+            f"due={len(selection.due)} selected={len(selected)} "
+            "skipped_has_photo="
+            f"{summary['counts'].get(OUTCOME_SKIPPED_HAS_PHOTO, 0)} "
             "skipped_recent_failure="
             f"{summary['counts'].get(OUTCOME_SKIPPED_RECENT_FAILURE, 0)} "
             f"no_handle={summary['counts'].get(OUTCOME_NO_HANDLE, 0)}"
@@ -373,7 +650,8 @@ class VenueProfilePhotoService:
                 outcome = OUTCOME_FETCH_FAILED
             record(venue_id, outcome)
             self._note_attempt(
-                venue_id, handle, outcome, had_attempt=venue_id in attempts
+                venue_id, handle, outcome,
+                had_attempt=venue_id in selection.attempt_ids,
             )
 
         failed = sum(
@@ -477,19 +755,25 @@ class VenueProfilePhotoService:
         return OUTCOME_STORED
 
     # ── helpers ─────────────────────────────────────────────────────────────
-    def _is_fresh(self, row: dict, cutoff: datetime, handle: str) -> bool:
-        """A row younger than the refresh window, for the CURRENT handle, and
-        not soft-deleted.
+    def _has_current_photo(self, row: dict, handle: str) -> bool:
+        """Whether this venue already holds a usable photo for its CURRENT
+        handle — the backfill gate, and deliberately age-blind.
 
-        The handle comparison is not a nicety. Handle discovery revises itself
-        — a corrected handle is a normal event — and a stored row is a photo
-        scraped from whatever handle was believed correct at the time. Judging
-        freshness on age alone keeps another business's logo on this venue's
-        card for up to the full refresh window, which is a wrong answer shown
-        to a user, not a stale one. A handle that no longer matches makes the
+        There is no refresh window and no cutoff argument. A profile picture,
+        once captured, is good indefinitely, so a row's age is not evidence of
+        anything and re-scraping on a clock is recurring spend that buys
+        almost nothing.
+
+        The handle comparison, however, stays — and it is not a refresh in
+        disguise. Handle discovery revises itself; a corrected handle is a
+        normal event, and a stored row is a photo scraped from whatever handle
+        was believed correct at the time. Keeping such a row means ANOTHER
+        BUSINESS'S LOGO sits on this venue's card, indefinitely now that
+        nothing else would ever dislodge it. That is a wrong answer served to
+        a user, not a stale one, so a handle that no longer matches makes the
         row worthless regardless of its age.
 
-        A stored row with NO handle recorded is treated as still fresh: it is
+        A stored row with NO handle recorded is treated as still good: it is
         unknown, not mismatched, and re-scraping every such row would re-buy
         the catalog to resolve an ambiguity that only pre-service-written rows
         can even have (`_persist` always records the handle).
@@ -497,13 +781,9 @@ class VenueProfilePhotoService:
         The `deleted_at` check is belt-and-braces: `get_enrichment_bulk`
         already excludes soft-deleted rows on both the real store and the
         fake. It is kept because reading it the other way round — treating a
-        withdrawn hero as "fresh" — would freeze that venue out of the
+        withdrawn hero as still present — would freeze that venue out of the
         pipeline permanently, and that is too quiet a failure to leave to one
         layer.
-
-        An unparseable/absent `updated_at` is treated as NOT fresh: erring
-        towards a re-scrape costs one Apify unit, while erring the other way
-        would freeze a venue's hero forever.
         """
         if row.get("deleted_at") is not None:
             return False
@@ -512,19 +792,21 @@ class VenueProfilePhotoService:
         )
         if stored_handle and stored_handle != _normalize_handle(handle):
             return False
-        updated_at = _coerce_dt(row.get("updated_at"))
-        if updated_at is None:
-            return False
-        return updated_at > cutoff
+        return True
 
     def _attempt_suppresses(self, attempt: dict, cutoff: datetime, handle: str) -> bool:
         """Whether a recorded failed attempt still blocks a billed retry.
 
-        Symmetric with `_is_fresh`, and for the same reasons: a soft-deleted or
-        unreadable attempt suppresses nothing (erring towards one Apify unit
-        beats freezing a venue out of the pipeline), and an attempt made
-        against a DIFFERENT handle suppresses nothing either — whatever we
-        learned about the old handle says nothing about the corrected one.
+        Symmetric with `_has_current_photo`, and for the same reasons: a
+        soft-deleted or unreadable attempt suppresses nothing (erring towards
+        one Apify unit beats freezing a venue out of the pipeline), and an
+        attempt made against a DIFFERENT handle suppresses nothing either —
+        whatever we learned about the old handle says nothing about the
+        corrected one.
+
+        Unlike `_has_current_photo` this one IS time-bounded, and that
+        asymmetry is the point: a stored photo stays true indefinitely, while a
+        failure only tells you what was true when it happened.
         """
         if attempt.get("deleted_at") is not None:
             return False

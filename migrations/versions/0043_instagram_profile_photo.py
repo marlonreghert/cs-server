@@ -27,10 +27,12 @@ type and byte size, and when it was fetched. The hash is what makes a re-run
 over an unchanged photo free — it re-uploads nothing and leaves the served
 URL byte-identical, so no CDN or device cache is invalidated for nothing.
 
-`updated_at` is load-bearing, not decoration: it is the input to the
-freshness gate that runs BEFORE any billed Apify call
-(`instagram_profile_photo_refresh_days`). A skip that happened after the
-scrape would have already spent the money it exists to save.
+The row's mere EXISTENCE is the cost gate for this table — not its age. The
+scheduled job is backfill-only: a venue holding a photo row for its current
+handle is skipped before any billed Apify call, however old the row is,
+because a captured profile picture stays valid indefinitely. (`updated_at` is
+kept as the standard facet column and for operational forensics; the job no
+longer reads it here. On `profile_photo_attempt` below it IS load-bearing.)
 
 Deliberately a SEPARATE table from `instagram.handle`, not a widened column
 on it: handle discovery and profile-photo archival have different write

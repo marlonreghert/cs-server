@@ -75,11 +75,24 @@ cs-server stores no venue avatar of any kind. The only Instagram imagery it
 archives is post images, into the internal-use `retrieved/` lake.
 
 ## Desired Behavior
-A scheduled, budget-capped job must, for each servable venue holding a confirmed
-Instagram handle:
+
+The scheduled job is **backfill-only**. A profile photo, once captured, is good
+indefinitely, so re-scraping the catalog on a clock buys almost nothing and is
+pure recurring Apify spend. There is therefore **no refresh window at all** —
+not a longer one, not one defaulted off. A venue that already has a photo is
+skipped at any age.
+
+Replacing photos the catalog already holds is an explicit, operator-triggered
+action (`refresh_all`) with a visible cost estimate in front of it, never a
+cron. Steady state after the backfill completes is **≈$0/month**: only
+genuinely new venues, retries of past failures whose negative-cache window
+expired, and venues whose Instagram handle was corrected cost anything.
+
+For each servable venue holding a confirmed Instagram handle the job must:
 
 1. Skip the venue entirely — **before any billed call** — when it already has a
-   profile-photo row younger than `instagram_profile_photo_refresh_days`.
+   profile-photo row **for its current handle**, regardless of that row's age
+   (`skipped_has_photo`). `refresh_all` ignores this gate; nothing else can.
 2. Scrape the profile through Apify, taking `profilePicUrlHD` (falling back to
    `profilePicUrl`).
 3. Download the image bytes from the Instagram CDN, enforcing a content-type
@@ -131,11 +144,19 @@ GetObject-denied `retrieved/` layout under different compliance rules. It expose
 and holds the cache-control policy and the CDN base URL in one place.
 
 **4. Service** `app/services/venue_profile_photo_service.py`, following the
-archive service's ordering guarantees: resolve config → select venues → apply the
-freshness skip → *only then* spend. Per-venue and per-photo failure isolation, a
-per-run venue cap, and a run summary bucketing every outcome (`stored`,
-`unchanged`, `skipped_fresh`, `no_handle`, `no_pic`, `fetch_failed`,
+archive service's ordering guarantees: resolve config → select venues → apply
+the has-photo and negative-cache skips → *only then* spend. Per-venue and
+per-photo failure isolation, a per-run venue cap, and a run summary bucketing
+every outcome (`stored`, `unchanged`, `skipped_has_photo`,
+`skipped_recent_failure`, `no_handle`, `no_pic`, `fetch_failed`,
 `download_failed`, `upload_failed`, `credit_exhausted`).
+
+All gating lives in **one** function, `select(mode)`, called by both the run and
+the estimate. That is the invariant that keeps a priced run honest: an estimate
+an operator approved is worthless if the run can scrape a different set, and two
+copies of a gate drift the moment either is edited. `estimate()` is synchronous,
+contains no `await` and touches no provider client, so "the estimate spends
+nothing" is structural rather than conventional.
 
 **5. Persistence.** Migration `0043_instagram_profile_photo.py` creating
 `instagram.profile_photo` in the standard facet shape; register
@@ -149,8 +170,11 @@ Google-photo projection: there is no ToS clock on our own S3 object, and the
 projector re-asserts or deletes the key every cycle anyway.
 
 **7. Wiring.** Container construction gated on the media bucket + CDN base being
-configured; an APScheduler job at `instagram_profile_photo_interval_hours`; and
-an admin trigger route for an operator-driven run.
+configured; an APScheduler job at `instagram_profile_photo_interval_hours` that
+passes `mode=backfill` **explicitly** (so a future change to the service default
+cannot turn the cron into a catalog-wide re-scrape); an admin trigger route for
+an operator-driven run; and a **separate** estimate route, never a flag on the
+trigger, so pricing a run can never start one.
 
 ## Data, Config, And API Impact
 - **Migration:** `0043` adds `instagram.profile_photo` and (see the Review
@@ -161,20 +185,34 @@ an admin trigger route for an operator-driven run.
   x ~200 bytes ≈ **0.3 MB**. Negligible.
 - **New config:** `media_bucket`, `media_cdn_base_url`,
   `instagram_profile_photo_enabled` (default **false** — prod turns it on only
-  after the terraform apply is verified), `instagram_profile_photo_refresh_days`
-  (30), `instagram_profile_photo_retry_days` (7, see the Review Amendment),
-  `instagram_profile_photo_max_venues_per_run`,
-  `instagram_profile_photo_max_bytes`, `instagram_profile_photo_interval_hours`,
-  `apify_instagram_profile_cost_usd` (0.003).
-- **New admin route:** `POST /admin/trigger/instagram-profile-photos`.
+  after the terraform apply is verified), `instagram_profile_photo_retry_days`
+  (7, see the Review Amendment), `instagram_profile_photo_max_venues_per_run`
+  (200), `instagram_profile_photo_max_bytes`,
+  `instagram_profile_photo_interval_hours`, `apify_instagram_profile_cost_usd`
+  (0.003).
+  There is deliberately **no** `instagram_profile_photo_refresh_days`: see the
+  Backfill Amendment below. It was removed rather than defaulted to 0, because a
+  dead knob still reads like a promise that a monthly refresh happens.
+- **New admin routes:** `POST /admin/trigger/instagram_profile_photos` (the
+  generic trigger; `mode` is its only config key) and
+  `POST /admin/trigger/instagram_profile_photos/estimate`, aliased at
+  `/admin/trigger/instagram-profile-photos/estimate`.
 - **Public venue API:** unchanged. cs-server serves no new field; consumption is
   vibes_bot's read of the new Redis key.
-- **Cost:** one Apify unit per venue per refresh window. At ~1,500 handled venues
-  and a 30-day window, ≈ **$4.50/month**, plus S3 storage of ~45 MB (≈$0.001) and
-  CloudFront egress well inside the free tier. Under the $10/month gate — but the
-  execution run must report the real handle count from
-  `list_instagram_handles()` before the first prod run, since the estimate scales
-  directly with it.
+- **Cost:** one Apify unit per venue, **once**. At ~1,500 handled venues the
+  one-time backfill is ≈ **$4.50 total**, spread over ~8 daily runs by the
+  200-venue per-run cap, plus S3 storage of ~45 MB (≈$0.001) and CloudFront
+  egress well inside the free tier.
+  **Steady state afterwards is ≈$0/month.** The only recurring spend is new
+  venues (a handful a month), corrected handles, and failed venues retried once
+  their 7-day negative-cache window expires — worst case, if F venues fail
+  permanently, ≈ `F × 0.003 × (30/7)` per month, i.e. under $0.50/month even at
+  F = 350. Far under the $10/month gate.
+  An explicit `refresh_all` over the whole catalog costs ≈$4.50 again and is
+  never automatic; the estimate endpoint prints that number, with a warning,
+  before anything is spent. The execution run must still report the real handle
+  count from `list_instagram_handles()` before the first prod run, since every
+  figure here scales directly with it.
 
 ## Error Handling And Observability
 Every failure is per-venue and isolated; one bad venue never aborts a run that is
@@ -189,7 +227,11 @@ New Prometheus metrics:
 - `venue_profile_photo_venues_total{outcome}` over the outcome buckets above
 - `venue_profile_photo_bytes_stored_total`
 - `venue_profile_photo_apify_calls_total` and
-  `venue_profile_photo_estimated_cost_usd`
+  `venue_profile_photo_estimated_cost_usd` (cumulative ACTUAL spend), plus
+  `venue_profile_photo_estimate_cost_usd{mode}` — a **gauge**, what the last
+  priced run *would* cost. Deliberately not folded into the counter: an
+  estimate spends nothing, and adding it to cumulative spend would inflate the
+  cost figure by exactly the amount an operator considered and declined.
 - `venue_profile_photo_projected_venues` gauge, set by the projector
 
 An `outcome` label that never appears is itself the diagnostic — an absent label
@@ -201,11 +243,21 @@ Feature file: `tests/bdd/enrichment/instagram-profile-photo-hero.feature`
 Scenarios:
 - A venue with a confirmed handle and a fresh profile picture stores the image
   and projects a CloudFront URL to Redis.
-- A venue whose stored photo is younger than the refresh window is skipped **and
-  no Apify call is made** — the cost gate, asserted as the absence of a billed
-  call, not merely as a skip count.
+- A venue that already has a stored photo is skipped **and no Apify call is
+  made** — the cost gate, asserted as the absence of a billed call, not merely
+  as a skip count.
+- A photo old enough to have expired under any refresh window (400 days) is
+  **still** not re-scraped. This is the backfill-only guarantee; a 31-day case
+  would pass under a reintroduced 90-day window and prove nothing.
+- A venue whose handle was corrected IS re-scraped despite having a photo.
+- `refresh_all` re-scrapes a venue the scheduled job skips.
+- The estimate makes **zero** Apify calls, and the number it reports equals the
+  number of billed scrapes the run then makes over the same fixture.
+- The `refresh_all` estimate carries a `warning` string; the backfill estimate
+  does not.
 - A re-run whose downloaded bytes hash identically re-uploads nothing and leaves
-  the served URL unchanged.
+  the served URL unchanged (driven in `refresh_all`, the only mode that reaches
+  a venue which already has a photo).
 - A venue without a confirmed handle is never fetched and never billed.
 - A profile that returns no picture URL records `no_pic` and writes no key.
 - A download exceeding the byte cap, or of a disallowed content-type, is
@@ -222,6 +274,16 @@ Pytest unit tests:
 - Run-summary bucketing across every outcome.
 - `VenueMediaStore` cache-control and CDN URL construction.
 - Projector registry entry: set on present row, delete on absent.
+- A stored photo is not re-scraped at 31 / 365 / 3650 days old.
+- `refresh_all` reaches it; `refresh_all` still honours the negative cache, and
+  `retry_days = 0` is the lever that overrides that.
+- Mode parsing: absent/blank config → `backfill`; an unknown mode raises rather
+  than defaulting, and such a run spends nothing.
+- The APScheduler job passes `mode=backfill` explicitly (asserted on what
+  arrives at the service, not on the service default).
+- The estimate and the run go through the same `select()` (asserted by spying
+  on it), the estimate makes no billed call, and the estimate never promises
+  more than the per-run cap allows.
 
 Manual or integration checks:
 - `terraform plan` on `infra/media` reviewed before apply; confirm it touches
@@ -235,8 +297,11 @@ Manual or integration checks:
 - A venue with a confirmed handle carries `venue_profile_photo_v1:{venue_id}`
   holding a CloudFront URL that returns HTTP 200 with a year-long
   `Cache-Control`.
-- No Apify call is made for a venue skipped by the freshness gate, proven by the
-  call counter, not by a log line.
+- No Apify call is made for a venue skipped by the has-photo gate, proven by the
+  call counter, not by a log line — at any row age.
+- No scheduled path can run `refresh_all`.
+- The estimate makes zero billed calls and reports exactly the number of venues
+  the run then scrapes.
 - A second run over unchanged photos performs zero S3 uploads and changes zero
   served URLs.
 - The media bucket is not publicly listable or readable except through
@@ -275,6 +340,66 @@ is part of this same PR:
 - **New outcome bucket:** `skipped_recent_failure`, on
   `venue_profile_photo_venues_total{outcome}`. It growing towards the whole
   catalog is the alarm that coverage has stalled.
+
+## Backfill Amendment (2026-08-16, operator directive, PR #205)
+
+The operator does **not** want a monthly re-scrape. A profile photo, once
+captured, is good indefinitely; re-scraping the whole catalog every 30 days
+buys almost nothing and is pure recurring Apify spend. Changed in this same PR:
+
+- **The scheduled job is backfill-only.** A venue with a profile-photo row is
+  skipped regardless of age. `instagram_profile_photo_refresh_days` and the
+  `refresh_cutoff` it fed are **deleted**, not defaulted off — a dead setting is
+  worse than none, because someone will set it and expect a monthly refresh that
+  never happens. `skipped_fresh` is renamed `skipped_has_photo`, since "fresh"
+  described a clock that no longer exists.
+- **Both surviving gates are unchanged.** The negative cache
+  (`instagram_profile_photo_retry_days`, 7) still skips a venue with no photo and
+  a recent failed attempt — it is now the *only* recurring spend, so it matters
+  more, not less. And the **handle-change re-scrape** still forces a re-fetch of
+  a row whose stored handle differs from the venue's current one. That is not a
+  refresh: it is another business's logo currently on this venue's card, a wrong
+  answer being served to a user, and with no refresh window left nothing else
+  would ever dislodge it. Normalization (case-insensitive, `@`-stripped) and the
+  "stored handle absent = unknown, not mismatched = still skip" rule are kept.
+- **New `refresh_all` mode, manual only.** Ignores the existing photo row and
+  re-scrapes every venue with a confirmed handle. Unreachable from the
+  scheduler: `main.py` passes `mode=backfill` explicitly, so a later change to
+  the service default cannot turn the cron into a catalog-wide re-scrape.
+  **`refresh_all` does NOT bypass the negative cache** — decision recorded
+  because the opposite is defensible. It exists to replace photos the catalog
+  *has*, and a negative-cached venue has none, so bypassing would buy a scrape
+  the next backfill makes anyway while inflating the very bill the operator is
+  approving. The dedicated lever for that intent already exists and is
+  deliberately a settings change rather than a dialog click:
+  `instagram_profile_photo_retry_days = 0`. The estimate reports the suppressed
+  count so the choice is visible rather than silent.
+- **New estimate endpoint that spends nothing.**
+  `POST /admin/trigger/instagram_profile_photos/estimate` (hyphenated alias
+  registered too), modelled on the proven
+  `POST /trigger/venue_photo_archive/estimate` — a *separate* endpoint rather
+  than a flag on the trigger, so an estimate can never accidentally start a run.
+  Returns the mode, the venue count that would actually be scraped, the unit
+  cost, the total USD, and — for `refresh_all` — a `warning` string for the
+  admin UI's warning sign.
+  **Critical invariant:** estimate and run share one selection function,
+  `VenueProfilePhotoService.select(mode)`. Proven two ways: a unit test spying
+  on `select` shows both paths call it, and a BDD scenario asserts the
+  estimate's count equals the run's billed-call count over the same fixture.
+- **Cost profile after this change:** one-time backfill ≈$4.50 at ~1,500 handled
+  venues; steady state ≈$0/month (see the Cost bullet above).
+
+**vibes_bot admin panel:** the estimate *call* already works with no change —
+`JobsList.tsx` renders the job registry generically, `JobRunOptionsDialog.tsx`
+builds `/api/enrichment/estimate/{job.name}`, and vibes_bot's
+`app/admin/routes.py` proxies that straight to
+`/admin/trigger/{job_name}/estimate`. The estimate *rendering* is field-specific
+(`EstimateResult` reads `venues_after_skip`/`venues_selected`/`est_cost_usd`/
+`caveat`), so this endpoint returns those names as aliases of the same
+selection — the panel therefore shows the right count and cost today. Only the
+visible **warning sign** needs a vibes_bot change (`warning` is not read
+anywhere), plus an optional `mode` dropdown; that is a separate PR in a separate
+repo and is **not** done here.
 
 ## Open Questions
 - None. Source (Apify), serving (private S3 + CloudFront), and the Google

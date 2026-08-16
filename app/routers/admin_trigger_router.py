@@ -16,6 +16,7 @@ from app.handlers.add_venue_handler import (
 from app.models.batch_add import BatchAddRequest
 from app.services.archive_sources import public_catalog
 from app.services.venue_photo_archive_service import InvalidArchivePath, parse_venue_ids
+from app.services.venue_profile_photo_service import InvalidProfilePhotoMode
 from app.services.venue_eligibility import (
     ADMIN_CONFIG_ELIGIBILITY_KEY,
     ADMIN_CONFIG_GEOFENCE_KEY,
@@ -221,12 +222,20 @@ JOB_REGISTRY = {
         "label": "Instagram Profile Photos (list hero)",
         "description": "Archive each venue's Instagram profile picture to the "
         "media bucket and project its CloudFront URL, so the venue list can "
-        "show a thumbnail with no serve-time Google call. A venue whose stored "
-        "photo is younger than the refresh window is skipped BEFORE any billed "
-        "scrape, and so is one whose last attempt failed inside "
-        "INSTAGRAM_PROFILE_PHOTO_RETRY_DAYS (set it to 0 to retry every venue "
-        "now, e.g. right after fixing the bucket policy). Inert unless "
+        "show a thumbnail with no serve-time Google call. "
+        "BACKFILL (the default, and the only mode the scheduler ever runs) "
+        "skips every venue that already has a photo, at ANY age — a captured "
+        "profile picture stays good indefinitely, so steady-state cost is "
+        "about zero. REFRESH_ALL re-scrapes venues that already have one and "
+        "costs one Apify unit each: price it first with "
+        "POST /admin/trigger/instagram_profile_photos/estimate. Either mode "
+        "also skips a venue whose last attempt failed inside "
+        "INSTAGRAM_PROFILE_PHOTO_RETRY_DAYS (set it to 0 to retry every failed "
+        "venue now, e.g. right after fixing the bucket policy). Inert unless "
         "INSTAGRAM_PROFILE_PHOTO_ENABLED is on.",
+        # The one knob this job takes. Every spend BOUND stays a setting, so a
+        # trigger dialog can choose what to scrape but never how much.
+        "default_config": {"mode": "backfill"},
         "service_attr": "venue_profile_photo_service",
         "unavailable_detail": "Instagram profile photos not configured "
         "(needs Apify API token + MEDIA_BUCKET + MEDIA_CDN_BASE_URL)",
@@ -581,6 +590,51 @@ async def estimate_photo_archive(config: Optional[dict] = None):
     except InvalidArchivePath as e:
         # Includes InvalidArchiveConfig: the operator's request was rejected and
         # nothing was spent.
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+def _profile_photo_service():
+    service = getattr(_container, "venue_profile_photo_service", None)
+    if service is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Instagram profile photos not configured "
+            "(needs Apify API token + MEDIA_BUCKET + MEDIA_CDN_BASE_URL)",
+        )
+    return service
+
+
+# Both spellings are registered. The underscore form is the one that matters:
+# the admin panel builds its estimate URL generically as
+# `/admin/trigger/{job.name}/estimate`, and this job's registry name is
+# `instagram_profile_photos`. The hyphenated alias is the path the feature was
+# specified with and is kept so a hand-written call or a doc link does not 404.
+@router.post("/trigger/instagram-profile-photos/estimate")
+@router.post("/trigger/instagram_profile_photos/estimate")
+async def estimate_instagram_profile_photos(config: Optional[dict] = None):
+    """Price an Instagram profile photo run WITHOUT making a single Apify call.
+
+    Same guarantee, and the same reason, as
+    `POST /trigger/venue_photo_archive/estimate` above: a SEPARATE endpoint
+    rather than a flag on the trigger, so an estimate can never accidentally
+    start a run. `VenueProfilePhotoService.estimate` reinforces that in code —
+    it is synchronous, contains no `await`, and never touches a provider
+    client.
+
+    The count it returns is `len(selection.selected)` from the very same
+    `select()` call the run makes, so the number an operator approves is the
+    number of billed scrapes they get.
+
+    `mode` is "backfill" (default, and free for venues that already have a
+    photo) or "refresh_all", which re-scrapes stored photos and therefore comes
+    back with a populated `warning` for the admin UI to put a warning sign on.
+    """
+    require()
+    try:
+        return _profile_photo_service().estimate(config)
+    except InvalidProfilePhotoMode as e:
+        # An unrecognised mode is rejected, never resolved to a default: the
+        # two modes differ by the whole catalog's worth of Apify units.
         raise HTTPException(status_code=400, detail=str(e))
 
 

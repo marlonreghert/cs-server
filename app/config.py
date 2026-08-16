@@ -465,25 +465,36 @@ class Settings(BaseSettings):
     # a bucket-policy or IAM gap fails the S3 write *after* the Apify scrape has
     # already been paid for. Prod turns this on only once the apply is verified.
     instagram_profile_photo_enabled: bool = False
-    # The cost gate. A venue whose stored row is younger than this is skipped
-    # BEFORE the billed scrape, never after (see VenueProfilePhotoService's
-    # ordering guarantee, inherited from VenuePhotoArchiveService).
-    instagram_profile_photo_refresh_days: int = 30
-    # The negative-cache window, and the other half of the same cost gate. A
+    #
+    # There is deliberately NO `instagram_profile_photo_refresh_days`. The
+    # scheduled job is BACKFILL-ONLY: a venue that already has a photo is
+    # skipped at any age, because a captured profile picture stays valid
+    # indefinitely and a monthly catalog re-scrape is pure recurring Apify
+    # spend for almost no change. The setting was removed rather than
+    # defaulted to 0 — a dead knob still reads like a promise that a refresh
+    # happens, and someone would eventually set it and wait for one. Replacing
+    # stored photos is now the explicit, operator-only `refresh_all` mode,
+    # priced first by POST /admin/trigger/instagram_profile_photos/estimate.
+    #
+    # The negative-cache window, and now the ONLY recurring cost gate. A
     # venue with no photo row is unconditionally due, so a venue that CANNOT
     # yield a photo (no profile picture, a handle that 404s, a download that
     # keeps failing) would otherwise be re-scraped and re-billed on every run
     # forever — and once max_venues_per_run of them accumulate they consume the
-    # entire run budget, so no venue that could get a photo ever does.
-    # Recording the failed attempt makes it skippable for this many days.
-    # Deliberately shorter than the refresh window: a failure is worth
-    # retrying occasionally (Instagram profiles change, and an upload failure
-    # is usually ours to fix), just not every single run. Same 7-day shape as
-    # instagram_not_found_cache_ttl_days, one facet over. Set to 0 to disable
-    # the suppression entirely — the escape hatch for retrying a whole catalog
-    # immediately after fixing an infrastructure-wide failure.
+    # entire run budget, so no venue that could get a photo ever does. With the
+    # refresh window gone this window is what the whole steady-state bill is:
+    # everything else the scheduled job touches is skipped for free.
+    # Recording the failed attempt makes it skippable for this many days — a
+    # failure is worth retrying occasionally (Instagram profiles change, and an
+    # upload failure is usually ours to fix), just not every single run. Same
+    # 7-day shape as instagram_not_found_cache_ttl_days, one facet over. Set to
+    # 0 to disable the suppression entirely — the escape hatch for retrying a
+    # whole catalog immediately after fixing an infrastructure-wide failure,
+    # and also the deliberate way to make `refresh_all` re-try known failures,
+    # which it does not do on its own.
     instagram_profile_photo_retry_days: int = 7
-    # Per-run venue ceiling, so one tick can never re-buy the whole catalog.
+    # Per-run venue ceiling, so one tick — or one refresh_all click — can never
+    # re-buy the whole catalog at once.
     instagram_profile_photo_max_venues_per_run: int = 200
     # An Instagram avatar is a small square JPEG; anything past this is not one,
     # and is discarded without an S3 write.

@@ -32,6 +32,7 @@ from app.services.refresh_interval_watch import (
     WATCH_INTERVAL_SECONDS,
     RefreshIntervalWatcher,
 )
+from app.services.venue_profile_photo_service import MODE_BACKFILL
 from app.metrics import (
     BACKGROUND_JOB_RUNS_TOTAL,
     BACKGROUND_JOB_DURATION_SECONDS,
@@ -359,7 +360,12 @@ run_instagram_profile_photo_job = make_job(
         f"[Scheduler] InstagramProfilePhotoJob completed: {summary}"
     ),
     error_label="InstagramProfilePhotoJob",
-    run=lambda c: c.venue_profile_photo_service.run(),
+    # BACKFILL, named explicitly rather than left to the default. refresh_all
+    # re-scrapes venues that already have a photo — real, catalog-wide Apify
+    # spend — and must only ever happen because an operator asked for it after
+    # seeing an estimate. Writing the mode here means a future change to the
+    # service's default cannot silently turn this cron into that.
+    run=lambda c: c.venue_profile_photo_service.run({"mode": MODE_BACKFILL}),
     service_attr="venue_profile_photo_service",
     require_container=True,
     disabled_log=(
@@ -680,10 +686,12 @@ def start_background_jobs(settings: Settings):
     # write happens AFTER the Apify scrape is already paid for, so prod turns
     # this on only once infra/media/ has been applied and verified.
     #
-    # Steady-state spend is bounded by the freshness gate, not by the cadence:
-    # a daily tick over a 30-day refresh window re-scrapes roughly a thirtieth
-    # of the catalog per run, and every venue it skips is skipped BEFORE the
-    # billed call.
+    # This tick is BACKFILL-ONLY and the cadence is therefore almost free: a
+    # venue that already has a photo is skipped at any age, BEFORE the billed
+    # call, so once the catalog is covered a daily run scrapes only genuinely
+    # new venues plus failures whose retry window expired. Re-scraping photos
+    # the catalog already has is `refresh_all`, which no scheduled path can
+    # reach — see `run_instagram_profile_photo_job` above.
     schedule(
         scheduler,
         enabled=bool(
