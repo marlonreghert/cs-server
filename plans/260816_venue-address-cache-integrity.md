@@ -9,12 +9,15 @@ geographically confident in. When it can't confidently link a submission to an
 existing venue, it must fall through to a normal create (or `created_google_only`)
 rather than silently short-circuiting to an unrelated venue — no BestTime link
 is an acceptable outcome; a wrong link is not. Also repair the specific
-already-poisoned cache entries discovered this session so those 7 venues can be
-added cleanly.
+already-poisoned cache entries discovered this session (now 8, see Evidence)
+so those venues can be added cleanly.
 
 ## Non-goals
 - A catalog-wide audit for other possibly-poisoned `venue_lookup_by_address_v1:*`
-  entries beyond the 7 already found. Real risk, but a separate, larger effort —
+  entries outside the 274-venue campaign this bug was found in. A scoped audit
+  of that campaign's own other 266 candidates *was* run as a pre-execution
+  check (see Evidence — found exactly one more, folded into the 8 above); a
+  broader audit of the rest of the catalog is a separate, larger effort —
   tracked as an open question below, not built here.
 - Redesigning BestTime's own venue-identity model. One of the 7 cases (see
   Evidence) may reflect BestTime's own geocode-derived id scheme rather than a
@@ -28,7 +31,7 @@ added cleanly.
 All found and verified live during this session (2026-08-16), operating a
 274-venue add-venue campaign (`plans/260814_venue-discovery-nordeste-sp.md`).
 
-- 7 confirmed-live Redis entries, each a permanent (`TTL -1`) mapping from a
+- 8 confirmed-live Redis entries, each a permanent (`TTL -1`) mapping from a
   submitted `venue_name|venue_address` hash to the WRONG existing venue's id —
   verified via `GET /admin/venues/inventory?q=<venue_id>` resolving to a
   different real-world venue than what was submitted:
@@ -39,6 +42,30 @@ All found and verified live during this session (2026-08-16), operating a
   - `Boteco da Orla` (Salvador, BA) → same **Boteco**, Fortaleza, CE (identical wrong target as the row above, despite a different submitted city)
   - `Boteco Senador` (São Paulo, SP) → same **Boteco**, Fortaleza, CE (again)
   - `Riva Bar de Praia` (Fortaleza, CE) → **Boteco do Illa**, same exact address in Fortaleza but a different name (no name overlap at all — see Open Questions)
+  - `Boteco da Villa` (São Paulo, SP — Vila Mariana) → **Boteco da Villa**,
+    São Bernardo do Campo, SP (~25 km away, different municipality) — found by
+    the pre-execution audit below, confirmed live: `venue_lookup_by_address_v1:
+    e6ea959324c085916588149734f0144f8c597c91` = `ven_3071305735315361344e6a5251...`
+    (São Bernardo), `TTL -1`.
+
+**Pre-execution audit (2026-08-16, this session, before writing this update):**
+before starting execution, 5 parallel subagents cross-checked the campaign's
+other 266 candidates (274 minus the 7 originally found) against live inventory
+by name+expected-city. 3 leads surfaced; each was individually confirmed or
+ruled out by computing the actual `venue_lookup_by_address_v1:{sha1(name|address)}`
+key and reading it from Redis directly (not just inferring from a name search):
+- `Boteco da Villa` — key exists, `TTL -1`, wrong venue_id → **real, added to
+  Evidence above (8th entry)**.
+- `Bar do Jorge` (submitted São Luís, MA) and `Restaurante Outback Steakhouse`
+  (submitted São Paulo, SP) — **no address-hash key exists for either** (`GET`
+  returns nil). Not this bug: these two simply never got added by the campaign
+  at all (the only inventory hits for those names are unrelated, legitimately
+  different, same-named venues in Salvador and Recife respectively — a
+  same-name coincidence, not a short-circuit). This is a separate, ordinary
+  campaign-coverage gap, not cache poisoning — out of scope for this plan.
+  Safe to retry as plain new submissions, but only *after* this fix ships:
+  retrying today, unbiased, risks the exact same coordinate-resolution gap
+  freshly poisoning a new cache entry for them.
 - The cache mechanism: `VENUE_LOOKUP_BY_ADDRESS_KEY_V1 = "venue_lookup_by_address_v1:{hash}"`
   (`app/handlers/add_venue_handler.py:43`), `hash = sha1(name.lower()+"|"+address.lower())`.
   Written by `_save_address_cache` (line 596), read by `_lookup_cached_venue_id`
@@ -102,7 +129,7 @@ underlying coordinate was resolved.
    by supplying the venue_name + venue_address that produced it (not a raw Redis
    key), through the same DAO/handler boundary the rest of add-venue uses — no
    ad hoc Redis access. The action is logged (old value, who/when).
-4. After the above ship, the 7 venues in Evidence are re-submitted through the
+4. After the above ship, the 8 venues in Evidence are re-submitted through the
    normal add-venue pipeline (not special-cased) and each resolves to a create,
    a `created_google_only`, or a *correct* nearby match — never the previously
    wrong venue.
@@ -124,9 +151,9 @@ underlying coordinate was resolved.
   `_address_hash`, reads the current value for logging, deletes the key via the
   existing Redis client the handler already holds, and returns what was
   cleared (or a 404-shaped "nothing cached" if there was nothing to clear).
-- Apply it to the 7 known entries as part of this fix's own rollout (a one-time
+- Apply it to the 8 known entries as part of this fix's own rollout (a one-time
   admin action after merge+deploy, not a migration script), then re-submit
-  those 7 venue_name+venue_address pairs through the normal batch-add endpoint
+  those 8 venue_name+venue_address pairs through the normal batch-add endpoint
   as the final verification step (see Test Plan).
 
 ## Data, Config, And API Impact
@@ -185,7 +212,7 @@ Pytest unit tests:
   returns the prior value, handles a missing key cleanly.
 
 Manual or integration checks:
-- After merge and deploy, clear the 7 known-bad entries listed in Evidence via
+- After merge and deploy, clear the 8 known-bad entries listed in Evidence via
   the new admin endpoint, then resubmit those exact venue_name+venue_address
   pairs through `POST /admin/venues/batch-add` and confirm each now resolves to
   `created`, `created_google_only`, or a genuinely correct nearby match — never
@@ -201,7 +228,7 @@ Manual or integration checks:
   the new BDD scenario, not just manual spot-checks.
 - The trusted-coordinate path (caller-supplied place_id or lat/lng) is
   unaffected — existing add-venue BDD scenarios still pass unchanged.
-- All 7 known-bad entries from Evidence are cleared and their venues
+- All 8 known-bad entries from Evidence are cleared and their venues
   successfully re-added (or confirmed `created_google_only`) with no wrong link,
   verified live against prod inventory after deploy.
 - Full `make test` (unit + BDD) stays green.
@@ -220,8 +247,16 @@ Manual or integration checks:
   possibly-unfixable note. Do not assume it's part of the same bug until
   confirmed.
 - Should a broader one-time audit of all existing `venue_lookup_by_address_v1:*`
-  keys for other poisoned entries be scoped as a near-term follow-up? Real risk
-  (this session found 7 out of ~280 attempts — roughly 2.5% — purely by
-  coincidence while retrying a specific campaign, not by looking for this),
-  but a full audit is a distinct, larger effort deliberately left out of this
-  plan's Non-goals. Flagging for the operator to decide, not blocking this fix.
+  keys for other poisoned entries, **outside** this specific 274-venue campaign,
+  be scoped as a near-term follow-up? The campaign's own candidates are now
+  fully accounted for (8 of 274 confirmed poisoned, verified via a dedicated
+  pre-execution audit — see Evidence), a ~2.9% hit rate. Whether that rate
+  holds across the rest of the catalog (thousands of venues never touched by
+  this campaign, added by unrelated historical flows) is unknown; a full audit
+  is a distinct, larger effort deliberately left out of this plan's Non-goals.
+  Flagging for the operator to decide, not blocking this fix.
+- `Bar do Jorge` and `Restaurante Outback Steakhouse` (see Evidence's
+  pre-execution audit note) never got added by the campaign at all — no cache
+  poisoning, just missing. Worth a plain retry once this fix ships (so a fresh
+  unbiased resolution can't repoison them the same way), but that's ordinary
+  campaign follow-up, not part of this fix's scope or Acceptance Criteria.
