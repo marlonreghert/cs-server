@@ -469,6 +469,20 @@ class Settings(BaseSettings):
     # BEFORE the billed scrape, never after (see VenueProfilePhotoService's
     # ordering guarantee, inherited from VenuePhotoArchiveService).
     instagram_profile_photo_refresh_days: int = 30
+    # The negative-cache window, and the other half of the same cost gate. A
+    # venue with no photo row is unconditionally due, so a venue that CANNOT
+    # yield a photo (no profile picture, a handle that 404s, a download that
+    # keeps failing) would otherwise be re-scraped and re-billed on every run
+    # forever — and once max_venues_per_run of them accumulate they consume the
+    # entire run budget, so no venue that could get a photo ever does.
+    # Recording the failed attempt makes it skippable for this many days.
+    # Deliberately shorter than the refresh window: a failure is worth
+    # retrying occasionally (Instagram profiles change, and an upload failure
+    # is usually ours to fix), just not every single run. Same 7-day shape as
+    # instagram_not_found_cache_ttl_days, one facet over. Set to 0 to disable
+    # the suppression entirely — the escape hatch for retrying a whole catalog
+    # immediately after fixing an infrastructure-wide failure.
+    instagram_profile_photo_retry_days: int = 7
     # Per-run venue ceiling, so one tick can never re-buy the whole catalog.
     instagram_profile_photo_max_venues_per_run: int = 200
     # An Instagram avatar is a small square JPEG; anything past this is not one,

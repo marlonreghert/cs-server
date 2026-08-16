@@ -30,12 +30,37 @@ The per-run cap is applied to the survivors of that gate, not to the raw
 servable list. Capping earlier would let a catalog of already-fresh venues
 consume the whole run budget and refresh nothing.
 
+## The negative cache (the other half of the cost gate)
+
+A venue with NO photo row is unconditionally due, so an absence has to be
+recorded somewhere or it is bought again every run. A profile with no picture,
+a handle that 404s, an image that will not download — none of those ever
+produce a photo row, and without a record of the attempt the same venue is
+re-scraped and re-billed on every tick, forever. Worse, once
+`max_venues_per_run` such venues accumulate they fill the whole run budget and
+no venue that COULD get a photo ever gets one.
+
+So every attempt that produced no photo writes a row to
+`instagram.profile_photo_attempt`, and the selection gate skips a venue whose
+last attempt is younger than `instagram_profile_photo_retry_days` — the same
+negative-caching shape handle discovery already uses via
+`instagram_not_found_cache_ttl_days`. It is a SEPARATE table from the photo
+row on purpose: a failed refresh must never overwrite the row a venue's live
+hero is projected from, and `venue_profile_photo_v1:{venue_id}` must keep
+meaning exactly one thing — this venue has a real stored photo. The attempt
+table has no entry in `RedisProjectionService._REBUILD_MODELS`, so it cannot
+produce a Redis key at all.
+
+A stored photo clears the attempt row, and a handle change ignores it: an old
+failure says nothing about a handle that has since been corrected.
+
 ## What is never a failure
 
 A venue with no handle, a profile with no picture, or a failed fetch produces
-an ABSENCE — no row, no key, no error. Nothing partial is ever persisted: the
-RDS row is written only after the S3 upload has returned, so a Redis key can
-never point at an object that does not exist.
+an ABSENCE — no photo row, no key, no error (only the attempt row above, which
+is projected nowhere). Nothing partial is ever persisted: the photo row is
+written only after the S3 upload has returned, so a Redis key can never point
+at an object that does not exist.
 
 Failure isolation is per venue. One bad venue never aborts a run that is paying
 for the others. The single exception is an exhausted Apify balance, which stops
@@ -61,12 +86,16 @@ from app.metrics import (
     VENUE_PROFILE_PHOTO_RUN_DURATION_SECONDS,
     VENUE_PROFILE_PHOTO_VENUES_TOTAL,
 )
-from app.models.instagram import VenueInstagramProfilePhoto
+from app.models.instagram import (
+    VenueInstagramProfilePhoto,
+    VenueInstagramProfilePhotoAttempt,
+)
 from app.services.pipeline_run_registry import new_run_id
 
 logger = logging.getLogger(__name__)
 
 PROFILE_PHOTO_TABLE = "instagram.profile_photo"
+PROFILE_PHOTO_ATTEMPT_TABLE = "instagram.profile_photo_attempt"
 
 # Outcome buckets. Every venue the run touches lands in exactly one, and the
 # set is closed — an outcome label that never appears in Prometheus is itself
@@ -74,12 +103,29 @@ PROFILE_PHOTO_TABLE = "instagram.profile_photo"
 OUTCOME_STORED = "stored"
 OUTCOME_UNCHANGED = "unchanged"
 OUTCOME_SKIPPED_FRESH = "skipped_fresh"
+# Skipped because the venue's LAST attempt produced no photo and is still
+# inside the retry window. Distinct from skipped_fresh on purpose: one venue
+# is skipped because it already has what we wanted, the other because we
+# already paid to find out it has nothing, and only the second one is
+# coverage that is missing rather than coverage that is done.
+OUTCOME_SKIPPED_RECENT_FAILURE = "skipped_recent_failure"
 OUTCOME_NO_HANDLE = "no_handle"
 OUTCOME_NO_PIC = "no_pic"
 OUTCOME_FETCH_FAILED = "fetch_failed"
 OUTCOME_DOWNLOAD_FAILED = "download_failed"
 OUTCOME_UPLOAD_FAILED = "upload_failed"
 OUTCOME_CREDIT_EXHAUSTED = "credit_exhausted"
+
+# The outcomes that produced NO photo and were paid for anyway. Each writes an
+# attempt row so the next run can skip the venue before spending again.
+# credit_exhausted is NOT here: the 402 never ran the actor, so nothing was
+# learned about that venue and nothing was billed for it.
+ATTEMPT_RECORDED_OUTCOMES = frozenset({
+    OUTCOME_NO_PIC,
+    OUTCOME_FETCH_FAILED,
+    OUTCOME_DOWNLOAD_FAILED,
+    OUTCOME_UPLOAD_FAILED,
+})
 
 # What we are willing to store and serve. A datacenter IP asking Instagram for
 # an image very often gets an HTML login wall with HTTP 200, so a content-type
@@ -114,6 +160,19 @@ def _coerce_dt(value) -> Optional[datetime]:
     if not isinstance(ts, datetime):
         return None
     return ts.replace(tzinfo=timezone.utc) if ts.tzinfo is None else ts
+
+
+def _normalize_handle(value) -> str:
+    """Compare handles the way Instagram itself treats them: case-insensitive,
+    no leading `@`, no surrounding whitespace.
+
+    Comparing raw strings would let a purely cosmetic re-casing by the
+    discovery cascade read as "different business" and re-buy a scrape for
+    every venue in the catalog at once.
+    """
+    if not value:
+        return ""
+    return str(value).strip().lstrip("@").strip().lower()
 
 
 async def download_image(url: str, *, max_bytes: Optional[int] = None) -> tuple[bytes, str]:
@@ -232,14 +291,26 @@ class VenueProfilePhotoService:
             existing = self.rds_store.get_enrichment_bulk(
                 PROFILE_PHOTO_TABLE, servable_ids
             )
+            # The negative cache. One more bulk read, still zero provider
+            # calls — and it is what keeps a permanently photo-less venue from
+            # being re-billed on every run.
+            attempts = self.rds_store.get_enrichment_bulk(
+                PROFILE_PHOTO_ATTEMPT_TABLE, servable_ids
+            )
         except Exception as e:
             logger.error(f"[ProfilePhoto] selection failed; nothing spent: {e}")
             return self._finish(summary, "error", started, job_id)
 
         summary["venues_servable"] = len(servable_ids)
-        refresh_cutoff = self._now() - timedelta(
+        now = self._now()
+        refresh_cutoff = now - timedelta(
             days=settings.instagram_profile_photo_refresh_days
         )
+        retry_days = settings.instagram_profile_photo_retry_days
+        # retry_days <= 0 disables the negative cache outright: the escape
+        # hatch for retrying the whole catalog right after fixing an
+        # infrastructure-wide failure, instead of waiting the window out.
+        retry_cutoff = now - timedelta(days=retry_days) if retry_days > 0 else None
 
         due: list[tuple[str, str]] = []
         for venue_id in servable_ids:
@@ -250,8 +321,16 @@ class VenueProfilePhotoService:
                 record(venue_id, OUTCOME_NO_HANDLE)
                 continue
             row = existing.get(venue_id)
-            if row is not None and self._is_fresh(row, refresh_cutoff):
+            if row is not None and self._is_fresh(row, refresh_cutoff, handle):
                 record(venue_id, OUTCOME_SKIPPED_FRESH)
+                continue
+            attempt = attempts.get(venue_id)
+            if (
+                retry_cutoff is not None
+                and attempt is not None
+                and self._attempt_suppresses(attempt, retry_cutoff, handle)
+            ):
+                record(venue_id, OUTCOME_SKIPPED_RECENT_FAILURE)
                 continue
             due.append((venue_id, handle))
 
@@ -262,6 +341,8 @@ class VenueProfilePhotoService:
             f"[ProfilePhoto] job={job_id} servable={len(servable_ids)} "
             f"due={len(due)} selected={len(selected)} "
             f"skipped_fresh={summary['counts'].get(OUTCOME_SKIPPED_FRESH, 0)} "
+            "skipped_recent_failure="
+            f"{summary['counts'].get(OUTCOME_SKIPPED_RECENT_FAILURE, 0)} "
             f"no_handle={summary['counts'].get(OUTCOME_NO_HANDLE, 0)}"
         )
 
@@ -291,6 +372,9 @@ class VenueProfilePhotoService:
                 )
                 outcome = OUTCOME_FETCH_FAILED
             record(venue_id, outcome)
+            self._note_attempt(
+                venue_id, handle, outcome, had_attempt=venue_id in attempts
+            )
 
         failed = sum(
             summary["counts"].get(o, 0)
@@ -393,8 +477,22 @@ class VenueProfilePhotoService:
         return OUTCOME_STORED
 
     # ── helpers ─────────────────────────────────────────────────────────────
-    def _is_fresh(self, row: dict, cutoff: datetime) -> bool:
-        """A row younger than the refresh window, and not soft-deleted.
+    def _is_fresh(self, row: dict, cutoff: datetime, handle: str) -> bool:
+        """A row younger than the refresh window, for the CURRENT handle, and
+        not soft-deleted.
+
+        The handle comparison is not a nicety. Handle discovery revises itself
+        — a corrected handle is a normal event — and a stored row is a photo
+        scraped from whatever handle was believed correct at the time. Judging
+        freshness on age alone keeps another business's logo on this venue's
+        card for up to the full refresh window, which is a wrong answer shown
+        to a user, not a stale one. A handle that no longer matches makes the
+        row worthless regardless of its age.
+
+        A stored row with NO handle recorded is treated as still fresh: it is
+        unknown, not mismatched, and re-scraping every such row would re-buy
+        the catalog to resolve an ambiguity that only pre-service-written rows
+        can even have (`_persist` always records the handle).
 
         The `deleted_at` check is belt-and-braces: `get_enrichment_bulk`
         already excludes soft-deleted rows on both the real store and the
@@ -409,10 +507,69 @@ class VenueProfilePhotoService:
         """
         if row.get("deleted_at") is not None:
             return False
+        stored_handle = _normalize_handle(
+            (row.get("payload") or {}).get("instagram_handle")
+        )
+        if stored_handle and stored_handle != _normalize_handle(handle):
+            return False
         updated_at = _coerce_dt(row.get("updated_at"))
         if updated_at is None:
             return False
         return updated_at > cutoff
+
+    def _attempt_suppresses(self, attempt: dict, cutoff: datetime, handle: str) -> bool:
+        """Whether a recorded failed attempt still blocks a billed retry.
+
+        Symmetric with `_is_fresh`, and for the same reasons: a soft-deleted or
+        unreadable attempt suppresses nothing (erring towards one Apify unit
+        beats freezing a venue out of the pipeline), and an attempt made
+        against a DIFFERENT handle suppresses nothing either — whatever we
+        learned about the old handle says nothing about the corrected one.
+        """
+        if attempt.get("deleted_at") is not None:
+            return False
+        attempted_handle = _normalize_handle(
+            (attempt.get("payload") or {}).get("instagram_handle")
+        )
+        if attempted_handle and attempted_handle != _normalize_handle(handle):
+            return False
+        updated_at = _coerce_dt(attempt.get("updated_at"))
+        if updated_at is None:
+            return False
+        return updated_at > cutoff
+
+    def _note_attempt(
+        self, venue_id: str, handle: str, outcome: str, *, had_attempt: bool
+    ) -> None:
+        """Maintain the negative cache after a venue was actually processed.
+
+        An outcome that produced no photo writes (or refreshes) the attempt
+        row, which is what makes the next run skip this venue BEFORE spending.
+        A success clears any row that was there, so an old failure can never
+        shadow a venue that now works.
+
+        Wrapped: this is bookkeeping for a run that has already spent money,
+        and losing it must degrade to "we re-scrape this venue next window",
+        never to a failed run. The log line is the diagnostic — silently
+        losing the negative cache is exactly how the spend bug comes back.
+        """
+        try:
+            if outcome in ATTEMPT_RECORDED_OUTCOMES:
+                self.repo.set_venue_profile_photo_attempt(
+                    VenueInstagramProfilePhotoAttempt(
+                        venue_id=venue_id,
+                        instagram_handle=handle,
+                        outcome=outcome,
+                        attempted_at=self._now(),
+                    )
+                )
+            elif had_attempt:
+                self.repo.delete_venue_profile_photo_attempt(venue_id)
+        except Exception as e:
+            logger.warning(
+                f"[ProfilePhoto] {venue_id} (@{handle}) attempt bookkeeping "
+                f"failed ({outcome}); it may be re-scraped next run: {e}"
+            )
 
     def _persist(
         self, venue_id: str, handle: str, photo_url: str, key: str,

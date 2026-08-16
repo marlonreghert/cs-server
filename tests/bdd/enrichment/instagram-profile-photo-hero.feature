@@ -27,6 +27,46 @@ Feature: Instagram profile photo as the venue list hero
     Then no profile scrape is requested for venue "v-bravo"
     And the run summary counts venue "v-bravo" as "skipped_fresh"
 
+  Scenario: A profile carrying no picture is not re-scraped within the retry window
+    Given a servable venue "v-mike" with the confirmed Instagram handle "mikebar"
+    And the retry window is 7 days
+    And the profile scrape returns a profile with no picture URL
+    And the profile photo job has already run once
+    When the profile photo job runs
+    Then the number of profile scrapes for venue "v-mike" is 1
+    And the run summary counts venue "v-mike" as "skipped_recent_failure"
+    And no Redis profile photo key exists for venue "v-mike"
+
+  Scenario: A venue whose failed attempt aged past the retry window is scraped again
+    Given a servable venue "v-november" with the confirmed Instagram handle "novemberbar"
+    And the retry window is 7 days
+    And the profile scrape returns a profile with no picture URL
+    And the profile photo job has already run once
+    And the last profile photo attempt for venue "v-november" is 8 days old
+    And the profile scrape returns a profile picture
+    When the profile photo job runs
+    Then the number of profile scrapes for venue "v-november" is 2
+    And the run summary counts venue "v-november" as "stored"
+
+  Scenario: A venue whose Instagram handle changed is re-fetched despite a fresh row
+    Given a servable venue "v-oscar" with the confirmed Instagram handle "oscarbar"
+    And venue "v-oscar" already has a profile photo stored 3 days ago
+    And the refresh window is 30 days
+    And the confirmed Instagram handle for venue "v-oscar" is corrected to "oscarbaroficial"
+    And the profile scrape returns a profile picture
+    When the profile photo job runs
+    Then the profile scrape for venue "v-oscar" used the handle "oscarbaroficial"
+    And the run summary counts venue "v-oscar" as "stored"
+    And the Redis key "venue_profile_photo_v1:v-oscar" holds that CDN URL
+
+  Scenario: A failed refresh keeps the venue's existing hero projected
+    Given a servable venue "v-papa" with the confirmed Instagram handle "papabar"
+    And venue "v-papa" already has a profile photo stored beyond the refresh window
+    And the profile scrape fails for venue "v-papa"
+    When the profile photo job runs
+    Then the run summary counts venue "v-papa" as "fetch_failed"
+    And the CDN URL projected for venue "v-papa" is unchanged
+
   Scenario: An unchanged photo re-uploads nothing and keeps the served URL identical
     Given a servable venue "v-charlie" with the confirmed Instagram handle "charliebar"
     And venue "v-charlie" already has a profile photo stored beyond the refresh window

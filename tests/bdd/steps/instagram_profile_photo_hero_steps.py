@@ -40,6 +40,10 @@ from app.models.venue import Venue
 _LAT, _LNG = -8.05, -34.88
 
 _PROFILE_PHOTO_TABLE = "instagram.profile_photo"
+# The negative cache: one row per venue whose last attempt produced no photo.
+# A DIFFERENT table from the photo row on purpose — a failed refresh must not
+# overwrite (and so un-serve) a hero the venue already has.
+_PROFILE_PHOTO_ATTEMPT_TABLE = "instagram.profile_photo_attempt"
 _REDIS_KEY = "venue_profile_photo_v1:{}"
 
 _LOOP: "asyncio.AbstractEventLoop | None" = None
@@ -413,6 +417,49 @@ def step_refresh_window(context, days):
     _override_setting(context, "instagram_profile_photo_refresh_days", days)
 
 
+@given("the retry window is {days:d} days")
+def step_retry_window(context, days):
+    # Deliberately tolerant of the setting not existing yet (true RED): the
+    # scenario must fail on observable state — a second BILLED scrape — never
+    # on an AttributeError raised inside a Given.
+    if hasattr(settings, "instagram_profile_photo_retry_days"):
+        _override_setting(context, "instagram_profile_photo_retry_days", days)
+
+
+@given('the confirmed Instagram handle for venue "{vid}" is corrected to "{handle}"')
+def step_handle_corrected(context, vid, handle):
+    """Handle discovery revising itself — the case the freshness gate must not
+    sleep through, because the stored photo now belongs to a different
+    business."""
+    _seed_handle(context, vid, handle)
+    context.handles[vid] = handle
+    context.last_venue_id = vid
+    context.last_handle = handle
+
+
+@given("the profile photo job has already run once")
+def step_job_already_ran(context):
+    step_run_job(context)
+    context.first_run_summary = context.profile_photo_summary
+
+
+@given('the last profile photo attempt for venue "{vid}" is {days:d} days old')
+def step_age_attempt(context, vid, days):
+    """Backdate the negative-cache row — the retry gate's input.
+
+    Asserting the row exists is the point: without a recorded attempt there is
+    nothing to suppress the next billed scrape with, and that absence is
+    exactly the defect this scenario pins."""
+    row = context.rds_store.enrichment.get(_PROFILE_PHOTO_ATTEMPT_TABLE, {}).get(vid)
+    assert row is not None, (
+        f"no profile photo attempt was recorded for {vid}; a failed venue with "
+        "no recorded attempt is re-scraped (and re-billed) on every run"
+    )
+    row["updated_at"] = (
+        datetime.now(timezone.utc) - timedelta(days=days)
+    ).isoformat()
+
+
 @given("the profile scrape returns a profile picture whose bytes are unchanged")
 def step_scrape_returns_unchanged_bytes(context):
     _program_pic(context, context.last_venue_id, context.unchanged_bytes)
@@ -535,6 +582,25 @@ def step_no_scrape_for(context, vid):
     handle = context.handles.get(vid)
     assert handle not in apify.calls, (
         f"@{handle} was scraped (a billed call) for {vid}; calls={apify.calls}"
+    )
+
+
+@then('the number of profile scrapes for venue "{vid}" is {count:d}')
+def step_scrape_count(context, vid, count):
+    """Every scrape is a billed Apify unit, so this counts money, not calls."""
+    apify, _ = _boundaries(context)
+    handle = context.handles.get(vid)
+    actual = apify.calls.count(handle)
+    assert actual == count, (
+        f"@{handle} was scraped {actual}x, expected {count}x; calls={apify.calls}"
+    )
+
+
+@then('the profile scrape for venue "{vid}" used the handle "{handle}"')
+def step_scrape_used_handle(context, vid, handle):
+    apify, _ = _boundaries(context)
+    assert handle in apify.calls, (
+        f"{vid} was never scraped with @{handle}; calls={apify.calls}"
     )
 
 

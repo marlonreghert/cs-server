@@ -1,12 +1,13 @@
-"""Add `instagram.profile_photo` — the RDS system of record for a venue's
-archived Instagram profile picture. See
-plans/260816_instagram-profile-photo-hero.md.
+"""Add `instagram.profile_photo` (+ `instagram.profile_photo_attempt`) — the
+RDS system of record for a venue's archived Instagram profile picture, and the
+negative cache that stops a venue with no photo from being re-billed forever.
+See plans/260816_instagram-profile-photo-hero.md.
 
 Chains from 0042_venue_add_job_run, verified against migrations/versions/
 directly rather than trusted from the plan text (see 0030_crawl_target.py's
 own docstring for why that verification step exists: a plan's stated chain
 reference can go stale between being written and being executed). This
-migration adds exactly ONE new table, in the existing `instagram` schema,
+migration adds exactly TWO new tables, in the existing `instagram` schema,
 and touches nothing 0001-0042 own.
 
 ## `instagram.profile_photo`
@@ -37,8 +38,31 @@ cadences, different failure modes and different costs, and folding them
 together would mean a photo refresh rewrites the row the discovery cascade
 owns.
 
-Additive only: one new table, no existing table touched, no Redis key
-reshaped. Downgrade drops it — safe, because everything in it is
+## `instagram.profile_photo_attempt`
+
+The negative cache, in the same facet shape. One row per venue whose last
+attempt produced NO photo — a profile with no picture, a failed scrape, a
+failed download, a failed upload — holding the attempted handle and the
+outcome, with `updated_at` as the retry clock
+(`instagram_profile_photo_retry_days`). Without it a venue that can never
+yield a photo has no row at all, so the selection gate finds it due on EVERY
+run and re-buys the same scrape forever; once enough of them accumulate they
+fill the per-run cap and no venue that COULD get a photo ever gets one.
+This is the same shape the repo already uses for handle discovery's
+`instagram_not_found_cache_ttl_days`, one facet over.
+
+Deliberately a SEPARATE table from `instagram.profile_photo`, not a status
+flag inside it, for one load-bearing reason: a refresh whose scrape fails
+must not overwrite the row a venue's LIVE hero is projected from. Writing a
+failure marker into the photo row would delete the venue's photo from Redis
+(the projector mirrors that row) over a transient Apify error. Keeping the
+two apart means `instagram.profile_photo` still holds one thing only — a
+real, stored photo — which is the cross-repo contract vibes_bot reads, and
+this table is never registered in `RedisProjectionService._REBUILD_MODELS`,
+so no Redis key can ever be produced from an attempt row.
+
+Additive only: two new tables, no existing table touched, no Redis key
+reshaped. Downgrade drops them — safe, because everything in them is
 re-derivable (the S3 objects are content-addressed and survive the drop; a
 later run simply re-asserts the rows, re-paying the Apify scrape).
 
@@ -60,9 +84,17 @@ CREATE TABLE IF NOT EXISTS instagram.profile_photo (
   deleted_at timestamptz,
   updated_at timestamptz NOT NULL DEFAULT now()
 );
+
+CREATE TABLE IF NOT EXISTS instagram.profile_photo_attempt (
+  venue_id   text PRIMARY KEY REFERENCES venues.venue(venue_id),
+  payload    jsonb NOT NULL,
+  deleted_at timestamptz,
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
 """
 
 DOWNGRADE = r"""
+DROP TABLE IF EXISTS instagram.profile_photo_attempt;
 DROP TABLE IF EXISTS instagram.profile_photo;
 """
 

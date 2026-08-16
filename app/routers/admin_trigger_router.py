@@ -223,7 +223,10 @@ JOB_REGISTRY = {
         "media bucket and project its CloudFront URL, so the venue list can "
         "show a thumbnail with no serve-time Google call. A venue whose stored "
         "photo is younger than the refresh window is skipped BEFORE any billed "
-        "scrape. Inert unless INSTAGRAM_PROFILE_PHOTO_ENABLED is on.",
+        "scrape, and so is one whose last attempt failed inside "
+        "INSTAGRAM_PROFILE_PHOTO_RETRY_DAYS (set it to 0 to retry every venue "
+        "now, e.g. right after fixing the bucket policy). Inert unless "
+        "INSTAGRAM_PROFILE_PHOTO_ENABLED is on.",
         "service_attr": "venue_profile_photo_service",
         "unavailable_detail": "Instagram profile photos not configured "
         "(needs Apify API token + MEDIA_BUCKET + MEDIA_CDN_BASE_URL)",

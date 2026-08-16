@@ -48,9 +48,11 @@ from app.services.venue_profile_photo_service import (
     OUTCOME_NO_HANDLE,
     OUTCOME_NO_PIC,
     OUTCOME_SKIPPED_FRESH,
+    OUTCOME_SKIPPED_RECENT_FAILURE,
     OUTCOME_STORED,
     OUTCOME_UNCHANGED,
     OUTCOME_UPLOAD_FAILED,
+    PROFILE_PHOTO_ATTEMPT_TABLE,
     PROFILE_PHOTO_TABLE,
     VenueProfilePhotoService,
 )
@@ -69,6 +71,7 @@ def restore_settings():
     names = (
         "instagram_profile_photo_enabled",
         "instagram_profile_photo_refresh_days",
+        "instagram_profile_photo_retry_days",
         "instagram_profile_photo_max_venues_per_run",
         "instagram_profile_photo_max_bytes",
         "media_bucket",
@@ -77,6 +80,7 @@ def restore_settings():
     saved = {n: getattr(settings, n) for n in names}
     settings.instagram_profile_photo_enabled = True
     settings.instagram_profile_photo_refresh_days = 30
+    settings.instagram_profile_photo_retry_days = 7
     settings.instagram_profile_photo_max_venues_per_run = 50
     settings.instagram_profile_photo_max_bytes = 5_000_000
     settings.media_bucket = "vibesense-media-test"
@@ -157,6 +161,31 @@ def _service(store, repo, apify, media_store, payloads):
 
 def _pic(handle: str) -> str:
     return f"https://scontent.cdninstagram.com/{handle}.jpg"
+
+
+def _age(store, table: str, vid: str, days: float) -> None:
+    """Backdate a facet row's `updated_at` — the input to both cost gates."""
+    store.enrichment[table][vid]["updated_at"] = (
+        datetime.now(timezone.utc) - timedelta(days=days)
+    ).isoformat()
+
+
+def _seed_photo_row(store, vid: str, handle: str, data: bytes, *, days_old: float) -> str:
+    """An existing profile-photo row shaped the way the service writes one, so
+    the freshness gate sees a real payload (handle included). Returns the CDN
+    URL it holds."""
+    digest = hashlib.sha256(data).hexdigest()
+    key = f"venue-profile-photos/{vid}/{digest[:16]}.jpg"
+    url = f"{_CDN}/{key}"
+    store.upsert_enrichment(
+        PROFILE_PHOTO_TABLE, vid,
+        {"venue_id": vid, "instagram_handle": handle, "photo_url": url,
+         "s3_key": key, "content_hash": digest, "content_type": "image/jpeg",
+         "byte_size": len(data)},
+        history=False,
+    )
+    _age(store, PROFILE_PHOTO_TABLE, vid, days_old)
+    return url
 
 
 # ── VenueMediaStore ─────────────────────────────────────────────────────────
@@ -573,27 +602,44 @@ def test_one_venue_failing_does_not_abort_the_run(restore_settings):
 
 
 def test_the_per_run_cap_bounds_venues_that_actually_cost_money(restore_settings):
-    """The cap is applied to the survivors of the freshness gate, not to the
+    """The cap must do two separable things, and both are asserted here.
+
+    POSITION: it is applied to the survivors of the freshness gate, not to the
     raw servable list — otherwise a catalog of already-fresh venues would
-    consume the whole run budget and refresh nothing."""
+    consume the whole run budget and refresh nothing. `v-fresh` is what pins
+    that: it is skipped without ever counting against the cap of 1.
+
+    BOUND: it actually truncates. That needs TWO due venues — with only one,
+    `due[:1]` equals `due` and the assertion holds whether the cap is applied
+    or not, which is exactly how a deleted cap survives a green suite. With
+    two, removing the cap makes this read 2, and the second billed scrape is
+    the money the cap exists to not spend.
+    """
     settings.instagram_profile_photo_max_venues_per_run = 1
     _, _, store, repo = _harness()
     _seed(store, repo, "v-fresh", "fresh")
     store.upsert_enrichment(
         PROFILE_PHOTO_TABLE, "v-fresh", {"content_hash": "a"}, history=False
     )
-    _seed(store, repo, "v-due", "due")
+    _seed(store, repo, "v-due-a", "duea")
+    _seed(store, repo, "v-due-b", "dueb")
     apify, s3 = _FakeApify(), _RecordingS3()
-    apify.programmed["due"] = ProfileFetchResult(
-        username="due", profile_pic_url=_pic("due")
-    )
+    for handle in ("duea", "dueb"):
+        apify.programmed[handle] = ProfileFetchResult(
+            username=handle, profile_pic_url=_pic(handle)
+        )
     media = VenueMediaStore(bucket="b", region="us-east-1", cdn_base_url=_CDN, s3_client=s3)
-    summary = asyncio.run(
-        _service(store, repo, apify, media, {_pic("due"): (b"x", "image/jpeg")}).run()
-    )
+    payloads = {_pic(h): (b"x", "image/jpeg") for h in ("duea", "dueb")}
+    summary = asyncio.run(_service(store, repo, apify, media, payloads).run())
     assert summary["outcomes"]["v-fresh"] == OUTCOME_SKIPPED_FRESH
-    assert summary["outcomes"]["v-due"] == OUTCOME_STORED
     assert summary["venues_selected"] == 1
+    # The bound, in money: exactly one of the two due venues was billed for,
+    # and the other was left for the next run entirely untouched.
+    assert len(apify.calls) == 1, apify.calls
+    assert summary["apify_calls"] == 1
+    assert summary["counts"][OUTCOME_STORED] == 1
+    processed = [v for v in ("v-due-a", "v-due-b") if v in summary["outcomes"]]
+    assert len(processed) == 1, summary["outcomes"]
 
 
 def test_estimated_cost_tracks_the_scrapes_actually_issued(restore_settings):
@@ -633,6 +679,312 @@ def test_a_stored_row_carries_the_cdn_url_and_the_full_digest(restore_settings):
     assert payload["photo_url"] == f"{_CDN}/{payload['s3_key']}"
     assert payload["instagram_handle"] == "bar"
     assert payload["byte_size"] == len(data)
+
+
+# ── the negative cache: a failure must not be re-billed every run ───────────
+
+
+def test_a_profile_with_no_picture_is_not_rescraped_within_the_retry_window(
+    restore_settings,
+):
+    """The live-cost defect this table exists for: a venue with no photo has no
+    photo row, and a venue with no row is unconditionally due — so without a
+    recorded attempt it is re-scraped, and re-billed, on every single run."""
+    settings.instagram_profile_photo_retry_days = 7
+    _, _, store, repo = _harness()
+    _seed(store, repo, "v-1", "bar")
+    apify, s3 = _FakeApify(), _RecordingS3()
+    apify.programmed["bar"] = ProfileFetchResult(username="bar", profile_pic_url=None)
+    media = VenueMediaStore(bucket="b", region="us-east-1", cdn_base_url=_CDN, s3_client=s3)
+    service = _service(store, repo, apify, media, {})
+
+    first = asyncio.run(service.run())
+    assert first["outcomes"]["v-1"] == OUTCOME_NO_PIC
+    attempt = store.get_enrichment(PROFILE_PHOTO_ATTEMPT_TABLE, "v-1")
+    assert attempt is not None, "no attempt was recorded, so nothing can be skipped"
+    assert attempt["payload"]["outcome"] == OUTCOME_NO_PIC
+    assert attempt["payload"]["instagram_handle"] == "bar"
+
+    second = asyncio.run(service.run())
+    assert second["outcomes"]["v-1"] == OUTCOME_SKIPPED_RECENT_FAILURE
+    # The cost gate, asserted as the absence of a second billed call.
+    assert apify.calls == ["bar"]
+    assert second["apify_calls"] == 0
+    assert second["estimated_cost_usd"] == 0.0
+
+
+def test_an_attempt_older_than_the_retry_window_is_scraped_again(restore_settings):
+    """The suppression is a window, not a tombstone: an Instagram profile that
+    gains a picture must eventually be picked up."""
+    settings.instagram_profile_photo_retry_days = 7
+    _, _, store, repo = _harness()
+    _seed(store, repo, "v-1", "bar")
+    apify, s3 = _FakeApify(), _RecordingS3()
+    apify.programmed["bar"] = ProfileFetchResult(username="bar", profile_pic_url=None)
+    media = VenueMediaStore(bucket="b", region="us-east-1", cdn_base_url=_CDN, s3_client=s3)
+    service = _service(store, repo, apify, media, {_pic("bar"): (b"now-there-is-one", "image/jpeg")})
+    asyncio.run(service.run())
+
+    _age(store, PROFILE_PHOTO_ATTEMPT_TABLE, "v-1", 8)
+    apify.programmed["bar"] = ProfileFetchResult(
+        username="bar", profile_pic_url=_pic("bar")
+    )
+    second = asyncio.run(service.run())
+    assert second["outcomes"]["v-1"] == OUTCOME_STORED
+    assert apify.calls == ["bar", "bar"]
+
+
+def test_a_zero_retry_window_disables_the_suppression(restore_settings):
+    """The escape hatch: after fixing an infrastructure-wide failure an
+    operator must be able to retry the whole catalog now, not in a week."""
+    settings.instagram_profile_photo_retry_days = 0
+    _, _, store, repo = _harness()
+    _seed(store, repo, "v-1", "bar")
+    apify, s3 = _FakeApify(), _RecordingS3()
+    apify.programmed["bar"] = ProfileFetchResult(username="bar", profile_pic_url=None)
+    media = VenueMediaStore(bucket="b", region="us-east-1", cdn_base_url=_CDN, s3_client=s3)
+    service = _service(store, repo, apify, media, {})
+    asyncio.run(service.run())
+    second = asyncio.run(service.run())
+    assert second["outcomes"]["v-1"] == OUTCOME_NO_PIC
+    assert apify.calls == ["bar", "bar"]
+
+
+def test_a_failed_scrape_is_recorded_as_an_attempt(restore_settings):
+    _, _, store, repo = _harness()
+    _seed(store, repo, "v-1", "bar")
+    apify, s3 = _FakeApify(), _RecordingS3()
+    apify.programmed["bar"] = ProfileFetchResult(username="bar", error_code="http_error")
+    media = VenueMediaStore(bucket="b", region="us-east-1", cdn_base_url=_CDN, s3_client=s3)
+    asyncio.run(_service(store, repo, apify, media, {}).run())
+    attempt = store.get_enrichment(PROFILE_PHOTO_ATTEMPT_TABLE, "v-1")
+    assert attempt["payload"]["outcome"] == OUTCOME_FETCH_FAILED
+
+
+def test_a_failed_download_is_recorded_as_an_attempt(restore_settings):
+    _, _, store, repo = _harness()
+    _seed(store, repo, "v-1", "bar")
+    apify, s3 = _FakeApify(), _RecordingS3()
+    apify.programmed["bar"] = ProfileFetchResult(
+        username="bar", profile_pic_url=_pic("bar")
+    )
+    media = VenueMediaStore(bucket="b", region="us-east-1", cdn_base_url=_CDN, s3_client=s3)
+    asyncio.run(
+        _service(store, repo, apify, media,
+                 {_pic("bar"): (b"<html>login wall</html>", "text/html")}).run()
+    )
+    attempt = store.get_enrichment(PROFILE_PHOTO_ATTEMPT_TABLE, "v-1")
+    assert attempt["payload"]["outcome"] == OUTCOME_DOWNLOAD_FAILED
+
+
+def test_a_failed_upload_is_recorded_as_an_attempt(restore_settings):
+    """An IAM or bucket-policy gap fails every venue in the catalog AFTER the
+    scrape is already paid for; without a recorded attempt that is the whole
+    per-run budget, burned again on every tick until someone notices."""
+    _, _, store, repo = _harness()
+    _seed(store, repo, "v-1", "bar")
+    apify, s3 = _FakeApify(), _RecordingS3()
+    s3.fail = True
+    apify.programmed["bar"] = ProfileFetchResult(
+        username="bar", profile_pic_url=_pic("bar")
+    )
+    media = VenueMediaStore(bucket="b", region="us-east-1", cdn_base_url=_CDN, s3_client=s3)
+    asyncio.run(
+        _service(store, repo, apify, media, {_pic("bar"): (b"x", "image/jpeg")}).run()
+    )
+    attempt = store.get_enrichment(PROFILE_PHOTO_ATTEMPT_TABLE, "v-1")
+    assert attempt["payload"]["outcome"] == OUTCOME_UPLOAD_FAILED
+
+
+def test_credit_exhaustion_records_no_attempt(restore_settings):
+    """A 402 never ran the actor: nothing was billed and nothing was learned
+    about the venue, so suppressing its next retry would be a free coverage
+    hole."""
+    _, _, store, repo = _harness()
+    _seed(store, repo, "v-1", "bar")
+    apify, s3 = _FakeApify(), _RecordingS3()
+    apify.programmed["bar"] = ApifyCreditExhaustedError("402")
+    media = VenueMediaStore(bucket="b", region="us-east-1", cdn_base_url=_CDN, s3_client=s3)
+    summary = asyncio.run(_service(store, repo, apify, media, {}).run())
+    assert summary["outcomes"]["v-1"] == OUTCOME_CREDIT_EXHAUSTED
+    assert store.get_enrichment(PROFILE_PHOTO_ATTEMPT_TABLE, "v-1") is None
+
+
+def test_a_stored_photo_clears_the_recorded_attempt(restore_settings):
+    """So a venue that finally works is never shadowed by an old failure."""
+    _, _, store, repo = _harness()
+    _seed(store, repo, "v-1", "bar")
+    apify, s3 = _FakeApify(), _RecordingS3()
+    apify.programmed["bar"] = ProfileFetchResult(username="bar", profile_pic_url=None)
+    media = VenueMediaStore(bucket="b", region="us-east-1", cdn_base_url=_CDN, s3_client=s3)
+    service = _service(store, repo, apify, media, {_pic("bar"): (b"x", "image/jpeg")})
+    asyncio.run(service.run())
+    assert store.get_enrichment(PROFILE_PHOTO_ATTEMPT_TABLE, "v-1") is not None
+
+    _age(store, PROFILE_PHOTO_ATTEMPT_TABLE, "v-1", 99)
+    apify.programmed["bar"] = ProfileFetchResult(
+        username="bar", profile_pic_url=_pic("bar")
+    )
+    second = asyncio.run(service.run())
+    assert second["outcomes"]["v-1"] == OUTCOME_STORED
+    row = store.get_enrichment(PROFILE_PHOTO_ATTEMPT_TABLE, "v-1")
+    assert row["deleted_at"] is not None, "the attempt row outlived the success"
+
+
+def test_a_failed_refresh_leaves_the_existing_hero_intact(restore_settings):
+    """THE reason the attempt lives in its own table. A failed refresh must not
+    overwrite the row the venue's live hero is projected from — that would take
+    a working photo off the card over a transient Apify error."""
+    redis_client, geo, store, repo = _harness()
+    _seed(store, repo, "v-1", "bar")
+    url = _seed_photo_row(store, "v-1", "bar", b"old-but-good", days_old=40)
+    apify, s3 = _FakeApify(), _RecordingS3()
+    apify.programmed["bar"] = ProfileFetchResult(username="bar", error_code="http_error")
+    media = VenueMediaStore(bucket="b", region="us-east-1", cdn_base_url=_CDN, s3_client=s3)
+    summary = asyncio.run(_service(store, repo, apify, media, {}).run())
+    assert summary["outcomes"]["v-1"] == OUTCOME_FETCH_FAILED
+
+    row = store.get_enrichment(PROFILE_PHOTO_TABLE, "v-1")
+    assert row["deleted_at"] is None
+    assert row["payload"]["photo_url"] == url
+    service, dao = _project(store, geo)
+    service.rebuild_redis_from_rds()
+    assert dao.get_venue_profile_photo("v-1").photo_url == url
+
+
+def test_an_attempt_row_never_becomes_a_redis_key(restore_settings):
+    """The cross-repo contract: `venue_profile_photo_v1:{venue_id}` exists ONLY
+    for a venue with a real stored photo, and its JSON carries the public
+    CloudFront URL in `photo_url`. vibes_bot is built against exactly that, so
+    an attempt row must be invisible to the projector."""
+    redis_client, geo, store, repo = _harness()
+    _seed(store, repo, "v-1", "bar")
+    apify, s3 = _FakeApify(), _RecordingS3()
+    apify.programmed["bar"] = ProfileFetchResult(username="bar", profile_pic_url=None)
+    media = VenueMediaStore(bucket="b", region="us-east-1", cdn_base_url=_CDN, s3_client=s3)
+    asyncio.run(_service(store, repo, apify, media, {}).run())
+    assert store.get_enrichment(PROFILE_PHOTO_ATTEMPT_TABLE, "v-1") is not None
+    assert store.get_enrichment(PROFILE_PHOTO_TABLE, "v-1") is None
+
+    service, _ = _project(store, geo)
+    summary = service.rebuild_redis_from_rds()
+    assert redis_client.get(VENUE_PROFILE_PHOTO_KEY_FORMAT.format("v-1")) is None
+    assert redis_client.keys("venue_profile_photo_v1:*") == []
+    assert summary["profile_photos"] == 0
+    # Structural, not incidental: the attempt table has no projector entry at
+    # all, so no future setter change can start emitting a key from one.
+    assert PROFILE_PHOTO_ATTEMPT_TABLE not in _REBUILD_MODELS
+
+
+def test_the_attempt_table_is_read_before_any_billed_call(restore_settings):
+    """Skip-before-spend: the negative cache is read during SELECTION, in bulk,
+    so a suppressed venue cannot have moved the Apify counter."""
+    settings.instagram_profile_photo_retry_days = 7
+    _, _, store, repo = _harness()
+    _seed(store, repo, "v-1", "bar")
+    store.upsert_enrichment(
+        PROFILE_PHOTO_ATTEMPT_TABLE, "v-1",
+        {"venue_id": "v-1", "instagram_handle": "bar", "outcome": OUTCOME_NO_PIC},
+        history=False,
+    )
+    apify, s3 = _FakeApify(), _RecordingS3()
+    media = VenueMediaStore(bucket="b", region="us-east-1", cdn_base_url=_CDN, s3_client=s3)
+    summary = asyncio.run(_service(store, repo, apify, media, {}).run())
+    assert summary["outcomes"]["v-1"] == OUTCOME_SKIPPED_RECENT_FAILURE
+    assert apify.calls == []
+    assert summary["venues_selected"] == 0
+
+
+# ── the freshness gate must follow the handle, not just the clock ───────────
+
+
+def test_a_changed_handle_forces_a_refetch_despite_a_fresh_row(restore_settings):
+    """Handle discovery revises itself. A row scraped from the OLD handle holds
+    another business's logo, and serving that on this venue's card for up to
+    the whole refresh window is a wrong answer, not a stale one."""
+    _, _, store, repo = _harness()
+    _seed(store, repo, "v-1", "newbar")  # the corrected handle
+    old_url = _seed_photo_row(store, "v-1", "oldbar", b"the-other-business", days_old=1)
+    apify, s3 = _FakeApify(), _RecordingS3()
+    apify.programmed["newbar"] = ProfileFetchResult(
+        username="newbar", profile_pic_url=_pic("newbar")
+    )
+    media = VenueMediaStore(bucket="b", region="us-east-1", cdn_base_url=_CDN, s3_client=s3)
+    summary = asyncio.run(
+        _service(store, repo, apify, media,
+                 {_pic("newbar"): (b"the-right-business", "image/jpeg")}).run()
+    )
+    assert summary["outcomes"]["v-1"] == OUTCOME_STORED
+    assert apify.calls == ["newbar"]
+    payload = store.get_enrichment(PROFILE_PHOTO_TABLE, "v-1")["payload"]
+    assert payload["instagram_handle"] == "newbar"
+    assert payload["photo_url"] != old_url
+
+
+def test_a_recased_handle_is_not_treated_as_a_change(restore_settings):
+    """Handles are case-insensitive and `@`-prefixed by convention, so a purely
+    cosmetic revision must not re-buy a scrape for every venue at once."""
+    _, _, store, repo = _harness()
+    _seed(store, repo, "v-1", "bardozeca")
+    _seed_photo_row(store, "v-1", "@BarDoZeca", b"same-business", days_old=1)
+    apify, s3 = _FakeApify(), _RecordingS3()
+    media = VenueMediaStore(bucket="b", region="us-east-1", cdn_base_url=_CDN, s3_client=s3)
+    summary = asyncio.run(_service(store, repo, apify, media, {}).run())
+    assert summary["outcomes"]["v-1"] == OUTCOME_SKIPPED_FRESH
+    assert apify.calls == []
+
+
+def test_a_row_with_no_recorded_handle_stays_fresh(restore_settings):
+    """Unknown is not mismatched: a row predating the handle being recorded is
+    left alone rather than re-bought."""
+    _, _, store, repo = _harness()
+    _seed(store, repo, "v-1", "bar")
+    store.upsert_enrichment(
+        PROFILE_PHOTO_TABLE, "v-1", {"content_hash": "abc"}, history=False
+    )
+    apify, s3 = _FakeApify(), _RecordingS3()
+    media = VenueMediaStore(bucket="b", region="us-east-1", cdn_base_url=_CDN, s3_client=s3)
+    summary = asyncio.run(_service(store, repo, apify, media, {}).run())
+    assert summary["outcomes"]["v-1"] == OUTCOME_SKIPPED_FRESH
+    assert apify.calls == []
+
+
+def test_an_attempt_under_a_different_handle_does_not_suppress_the_retry(
+    restore_settings,
+):
+    """Symmetric with the freshness gate: what the old handle failed to yield
+    says nothing about the corrected one."""
+    settings.instagram_profile_photo_retry_days = 7
+    _, _, store, repo = _harness()
+    _seed(store, repo, "v-1", "newbar")
+    store.upsert_enrichment(
+        PROFILE_PHOTO_ATTEMPT_TABLE, "v-1",
+        {"venue_id": "v-1", "instagram_handle": "oldbar", "outcome": OUTCOME_NO_PIC},
+        history=False,
+    )
+    apify, s3 = _FakeApify(), _RecordingS3()
+    apify.programmed["newbar"] = ProfileFetchResult(
+        username="newbar", profile_pic_url=_pic("newbar")
+    )
+    media = VenueMediaStore(bucket="b", region="us-east-1", cdn_base_url=_CDN, s3_client=s3)
+    summary = asyncio.run(
+        _service(store, repo, apify, media, {_pic("newbar"): (b"x", "image/jpeg")}).run()
+    )
+    assert summary["outcomes"]["v-1"] == OUTCOME_STORED
+    assert apify.calls == ["newbar"]
+
+
+def test_profile_photo_attempt_writes_stay_out_of_enrichment_history(restore_settings):
+    """The attempt row is a rate limiter, re-asserted every retry window by
+    design; history would grow by the whole failing catalog and record nothing
+    recoverable."""
+    _, _, store, repo = _harness()
+    _seed(store, repo, "v-1", "bar")
+    apify, s3 = _FakeApify(), _RecordingS3()
+    apify.programmed["bar"] = ProfileFetchResult(username="bar", profile_pic_url=None)
+    media = VenueMediaStore(bucket="b", region="us-east-1", cdn_base_url=_CDN, s3_client=s3)
+    asyncio.run(_service(store, repo, apify, media, {}).run())
+    assert store.history_count(PROFILE_PHOTO_ATTEMPT_TABLE, "v-1") == 0
 
 
 # ── projection ──────────────────────────────────────────────────────────────

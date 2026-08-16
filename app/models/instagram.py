@@ -126,3 +126,34 @@ class VenueInstagramProfilePhoto(BaseModel):
     content_type: str = "image/jpeg"
     byte_size: int = 0
     fetched_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class VenueInstagramProfilePhotoAttempt(BaseModel):
+    """The negative cache: a venue's last profile-photo attempt that produced
+    NO photo.
+
+    System of record: `instagram.profile_photo_attempt` (migration 0043). It
+    exists for one reason — cost. A venue with no photo row is unconditionally
+    due, so without a record of the failed attempt the job re-scrapes (and
+    re-pays for) a profile that has no picture, or that cannot be downloaded,
+    on every single run, forever; enough of them fill the per-run cap and no
+    venue that could actually get a photo ever does. `updated_at` on the row is
+    the retry clock (`instagram_profile_photo_retry_days`), the same shape
+    handle discovery already uses via `instagram_not_found_cache_ttl_days`.
+
+    `instagram_handle` is the handle that was ATTEMPTED: when discovery later
+    revises a venue's handle, the old failure says nothing about the new one,
+    so it must stop suppressing the retry.
+
+    Deliberately NOT projected: this model has no entry in
+    `RedisProjectionService._REBUILD_MODELS`, so an attempt can never produce a
+    `venue_profile_photo_v1` key. That key means "this venue has a real,
+    stored photo" — the contract vibes_bot is built against — and an attempt
+    is precisely the absence of one.
+    """
+    venue_id: str
+    instagram_handle: Optional[str] = None
+    # One of the service's failure/absence outcome buckets: no_pic,
+    # fetch_failed, download_failed, upload_failed.
+    outcome: str
+    attempted_at: datetime = Field(default_factory=datetime.utcnow)

@@ -1809,12 +1809,18 @@ VENUE_PROFILE_PHOTO_VENUES_TOTAL = Counter(
     "venue_profile_photo_venues_total",
     "Venues processed by the Instagram profile photo job, by outcome",
     ["outcome"],
-    # outcome: stored, unchanged, skipped_fresh, no_handle, no_pic,
-    #          fetch_failed, download_failed, upload_failed, credit_exhausted
+    # outcome: stored, unchanged, skipped_fresh, skipped_recent_failure,
+    #          no_handle, no_pic, fetch_failed, download_failed,
+    #          upload_failed, credit_exhausted
     #
     # `unchanged` and `stored` are deliberately distinct: both are successes,
     # but only one of them spent an S3 write, and a run that is all `unchanged`
     # is the steady state working, not a job doing nothing.
+    #
+    # `skipped_recent_failure` is the negative cache doing its job — venues
+    # that already cost money to learn nothing about, being skipped instead of
+    # re-bought. It growing towards the whole catalog is the alarm: coverage
+    # has stopped and the money is going nowhere.
 )
 
 VENUE_PROFILE_PHOTO_BYTES_STORED_TOTAL = Counter(

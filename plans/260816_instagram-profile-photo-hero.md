@@ -153,7 +153,8 @@ configured; an APScheduler job at `instagram_profile_photo_interval_hours`; and
 an admin trigger route for an operator-driven run.
 
 ## Data, Config, And API Impact
-- **Migration:** `0043` adds `instagram.profile_photo`. Additive; no existing
+- **Migration:** `0043` adds `instagram.profile_photo` and (see the Review
+  Amendment below) `instagram.profile_photo_attempt`. Additive; no existing
   table, column, or Redis key changes shape.
 - **New Redis key family:** `venue_profile_photo_v1:{venue_id}`, JSON, no TTL.
   Sized against the ~20 MB currently in use on a `maxmemory 0` box: ~1,500 venues
@@ -161,7 +162,8 @@ an admin trigger route for an operator-driven run.
 - **New config:** `media_bucket`, `media_cdn_base_url`,
   `instagram_profile_photo_enabled` (default **false** — prod turns it on only
   after the terraform apply is verified), `instagram_profile_photo_refresh_days`
-  (30), `instagram_profile_photo_max_venues_per_run`,
+  (30), `instagram_profile_photo_retry_days` (7, see the Review Amendment),
+  `instagram_profile_photo_max_venues_per_run`,
   `instagram_profile_photo_max_bytes`, `instagram_profile_photo_interval_hours`,
   `apify_instagram_profile_cost_usd` (0.003).
 - **New admin route:** `POST /admin/trigger/instagram-profile-photos`.
@@ -243,6 +245,36 @@ Manual or integration checks:
   `description` is byte-identical.
 - The Google detail-photo path is byte-for-byte unchanged.
 - The full BDD and pytest suites pass.
+
+## Review Amendment (2026-08-16, PR #205 review)
+
+Review of the implementation found the cost gate only half built, and the fix
+is part of this same PR:
+
+- **Negative caching (live cost defect).** Only `stored` and `unchanged` wrote
+  a row, so a venue with no profile picture — or whose download/upload kept
+  failing — had no row at all, and a venue with no row is unconditionally due.
+  It was therefore re-scraped and re-billed on **every** run, forever; once
+  `max_venues_per_run` (200) such venues accumulated they would consume the
+  whole run budget (≈$0.60/day ≈ $18/month, breaching the $10/month gate) while
+  no venue that could actually get a photo ever would. Fixed with
+  `instagram.profile_photo_attempt` (added to migration **0043**, which had not
+  been applied anywhere) plus `instagram_profile_photo_retry_days` (7, `0`
+  disables) — the same negative-cache shape as
+  `instagram_not_found_cache_ttl_days`. A separate table, not a status flag on
+  the photo row, so a failed refresh can never overwrite (and so un-project)
+  the hero a venue already has; it has no `_REBUILD_MODELS` entry, so
+  `venue_profile_photo_v1:{venue_id}` still means exactly "this venue has a
+  real stored photo".
+- **The freshness gate ignored handle changes.** It read only `deleted_at` and
+  `updated_at`, so a corrected Instagram handle kept the OLD business's logo on
+  the venue's card for up to the full 30-day window. A stored handle that
+  differs from the current one (compared case-insensitively, `@` stripped) now
+  forces a re-fetch regardless of age; the same rule stops a stale attempt from
+  suppressing a corrected handle's retry.
+- **New outcome bucket:** `skipped_recent_failure`, on
+  `venue_profile_photo_venues_total{outcome}`. It growing towards the whole
+  catalog is the alarm that coverage has stalled.
 
 ## Open Questions
 - None. Source (Apify), serving (private S3 + CloudFront), and the Google

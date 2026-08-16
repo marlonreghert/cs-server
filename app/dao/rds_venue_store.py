@@ -48,6 +48,9 @@ _ENRICHMENT = {
     # field other than venue_id, and the freshness gate reads `updated_at`,
     # which every facet table already has.
     "instagram.profile_photo": ("instagram", "profile_photo", []),
+    # Migration 0043. The negative cache behind the profile-photo cost gate:
+    # `updated_at` is the retry clock, read in bulk by the selection gate.
+    "instagram.profile_photo_attempt": ("instagram", "profile_photo_attempt", []),
     "venues.menu_photos": ("venues", "menu_photos", []),
     "venues.menu_data": ("venues", "menu_data", []),
     "venues.vibe_profile": ("venues", "vibe_profile", []),
