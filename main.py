@@ -352,6 +352,22 @@ run_closure_detection_job = make_job(
 )
 
 
+run_instagram_profile_photo_job = make_job(
+    "instagram_profile_photos",
+    start_log="[Scheduler] Running InstagramProfilePhotoJob",
+    done_log=lambda summary: (
+        f"[Scheduler] InstagramProfilePhotoJob completed: {summary}"
+    ),
+    error_label="InstagramProfilePhotoJob",
+    run=lambda c: c.venue_profile_photo_service.run(),
+    service_attr="venue_profile_photo_service",
+    require_container=True,
+    disabled_log=(
+        "[Scheduler] InstagramProfilePhotoJob skipped: service not configured"
+    ),
+)
+
+
 def register_refresh_jobs(scheduler, settings: Settings):
     """Register the BestTime refresh jobs (catalog discovery, live, weekly).
 
@@ -656,7 +672,39 @@ def start_background_jobs(settings: Settings):
         ),
     )
 
-    # Job 13: Scheduled Incremental Instagram Crawl — schedule sync
+    # Job 13: Instagram profile photos -> the venue list hero
+    # (plans/260816_instagram-profile-photo-hero.md). OFF by default and
+    # doubly gated: the service is only built when the media bucket AND the CDN
+    # base are configured, and the run itself is inert unless
+    # instagram_profile_photo_enabled is on. Both gates exist because the S3
+    # write happens AFTER the Apify scrape is already paid for, so prod turns
+    # this on only once infra/media/ has been applied and verified.
+    #
+    # Steady-state spend is bounded by the freshness gate, not by the cadence:
+    # a daily tick over a 30-day refresh window re-scrapes roughly a thirtieth
+    # of the catalog per run, and every venue it skips is skipped BEFORE the
+    # billed call.
+    schedule(
+        scheduler,
+        enabled=bool(
+            settings.instagram_profile_photo_enabled
+            and container.venue_profile_photo_service is not None
+        ),
+        func=run_instagram_profile_photo_job,
+        trigger=IntervalTrigger(hours=settings.instagram_profile_photo_interval_hours),
+        id="instagram_profile_photos",
+        name="Instagram profile photos (venue list hero)",
+        enabled_log=(
+            f"[Scheduler] Scheduled Instagram profile photos every "
+            f"{settings.instagram_profile_photo_interval_hours} hours"
+        ),
+        disabled_log=(
+            "[Scheduler] Instagram profile photos disabled "
+            "(instagram_profile_photo_enabled=false or missing dependencies)"
+        ),
+    )
+
+    # Job 14: Scheduled Incremental Instagram Crawl — schedule sync
     # (plans/260809_scheduled-incremental-instagram-crawl.md §D). This does
     # NOT itself scrape anything: it periodically re-reads events.crawl_target
     # and reconciles the SCHEDULER'S OWN dynamic `crawl_target:<handle>` jobs

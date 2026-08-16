@@ -34,7 +34,12 @@ from app.db.geo_redis_client import GeoRedisClient
 from app.handlers.venue_handler import VenueHandler
 from app.metrics import VENUE_SERVE_LIVE_BUSYNESS_TOTAL
 from app.models import Venue
-from app.models.instagram import InstagramPost, VenueInstagram, VenueInstagramPosts
+from app.models.instagram import (
+    InstagramPost,
+    VenueInstagram,
+    VenueInstagramPosts,
+    VenueInstagramProfilePhoto,
+)
 from app.models.menu import VenueMenuData, VenueMenuPhotos
 from app.models.opening_hours import OpeningHours
 from app.models.venue import DayInfo, DayInfoV2, OpenCloseDetail
@@ -128,6 +133,19 @@ def _seed_full_venue(context, vid: str, name: str) -> None:
         truncated=False,
     )
     store.upsert_enrichment("venues.reviews_deep", vid, rd.model_dump(mode="json"), history=False)
+    # Same "bake the default_factory timestamp into the payload once" reason as
+    # VenueInstagramPosts above: `fetched_at` would otherwise regenerate on
+    # every independent model_validate and produce a false mismatch.
+    pp = VenueInstagramProfilePhoto(
+        venue_id=vid, instagram_handle=f"ig_{vid}",
+        photo_url=f"https://media.apivibesensemiddleware.click/venue-profile-photos/{vid}/abc0123456789def.jpg",
+        s3_key=f"venue-profile-photos/{vid}/abc0123456789def.jpg",
+        content_hash="abc0123456789def" + "0" * 48,
+        content_type="image/jpeg", byte_size=1234,
+    )
+    store.upsert_enrichment(
+        "instagram.profile_photo", vid, pp.model_dump(mode="json"), history=False
+    )
 
     for day_int in range(7):
         wk = _weekly_day(day_int, with_hours=True)
@@ -369,6 +387,7 @@ def step_projection_matches_rds(context):
                 "venues.menu_data": "get_venue_menu_data",
                 "venues.vibe_profile": "get_venue_vibe_profile",
                 "venues.reviews_deep": "get_venue_reviews_deep",
+                "instagram.profile_photo": "get_venue_profile_photo",
             }[table_key]
             actual = getattr(dao, getter_name)(vid)
             assert actual is not None, f"{table_key} missing in Redis for {vid}"
@@ -404,10 +423,11 @@ def step_summary_counts(context):
     # 5 servable venues projected: the 3 full ones + the no-hours venue + the
     # soft-deleted-vibe venue (ineligible v5 excluded).
     assert summary["venues"] == 5, summary
-    # 9 enrichment tables (incl. venues.reviews_deep) x 3 fully-enriched
-    # venues; the no-hours venue has none, the soft-deleted-vibe venue's only
-    # enrichment row is soft-deleted (not counted).
-    assert summary["enrichment"] == 27, summary
+    # 10 enrichment tables (incl. venues.reviews_deep and
+    # instagram.profile_photo) x 3 fully-enriched venues; the no-hours venue
+    # has none, the soft-deleted-vibe venue's only enrichment row is
+    # soft-deleted (not counted).
+    assert summary["enrichment"] == 30, summary
     # Live forecasts: only the 3 fully-enriched venues have one.
     assert summary["live"] == 3, summary
     # The stale pre-seeded ineligible-venue copy is reconciled out.
@@ -416,9 +436,13 @@ def step_summary_counts(context):
 
 
 # ── Then: bounded projector queries ────────────────────────────────────────
-@then("the number of RDS queries issued must not exceed 13")
+@then("the number of RDS queries issued must not exceed 14")
 def step_bounded_rds_queries(context):
-    assert context.rebuild_query_count <= 13, context.rebuild_query_count
+    # 14 = 1 venue-rows + 11 enrichment (the 10 _REBUILD_MODELS tables +
+    # google_places.photos) + 1 weekly + 1 live. The bound tracks the number of
+    # FAMILIES, which is fixed; what must never grow is the number of venues,
+    # and the next scenario is what pins that.
+    assert context.rebuild_query_count <= 14, context.rebuild_query_count
 
 
 @then("the number of RDS queries must be the same regardless of how many servable venues exist")

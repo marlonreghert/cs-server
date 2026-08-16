@@ -44,6 +44,10 @@ _ENRICHMENT = {
     "google_places.reviews": ("google_places", "reviews", []),
     "instagram.handle": ("instagram", "handle", ["instagram_handle", "source"]),
     "instagram.posts": ("instagram", "posts", []),
+    # Migration 0043. No promoted columns: nothing queries this table by any
+    # field other than venue_id, and the freshness gate reads `updated_at`,
+    # which every facet table already has.
+    "instagram.profile_photo": ("instagram", "profile_photo", []),
     "venues.menu_photos": ("venues", "menu_photos", []),
     "venues.menu_data": ("venues", "menu_data", []),
     "venues.vibe_profile": ("venues", "vibe_profile", []),

@@ -96,3 +96,33 @@ class VenueInstagramPosts(BaseModel):
     instagram_handle: str
     posts: list[InstagramPost] = []
     scraped_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class VenueInstagramProfilePhoto(BaseModel):
+    """The venue's Instagram profile picture, archived to the media bucket.
+
+    System of record: `instagram.profile_photo` (migration 0043). Projected to
+    Redis at key `venue_profile_photo_v1:{venue_id}` with **no TTL** — unlike
+    every Google-photo cache in this repo, which expires because Google's URLs
+    do. This URL points at an object in our own bucket under a
+    content-addressed, immutable key, so there is nothing to expire and the
+    projector re-asserts (or deletes) the key every cycle anyway.
+
+    `photo_url` is the durable public CloudFront URL the app renders.
+    `content_hash` is the FULL sha256 of the stored bytes; the S3 key uses its
+    first 16 characters. Keeping the full digest here means an unchanged photo
+    is detected on the strongest available comparison, while the key stays at
+    the length the cross-repo contract fixed.
+
+    Deliberately NOT part of the venue detail photo path: `venue_photos_v1` /
+    `venue_photos_fresh_v1` and `PhotoEnrichmentService` are untouched by this
+    model's existence.
+    """
+    venue_id: str
+    instagram_handle: Optional[str] = None
+    photo_url: str
+    s3_key: str
+    content_hash: str
+    content_type: str = "image/jpeg"
+    byte_size: int = 0
+    fetched_at: datetime = Field(default_factory=datetime.utcnow)

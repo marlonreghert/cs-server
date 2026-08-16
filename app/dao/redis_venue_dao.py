@@ -10,7 +10,11 @@ from app.db.geo_redis_client import GeoRedisClient
 from app.models import Venue, LiveForecastResponse, WeekRawDay
 from app.models.vibe_attributes import VibeAttributes
 from app.models.opening_hours import OpeningHours
-from app.models.instagram import VenueInstagram, VenueInstagramPosts
+from app.models.instagram import (
+    VenueInstagram,
+    VenueInstagramPosts,
+    VenueInstagramProfilePhoto,
+)
 from app.models.venue_review import VenueReviews, VenueReviewsDeep
 from app.models.menu import VenueMenuPhotos, VenueMenuData
 from app.models.vibe_profile import VenueVibeProfile
@@ -48,6 +52,11 @@ VENUE_REVIEWS_DEEP_KEY_FORMAT = "venue_reviews_deep_v1:{}"
 VENUE_MENU_PHOTOS_KEY_FORMAT = "venue_menu_photos_v1:{}"
 VENUE_MENU_RAW_DATA_KEY_FORMAT = "venue_menu_raw_data_v1:{}"
 VENUE_IG_POSTS_KEY_FORMAT = "venue_ig_posts_v1:{}"
+# The venue-list hero: a venue's archived Instagram profile picture, served
+# from our own bucket through CloudFront. Written WITHOUT a TTL — see
+# set_venue_profile_photo below for why that is correct here and wrong for
+# every Google-photo key in this module.
+VENUE_PROFILE_PHOTO_KEY_FORMAT = "venue_profile_photo_v1:{}"
 VENUE_VIBE_PROFILE_KEY_FORMAT = "venue_vibe_profile_v2:{}"
 
 
@@ -268,9 +277,10 @@ class RedisVenueDAO:
             # Remove opening hours
             self.delete_opening_hours(venue_id)
 
-            # Remove Instagram cache (handle + posts)
+            # Remove Instagram cache (handle + posts + archived profile photo)
             self.delete_venue_instagram(venue_id)
             self.delete_venue_ig_posts(venue_id)
+            self.delete_venue_profile_photo(venue_id)
 
             # Remove reviews
             self.delete_venue_reviews(venue_id)
@@ -1019,6 +1029,48 @@ class RedisVenueDAO:
 
     def delete_venue_reviews_deep(self, venue_id: str) -> bool:
         key = VENUE_REVIEWS_DEEP_KEY_FORMAT.format(venue_id)
+        return bool(self.client.del_(key))
+
+    # ── venue list hero: archived Instagram profile photo ────────────────────
+    def set_venue_profile_photo(self, photo: VenueInstagramProfilePhoto) -> None:
+        """Project a venue's archived Instagram profile photo. NO TTL.
+
+        Every other photo key in this module expires because the URL it holds
+        expires: Google rotates its photo tokens, so a cached `/media` or
+        `googleusercontent.com` URL becomes a dead image and a finite TTL is
+        what forces a refetch. None of that applies here. This URL addresses an
+        object in our own bucket under a content-addressed key that is never
+        rewritten, so it cannot go stale — and the off-loop projector re-asserts
+        or DELETES this key every cycle from the RDS row, which makes the RDS
+        row (not a TTL) the thing that controls the key's lifetime.
+
+        A TTL here would be actively harmful: it would blank the hero on a
+        random subset of cards whenever the projector fell behind, which is the
+        exact "reads as broken" failure mode the blocked Google hero plan was
+        worried about.
+        """
+        self.client.set(
+            VENUE_PROFILE_PHOTO_KEY_FORMAT.format(photo.venue_id),
+            photo.model_dump_json(by_alias=True),
+        )
+
+    def get_venue_profile_photo(self, venue_id: str) -> Optional[VenueInstagramProfilePhoto]:
+        return self._get_model(
+            VENUE_PROFILE_PHOTO_KEY_FORMAT.format(venue_id),
+            VenueInstagramProfilePhoto,
+            "venue profile photo",
+        )
+
+    def get_venue_profile_photo_bulk(
+        self, venue_ids: list[str]
+    ) -> dict[str, VenueInstagramProfilePhoto]:
+        """MGET the profile-photo projection for an id set, keyed by venue_id."""
+        return self._mget_parsed(
+            VENUE_PROFILE_PHOTO_KEY_FORMAT.format, venue_ids, VenueInstagramProfilePhoto
+        )
+
+    def delete_venue_profile_photo(self, venue_id: str) -> bool:
+        key = VENUE_PROFILE_PHOTO_KEY_FORMAT.format(venue_id)
         return bool(self.client.del_(key))
 
     def count_venues_with_instagram(self) -> int:

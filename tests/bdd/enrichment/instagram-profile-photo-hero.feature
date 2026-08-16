@@ -1,4 +1,3 @@
-@wip
 Feature: Instagram profile photo as the venue list hero
 
   A venue's Instagram profile picture is archived to the media bucket and

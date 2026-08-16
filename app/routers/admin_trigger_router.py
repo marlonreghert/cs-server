@@ -217,6 +217,18 @@ JOB_REGISTRY = {
         "unavailable_detail": "Media archive not configured (needs Google Places + a bucket)",
         "runner": lambda c, cfg: c.venue_photo_archive_service.run(cfg),
     },
+    "instagram_profile_photos": {
+        "label": "Instagram Profile Photos (list hero)",
+        "description": "Archive each venue's Instagram profile picture to the "
+        "media bucket and project its CloudFront URL, so the venue list can "
+        "show a thumbnail with no serve-time Google call. A venue whose stored "
+        "photo is younger than the refresh window is skipped BEFORE any billed "
+        "scrape. Inert unless INSTAGRAM_PROFILE_PHOTO_ENABLED is on.",
+        "service_attr": "venue_profile_photo_service",
+        "unavailable_detail": "Instagram profile photos not configured "
+        "(needs Apify API token + MEDIA_BUCKET + MEDIA_CDN_BASE_URL)",
+        "runner": lambda c, cfg: c.venue_profile_photo_service.run(cfg),
+    },
     "menu_photos": {
         "label": "Menu Photo Enrichment",
         "description": "Fetch menu photos from Instagram highlights and Google Maps",

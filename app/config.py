@@ -442,6 +442,46 @@ class Settings(BaseSettings):
     datalake_flush_max_seconds: int = 900
     datalake_shutdown_flush_seconds: int = 10
 
+    # ── App-servable media (Instagram profile photos) ─────────────────────────
+    # A SEPARATE bucket from the data lake and from the menu-photo bucket, and
+    # deliberately so: `retrieved/` is internal-use-only by design (docs/venue-
+    # retrieval-storage.md §8, enforced by the writer role's missing GetObject),
+    # whereas this bucket exists to be READ by end users through CloudFront.
+    # Managed by infra/media/; the bucket itself stays private and public reach
+    # comes from the distribution, never from an ACL.
+    media_bucket: str = ""
+    media_region: str = "us-east-1"
+    # Public base for objects in `media_bucket`, i.e. the CloudFront alias.
+    # Empty disables the whole feature: without it there is no durable URL to
+    # store, and storing an S3 URL the app cannot read would be worse than
+    # storing nothing.
+    media_cdn_base_url: str = ""
+
+    # Instagram profile photo -> venue list hero
+    # (plans/260816_instagram-profile-photo-hero.md).
+    #
+    # OFF by default, and it must stay that way in the repo: the terraform in
+    # infra/media/ has to be applied and verified BEFORE the first run, because
+    # a bucket-policy or IAM gap fails the S3 write *after* the Apify scrape has
+    # already been paid for. Prod turns this on only once the apply is verified.
+    instagram_profile_photo_enabled: bool = False
+    # The cost gate. A venue whose stored row is younger than this is skipped
+    # BEFORE the billed scrape, never after (see VenueProfilePhotoService's
+    # ordering guarantee, inherited from VenuePhotoArchiveService).
+    instagram_profile_photo_refresh_days: int = 30
+    # Per-run venue ceiling, so one tick can never re-buy the whole catalog.
+    instagram_profile_photo_max_venues_per_run: int = 200
+    # An Instagram avatar is a small square JPEG; anything past this is not one,
+    # and is discarded without an S3 write.
+    instagram_profile_photo_max_bytes: int = 5_242_880  # 5 MiB
+    instagram_profile_photo_download_timeout_seconds: float = 15.0
+    instagram_profile_photo_interval_hours: int = 24
+    # One profile scrape is one billed Apify result item, same unit price as a
+    # post (apify_instagram_post_cost_usd). Separate setting because the two can
+    # diverge on Apify's rate card and the estimate must not silently follow the
+    # wrong one.
+    apify_instagram_profile_cost_usd: float = 0.003
+
     # Venue media archive (Google photos -> S3 media/ prefix). Off by default.
     # Bucket falls back to datalake_bucket so the media archive lives beside the
     # raw lake; credentials come from the same instance role (no keys here).
