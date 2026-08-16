@@ -156,7 +156,11 @@ underlying coordinate was resolved.
   standard.
 
 ## Test Plan
-Feature file: `tests/bdd/api/venue-address-cache-integrity.feature`
+Feature file: `tests/bdd/api/geo-fallback-safe-linking.feature` (extended — this
+existing feature already bundles fold-match/generic-name-guard/undo safety
+scenarios for the same `_geo_fallback` mechanism; adding two new lettered
+sections there rather than fragmenting into a new file: (d) coordinate-trust
+gate, (e) address-cache repair)
 
 Scenarios:
 - Add-venue with no caller-supplied coordinates and no place_id, where Text
