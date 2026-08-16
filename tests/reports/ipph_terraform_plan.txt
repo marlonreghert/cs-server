@@ -1,0 +1,143 @@
+================================================================================
+infra/media — terraform verification record
+plans/260816_instagram-profile-photo-hero.md
+Captured 2026-08-16 on branch feature/instagram-profile-photo-hero
+================================================================================
+
+TERRAFORM PLAN COULD NOT BE RUN. This is stated plainly rather than
+approximated: no plan output below is invented, and the resource inventory in
+section 4 is a READ OF THE CONFIG, explicitly NOT a plan.
+
+--------------------------------------------------------------------------------
+1. What blocked it
+--------------------------------------------------------------------------------
+
+The AWS IAM Identity Center (SSO) token for the `vibesense` profile has
+expired, and this session is non-interactive, so `aws sso login --profile
+vibesense` cannot be completed here.
+
+$ aws sts get-caller-identity --profile vibesense
+aws: [ERROR]: Error when retrieving token from sso: Token has expired and
+refresh failed
+
+$ cd infra/media && terraform init -input=false
+Initializing the backend...
+Error: No valid credential sources found
+  Please see https://developer.hashicorp.com/terraform/language/backend/s3
+  for more information about providing credentials.
+  Error: failed to refresh cached credentials, refresh cached SSO token
+  failed, unable to refresh SSO token, operation error SSO OIDC: CreateToken,
+  https response error StatusCode: 400,
+  InvalidGrantException:
+
+`terraform init` fails at the S3 BACKEND, before any provider call, so the
+plan never starts. Running with `-backend=false` does not help either: the
+plan then refuses to proceed ("Backend initialization required"), and even if
+it did, this module reads `aws_caller_identity` and `aws_route53_zone`, both
+of which require live credentials.
+
+TO PRODUCE THE PLAN, an operator runs:
+
+    aws sso login --profile vibesense
+    cd infra/media
+    terraform init
+    terraform plan
+
+--------------------------------------------------------------------------------
+2. What WAS verified offline
+--------------------------------------------------------------------------------
+
+$ terraform fmt -check -diff
+(no output; exit 0 — formatting is canonical)
+
+$ terraform init -backend=false -input=false
+Terraform has been successfully initialized!
+
+$ terraform validate
+Success! The configuration is valid.
+
+Provider resolved: hashicorp/aws ~> 5.0. Terraform v1.15.6.
+
+--------------------------------------------------------------------------------
+3. infra/datalake — ZERO DIFF (verified, not asserted)
+--------------------------------------------------------------------------------
+
+The hard constraint is that this feature must not touch infra/datalake at all,
+because `aws_iam_policy.description` is immutable in AWS: editing it forces a
+destroy-and-recreate of the writer policy and its role attachment, opening a
+window in which cs-server holds no PutObject — and a data-lake flush in that
+window is DROPPED, not retried.
+
+$ git status --porcelain infra/datalake
+(no output)
+
+$ git diff HEAD -- infra/datalake | wc -l
+0
+
+$ git status --porcelain infra/
+?? infra/media/
+
+So the ONLY change under infra/ is the new, untracked infra/media/ directory.
+No file under infra/datalake was read-modified, and no resource in it is
+addressable from this module:
+
+  - Separate state key: media/terraform.tfstate (backend.tf) vs
+    datalake/terraform.tfstate. A `media` plan physically cannot enumerate,
+    let alone propose a change to, a datalake resource.
+  - Separate bucket: vibesense-media-<account_id>, not
+    vibesense-datalake-<account_id>.
+  - A NEW, separately-named IAM policy: `vibesense-media-profile-photo-writer`.
+    It does not extend, rename, or re-describe `vibesense-datalake-writer`.
+  - The only interaction with the shared cs-server EC2 role is an
+    `aws_iam_role_policy_attachment` (and only when `cs_server_role_name` is
+    set; default "" creates no attachment at all). Attaching a policy does not
+    modify the role or any other policy already attached to it.
+
+--------------------------------------------------------------------------------
+4. CONFIG INVENTORY — what a plan WOULD be expected to add
+--------------------------------------------------------------------------------
+
+NOT terraform plan output. This is a hand count of the resource blocks in
+infra/media/main.tf, provided so the operator knows what to expect and can
+challenge the real plan if it differs. Actual counts depend on state and on
+`aws_route53_record.cert_validation`'s for_each (one record per ACM domain
+validation option — 1 for a single-name certificate).
+
+  aws_s3_bucket.media
+  aws_s3_bucket_public_access_block.media
+  aws_s3_bucket_versioning.media
+  aws_s3_bucket_server_side_encryption_configuration.media
+  aws_s3_bucket_lifecycle_configuration.media
+  aws_s3_bucket_policy.media
+  aws_acm_certificate.media
+  aws_route53_record.cert_validation["media.apivibesensemiddleware.click"]
+  aws_acm_certificate_validation.media
+  aws_cloudfront_origin_access_control.media
+  aws_cloudfront_distribution.media
+  aws_route53_record.media
+  aws_iam_policy.media_profile_photo_writer
+  aws_iam_role_policy_attachment.cs_server_media_writer[0]   (only when
+      var.cs_server_role_name is set; 0 resources at the default "")
+
+  => 13 resources at the default (cs_server_role_name = ""), 14 with the role
+     attachment. 0 to change, 0 to destroy — nothing pre-existing is adopted.
+
+  Data sources (read-only): aws_caller_identity.current,
+  aws_route53_zone.apex.
+
+The expected plan summary is therefore:
+  "Plan: 13 to add, 0 to change, 0 to destroy."  (14 with the attachment)
+
+REVIEW GATE: if the real plan proposes ANY change or destroy — and most
+especially anything named `datalake` — stop and investigate before applying.
+
+--------------------------------------------------------------------------------
+5. Apply ordering (why this matters operationally)
+--------------------------------------------------------------------------------
+
+A write outside the IAM policy fails AFTER the Apify scrape has already been
+paid for. `instagram_profile_photo_enabled` therefore ships FALSE, and the
+apply is verified before the job is ever enabled in prod. See
+infra/media/README.md for the post-apply verification commands (bucket is not
+publicly readable; an object IS readable through CloudFront carrying
+`cache-control: public, max-age=31536000, immutable`).
