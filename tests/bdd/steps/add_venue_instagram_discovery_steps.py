@@ -23,6 +23,7 @@ from behave import given, when, then  # type: ignore[import-untyped]
 from app.config import settings
 from app.models import NewVenueResponse, Venue, VenueFilterResponse, VenueFilterVenue
 from app.services.instagram_cascade_service import InstagramCascadeService
+from tests.async_job_wait import await_job_task_blocking
 
 _DEFAULT_ADDRESS = "Rua Exemplo 100, Recife - PE, 50000-000, Brazil"
 _DEFAULT_LAT = -8.05
@@ -556,8 +557,6 @@ def _slug(name: str) -> str:
 
 @when("the batch job completes")
 def step_run_batch_job(context):
-    import time as _time
-
     # Driven over the real HTTP endpoint (not batch_add_service.start_job()
     # directly): start_job() calls asyncio.create_task, which needs a running
     # event loop — the ASGI TestClient provides one, a bare asyncio.run() call
@@ -570,15 +569,13 @@ def step_run_batch_job(context):
     resp = context.client.post("/admin/venues/batch-add", json=body)
     assert resp.status_code == 202, resp.text
     job_id = resp.json()["job_id"]
-    last = None
-    for _ in range(200):
-        poll = context.client.get(f"/admin/venues/batch-add/{job_id}")
-        assert poll.status_code == 200, poll.text
-        last = poll.json()
-        if last.get("status") in ("done", "stopped", "failed"):
-            break
-        _time.sleep(0.02)
-    assert last is not None and last["status"] == "done", last
+    # Wait on the job task itself rather than polling on a fixed budget (see
+    # tests/async_job_wait.py), then read the terminal state back over HTTP.
+    await_job_task_blocking(context.client, context.batch_add_service, job_id)
+    poll = context.client.get(f"/admin/venues/batch-add/{job_id}")
+    assert poll.status_code == 200, poll.text
+    last = poll.json()
+    assert last["status"] == "done", last
     context.ig_batch_job = last
 
 
