@@ -436,6 +436,178 @@ async def test_besttime_error_with_no_geo_match_returns_502(handler, besttime, f
     assert int(fake.get("venue_add_counter_v1:2026-05") or 0) == 0
 
 
+def _skipped_untrusted_metric() -> float:
+    from prometheus_client import REGISTRY
+
+    return (
+        REGISTRY.get_sample_value("add_venue_geo_fallback_skipped_untrusted_total")
+        or 0.0
+    )
+
+
+# ── coordinate-trust gate (plans/260816_venue-address-cache-integrity.md) ─────
+@pytest.mark.asyncio
+async def test_untrusted_coordinates_skip_geo_fallback_entirely(
+    handler, besttime, fake
+):
+    """An untrusted coordinate must never reach /venues/filter at all — even
+    when a candidate that WOULD match is programmed, the call itself must
+    never happen (proves the skip is a true short-circuit, not just an
+    ignored result)."""
+    besttime.add_venue_to_account.return_value = NewVenueResponse.model_validate(
+        {"status": "Error", "message": "Could not geocode address"}
+    )
+    matched = VenueFilterVenue(
+        venue_id="ven_wrong_target",
+        venue_name="Bar do Joao",
+        venue_address="any addr",
+        venue_lat=-8.05,
+        venue_lng=-34.88,
+        venue_type="BAR",
+        day_int=0,
+        day_raw=[0] * 24,
+    )
+    besttime.venue_filter.return_value = VenueFilterResponse(
+        status="OK", venues=[matched], venues_n=1
+    )
+    skipped_before = _skipped_untrusted_metric()
+
+    outcome = await handler.add(_req(), coordinates_trusted=False)
+
+    assert outcome.status_code == 502
+    assert "no matching" in outcome.body["detail"].lower()
+    besttime.venue_filter.assert_not_awaited()
+    assert _skipped_untrusted_metric() - skipped_before == 1
+    # No address-hash cache entry for a skipped attempt.
+    key = VENUE_LOOKUP_BY_ADDRESS_KEY_V1.format(
+        hash=_address_hash(_req().venue_name, _req().venue_address)
+    )
+    assert fake.get(key) is None
+
+
+@pytest.mark.asyncio
+async def test_untrusted_coordinates_fall_through_to_google_only_when_enabled(
+    venue_dao, besttime, budget, fake
+):
+    """Same skip, but with the Google-only catalog flag on: falls through to
+    the SAME branch a genuine zero-candidate geo fallback already takes
+    (created_google_only), never a wrong link."""
+    besttime.add_venue_to_account.return_value = _unforecastable_response()
+    matched = VenueFilterVenue(
+        venue_id="ven_wrong_target",
+        venue_name=_GOOGLE_ONLY_NAME,
+        venue_address="any addr",
+        venue_lat=-8.05,
+        venue_lng=-34.88,
+        venue_type="BAR",
+        day_int=0,
+        day_raw=[0] * 24,
+    )
+    besttime.venue_filter.return_value = VenueFilterResponse(
+        status="OK", venues=[matched], venues_n=1
+    )
+    admin_config = _AdminConfigStub(value={"enabled": True})
+    handler = _google_only_handler(
+        venue_dao, besttime, budget, fake, admin_config, _google_client()
+    )
+
+    outcome = await handler.add(_req(), coordinates_trusted=False)
+
+    assert outcome.status_code == 201
+    assert outcome.body["status"] == "created_google_only"
+    assert outcome.body["venue_id"] == _minted_id()
+    besttime.venue_filter.assert_not_awaited()
+    # The minted venue is never the geo-fallback candidate's id.
+    assert outcome.body["venue_id"] != "ven_wrong_target"
+
+
+@pytest.mark.asyncio
+async def test_trusted_coordinates_still_attempt_geo_fallback(handler, besttime, fake):
+    """Regression guard: an explicit coordinates_trusted=True (and the
+    default, exercised by every other geo-fallback test in this file) must
+    still call /venues/filter and link normally."""
+    besttime.add_venue_to_account.return_value = NewVenueResponse.model_validate(
+        {"status": "Error", "message": "Could not geocode address"}
+    )
+    matched = VenueFilterVenue(
+        venue_id="ven_geo_match",
+        venue_name="Bar do Joao",
+        venue_address="any addr",
+        venue_lat=-8.05,
+        venue_lng=-34.88,
+        venue_type="BAR",
+        day_int=0,
+        day_raw=[0] * 24,
+    )
+    besttime.venue_filter.return_value = VenueFilterResponse(
+        status="OK", venues=[matched], venues_n=1
+    )
+
+    outcome = await handler.add(_req(), coordinates_trusted=True)
+
+    assert outcome.status_code == 200
+    assert outcome.body["status"] == "matched_via_geo_fallback"
+    assert outcome.body["venue_id"] == "ven_geo_match"
+    besttime.venue_filter.assert_awaited_once()
+
+
+# ── admin address-cache repair (plans/260816_venue-address-cache-integrity.md)
+@pytest.mark.asyncio
+async def test_clear_address_cache_reports_and_deletes_a_poisoned_entry(
+    handler, fake
+):
+    name, address = "Boteco da Villa", "Rua Exemplo 1, Sao Paulo - SP"
+    key = VENUE_LOOKUP_BY_ADDRESS_KEY_V1.format(hash=_address_hash(name, address))
+    fake.set(key, "ven_wrong_target_001")
+
+    outcome = handler.clear_address_cache(name, address)
+
+    assert outcome.status_code == 200
+    assert outcome.body["status"] == "cleared"
+    assert outcome.body["previous_venue_id"] == "ven_wrong_target_001"
+    assert fake.get(key) is None
+
+
+def test_clear_address_cache_reports_nothing_to_clear_for_a_miss(handler, fake):
+    outcome = handler.clear_address_cache("Never Cached Venue", "Nowhere St 1")
+
+    assert outcome.status_code == 200
+    assert outcome.body["status"] == "not_cached"
+
+
+def test_clear_address_cache_is_idempotent(handler, fake):
+    name, address = "Boteco da Villa", "Rua Exemplo 1, Sao Paulo - SP"
+    key = VENUE_LOOKUP_BY_ADDRESS_KEY_V1.format(hash=_address_hash(name, address))
+    fake.set(key, "ven_wrong_target_001")
+
+    first = handler.clear_address_cache(name, address)
+    second = handler.clear_address_cache(name, address)
+
+    assert first.body["status"] == "cleared"
+    assert second.body["status"] == "not_cached"
+
+
+@pytest.mark.asyncio
+async def test_clear_address_cache_unblocks_a_correct_readd(handler, besttime, fake):
+    """End-to-end proof the repair actually works: after clearing, the exact
+    same name+address no longer short-circuits to the old (wrong) venue —
+    the add proceeds to a fresh BestTime create."""
+    name, address = _req().venue_name, _req().venue_address
+    key = VENUE_LOOKUP_BY_ADDRESS_KEY_V1.format(hash=_address_hash(name, address))
+    fake.set(key, "ven_wrong_target_001")
+
+    cleared = handler.clear_address_cache(name, address)
+    assert cleared.body["status"] == "cleared"
+
+    besttime.add_venue_to_account.return_value = _ok_response("ven_correct_001")
+    besttime.get_live_forecast.return_value = _live_unavailable("ven_correct_001")
+
+    outcome = await handler.add(_req())
+
+    assert outcome.status_code == 201
+    assert outcome.body["venue_id"] == "ven_correct_001"
+
+
 @pytest.mark.asyncio
 async def test_geo_fallback_no_double_count_when_venue_already_exists(
     handler, besttime, venue_dao, fake

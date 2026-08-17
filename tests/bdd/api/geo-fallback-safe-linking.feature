@@ -2,8 +2,11 @@ Feature: Geo-fallback safe linking — fold+best-match, generic-name guard, undo
   As the venue platform
   I must link a rejected add only to the right nearby venue,
   say when a link created a new catalog row,
-  and let an operator undo a fresh link without poisoning future re-adds,
-  so a BestTime rejection never silently attaches the wrong place to the catalog.
+  let an operator undo a fresh link without poisoning future re-adds,
+  refuse to link at all when I don't trust the coordinates a match would rest
+  on, and let an operator repair a link that was already cached wrong,
+  so a BestTime rejection never silently attaches the wrong place to the
+  catalog — and if it already has, an operator can put that right.
 
   # (a) fold + best-match
   Scenario: An accent-folded name links to BestTime's normalized inventory name
@@ -62,3 +65,40 @@ Feature: Geo-fallback safe linking — fold+best-match, generic-name guard, undo
     Given a venue was newly linked via the geo fallback and then undone
     When the same venue is added again and BestTime confirms it
     Then the venue is active again in the catalog
+
+  # (d) coordinate-trust gate
+  Scenario: A geo fallback is not attempted when the coordinates came from an unbiased search
+    Given BestTime rejects a create with a venue info block without a venue id
+    And the request's coordinates were resolved from a text search with no place id and no caller-supplied location
+    And a nearby venue would otherwise have matched by name
+    When an operator adds the venue by name and address
+    Then no geo fallback link is attempted
+    And the add falls through to a normal create instead
+    And no address lookup entry is cached for this attempt
+
+  Scenario: A geo fallback still links when the coordinates are caller-supplied
+    Given BestTime rejects a create with a venue info block without a venue id
+    And the request carries a caller-supplied latitude and longitude
+    And the geo fallback offers a matching candidate nearby
+    When an operator adds the venue by name and address
+    Then the add completes as matched via geo fallback
+
+  Scenario: A geo fallback still links when the coordinates came from a caller-supplied place id
+    Given BestTime rejects a create with a venue info block without a venue id
+    And the request's coordinates were resolved from a caller-supplied place id
+    And the geo fallback offers a matching candidate nearby
+    When an operator adds the venue by name and address
+    Then the add completes as matched via geo fallback
+
+  # (e) address-cache repair
+  Scenario: An operator repairs an address lookup entry that was cached wrong
+    Given a venue name and address are cached against the wrong venue id
+    When the operator clears the address lookup entry for that name and address
+    Then the cleared entry's previous venue id is reported
+    And a subsequent add for that same name and address no longer resolves to the old venue
+
+  Scenario: Clearing an address lookup entry that was never cached reports nothing to clear
+    Given no address lookup entry exists for a given name and address
+    When the operator clears the address lookup entry for that name and address
+    Then the response reports nothing was cached
+    And no error is raised

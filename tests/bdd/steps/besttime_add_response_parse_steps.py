@@ -257,7 +257,18 @@ def _post_add(context) -> None:
     app_logger = logging.getLogger("app")
     app_logger.addHandler(handler)
     try:
-        outcome = asyncio.run(context.add_venue_handler.add(request))
+        # Coordinate-trust gate (plans/260816_venue-address-cache-integrity.md):
+        # defaults True (every existing scenario's expectation — the harness
+        # always supplies venue_lat/venue_lng directly, trusted by
+        # construction); the "(d) coordinate-trust gate" scenarios in
+        # geo-fallback-safe-linking.feature flip this via
+        # context.coordinates_trusted before calling this helper.
+        outcome = asyncio.run(
+            context.add_venue_handler.add(
+                request,
+                coordinates_trusted=getattr(context, "coordinates_trusted", True),
+            )
+        )
     finally:
         app_logger.removeHandler(handler)
     context.captured_logs = records

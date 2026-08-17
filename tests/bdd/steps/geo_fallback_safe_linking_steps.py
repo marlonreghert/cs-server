@@ -18,6 +18,7 @@ from besttime_add_response_parse_steps import (  # type: ignore[import-not-found
     _VENUE,
     _post_add,
 )
+from app.handlers.add_venue_handler import VENUE_LOOKUP_BY_ADDRESS_KEY_V1, _address_hash
 from app.models import Venue
 
 # The shared "the add completes as matched via geo fallback" Then (defined in
@@ -168,6 +169,80 @@ def step_matching_candidate_new(context):
 
 
 # ---------------------------------------------------------------------------
+# Givens — (d) coordinate-trust gate
+# ---------------------------------------------------------------------------
+
+
+@given(
+    "the request's coordinates were resolved from a text search with no "
+    "place id and no caller-supplied location"
+)
+def step_coords_untrusted(context):
+    # Mirrors BatchAddService._resolve_coords: no caller lat/lng, no caller
+    # place_id — the coordinate came from a bare, unbiased Text Search, the
+    # exact gap plans/260816_venue-address-cache-integrity.md closes.
+    context.coordinates_trusted = False
+
+
+@given("the request carries a caller-supplied latitude and longitude")
+def step_coords_caller_latlng(context):
+    # Already the harness default (the request always carries explicit
+    # venue_lat/venue_lng); set explicitly so this scenario's intent reads
+    # clearly and survives a future default change.
+    context.coordinates_trusted = True
+
+
+@given("the request's coordinates were resolved from a caller-supplied place id")
+def step_coords_from_caller_place_id(context):
+    context.coordinates_trusted = True
+
+
+@given("a nearby venue would otherwise have matched by name")
+def step_would_otherwise_match(context):
+    _program_filter(
+        context,
+        [_candidate(_MATCH_ID, _VENUE["venue_name"], _VENUE["venue_address"])],
+    )
+
+
+@given("the geo fallback offers a matching candidate nearby")
+def step_offers_matching_candidate_nearby(context):
+    _program_filter(
+        context,
+        [_candidate(_MATCH_ID, _VENUE["venue_name"], _VENUE["venue_address"])],
+    )
+
+
+# ---------------------------------------------------------------------------
+# Givens — (e) address-cache repair
+# ---------------------------------------------------------------------------
+
+
+def _clear_address_cache(context, venue_name: str, venue_address: str):
+    return context.client.post(
+        "/admin/venues/address-cache/clear",
+        json={"venue_name": venue_name, "venue_address": venue_address},
+    )
+
+
+@given("a venue name and address are cached against the wrong venue id")
+def step_cache_poisoned(context):
+    context.poisoned_name = _VENUE["venue_name"]
+    context.poisoned_address = _VENUE["venue_address"]
+    context.wrong_venue_id = "ven_wrong_target_001"
+    key = VENUE_LOOKUP_BY_ADDRESS_KEY_V1.format(
+        hash=_address_hash(context.poisoned_name, context.poisoned_address)
+    )
+    context.fake_redis.set(key, context.wrong_venue_id)
+
+
+@given("no address lookup entry exists for a given name and address")
+def step_cache_absent(context):
+    context.poisoned_name = _VENUE["venue_name"]
+    context.poisoned_address = _VENUE["venue_address"]
+
+
+# ---------------------------------------------------------------------------
 # Givens — undo / re-add scenarios
 # ---------------------------------------------------------------------------
 
@@ -251,6 +326,13 @@ def step_readd_confirmed(context):
     context.besttime_http_status = 200
     context.besttime_filter_body = None
     _post_add(context)
+
+
+@when("the operator clears the address lookup entry for that name and address")
+def step_operator_clears_cache(context):
+    context.response = _clear_address_cache(
+        context, context.poisoned_name, context.poisoned_address
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -358,4 +440,106 @@ def step_active_again(context):
     assert row is not None, "venue vanished from RDS"
     assert row.get("lifecycle_status") == "active", (
         f"venue not reactivated: {row}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Thens — (d) coordinate-trust gate
+# ---------------------------------------------------------------------------
+
+
+@then("no geo fallback link is attempted")
+def step_no_geo_fallback_attempted(context):
+    paths = [req["path"] for req in context.besttime_http_requests]
+    assert not any(path.endswith("/venues/filter") for path in paths), (
+        f"/venues/filter was called despite untrusted coordinates; calls: {paths}"
+    )
+
+
+@then("the add falls through to a normal create instead")
+def step_falls_through_normal_create(context):
+    # The Google-only catalog flag is off by default in this harness, so a
+    # skipped geo fallback lands on today's exact terminal rejection — the
+    # same shape a genuine zero-candidate geo fallback already produces (see
+    # step_add_fails_no_match). That sameness IS the requirement: a skipped
+    # attempt must be indistinguishable from an honest "nothing nearby".
+    assert context.response.status_code == 502, (
+        f"expected 502, got {context.response.status_code} "
+        f"{context.response.text[:300]}"
+    )
+    detail = (context.response.json().get("detail") or "").lower()
+    assert "no matching" in detail, context.response.text
+
+
+@then("no address lookup entry is cached for this attempt")
+def step_no_address_cache_written_for_attempt(context):
+    key = VENUE_LOOKUP_BY_ADDRESS_KEY_V1.format(
+        hash=_address_hash(_VENUE["venue_name"], _VENUE["venue_address"])
+    )
+    assert context.fake_redis.get(key) is None, (
+        "address cache was written despite the skipped geo fallback"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Thens — (e) address-cache repair
+# ---------------------------------------------------------------------------
+
+
+@then("the cleared entry's previous venue id is reported")
+def step_reports_previous_venue_id(context):
+    assert context.response.status_code == 200, context.response.text
+    body = context.response.json()
+    assert body.get("status") == "cleared", context.response.text
+    assert body.get("previous_venue_id") == context.wrong_venue_id, (
+        f"expected {context.wrong_venue_id}, got {body.get('previous_venue_id')}: "
+        f"{context.response.text[:300]}"
+    )
+
+
+@then(
+    "a subsequent add for that same name and address no longer resolves to "
+    "the old venue"
+)
+def step_readd_no_longer_old_venue(context):
+    # The cache entry is gone, so this add falls through to a fresh BestTime
+    # create rather than short-circuiting to the wrong venue_id it used to.
+    context.besttime_http_body = {
+        "status": "OK",
+        "venue_info": {
+            "venue_id": "ven_fixed_after_repair_001",
+            "venue_name": context.poisoned_name,
+            "venue_address": context.poisoned_address,
+            "venue_lat": _VENUE["venue_lat"],
+            "venue_lon": _VENUE["venue_lng"],
+        },
+        "analysis": [],
+    }
+    context.besttime_http_status = 200
+    context.besttime_filter_body = None
+    context.add_request_override = {
+        "venue_name": context.poisoned_name,
+        "venue_address": context.poisoned_address,
+    }
+    _post_add(context)
+    assert context.response.status_code == 201, context.response.text
+    body = context.response.json()
+    assert body.get("venue_id") == "ven_fixed_after_repair_001", context.response.text
+    assert body.get("venue_id") != context.wrong_venue_id, (
+        "re-add still resolved to the cleared entry's old (wrong) venue_id"
+    )
+
+
+@then("the response reports nothing was cached")
+def step_reports_nothing_cached(context):
+    assert context.response.status_code == 200, context.response.text
+    body = context.response.json()
+    assert body.get("status") == "not_cached", context.response.text
+
+
+@then("no error is raised")
+def step_no_error_raised(context):
+    assert context.response.status_code < 400, (
+        f"expected a non-error status, got {context.response.status_code}: "
+        f"{context.response.text[:300]}"
     )
