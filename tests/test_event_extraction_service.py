@@ -499,9 +499,23 @@ class TestExtractionFailureRecordsAndContinues:
     def test_unparseable_json_is_recorded_and_the_run_continues(self):
         dao = _dao()
         _seed_venue(dao, "v1", "v1_handle")
+        # Pin the post timestamp. `resolve_event_datetime` is pure and resolves
+        # `date_text` against the POST's own timestamp, but a post with
+        # `timestamp=None` falls back to the wall clock
+        # (event_extraction_service.py: `post.timestamp or self._now()`). With
+        # `_extraction_json`'s year-less "15/08", that made this test's outcome
+        # depend on the day it ran: on or before 15 August the date is still
+        # ahead and resolves `accepted`, and from 16 August it is in the past,
+        # so the year is rolled forward and the outcome becomes
+        # `year_inferred` instead. The suite went red on 2026-08-16 for exactly
+        # that reason. An explicit timestamp two weeks before the flyer's date
+        # makes the assertion time-independent for good.
+        posted_at = datetime(2026, 8, 1, tzinfo=timezone.utc)
         posts = {"v1": [
-            _post("bad", caption="Ingressos!", flyer_photo_key="bad.jpg", flyer_confidence=0.9),
-            _post("good", caption="Ingressos!", flyer_photo_key="good.jpg", flyer_confidence=0.9),
+            _post("bad", caption="Ingressos!", flyer_photo_key="bad.jpg",
+                  flyer_confidence=0.9, timestamp=posted_at),
+            _post("good", caption="Ingressos!", flyer_photo_key="good.jpg",
+                  flyer_confidence=0.9, timestamp=posted_at),
         ]}
         cfg = {"eligibility": {"mode": "venue_ids", "venue_ids": "v1"}}
         client = _FakeOpenAIClient(["not json at all {{{", _extraction_json()])
