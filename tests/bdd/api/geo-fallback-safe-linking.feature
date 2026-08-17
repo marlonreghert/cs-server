@@ -67,7 +67,6 @@ Feature: Geo-fallback safe linking — fold+best-match, generic-name guard, undo
     Then the venue is active again in the catalog
 
   # (d) coordinate-trust gate
-  @wip
   Scenario: A geo fallback is not attempted when the coordinates came from an unbiased search
     Given BestTime rejects a create with a venue info block without a venue id
     And the request's coordinates were resolved from a text search with no place id and no caller-supplied location
@@ -77,7 +76,6 @@ Feature: Geo-fallback safe linking — fold+best-match, generic-name guard, undo
     And the add falls through to a normal create instead
     And no address lookup entry is cached for this attempt
 
-  @wip
   Scenario: A geo fallback still links when the coordinates are caller-supplied
     Given BestTime rejects a create with a venue info block without a venue id
     And the request carries a caller-supplied latitude and longitude
@@ -85,7 +83,6 @@ Feature: Geo-fallback safe linking — fold+best-match, generic-name guard, undo
     When an operator adds the venue by name and address
     Then the add completes as matched via geo fallback
 
-  @wip
   Scenario: A geo fallback still links when the coordinates came from a caller-supplied place id
     Given BestTime rejects a create with a venue info block without a venue id
     And the request's coordinates were resolved from a caller-supplied place id
@@ -94,14 +91,12 @@ Feature: Geo-fallback safe linking — fold+best-match, generic-name guard, undo
     Then the add completes as matched via geo fallback
 
   # (e) address-cache repair
-  @wip
   Scenario: An operator repairs an address lookup entry that was cached wrong
     Given a venue name and address are cached against the wrong venue id
     When the operator clears the address lookup entry for that name and address
     Then the cleared entry's previous venue id is reported
     And a subsequent add for that same name and address no longer resolves to the old venue
 
-  @wip
   Scenario: Clearing an address lookup entry that was never cached reports nothing to clear
     Given no address lookup entry exists for a given name and address
     When the operator clears the address lookup entry for that name and address

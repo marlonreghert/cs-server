@@ -190,15 +190,28 @@ class BatchAddService:
 
     async def _resolve_coords(
         self, row: BatchAddRow
-    ) -> tuple[Optional[str], Optional[float], Optional[float]]:
+    ) -> tuple[Optional[str], Optional[float], Optional[float], bool]:
+        """Resolve (place_id, lat, lng, coordinates_trusted) for one batch
+        row. coordinates_trusted mirrors AddVenueHandler.add()'s trust gate
+        (plans/260816_venue-address-cache-integrity.md): True when the
+        coordinate is caller-supplied lat/lng, or resolved via a
+        caller-supplied place_id (row.place_id already set before
+        resolution); False when it had to come from a bare Text Search (see
+        GooglePlacesAPIClient.search_place_id) with no caller anchor — the
+        exact gap that let a submission permanently mis-link to an unrelated
+        existing venue. bias_lat/bias_lng only steer Google's own relevance
+        ranking; they are not a caller-verified location, so a
+        Text-Search-resolved coordinate stays untrusted even when biased.
+        """
         if row.venue_lat is not None and row.venue_lng is not None:
-            return row.place_id, row.venue_lat, row.venue_lng
+            return row.place_id, row.venue_lat, row.venue_lng, True
         if self.google is None:
-            return row.place_id, None, None
+            return row.place_id, None, None, True
         # Pace + retry: a transient Google QPM 429 returns None; back off and
         # retry rather than skip (which would speed the loop into a cascade).
         attempts = (0.0,) + _COORD_RETRY_BACKOFFS
         pid = row.place_id
+        trusted = pid is not None
         for i, backoff in enumerate(attempts):
             if backoff:
                 await asyncio.sleep(backoff)
@@ -210,8 +223,8 @@ class BatchAddService:
                 lng_bias=row.bias_lng,
             )
             if lat is not None and lng is not None:
-                return pid, lat, lng
-        return pid, None, None
+                return pid, lat, lng, trusted
+        return pid, None, None, trusted
 
     async def _run_job(self, job: dict, rows: list[BatchAddRow]) -> None:
         summary: dict[str, int] = {}
@@ -234,7 +247,7 @@ class BatchAddService:
                         self.google is not None
                         and (row.venue_lat is None or row.venue_lng is None)
                     )
-                    place_id, lat, lng = await self._resolve_coords(row)
+                    place_id, lat, lng, coordinates_trusted = await self._resolve_coords(row)
                     if lat is None or lng is None:
                         result.update(outcome="skipped_unresolved_coords",
                                       http=None, venue_id=None,
@@ -247,7 +260,9 @@ class BatchAddService:
                             venue_lng=lng,
                             place_id=place_id,
                         )
-                        outcome = await self.handler.add(req)
+                        outcome = await self.handler.add(
+                            req, coordinates_trusted=coordinates_trusted
+                        )
                         result.update(_classify(outcome))
             except Exception as e:  # noqa: BLE001
                 logger.error(

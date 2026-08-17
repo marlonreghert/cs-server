@@ -152,18 +152,23 @@ class _Handler:
     """Scripted handler: maps venue_name -> AddVenueOutcome; records calls.
 
     `cached` maps (name) -> venue_id for the address-hash fast-path;
-    `dao_venues` maps venue_id -> _Venue for the active check."""
+    `dao_venues` maps venue_id -> _Venue for the active check. `trust_calls`
+    records each add()'s (venue_name, coordinates_trusted) so tests can pin
+    the trust flag BatchAddService._resolve_coords threads through (see
+    plans/260816_venue-address-cache-integrity.md)."""
     def __init__(self, script, cached=None, dao_venues=None):
         self.script = script
         self.calls = []
+        self.trust_calls = []
         self._cached = cached or {}
         self.venue_dao = _Dao(dao_venues or {})
 
     def _lookup_cached_venue_id(self, name, address):
         return self._cached.get(name)
 
-    async def add(self, request):
+    async def add(self, request, *, coordinates_trusted=True):
         self.calls.append(request.venue_name)
+        self.trust_calls.append((request.venue_name, coordinates_trusted))
         return self.script[request.venue_name]
 
 
@@ -291,6 +296,59 @@ async def test_prepassed_coords_skip_google():
     job = await _run_to_completion(svc, req)
     assert job["summary"] == {"created": 1}
     assert handler.calls == ["A"]
+
+
+# ── coordinate-trust gate (plans/260816_venue-address-cache-integrity.md) ─────
+@pytest.mark.asyncio
+async def test_caller_supplied_latlng_is_trusted():
+    handler = _Handler({"A": AddVenueOutcome(201, {"status": "created", "venue_id": "vA"})})
+    svc = _service(handler, google=None)
+    req = BatchAddRequest(venues=[
+        {"venue_name": "A", "venue_address": "a", "venue_lat": -9.6, "venue_lng": -35.7},
+    ])
+    await _run_to_completion(svc, req)
+    assert handler.trust_calls == [("A", True)]
+
+
+@pytest.mark.asyncio
+async def test_caller_supplied_place_id_resolution_is_trusted():
+    # No lat/lng on the row — must resolve via Google, but the place_id came
+    # from the caller, so the resulting coordinate is trusted.
+    handler = _Handler({"A": AddVenueOutcome(201, {"status": "created", "venue_id": "vA"})})
+    google = _Google({"A": (-9.6, -35.7)})
+    svc = _service(handler, google)
+    req = BatchAddRequest(venues=[
+        {"venue_name": "A", "venue_address": "a", "place_id": "pid_caller_A"},
+    ])
+    await _run_to_completion(svc, req)
+    assert handler.trust_calls == [("A", True)]
+
+
+@pytest.mark.asyncio
+async def test_bare_text_search_resolution_is_untrusted():
+    # No lat/lng, no place_id, no bias — the exact unbiased-Text-Search gap
+    # that let a submission permanently mis-link to an unrelated venue.
+    handler = _Handler({"A": AddVenueOutcome(201, {"status": "created", "venue_id": "vA"})})
+    google = _Google({"A": (-9.6, -35.7)})
+    svc = _service(handler, google)
+    req = BatchAddRequest(venues=[{"venue_name": "A", "venue_address": "a"}])
+    await _run_to_completion(svc, req)
+    assert handler.trust_calls == [("A", False)]
+
+
+@pytest.mark.asyncio
+async def test_bias_only_resolution_is_still_untrusted():
+    # bias_lat/bias_lng only steer Google's relevance ranking; they are not a
+    # caller-verified location for THIS venue, so a Text-Search resolution
+    # stays untrusted even when biased toward the right city.
+    handler = _Handler({"A": AddVenueOutcome(201, {"status": "created", "venue_id": "vA"})})
+    google = _Google({"A": (-9.6, -35.7)})
+    svc = _service(handler, google)
+    req = BatchAddRequest(venues=[
+        {"venue_name": "A", "venue_address": "a", "bias_lat": -9.6, "bias_lng": -35.7},
+    ])
+    await _run_to_completion(svc, req)
+    assert handler.trust_calls == [("A", False)]
 
 
 @pytest.mark.asyncio

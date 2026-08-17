@@ -714,6 +714,34 @@ async def undo_geo_link(request: GeoLinkUndoRequest, response: Response):
     return outcome.body
 
 
+class AddressCacheClearRequest(BaseModel):
+    venue_name: str = Field(..., min_length=1, max_length=256)
+    venue_address: str = Field(..., min_length=1, max_length=1024)
+
+
+@router.post("/venues/address-cache/clear")
+async def clear_venue_address_cache(
+    request: AddressCacheClearRequest, response: Response
+):
+    """Admin repair: clear one venue_lookup_by_address_v1:* entry by
+    venue_name + venue_address (never a raw Redis key) — the operator-facing
+    fix for an add-venue attempt that was permanently (mis-)cached against
+    the wrong venue id. See
+    app/handlers/add_venue_handler.py:clear_address_cache and
+    plans/260816_venue-address-cache-integrity.md.
+
+    Returns 200 {"status": "cleared", "previous_venue_id": ...} when an entry
+    existed, or 200 {"status": "not_cached"} when there was nothing to clear
+    (never an error — safe to call repeatedly).
+    """
+    handler: AddVenueHandler = require(
+        "add_venue_handler", detail="add-venue handler not configured"
+    )
+    outcome = handler.clear_address_cache(request.venue_name, request.venue_address)
+    response.status_code = outcome.status_code
+    return outcome.body
+
+
 @router.get("/venues/monthly-budget")
 async def get_monthly_budget():
     """Return the current state of the monthly new-venue budget."""
