@@ -7,11 +7,10 @@ programmable harness stub.
 """
 from __future__ import annotations
 
-import time
-
 from behave import given, when, then  # type: ignore[import-untyped]
 
 from app.models import NewVenueResponse
+from tests.async_job_wait import await_job_task_blocking
 
 
 @given("BestTime accepts every add and returns a created venue")
@@ -54,15 +53,15 @@ def step_batch_accepted(context):
 
 @then('polling the job eventually reports status "done"')
 def step_poll_until_done(context):
-    last = None
-    for _ in range(200):
-        resp = context.client.get(f"/admin/venues/batch-add/{context.batch_job_id}")
-        assert resp.status_code == 200, resp.text
-        last = resp.json()
-        if last["status"] in ("done", "stopped", "failed"):
-            break
-        time.sleep(0.02)
-    assert last is not None and last["status"] == "done", last
+    # Wait on the job task itself rather than polling on a fixed budget (see
+    # tests/async_job_wait.py), then read the terminal state back over the real
+    # HTTP endpoint — which is what this step is actually asserting.
+    await_job_task_blocking(context.client, context.batch_add_service,
+                            context.batch_job_id)
+    resp = context.client.get(f"/admin/venues/batch-add/{context.batch_job_id}")
+    assert resp.status_code == 200, resp.text
+    last = resp.json()
+    assert last["status"] == "done", last
     context.batch_job = last
 
 

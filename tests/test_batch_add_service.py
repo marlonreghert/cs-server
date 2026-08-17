@@ -1,12 +1,11 @@
 """Unit tests for the server-side batch venue-add service."""
-import asyncio
-
 import pytest
 
 from app.handlers.add_venue_handler import AddVenueOutcome
 from app.models.batch_add import BatchAddRequest
 import app.services.batch_add_service as bas
 from app.services.batch_add_service import BatchAddService, _classify
+from tests.async_job_wait import await_job_task
 from tests.venue_add_job_fake import InMemoryVenueAddJobStore
 
 
@@ -205,16 +204,10 @@ def _service(handler, google=None, budget=None):
 async def _run_to_completion(svc, req):
     accepted = svc.start_job(req)
     job_id = accepted["job_id"]
-    # Drain the background task the service scheduled.
-    for _ in range(200):
-        task = svc._tasks.get(job_id)
-        if task is None:
-            break
-        await asyncio.sleep(0)
-        if task.done():
-            break
-    # ensure any trailing awaits settle
-    await asyncio.sleep(0)
+    # Await the background task the service scheduled — see
+    # tests/async_job_wait.py for why counting asyncio.sleep(0) yields here was
+    # a race rather than a wait.
+    await await_job_task(svc, job_id)
     return svc.get_job(job_id)
 
 
@@ -445,12 +438,10 @@ async def test_second_batch_refused_while_one_is_running():
     assert "job_id" not in second
 
     # Drain the first job; the lock must be released when it finishes.
-    for _ in range(200):
-        task = svc._tasks.get(first["job_id"])
-        if task is None or task.done():
-            break
-        await asyncio.sleep(0)
-    await asyncio.sleep(0)
+    # _on_done (which releases the lock) is registered as the task's FIRST done
+    # callback in start_job, before any waiter exists, so it has already run by
+    # the time this await resumes.
+    await await_job_task(svc, first["job_id"])
     assert job_lock.is_running(bas.BATCH_ADD_LOCK) is False
 
     # A new batch may start now that the first finished.
@@ -462,12 +453,7 @@ async def test_second_batch_refused_while_one_is_running():
     # at an unpredictable later point, which pytest-asyncio flags with a
     # "Task was destroyed but it is pending!" warning wherever that GC happens
     # to land, potentially confusing an unrelated later test).
-    for _ in range(200):
-        task = svc._tasks.get(third["job_id"])
-        if task is None or task.done():
-            break
-        await asyncio.sleep(0)
-    await asyncio.sleep(0)
+    await await_job_task(svc, third["job_id"])
 
 
 # ── RDS job store: persistence + job_type (plans/260814_venue-add-job-rds-
