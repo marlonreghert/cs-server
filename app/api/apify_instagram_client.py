@@ -179,6 +179,34 @@ class FetchPostsResult:
     request_error_count: int = 0
 
 
+@dataclass(frozen=True)
+class ProfileFetchResult:
+    """`fetch_profile`'s return shape (plans/260816_instagram-profile-photo-
+    hero.md). Deliberately mirrors `FetchPostsResult`'s contract rather than
+    inventing a second one:
+
+    - `error_code` is EITHER Apify's own `error` value verbatim, OR one of
+      `"timeout"`/`"http_error"`/`"request_error"` when `_run_actor_sync`
+      failed at the transport layer, OR `"no_items"` when the dataset came
+      back empty. `None` means the scrape succeeded and the payload was
+      readable — the ONLY value that means "no error at all".
+    - `profile_pic_url` is `None` for a profile that genuinely carries no
+      picture. That is an ABSENCE, not a failure, and the caller must be able
+      to tell it apart from a failed scrape — which is exactly why both fields
+      exist rather than a single Optional[str] return.
+
+    A credit-exhausted 402 is NOT represented here: `ApifyCreditExhaustedError`
+    propagates out of this method untouched, identically to
+    `fetch_recent_posts`, so an exhausted balance stops the caller's run
+    instead of being re-spent once per venue.
+    """
+
+    username: Optional[str] = None
+    profile_pic_url: Optional[str] = None
+    error_code: Optional[str] = None
+    error_description: Optional[str] = None
+
+
 class ApifyInstagramClient:
     """Async HTTP client for Apify Instagram scraper actors."""
 
@@ -422,6 +450,77 @@ class ApifyInstagramClient:
         return FetchPostsResult(
             posts=posts, error_code=error_code, error_description=error_description,
             request_error_count=request_error_count,
+        )
+
+    async def fetch_profile(self, username: str) -> ProfileFetchResult:
+        """Fetch ONE Instagram profile's details, for its profile picture.
+
+        Same actor as `fetch_recent_posts`, a different `resultsType`: this is
+        a second mode on machinery that already exists, not a new client. One
+        billed result item per call.
+
+        Why not `app/api/instagram_profile_probe.py`, which already parses
+        `og:image`? Two independent reasons, both measured rather than assumed
+        (plan §Evidence): from a datacenter IP — which is where cs-server runs
+        — Instagram serves the login wall for every handle, and the og:image it
+        would return is 100x100 with the size directive signature-locked, so
+        rewriting it to a usable size returns HTTP 403. It is unavailable in
+        production AND too small.
+
+        `profilePicUrlHD` is preferred over `profilePicUrl`: the HD variant is
+        what survives a 101x76dp card at 3x density. The fallback matters
+        because not every profile carries the HD key.
+
+        An error item is captured rather than discarded (the same defect
+        `fetch_recent_posts` had before plans/260812) but never wins over a
+        real profile item: a dataset carrying both is a scrape that worked.
+
+        Raises:
+            ApifyCreditExhaustedError: propagated untouched from
+                `_run_actor_sync`, so an exhausted balance stops the caller's
+                whole run rather than being re-spent per venue.
+        """
+        run_input = {
+            "directUrls": [f"https://www.instagram.com/{username}/"],
+            "resultsType": "details",
+            "resultsLimit": 1,
+        }
+
+        try:
+            items = await self._run_actor_sync(
+                "apify~instagram-scraper", run_input,
+                endpoint_label="instagram_profile", username=username,
+            )
+        except ApifyTransportFailure as e:
+            return ProfileFetchResult(username=username, error_code=e.code)
+
+        if not items:
+            return ProfileFetchResult(username=username, error_code="no_items")
+
+        error_code: Optional[str] = None
+        error_description: Optional[str] = None
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            if "error" in item:
+                if error_code is None:
+                    error_code = item.get("error")
+                    error_description = item.get("errorDescription")
+                continue
+            pic = item.get("profilePicUrlHD") or item.get("profilePicUrl")
+            return ProfileFetchResult(
+                username=item.get("username") or username,
+                profile_pic_url=pic if isinstance(pic, str) and pic else None,
+            )
+
+        logger.warning(
+            f"[ApifyInstagram] {username} profile: Apify returned "
+            f"error={error_code!r} description={error_description!r}"
+        )
+        return ProfileFetchResult(
+            username=username,
+            error_code=error_code or "no_items",
+            error_description=error_description,
         )
 
     async def _run_actor_sync(

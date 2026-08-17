@@ -921,6 +921,46 @@ class Container:
                 "[Container] Deep review crawl disabled (needs Apify API token)"
             )
 
+        # Instagram profile photo -> venue list hero
+        # (plans/260816_instagram-profile-photo-hero.md). Construction is gated
+        # on BOTH halves of the serving story being configured: the bucket to
+        # write to and the CDN base the app will read from. A bucket without a
+        # CDN base would store objects nobody can fetch — the bucket is private
+        # by design — so half-configured is treated as not configured, and the
+        # job stays absent rather than spending on scrapes it cannot serve.
+        self.venue_media_store = None
+        self.venue_profile_photo_service = None
+        if (
+            self.apify_instagram_client is not None
+            and settings.media_bucket
+            and settings.media_cdn_base_url
+        ):
+            from app.dao.venue_media_store import VenueMediaStore
+            from app.services.venue_profile_photo_service import (
+                VenueProfilePhotoService,
+            )
+
+            self.venue_media_store = VenueMediaStore(
+                bucket=settings.media_bucket,
+                region=settings.media_region,
+                cdn_base_url=settings.media_cdn_base_url,
+            )
+            self.venue_profile_photo_service = VenueProfilePhotoService(
+                repo=self.pipeline_repository,
+                apify_client=self.apify_instagram_client,
+                media_store=self.venue_media_store,
+            )
+            logger.info(
+                "[Container] Instagram profile photo service initialized "
+                f"(bucket={settings.media_bucket}, enabled="
+                f"{settings.instagram_profile_photo_enabled})"
+            )
+        else:
+            logger.info(
+                "[Container] Instagram profile photo disabled (needs Apify API "
+                "token + MEDIA_BUCKET + MEDIA_CDN_BASE_URL)"
+            )
+
         # The serve handler resolves the live-busyness freshness window through the
         # admin-config mirror; wire it now that the service exists (venue_handler
         # was built above, before admin_config_service).

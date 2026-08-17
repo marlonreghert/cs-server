@@ -460,10 +460,23 @@ honour `$job_id`, and a text panel says so.
 
 ## 8. Compliance
 
-`retrieved/` is **internal-use only**. Images displayed in the app must be
-served from Google's CDN — see the BLOCKED section of
+`retrieved/` is **internal-use only**. **Google Places** images displayed in the
+app must be served from Google's CDN — see the BLOCKED section of
 `plans/260726_venue-list-hero-photo.md`. The bucket blocks public access and the
 writer role is denied `GetObject`, so this is enforced by infra, not convention.
+
+**That rule is about Places content, not about S3 as a mechanism.** Read as
+"no app image may ever come from our own bucket" it is too broad, and would
+wrongly condemn `plans/260816_instagram-profile-photo-hero.md`, which serves
+venue Instagram profile photos from a **different** bucket (`infra/media/`,
+private + CloudFront/OAC) at `media.apivibesensemiddleware.click`. No Places
+content is cached there and no Google attribution is implied, which is
+precisely why that approach is viable where the hero pre-bake was not. It does
+rely on Apify scraping — the same posture this repo already accepted for menu
+photos and the Instagram post archive, and the same per-run operator choice
+this section frames below. `infra/media/` is deliberately a separate stack from
+`infra/datalake`: same reasoning as §5's warning, so a media apply can never
+plan a change to the lake's writer policy.
 
 Google's terms permit the licensed API; scraping the same content is a
 different posture. This repo already accepted Apify scraping for menu photos, so

@@ -442,6 +442,71 @@ class Settings(BaseSettings):
     datalake_flush_max_seconds: int = 900
     datalake_shutdown_flush_seconds: int = 10
 
+    # ── App-servable media (Instagram profile photos) ─────────────────────────
+    # A SEPARATE bucket from the data lake and from the menu-photo bucket, and
+    # deliberately so: `retrieved/` is internal-use-only by design (docs/venue-
+    # retrieval-storage.md §8, enforced by the writer role's missing GetObject),
+    # whereas this bucket exists to be READ by end users through CloudFront.
+    # Managed by infra/media/; the bucket itself stays private and public reach
+    # comes from the distribution, never from an ACL.
+    media_bucket: str = ""
+    media_region: str = "us-east-1"
+    # Public base for objects in `media_bucket`, i.e. the CloudFront alias.
+    # Empty disables the whole feature: without it there is no durable URL to
+    # store, and storing an S3 URL the app cannot read would be worse than
+    # storing nothing.
+    media_cdn_base_url: str = ""
+
+    # Instagram profile photo -> venue list hero
+    # (plans/260816_instagram-profile-photo-hero.md).
+    #
+    # OFF by default, and it must stay that way in the repo: the terraform in
+    # infra/media/ has to be applied and verified BEFORE the first run, because
+    # a bucket-policy or IAM gap fails the S3 write *after* the Apify scrape has
+    # already been paid for. Prod turns this on only once the apply is verified.
+    instagram_profile_photo_enabled: bool = False
+    #
+    # There is deliberately NO `instagram_profile_photo_refresh_days`. The
+    # scheduled job is BACKFILL-ONLY: a venue that already has a photo is
+    # skipped at any age, because a captured profile picture stays valid
+    # indefinitely and a monthly catalog re-scrape is pure recurring Apify
+    # spend for almost no change. The setting was removed rather than
+    # defaulted to 0 — a dead knob still reads like a promise that a refresh
+    # happens, and someone would eventually set it and wait for one. Replacing
+    # stored photos is now the explicit, operator-only `refresh_all` mode,
+    # priced first by POST /admin/trigger/instagram_profile_photos/estimate.
+    #
+    # The negative-cache window, and now the ONLY recurring cost gate. A
+    # venue with no photo row is unconditionally due, so a venue that CANNOT
+    # yield a photo (no profile picture, a handle that 404s, a download that
+    # keeps failing) would otherwise be re-scraped and re-billed on every run
+    # forever — and once max_venues_per_run of them accumulate they consume the
+    # entire run budget, so no venue that could get a photo ever does. With the
+    # refresh window gone this window is what the whole steady-state bill is:
+    # everything else the scheduled job touches is skipped for free.
+    # Recording the failed attempt makes it skippable for this many days — a
+    # failure is worth retrying occasionally (Instagram profiles change, and an
+    # upload failure is usually ours to fix), just not every single run. Same
+    # 7-day shape as instagram_not_found_cache_ttl_days, one facet over. Set to
+    # 0 to disable the suppression entirely — the escape hatch for retrying a
+    # whole catalog immediately after fixing an infrastructure-wide failure,
+    # and also the deliberate way to make `refresh_all` re-try known failures,
+    # which it does not do on its own.
+    instagram_profile_photo_retry_days: int = 7
+    # Per-run venue ceiling, so one tick — or one refresh_all click — can never
+    # re-buy the whole catalog at once.
+    instagram_profile_photo_max_venues_per_run: int = 200
+    # An Instagram avatar is a small square JPEG; anything past this is not one,
+    # and is discarded without an S3 write.
+    instagram_profile_photo_max_bytes: int = 5_242_880  # 5 MiB
+    instagram_profile_photo_download_timeout_seconds: float = 15.0
+    instagram_profile_photo_interval_hours: int = 24
+    # One profile scrape is one billed Apify result item, same unit price as a
+    # post (apify_instagram_post_cost_usd). Separate setting because the two can
+    # diverge on Apify's rate card and the estimate must not silently follow the
+    # wrong one.
+    apify_instagram_profile_cost_usd: float = 0.003
+
     # Venue media archive (Google photos -> S3 media/ prefix). Off by default.
     # Bucket falls back to datalake_bucket so the media archive lives beside the
     # raw lake; credentials come from the same instance role (no keys here).

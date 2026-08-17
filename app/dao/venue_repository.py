@@ -20,7 +20,11 @@ from app.config import settings
 from app.dao.redis_venue_dao import RedisVenueDAO
 from app.dao.venue_row import venue_from_row
 from app.models import LiveForecastResponse, WeekRawDay
-from app.models.instagram import VenueInstagram, VenueInstagramPosts
+from app.models.instagram import (
+    VenueInstagram,
+    VenueInstagramPosts,
+    VenueInstagramProfilePhoto,
+)
 from app.models.menu import VenueMenuData, VenueMenuPhotos
 from app.models.opening_hours import OpeningHours
 from app.models.venue_review import VenueReviews, VenueReviewsDeep
@@ -73,6 +77,11 @@ class VenueRepository(RedisVenueDAO):
 
     def get_venue_ig_posts(self, venue_id):
         return self._rds_enrichment("instagram.posts", VenueInstagramPosts, venue_id)
+
+    def get_venue_profile_photo(self, venue_id):
+        return self._rds_enrichment(
+            "instagram.profile_photo", VenueInstagramProfilePhoto, venue_id
+        )
 
     def get_venue_menu_photos(self, venue_id):
         return self._rds_enrichment("venues.menu_photos", VenueMenuPhotos, venue_id)
@@ -363,6 +372,41 @@ class VenueRepository(RedisVenueDAO):
             "instagram.posts", posts.venue_id, _json(posts), history=_HISTORY,
         )
 
+    def set_venue_profile_photo(self, photo) -> None:
+        """RDS write for the archived Instagram profile photo.
+
+        Excluded from append-only history (see _NO_HISTORY_TABLES): the durable
+        artifact is the content-addressed S3 object, which a history row could
+        not reconstruct and does not protect. A row is re-asserted on every
+        refresh cycle even when the bytes are unchanged — that re-assert is what
+        restarts the freshness clock — so history here would grow by the whole
+        catalog every window while recording nothing recoverable.
+        """
+        self.rds_store.upsert_enrichment(
+            "instagram.profile_photo", photo.venue_id, _json(photo),
+            history=_NO_HISTORY,
+        )
+
+    def set_venue_profile_photo_attempt(self, attempt) -> None:
+        """RDS write for the profile-photo negative cache.
+
+        A venue whose scrape yielded no photo has no `instagram.profile_photo`
+        row, and a venue with no row is unconditionally due — so this row is
+        the ONLY thing standing between a permanently photo-less venue and a
+        re-billed Apify scrape on every run. Kept in its own table so a failed
+        refresh can never overwrite (and so un-project) a hero the venue
+        already has.
+
+        Excluded from append-only history for the same reason as the photo row
+        itself: it is re-asserted every retry window by design and records
+        nothing recoverable, so history would grow by the whole failing catalog
+        for nothing.
+        """
+        self.rds_store.upsert_enrichment(
+            "instagram.profile_photo_attempt", attempt.venue_id, _json(attempt),
+            history=_NO_HISTORY,
+        )
+
     # ── venues (derived / menu / vibe profile) ──────────────────────────────────
     def set_venue_menu_photos(self, menu_photos) -> None:
         self.rds_store.upsert_enrichment(
@@ -414,11 +458,23 @@ class VenueRepository(RedisVenueDAO):
         "delete_venue_menu_data": "venues.menu_data",
         "delete_venue_vibe_profile": "venues.vibe_profile",
         "delete_venue_reviews_deep": "venues.reviews_deep",
+        "delete_venue_profile_photo": "instagram.profile_photo",
+        "delete_venue_profile_photo_attempt": "instagram.profile_photo_attempt",
     }
+
+    # Tables whose writes/deletes stay OUT of audit.enrichment_history. Photos
+    # because Google's URLs expire (a history row preserves a dead link);
+    # profile photos because the durable artifact is the content-addressed S3
+    # object and the row is re-asserted every refresh window by design.
+    _NO_HISTORY_TABLES = frozenset({
+        "google_places.photos",
+        "instagram.profile_photo",
+        "instagram.profile_photo_attempt",
+    })
 
     def _soft_delete_enrichment(self, name, venue_id):
         table_key = self._DELETE_TABLE[name]
-        history = table_key != "google_places.photos"
+        history = table_key not in self._NO_HISTORY_TABLES
         self.rds_store.soft_delete_enrichment(table_key, venue_id, history=history)
         return None
 
@@ -448,3 +504,13 @@ class VenueRepository(RedisVenueDAO):
 
     def delete_venue_reviews_deep(self, venue_id):
         return self._soft_delete_enrichment("delete_venue_reviews_deep", venue_id)
+
+    def delete_venue_profile_photo(self, venue_id):
+        return self._soft_delete_enrichment("delete_venue_profile_photo", venue_id)
+
+    def delete_venue_profile_photo_attempt(self, venue_id):
+        """Clear the negative cache once the venue finally stores a photo, so a
+        stale failure never shadows a working one."""
+        return self._soft_delete_enrichment(
+            "delete_venue_profile_photo_attempt", venue_id
+        )

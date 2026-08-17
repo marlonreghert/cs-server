@@ -1,0 +1,304 @@
+.venv/bin/python -m behave "tests/bdd/enrichment/instagram-profile-photo-hero.feature"
+USING RUNNER: behave.runner:Runner
+Feature: Instagram profile photo as the venue list hero # tests/bdd/enrichment/instagram-profile-photo-hero.feature:1
+  A venue's Instagram profile picture is archived to the media bucket and
+  projected to Redis, so the venue list can show a thumbnail without any
+  serve-time Google call. Spending is gated before every billed call, and an
+  absent photo is a normal absence, never an error.
+  Feature: Instagram profile photo as the venue list hero  # tests/bdd/enrichment/instagram-profile-photo-hero.feature:1
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: A venue with a confirmed handle stores its profile photo and is projected  # tests/bdd/enrichment/instagram-profile-photo-hero.feature:12
+    Given the Instagram profile photo job is enabled                                   # tests/bdd/steps/instagram_profile_photo_hero_steps.py:270
+    And the media bucket and CDN base URL are configured                               # tests/bdd/steps/instagram_profile_photo_hero_steps.py:283
+    Given a servable venue "v-alpha" with the confirmed Instagram handle "alphabar"    # tests/bdd/steps/instagram_profile_photo_hero_steps.py:298
+    And the profile scrape returns a profile picture                                   # tests/bdd/steps/instagram_profile_photo_hero_steps.py:351
+    When the profile photo job runs                                                    # tests/bdd/steps/instagram_profile_photo_hero_steps.py:445
+    Then the image bytes are stored in the media bucket under a content-addressed key  # tests/bdd/steps/instagram_profile_photo_hero_steps.py:463
+      ASSERT FAILED: expected exactly one upload, got 0: []
+
+    And the stored object carries an immutable one-year cache-control header           # None
+    And the venue's profile photo row records the CDN URL                              # None
+    And the Redis key "venue_profile_photo_v1:v-alpha" holds that CDN URL              # None
+    And the run summary counts venue "v-alpha" as "stored"                             # None
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+----
+CAPTURED LOG: before_scenario
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+---- CAPTURED_SCENARIO_OUTPUT_END ----
+
+  Scenario: A venue whose stored photo is still fresh is never billed               # tests/bdd/enrichment/instagram-profile-photo-hero.feature:22
+    Given the Instagram profile photo job is enabled                                # tests/bdd/steps/instagram_profile_photo_hero_steps.py:270
+    And the media bucket and CDN base URL are configured                            # tests/bdd/steps/instagram_profile_photo_hero_steps.py:283
+    Given a servable venue "v-bravo" with the confirmed Instagram handle "bravobar" # tests/bdd/steps/instagram_profile_photo_hero_steps.py:298
+    And venue "v-bravo" already has a profile photo stored 3 days ago               # tests/bdd/steps/instagram_profile_photo_hero_steps.py:395
+    And the refresh window is 30 days                                               # tests/bdd/steps/instagram_profile_photo_hero_steps.py:411
+    When the profile photo job runs                                                 # tests/bdd/steps/instagram_profile_photo_hero_steps.py:445
+    Then no profile scrape is requested for venue "v-bravo"                         # tests/bdd/steps/instagram_profile_photo_hero_steps.py:532
+    And the run summary counts venue "v-bravo" as "skipped_fresh"                   # tests/bdd/steps/instagram_profile_photo_hero_steps.py:522
+      ASSERT FAILED: expected v-bravo -> skipped_fresh, run summary said None (summary={})
+
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+----
+CAPTURED LOG: before_scenario
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+---- CAPTURED_SCENARIO_OUTPUT_END ----
+
+  Scenario: An unchanged photo re-uploads nothing and keeps the served URL identical    # tests/bdd/enrichment/instagram-profile-photo-hero.feature:30
+    Given the Instagram profile photo job is enabled                                    # tests/bdd/steps/instagram_profile_photo_hero_steps.py:270
+    And the media bucket and CDN base URL are configured                                # tests/bdd/steps/instagram_profile_photo_hero_steps.py:283
+    Given a servable venue "v-charlie" with the confirmed Instagram handle "charliebar" # tests/bdd/steps/instagram_profile_photo_hero_steps.py:298
+    And venue "v-charlie" already has a profile photo stored beyond the refresh window  # tests/bdd/steps/instagram_profile_photo_hero_steps.py:402
+    And the profile scrape returns a profile picture whose bytes are unchanged          # tests/bdd/steps/instagram_profile_photo_hero_steps.py:416
+    When the profile photo job runs                                                     # tests/bdd/steps/instagram_profile_photo_hero_steps.py:445
+    Then no object is uploaded to the media bucket                                      # tests/bdd/steps/instagram_profile_photo_hero_steps.py:557
+    And the CDN URL projected for venue "v-charlie" is unchanged                        # tests/bdd/steps/instagram_profile_photo_hero_steps.py:570
+LOG_INFO:app.services.eligibility_rules: [eligibility] mirror rehydrated from 0 eligibility rule rows
+LOG_INFO:app.services.redis_projection_service: [Rebuild] {'venues': 1, 'enrichment': 1, 'live': 0, 'removed': 0, 'errors': 0, 'error_venues': [], 'geo_excluded': 0}
+      ASSERT FAILED: no projected profile photo for v-charlie
+
+    And the run summary counts venue "v-charlie" as "unchanged"                         # None
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+----
+CAPTURED LOG: before_scenario
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+---- CAPTURED_SCENARIO_OUTPUT_END ----
+
+  Scenario: A venue without a confirmed handle is never fetched         # tests/bdd/enrichment/instagram-profile-photo-hero.feature:39
+    Given the Instagram profile photo job is enabled                    # tests/bdd/steps/instagram_profile_photo_hero_steps.py:270
+    And the media bucket and CDN base URL are configured                # tests/bdd/steps/instagram_profile_photo_hero_steps.py:283
+    Given a servable venue "v-delta" with no confirmed Instagram handle # tests/bdd/steps/instagram_profile_photo_hero_steps.py:308
+    When the profile photo job runs                                     # tests/bdd/steps/instagram_profile_photo_hero_steps.py:445
+    Then no profile scrape is requested for venue "v-delta"             # tests/bdd/steps/instagram_profile_photo_hero_steps.py:532
+    And no Redis profile photo key exists for venue "v-delta"           # tests/bdd/steps/instagram_profile_photo_hero_steps.py:563
+LOG_INFO:app.services.eligibility_rules: [eligibility] mirror rehydrated from 0 eligibility rule rows
+LOG_INFO:app.services.redis_projection_service: [Rebuild] {'venues': 1, 'enrichment': 0, 'live': 0, 'removed': 0, 'errors': 0, 'error_venues': [], 'geo_excluded': 0}
+    And the run summary counts venue "v-delta" as "no_handle"           # tests/bdd/steps/instagram_profile_photo_hero_steps.py:522
+      ASSERT FAILED: expected v-delta -> no_handle, run summary said None (summary={})
+
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+----
+CAPTURED LOG: before_scenario
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+---- CAPTURED_SCENARIO_OUTPUT_END ----
+
+  Scenario: A profile carrying no picture writes nothing                          # tests/bdd/enrichment/instagram-profile-photo-hero.feature:46
+    Given the Instagram profile photo job is enabled                              # tests/bdd/steps/instagram_profile_photo_hero_steps.py:270
+    And the media bucket and CDN base URL are configured                          # tests/bdd/steps/instagram_profile_photo_hero_steps.py:283
+    Given a servable venue "v-echo" with the confirmed Instagram handle "echobar" # tests/bdd/steps/instagram_profile_photo_hero_steps.py:298
+    And the profile scrape returns a profile with no picture URL                  # tests/bdd/steps/instagram_profile_photo_hero_steps.py:364
+    When the profile photo job runs                                               # tests/bdd/steps/instagram_profile_photo_hero_steps.py:445
+    Then no object is uploaded to the media bucket                                # tests/bdd/steps/instagram_profile_photo_hero_steps.py:557
+    And no Redis profile photo key exists for venue "v-echo"                      # tests/bdd/steps/instagram_profile_photo_hero_steps.py:563
+LOG_INFO:app.services.eligibility_rules: [eligibility] mirror rehydrated from 0 eligibility rule rows
+LOG_INFO:app.services.redis_projection_service: [Rebuild] {'venues': 1, 'enrichment': 1, 'live': 0, 'removed': 0, 'errors': 0, 'error_venues': [], 'geo_excluded': 0}
+    And the run summary counts venue "v-echo" as "no_pic"                         # tests/bdd/steps/instagram_profile_photo_hero_steps.py:522
+      ASSERT FAILED: expected v-echo -> no_pic, run summary said None (summary={})
+
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+----
+CAPTURED LOG: before_scenario
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+---- CAPTURED_SCENARIO_OUTPUT_END ----
+
+  Scenario: An oversized download is discarded before any storage write                 # tests/bdd/enrichment/instagram-profile-photo-hero.feature:54
+    Given the Instagram profile photo job is enabled                                    # tests/bdd/steps/instagram_profile_photo_hero_steps.py:270
+    And the media bucket and CDN base URL are configured                                # tests/bdd/steps/instagram_profile_photo_hero_steps.py:283
+    Given a servable venue "v-foxtrot" with the confirmed Instagram handle "foxtrotbar" # tests/bdd/steps/instagram_profile_photo_hero_steps.py:298
+    And the profile scrape returns a profile picture                                    # tests/bdd/steps/instagram_profile_photo_hero_steps.py:351
+    And the profile picture download exceeds the maximum allowed size                   # tests/bdd/steps/instagram_profile_photo_hero_steps.py:421
+    When the profile photo job runs                                                     # tests/bdd/steps/instagram_profile_photo_hero_steps.py:445
+    Then no object is uploaded to the media bucket                                      # tests/bdd/steps/instagram_profile_photo_hero_steps.py:557
+    And no profile photo row is written for venue "v-foxtrot"                           # tests/bdd/steps/instagram_profile_photo_hero_steps.py:580
+    And the run summary counts venue "v-foxtrot" as "download_failed"                   # tests/bdd/steps/instagram_profile_photo_hero_steps.py:522
+      ASSERT FAILED: expected v-foxtrot -> download_failed, run summary said None (summary={})
+
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+----
+CAPTURED LOG: before_scenario
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+---- CAPTURED_SCENARIO_OUTPUT_END ----
+
+  Scenario: A download that is not an allowed image type is discarded             # tests/bdd/enrichment/instagram-profile-photo-hero.feature:63
+    Given the Instagram profile photo job is enabled                              # tests/bdd/steps/instagram_profile_photo_hero_steps.py:270
+    And the media bucket and CDN base URL are configured                          # tests/bdd/steps/instagram_profile_photo_hero_steps.py:283
+    Given a servable venue "v-golf" with the confirmed Instagram handle "golfbar" # tests/bdd/steps/instagram_profile_photo_hero_steps.py:298
+    And the profile scrape returns a profile picture                              # tests/bdd/steps/instagram_profile_photo_hero_steps.py:351
+    And the profile picture download returns a disallowed content type            # tests/bdd/steps/instagram_profile_photo_hero_steps.py:427
+    When the profile photo job runs                                               # tests/bdd/steps/instagram_profile_photo_hero_steps.py:445
+    Then no object is uploaded to the media bucket                                # tests/bdd/steps/instagram_profile_photo_hero_steps.py:557
+    And the run summary counts venue "v-golf" as "download_failed"                # tests/bdd/steps/instagram_profile_photo_hero_steps.py:522
+      ASSERT FAILED: expected v-golf -> download_failed, run summary said None (summary={})
+
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+----
+CAPTURED LOG: before_scenario
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+---- CAPTURED_SCENARIO_OUTPUT_END ----
+
+  Scenario: Exhausted scraping credit stops the run instead of spending further  # tests/bdd/enrichment/instagram-profile-photo-hero.feature:71
+    Given the Instagram profile photo job is enabled                             # tests/bdd/steps/instagram_profile_photo_hero_steps.py:270
+    And the media bucket and CDN base URL are configured                         # tests/bdd/steps/instagram_profile_photo_hero_steps.py:283
+    Given three servable venues with confirmed Instagram handles                 # tests/bdd/steps/instagram_profile_photo_hero_steps.py:316
+    And the profile scrape reports exhausted credit on the first venue           # tests/bdd/steps/instagram_profile_photo_hero_steps.py:379
+    When the profile photo job runs                                              # tests/bdd/steps/instagram_profile_photo_hero_steps.py:445
+    Then no profile scrape is requested for the remaining venues                 # tests/bdd/steps/instagram_profile_photo_hero_steps.py:541
+    And the run summary reports the run stopped for exhausted credit             # tests/bdd/steps/instagram_profile_photo_hero_steps.py:549
+      ASSERT FAILED: summary={}
+
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+----
+CAPTURED LOG: before_scenario
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+---- CAPTURED_SCENARIO_OUTPUT_END ----
+
+  Scenario: One venue failing does not abort the run                                # tests/bdd/enrichment/instagram-profile-photo-hero.feature:78
+    Given the Instagram profile photo job is enabled                                # tests/bdd/steps/instagram_profile_photo_hero_steps.py:270
+    And the media bucket and CDN base URL are configured                            # tests/bdd/steps/instagram_profile_photo_hero_steps.py:283
+    Given a servable venue "v-hotel" with the confirmed Instagram handle "hotelbar" # tests/bdd/steps/instagram_profile_photo_hero_steps.py:298
+    And a servable venue "v-india" with the confirmed Instagram handle "indiabar"   # tests/bdd/steps/instagram_profile_photo_hero_steps.py:298
+    And the profile scrape fails for venue "v-hotel"                                # tests/bdd/steps/instagram_profile_photo_hero_steps.py:371
+    And the profile scrape returns a profile picture for venue "v-india"            # tests/bdd/steps/instagram_profile_photo_hero_steps.py:358
+    When the profile photo job runs                                                 # tests/bdd/steps/instagram_profile_photo_hero_steps.py:445
+    Then the run summary counts venue "v-hotel" as "fetch_failed"                   # tests/bdd/steps/instagram_profile_photo_hero_steps.py:522
+      ASSERT FAILED: expected v-hotel -> fetch_failed, run summary said None (summary={})
+
+    And the run summary counts venue "v-india" as "stored"                          # None
+    And the Redis key "venue_profile_photo_v1:v-india" holds a CDN URL              # None
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+----
+CAPTURED LOG: before_scenario
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+---- CAPTURED_SCENARIO_OUTPUT_END ----
+
+  Scenario: The projector removes a Redis key whose row was soft-deleted  # tests/bdd/enrichment/instagram-profile-photo-hero.feature:88
+    Given the Instagram profile photo job is enabled                      # tests/bdd/steps/instagram_profile_photo_hero_steps.py:270
+    And the media bucket and CDN base URL are configured                  # tests/bdd/steps/instagram_profile_photo_hero_steps.py:283
+    Given a servable venue "v-juliet" with a projected profile photo      # tests/bdd/steps/instagram_profile_photo_hero_steps.py:326
+LOG_INFO:app.services.eligibility_rules: [eligibility] mirror rehydrated from 0 eligibility rule rows
+LOG_INFO:app.services.redis_projection_service: [Rebuild] {'venues': 1, 'enrichment': 0, 'live': 0, 'removed': 0, 'errors': 0, 'error_venues': [], 'geo_excluded': 0}
+      ASSERT FAILED: precondition: v-juliet should carry a projected profile photo
+
+    And the profile photo row for venue "v-juliet" is soft-deleted        # None
+    When the Redis projection rebuild runs                                # None
+    Then no Redis profile photo key exists for venue "v-juliet"           # None
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+----
+CAPTURED LOG: before_scenario
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+---- CAPTURED_SCENARIO_OUTPUT_END ----
+
+  Scenario: The job is inert while the feature is disabled                      # tests/bdd/enrichment/instagram-profile-photo-hero.feature:94
+    Given the Instagram profile photo job is enabled                            # tests/bdd/steps/instagram_profile_photo_hero_steps.py:270
+    And the media bucket and CDN base URL are configured                        # tests/bdd/steps/instagram_profile_photo_hero_steps.py:283
+    Given the Instagram profile photo job is disabled                           # tests/bdd/steps/instagram_profile_photo_hero_steps.py:278
+    And a servable venue "v-kilo" with the confirmed Instagram handle "kilobar" # tests/bdd/steps/instagram_profile_photo_hero_steps.py:298
+    When the profile photo job runs                                             # tests/bdd/steps/instagram_profile_photo_hero_steps.py:445
+    Then no profile scrape is requested for venue "v-kilo"                      # tests/bdd/steps/instagram_profile_photo_hero_steps.py:532
+    And no object is uploaded to the media bucket                               # tests/bdd/steps/instagram_profile_photo_hero_steps.py:557
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: The venue detail photo path is unaffected              # tests/bdd/enrichment/instagram-profile-photo-hero.feature:101
+    Given the Instagram profile photo job is enabled               # tests/bdd/steps/instagram_profile_photo_hero_steps.py:270
+    And the media bucket and CDN base URL are configured           # tests/bdd/steps/instagram_profile_photo_hero_steps.py:283
+    Given a servable venue "v-lima" with a projected profile photo # tests/bdd/steps/instagram_profile_photo_hero_steps.py:326
+LOG_INFO:app.services.eligibility_rules: [eligibility] mirror rehydrated from 0 eligibility rule rows
+LOG_INFO:app.services.redis_projection_service: [Rebuild] {'venues': 1, 'enrichment': 0, 'live': 0, 'removed': 0, 'errors': 0, 'error_venues': [], 'geo_excluded': 0}
+      ASSERT FAILED: precondition: v-lima should carry a projected profile photo
+
+    And venue "v-lima" has stored Google photos                    # None
+    When the Redis projection rebuild runs                         # None
+    Then the venue's Google photo projection is unchanged          # None
+----
+CAPTURED LOG: before_scenario
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+---- CAPTURED_SCENARIO_OUTPUT_END ----
+
+
+Failing scenarios:
+  tests/bdd/enrichment/instagram-profile-photo-hero.feature:12  A venue with a confirmed handle stores its profile photo and is projected
+  tests/bdd/enrichment/instagram-profile-photo-hero.feature:22  A venue whose stored photo is still fresh is never billed
+  tests/bdd/enrichment/instagram-profile-photo-hero.feature:30  An unchanged photo re-uploads nothing and keeps the served URL identical
+  tests/bdd/enrichment/instagram-profile-photo-hero.feature:39  A venue without a confirmed handle is never fetched
+  tests/bdd/enrichment/instagram-profile-photo-hero.feature:46  A profile carrying no picture writes nothing
+  tests/bdd/enrichment/instagram-profile-photo-hero.feature:54  An oversized download is discarded before any storage write
+  tests/bdd/enrichment/instagram-profile-photo-hero.feature:63  A download that is not an allowed image type is discarded
+  tests/bdd/enrichment/instagram-profile-photo-hero.feature:71  Exhausted scraping credit stops the run instead of spending further
+  tests/bdd/enrichment/instagram-profile-photo-hero.feature:78  One venue failing does not abort the run
+  tests/bdd/enrichment/instagram-profile-photo-hero.feature:88  The projector removes a Redis key whose row was soft-deleted
+  tests/bdd/enrichment/instagram-profile-photo-hero.feature:101  The venue detail photo path is unaffected
+
+0 features passed, 1 failed, 0 skipped
+1 scenario passed, 11 failed, 0 skipped
+71 steps passed, 11 failed, 13 skipped
+Took 0min 0.020s
+make: *** [Makefile:173: test-feature] Error 1

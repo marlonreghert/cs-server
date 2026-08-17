@@ -1794,6 +1794,98 @@ DEEP_REVIEWS_PROJECTED_VENUES = Gauge(
 )
 
 # =============================================================================
+# INSTAGRAM PROFILE PHOTO (VENUE LIST HERO)
+# plans/260816_instagram-profile-photo-hero.md
+#
+# An `outcome` label that never appears is itself the diagnostic: an absent
+# label proves that code path never ran, which is the cheapest way to kill a
+# hypothesis about a run that "did nothing".
+# =============================================================================
+
+VENUE_PROFILE_PHOTO_RUNS_TOTAL = Counter(
+    "venue_profile_photo_runs_total",
+    "Instagram profile photo archival runs, by result",
+    ["result"],
+    # result: success (every selected venue reached a good terminal state),
+    #         partial (completed, but some venue failed),
+    #         credit_exhausted (stopped early to stop spending),
+    #         disabled / not_configured (inert: no calls, nothing written),
+    #         invalid_mode (an unrecognised mode; rejected before selection,
+    #                       so nothing was read and nothing spent),
+    #         error (the run itself raised)
+)
+
+VENUE_PROFILE_PHOTO_RUN_DURATION_SECONDS = Histogram(
+    "venue_profile_photo_run_duration_seconds",
+    "Instagram profile photo archival run duration in seconds",
+    buckets=(1.0, 5.0, 15.0, 30.0, 60.0, 120.0, 300.0, 600.0, 1800.0),
+)
+
+VENUE_PROFILE_PHOTO_VENUES_TOTAL = Counter(
+    "venue_profile_photo_venues_total",
+    "Venues processed by the Instagram profile photo job, by outcome",
+    ["outcome"],
+    # outcome: stored, unchanged, skipped_has_photo, skipped_recent_failure,
+    #          no_handle, no_pic, fetch_failed, download_failed,
+    #          upload_failed, credit_exhausted
+    #
+    # `unchanged` and `stored` are deliberately distinct: both are successes,
+    # but only one of them spent an S3 write, and a run that is all `unchanged`
+    # is the steady state working, not a job doing nothing.
+    #
+    # `skipped_has_photo` (renamed from the old `skipped_fresh` when the
+    # time-based refresh window was deleted) is the backfill gate: this venue
+    # already has a photo for its current handle and is DONE — permanently,
+    # not until a clock runs out. In steady state it is essentially the whole
+    # catalog, and that is the job costing nothing.
+    #
+    # `skipped_recent_failure` is the negative cache doing its job — venues
+    # that already cost money to learn nothing about, being skipped instead of
+    # re-bought. With the refresh window gone it guards the ONLY recurring
+    # spend the job makes. It growing towards the whole catalog is the alarm:
+    # coverage has stopped and the money is going nowhere.
+)
+
+VENUE_PROFILE_PHOTO_BYTES_STORED_TOTAL = Counter(
+    "venue_profile_photo_bytes_stored_total",
+    "Bytes uploaded to the media bucket by the Instagram profile photo job",
+)
+
+VENUE_PROFILE_PHOTO_APIFY_CALLS_TOTAL = Counter(
+    "venue_profile_photo_apify_calls_total",
+    "Apify profile scrapes issued by the Instagram profile photo job",
+    # THE cost gate's evidence. A venue skipped by the freshness check must not
+    # move this counter — that is the acceptance criterion, asserted as the
+    # absence of a billed call rather than as a log line.
+)
+
+VENUE_PROFILE_PHOTO_ESTIMATED_COST_USD = Counter(
+    "venue_profile_photo_estimated_cost_usd",
+    "Cumulative estimated USD spent on Instagram profile scrapes "
+    "(scrapes x apify_instagram_profile_cost_usd)",
+)
+
+# What a run WOULD cost, last time someone priced one — deliberately a Gauge
+# and deliberately NOT the counter above. The estimate spends nothing, so
+# folding it into cumulative spend would make the cost figure lie by exactly
+# the amount an operator considered and then declined. `mode` separates the
+# free routine backfill from an explicit refresh_all.
+VENUE_PROFILE_PHOTO_ESTIMATE_COST_USD = Gauge(
+    "venue_profile_photo_estimate_cost_usd",
+    "Estimated USD of the last priced Instagram profile photo run, by mode",
+    ["mode"],
+)
+
+# Set by the projector (RedisProjectionService), not by the job: how many
+# venues carry a hero in Redis right now. Coverage, not throughput — a job
+# that has stalled shows up here long before it shows up as complaints about
+# blank cards.
+VENUE_PROFILE_PHOTO_PROJECTED_VENUES = Gauge(
+    "venue_profile_photo_projected_venues",
+    "Venues with an Instagram profile photo currently projected in Redis",
+)
+
+# =============================================================================
 # APPLICATION INFO
 # =============================================================================
 

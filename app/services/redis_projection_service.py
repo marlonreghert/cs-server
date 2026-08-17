@@ -20,6 +20,7 @@ from app.metrics import (
     REDIS_PROJECTION_VENUES,
     SERVING_VIEW_VENUES,
     VENUES_GEO_EXCLUDED,
+    VENUE_PROFILE_PHOTO_PROJECTED_VENUES,
 )
 from app.models import (
     LiveForecastResponse,
@@ -27,7 +28,11 @@ from app.models import (
 )
 from app.models.vibe_attributes import VibeAttributes
 from app.models.opening_hours import OpeningHours
-from app.models.instagram import VenueInstagram, VenueInstagramPosts
+from app.models.instagram import (
+    VenueInstagram,
+    VenueInstagramPosts,
+    VenueInstagramProfilePhoto,
+)
 from app.models.menu import VenueMenuData, VenueMenuPhotos
 from app.models.venue_review import VenueReviews, VenueReviewsDeep
 from app.models.vibe_profile import VenueVibeProfile
@@ -67,6 +72,15 @@ _REBUILD_MODELS = {
     "google_places.reviews": (VenueReviews, "set_venue_reviews", "delete_venue_reviews"),
     "instagram.handle": (VenueInstagram, "set_venue_instagram", "delete_venue_instagram"),
     "instagram.posts": (VenueInstagramPosts, "set_venue_ig_posts", "delete_venue_ig_posts"),
+    # The venue-list hero. Registry entry only, deliberately: the deleter below
+    # is what guarantees a soft-deleted RDS row cannot leave a `venue_profile_
+    # photo_v1` key pointing at an object nobody meant to serve any more. The
+    # setter writes without a TTL (RedisVenueDAO.set_venue_profile_photo) — this
+    # projection is re-asserted every cycle, so the row is the lifetime, not a
+    # clock.
+    "instagram.profile_photo": (
+        VenueInstagramProfilePhoto, "set_venue_profile_photo", "delete_venue_profile_photo",
+    ),
     "venues.menu_photos": (VenueMenuPhotos, "set_venue_menu_photos", "delete_venue_menu_photos"),
     "venues.menu_data": (VenueMenuData, "set_venue_menu_data", "delete_venue_menu_data"),
     "venues.vibe_profile": (VenueVibeProfile, "set_venue_vibe_profile", "delete_venue_vibe_profile"),
@@ -119,13 +133,17 @@ class RedisProjectionService:
         except Exception as e:
             logger.warning(f"[Rebuild] geo-excluded count failed: {e}")
         # Bulk-prefetch every input the per-venue loop below needs, once per
-        # cycle (P1): 1 venue-rows query + 10 enrichment-table queries (the 9
-        # _REBUILD_MODELS tables, incl. venues.reviews_deep, + photos) + 1
-        # weekly query + 1 live query = 13 bulk reads total, independent of
-        # how many servable venues exist — replacing what was ~18 SQL queries
-        # PER VENUE. The per-venue projection logic below is unchanged; only
-        # the source of each row/rec moves from a per-call SELECT to a dict
-        # lookup on these prefetched maps.
+        # cycle (P1): 1 venue-rows query + 11 enrichment-table queries (the 10
+        # _REBUILD_MODELS tables, incl. venues.reviews_deep and
+        # instagram.profile_photo, + photos) + 1 weekly query + 1 live query =
+        # 14 bulk reads total, independent of how many servable venues exist —
+        # replacing what was ~18 SQL queries PER VENUE. The count tracks the
+        # number of FAMILIES (a new family adds exactly one read); what must
+        # never grow is the number of VENUES, which is what
+        # tests/bdd/persistence/projector-and-serving-bulk-reads.feature pins.
+        # The per-venue projection logic below is unchanged; only the source of
+        # each row/rec moves from a per-call SELECT to a dict lookup on these
+        # prefetched maps.
         venue_rows = self.rds_store.get_venues_by_ids(servable_ids)
         enrichment_maps = {
             table_key: self.rds_store.get_enrichment_bulk(table_key, servable_ids)
@@ -143,6 +161,11 @@ class RedisProjectionService:
         # Redis, so its size is logged from the same place the risk lives.
         deep_reviews_projected = 0
         deep_reviews_bytes = 0
+        # Same reasoning one family over: how many venues actually carry a hero
+        # right now is the coverage number this feature lives or dies by, and
+        # "the job is behind" has to be visible as a gauge rather than inferred
+        # from a wall of missing thumbnails in the app.
+        profile_photos_projected = 0
 
         for venue_id in servable_ids:
             # Isolation boundary: any exception while reading/projecting this ONE
@@ -171,6 +194,8 @@ class RedisProjectionService:
                             deep_reviews_projected += 1
                             if isinstance(result, int):
                                 deep_reviews_bytes += result
+                        elif table_key == "instagram.profile_photo":
+                            profile_photos_projected += 1
                     elif getattr(self.redis_only_dao, deleter)(venue_id):
                         REDIS_PROJECTION_ENTITY_DELETES_TOTAL.labels(entity=table_key).inc()
 
@@ -205,6 +230,8 @@ class RedisProjectionService:
                 continue
         REDIS_PROJECTION_VENUES.set(summary["venues"])
         DEEP_REVIEWS_PROJECTED_VENUES.set(deep_reviews_projected)
+        VENUE_PROFILE_PHOTO_PROJECTED_VENUES.set(profile_photos_projected)
+        summary["profile_photos"] = profile_photos_projected
         if deep_reviews_projected:
             logger.info(
                 f"[Rebuild] deep review projection: {deep_reviews_projected} venues, "
