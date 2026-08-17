@@ -18,7 +18,6 @@ path itself to reach RDS (it doesn't, in this harness).
 from __future__ import annotations
 
 import asyncio
-import time
 from unittest.mock import AsyncMock
 
 import httpx
@@ -35,6 +34,7 @@ from besttime_add_response_parse_steps import (  # type: ignore[import-not-found
     _post_add,
 )
 from priority_bounded_besttime_refresh_steps import _refresher  # type: ignore[import-not-found]
+from tests.async_job_wait import await_job_task_blocking
 
 _GOOGLE_ONLY_REJECTION_MESSAGE = (
     "Venue found, but could not forecast this venue. Potential issues: This "
@@ -306,15 +306,13 @@ def step_batch_process_row(context):
     resp = context.client.post("/admin/venues/batch-add", json=body)
     assert resp.status_code == 202, resp.text
     job_id = resp.json()["job_id"]
-    last = None
-    for _ in range(200):
-        poll = context.client.get(f"/admin/venues/batch-add/{job_id}")
-        assert poll.status_code == 200, poll.text
-        last = poll.json()
-        if last["status"] in ("done", "stopped", "failed"):
-            break
-        time.sleep(0.02)
-    context.batch_job = last
+    # Wait on the job task itself rather than polling on a fixed budget (see
+    # tests/async_job_wait.py), then read the terminal state back over HTTP.
+    # The terminal status is asserted by the "the job is not stopped" step.
+    await_job_task_blocking(context.client, context.batch_add_service, job_id)
+    poll = context.client.get(f"/admin/venues/batch-add/{job_id}")
+    assert poll.status_code == 200, poll.text
+    context.batch_job = poll.json()
 
 
 # ---------------------------------------------------------------------------

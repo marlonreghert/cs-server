@@ -7,8 +7,6 @@ the shared RDS job store (tests.venue_add_job_fake.InMemoryVenueAddJobStore)
 instead of Redis. See plans/260813_add-venue-async-job.md and
 plans/260814_venue-add-job-rds-tracking.md.
 """
-import asyncio
-
 import pytest
 
 from app.handlers.add_venue_handler import AddVenueByAddressRequest, AddVenueOutcome
@@ -16,6 +14,7 @@ from app.services.add_venue_job_service import (
     ADD_VENUE_RECENT_JOBS_CAP,
     AddVenueJobService,
 )
+from tests.async_job_wait import await_job_task
 from tests.venue_add_job_fake import InMemoryVenueAddJobStore
 
 
@@ -45,16 +44,13 @@ def _req(name="A", address="addr A", lat=-9.6, lng=-35.7):
     )
 
 
-async def _drain(svc, job_id, iters=200):
-    """Let the background task scheduled by start_job() run to completion."""
-    for _ in range(iters):
-        task = svc._tasks.get(job_id)
-        if task is None:
-            break
-        await asyncio.sleep(0)
-        if task.done():
-            break
-    await asyncio.sleep(0)
+async def _drain(svc, job_id):
+    """Await the background task scheduled by start_job().
+
+    Counting asyncio.sleep(0) yields here was a race rather than a wait — see
+    tests/async_job_wait.py.
+    """
+    await await_job_task(svc, job_id)
 
 
 # ── start_job ─────────────────────────────────────────────────────────────

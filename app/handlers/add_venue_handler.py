@@ -27,6 +27,7 @@ from app.dao.redis_venue_dao import RedisVenueDAO
 from app.dao.venue_row import venue_from_row
 from app.metrics import (
     ADD_VENUE_BY_ADDRESS_TOTAL,
+    ADD_VENUE_GEO_FALLBACK_SKIPPED_UNTRUSTED_TOTAL,
     ADD_VENUE_INSTAGRAM_TOTAL,
     VENUE_MONTHLY_NEW_COUNT,
 )
@@ -204,7 +205,22 @@ class AddVenueHandler:
         # (dependency-aware, same guardrail as the Google enrichment service).
         self.instagram_cascade_service = instagram_cascade_service
 
-    async def add(self, request: AddVenueByAddressRequest) -> AddVenueOutcome:
+    async def add(
+        self,
+        request: AddVenueByAddressRequest,
+        *,
+        coordinates_trusted: bool = True,
+    ) -> AddVenueOutcome:
+        """coordinates_trusted gates geo-fallback matching (see _geo_fallback):
+        True (the default) is correct for the synchronous
+        POST /admin/venues/by-address endpoint, which always requires
+        caller-supplied venue_lat/venue_lng and is therefore trusted by
+        construction. BatchAddService passes False when a batch row's
+        coordinate had to be resolved from a bare, unbiased Text Search (no
+        caller place_id, no caller lat/lng) — the exact gap that let the
+        add-venue flow permanently mis-link a submission to an unrelated
+        existing venue. See plans/260816_venue-address-cache-integrity.md.
+        """
         radius_m = request.fallback_radius_meters or DEFAULT_FALLBACK_RADIUS_M
 
         # 1. Address-hash short circuit (cheap, pre-lock: no reserve/create).
@@ -241,7 +257,9 @@ class AddVenueHandler:
             hit = self._cached_hit_outcome(request)
             if hit is not None:
                 return hit
-            return await self._reserve_create_persist(request, radius_m)
+            return await self._reserve_create_persist(
+                request, radius_m, coordinates_trusted
+            )
         finally:
             self._release_add_lock(lock_key)
 
@@ -273,7 +291,10 @@ class AddVenueHandler:
         return None
 
     async def _reserve_create_persist(
-        self, request: AddVenueByAddressRequest, radius_m: int
+        self,
+        request: AddVenueByAddressRequest,
+        radius_m: int,
+        coordinates_trusted: bool = True,
     ) -> AddVenueOutcome:
         """Steps 3-5 of add() (reserve → BestTime create → persist), run under
         the single-flight lock so the paid create happens at most once per
@@ -362,7 +383,9 @@ class AddVenueHandler:
                     },
                 )
             # Recoverable failure: try the geo fallback before we give up.
-            return await self._geo_fallback(request, radius_m, response)
+            return await self._geo_fallback(
+                request, radius_m, response, coordinates_trusted
+            )
 
         # 5. Success: persist + cache + record + report.
         persisted_venue = await self._persist_new_venue(response, request.place_id)
@@ -692,8 +715,35 @@ class AddVenueHandler:
         request: AddVenueByAddressRequest,
         radius_m: int,
         besttime_response,
+        coordinates_trusted: bool = True,
     ) -> AddVenueOutcome:
-        """Call /venues/filter for the request coordinate; match by name."""
+        """Call /venues/filter for the request coordinate; match by name.
+
+        Only runs when ``coordinates_trusted`` is True. An untrusted
+        coordinate (resolved from a bare, unbiased Text Search — see
+        BatchAddService._resolve_coords) skips the /venues/filter call and
+        the name matcher entirely: nothing checked whether that resolved
+        point was ever geographically trustworthy before it gated a
+        permanent address-hash cache write, and BestTime's own inventory can
+        surface a same-or-similar-named venue in a completely different city
+        above the intended target for a generic name. Skipping falls through
+        to the exact branch a genuine zero-candidate geo fallback already
+        takes (_create_from_google_metadata) — same outcome shape a
+        brand-new venue already gets today, and no cache entry is written.
+        See plans/260816_venue-address-cache-integrity.md.
+        """
+        if not coordinates_trusted:
+            ADD_VENUE_GEO_FALLBACK_SKIPPED_UNTRUSTED_TOTAL.inc()
+            logger.info(
+                f"[AddVenueHandler] geo fallback skipped for "
+                f"{request.venue_name!r}: resolved coordinate is not trusted "
+                "(no caller-supplied lat/lng or place_id); falling through "
+                "to a normal create"
+            )
+            return await self._create_from_google_metadata(
+                request, radius_m, besttime_response, candidates_seen=0
+            )
+
         try:
             filter_response = await self.besttime.venue_filter(
                 VenueFilterParams(
@@ -1126,6 +1176,73 @@ class AddVenueHandler:
             self.redis.delete(key)
         except Exception as e:
             logger.warning(f"[AddVenueHandler] address-cache delete failed: {e}")
+
+    def clear_address_cache(self, venue_name: str, venue_address: str) -> AddVenueOutcome:
+        """Admin repair for one venue_lookup_by_address_v1:* entry, addressed
+        by venue_name + venue_address (never a raw Redis key) — the
+        operator-facing fix for an entry _save_address_cache already wrote
+        permanently and wrongly (see
+        plans/260816_venue-address-cache-integrity.md). Always logs the
+        computed hash and whatever value it found (never a silent no-op).
+        Returns 200 either way: a hit reports the previous venue_id; a miss
+        reports nothing was cached — never an error, so an operator retrying
+        a repair against an already-clean entry sees a clean result, not a
+        failure.
+        """
+        key = VENUE_LOOKUP_BY_ADDRESS_KEY_V1.format(
+            hash=_address_hash(venue_name, venue_address)
+        )
+        try:
+            previous = self.redis.get(key)
+        except Exception as e:
+            logger.warning(
+                f"[AddVenueHandler] address-cache clear: read failed for "
+                f"{venue_name!r} (key={key}): {e}"
+            )
+            previous = None
+
+        if not previous:
+            logger.info(
+                f"[AddVenueHandler] address-cache clear: nothing cached for "
+                f"{venue_name!r} / {venue_address!r} (key={key})"
+            )
+            return AddVenueOutcome(
+                status_code=200,
+                body={
+                    "status": "not_cached",
+                    "venue_name": venue_name,
+                    "venue_address": venue_address,
+                },
+            )
+
+        try:
+            self.redis.delete(key)
+        except Exception as e:
+            logger.error(
+                f"[AddVenueHandler] address-cache clear: delete failed for "
+                f"{venue_name!r} (key={key}, previous_venue_id={previous!r}): {e}"
+            )
+            return AddVenueOutcome(
+                status_code=502,
+                body={
+                    "detail": f"address-cache delete failed: {type(e).__name__}",
+                    "previous_venue_id": previous,
+                },
+            )
+
+        logger.info(
+            f"[AddVenueHandler] address-cache clear: cleared {venue_name!r} / "
+            f"{venue_address!r} (key={key}, previous_venue_id={previous!r})"
+        )
+        return AddVenueOutcome(
+            status_code=200,
+            body={
+                "status": "cleared",
+                "venue_name": venue_name,
+                "venue_address": venue_address,
+                "previous_venue_id": previous,
+            },
+        )
 
     def _already_exists_body(self, venue: Venue) -> dict:
         return {

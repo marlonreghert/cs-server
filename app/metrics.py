@@ -1050,6 +1050,20 @@ ADD_VENUE_INSTAGRAM_TOTAL = Counter(
     ["result"],  # found | low_confidence | not_found | timeout | skipped | error
 )
 
+# plans/260816_venue-address-cache-integrity.md: an add-venue attempt whose
+# coordinate could not be trusted (no caller-supplied lat/lng and no
+# caller-supplied place_id — resolved instead from a bare, unbiased Text
+# Search) skips geo-fallback matching entirely, so it can never permanently
+# cache a match against an unrelated existing venue. Counted on its own
+# series, deliberately separate from ADD_VENUE_BY_ADDRESS_TOTAL's outcome
+# labels, so this never silently blends into the "created"/"created_google_
+# only" counts an operator already watches.
+ADD_VENUE_GEO_FALLBACK_SKIPPED_UNTRUSTED_TOTAL = Counter(
+    "add_venue_geo_fallback_skipped_untrusted_total",
+    "Add-venue attempts where geo-fallback matching was skipped because the "
+    "resolved coordinate was not trusted",
+)
+
 # plans/260814_venue-add-job-rds-tracking.md: venue-add job tracking
 # (AddVenueJobService + BatchAddService) moved off Redis onto the RDS
 # admin.venue_add_job_run table, which is now the ONLY copy of a job's state.

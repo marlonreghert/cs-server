@@ -162,6 +162,13 @@ def _build_test_app(context) -> None:
         # whose Given raises before a job start consumes the flag must not
         # leave it stuck True for the next scenario's first job start.
         context._besttime_special_programmed = False
+        # Same leak risk for the coordinate-trust gate (see
+        # besttime_add_response_parse_steps._post_add and
+        # geo_fallback_safe_linking_steps.py's "(d) coordinate-trust gate"
+        # scenarios): reset to the trusted default every scenario so an
+        # untrusted override from one scenario can never bleed into the next
+        # scenario's add() call.
+        context.coordinates_trusted = True
         context.add_venue_handler = AddVenueHandler(
             venue_dao=context.venue_dao,
             besttime_api=context.besttime,
