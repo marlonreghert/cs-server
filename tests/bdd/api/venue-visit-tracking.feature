@@ -24,9 +24,9 @@ Feature: Venue visit tracking — batch ingest and system of record
     Given the engagement pseudonymization key is configured
     And the minimum accepted dwell is 60 seconds
     And the maximum accepted dwell is 86400 seconds
-    And the maximum accepted clock skew is 300 seconds
+    And the maximum accepted clock skew is 3600 seconds
     And the maximum accepted backfill window is 30 days
-    And the maximum accepted batch size is 200 visits
+    And the maximum accepted batch size is 500 visits
 
   Scenario: A batch of visits is persisted
     Given a signed-in user with two buffered visits to different venues
@@ -73,8 +73,17 @@ Feature: Venue visit tracking — batch ingest and system of record
     And no visit row must be persisted
     And the rejection must be counted with reason "dwell_too_long"
 
-  Scenario: A visit arriving beyond the clock skew allowance is rejected
-    Given a signed-in user with one buffered visit whose arrival is 1 hour in the future
+  Scenario: A visit from a device with a fast clock is corrected, not rejected
+    Given a signed-in user whose device clock is 6 minutes ahead of the server
+    And the device reports its clock offset with the batch
+    And the batch carries one buffered visit
+    When the batch is uploaded
+    Then the response must report 1 accepted visit
+    And the persisted arrival must be corrected by the reported offset
+    And the clock-corrected counter must be incremented
+
+  Scenario: A visit arriving beyond the clamp bound is rejected
+    Given a signed-in user with one buffered visit whose arrival is 3 hours in the future
     When the batch is uploaded
     Then the response must report 1 rejected visit
     And no visit row must be persisted
@@ -122,11 +131,20 @@ Feature: Venue visit tracking — batch ingest and system of record
     And the visit row must be persisted with that venue id
     And the unknown venue counter must be incremented
 
-  Scenario: An oversized batch is refused
-    Given a signed-in user with 201 buffered visits
+  Scenario: An oversized batch is truncated rather than refused
+    Given a signed-in user with 501 buffered visits
     When the batch is uploaded
-    Then the response status must be 422
-    And no visit row must be persisted
+    Then the response status must be 200
+    And the response must report 500 accepted visits
+    And the response must report the surplus as rejected
+    And the device must not be told to retry the same batch
+
+  Scenario: Visits older than the retention window are deleted
+    Given a persisted visit older than the retention window
+    And a persisted visit inside the retention window
+    When the retention job runs
+    Then the visit older than the window must be deleted
+    And the visit inside the window must remain
 
   Scenario: A storage failure is reported as retryable
     Given a signed-in user with one buffered visit
