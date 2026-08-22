@@ -231,8 +231,12 @@ JOB_REGISTRY = {
         "POST /admin/trigger/instagram_profile_photos/estimate. Either mode "
         "also skips a venue whose last attempt failed inside "
         "INSTAGRAM_PROFILE_PHOTO_RETRY_DAYS (set it to 0 to retry every failed "
-        "venue now, e.g. right after fixing the bucket policy). Inert unless "
-        "INSTAGRAM_PROFILE_PHOTO_ENABLED is on.",
+        "venue now, e.g. right after fixing the bucket policy). "
+        "EDGE_COLOR is a third, FREE mode: it makes no Apify call and uploads "
+        "nothing, re-reading each already-stored photo over its own public CDN "
+        "URL to record the edge colour the app paints behind a fitted avatar. "
+        "It only touches rows that have no colour yet, so it is safe to re-run "
+        "and costs $0.00. Inert unless INSTAGRAM_PROFILE_PHOTO_ENABLED is on.",
         # The one knob this job takes. Every spend BOUND stays a setting, so a
         # trigger dialog can choose what to scrape but never how much.
         "default_config": {"mode": "backfill"},

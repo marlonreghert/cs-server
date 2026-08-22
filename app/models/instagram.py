@@ -125,6 +125,17 @@ class VenueInstagramProfilePhoto(BaseModel):
     content_hash: str
     content_type: str = "image/jpeg"
     byte_size: int = 0
+    # The dominant colour of the strips a `contain` fit letterboxes, as an
+    # uppercase `#RRGGBB` (see app/services/image_edge_color.py). The app fits
+    # a square avatar whole and paints that strip in this colour so it reads as
+    # artwork rather than a grey bar.
+    #
+    # `None` is NORMAL, not an error: rows written before the field existed
+    # have none, and an image that cannot be decoded is still stored without
+    # one. Every consumer must fall back to its own neutral rather than treat
+    # an absence as a failure — a correct avatar on a grey field is always
+    # better than no avatar.
+    edge_color: Optional[str] = None
     fetched_at: datetime = Field(default_factory=datetime.utcnow)
 
 

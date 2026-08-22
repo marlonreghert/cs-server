@@ -1885,6 +1885,15 @@ VENUE_PROFILE_PHOTO_PROJECTED_VENUES = Gauge(
     "Venues with an Instagram profile photo currently projected in Redis",
 )
 
+# The edge-colour coverage of that same projection. Read as a RATIO against the
+# gauge above: equal means every served avatar can paint its own letterbox,
+# while a value stuck at 0 while the other reads in the hundreds is the
+# unambiguous proof that the free `edge_color` backfill has never run.
+VENUE_PROFILE_PHOTO_EDGE_COLOR_VENUES = Gauge(
+    "venue_profile_photo_edge_color_venues",
+    "Projected Instagram profile photos that carry an edge colour",
+)
+
 # =============================================================================
 # APPLICATION INFO
 # =============================================================================

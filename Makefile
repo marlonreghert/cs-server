@@ -151,6 +151,7 @@ test-unit:
 		tests/test_deep_review_crawl_service.py \
 		tests/test_admin_jobs_run_record.py \
 		tests/test_venue_profile_photo.py \
+		tests/test_image_edge_color.py \
 		-v
 
 test-integration:

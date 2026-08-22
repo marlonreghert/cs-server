@@ -20,6 +20,7 @@ from app.metrics import (
     REDIS_PROJECTION_VENUES,
     SERVING_VIEW_VENUES,
     VENUES_GEO_EXCLUDED,
+    VENUE_PROFILE_PHOTO_EDGE_COLOR_VENUES,
     VENUE_PROFILE_PHOTO_PROJECTED_VENUES,
 )
 from app.models import (
@@ -166,6 +167,11 @@ class RedisProjectionService:
         # "the job is behind" has to be visible as a gauge rather than inferred
         # from a wall of missing thumbnails in the app.
         profile_photos_projected = 0
+        # Coverage of the additive `edge_color`. Counted here, in the projector,
+        # because this is the only place that sees the exact set the app will
+        # be served from — the backfill job's own counters say what one run did,
+        # not what the catalog currently holds.
+        profile_photos_with_edge_color = 0
 
         for venue_id in servable_ids:
             # Isolation boundary: any exception while reading/projecting this ONE
@@ -196,6 +202,8 @@ class RedisProjectionService:
                                 deep_reviews_bytes += result
                         elif table_key == "instagram.profile_photo":
                             profile_photos_projected += 1
+                            if getattr(obj, "edge_color", None):
+                                profile_photos_with_edge_color += 1
                     elif getattr(self.redis_only_dao, deleter)(venue_id):
                         REDIS_PROJECTION_ENTITY_DELETES_TOTAL.labels(entity=table_key).inc()
 
@@ -231,7 +239,9 @@ class RedisProjectionService:
         REDIS_PROJECTION_VENUES.set(summary["venues"])
         DEEP_REVIEWS_PROJECTED_VENUES.set(deep_reviews_projected)
         VENUE_PROFILE_PHOTO_PROJECTED_VENUES.set(profile_photos_projected)
+        VENUE_PROFILE_PHOTO_EDGE_COLOR_VENUES.set(profile_photos_with_edge_color)
         summary["profile_photos"] = profile_photos_projected
+        summary["profile_photos_with_edge_color"] = profile_photos_with_edge_color
         if deep_reviews_projected:
             logger.info(
                 f"[Rebuild] deep review projection: {deep_reviews_projected} venues, "
