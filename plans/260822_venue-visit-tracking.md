@@ -35,8 +35,9 @@ back yet.
 - **No geofence detection logic.** Detecting arrival/departure is the device's
   job (vibe_sense_mobile). cs-server never infers a visit; it records what it is
   told, after validating it.
-- **No retention/TTL job.** Rows accumulate. A retention policy is follow-up
-  work — see Open Questions.
+- **No aggregation or derived rollup.** Retention IS in scope (see below); what
+  stays out is any summarisation of the rows into per-venue or per-user
+  aggregates.
 
 ## Evidence
 
@@ -172,16 +173,30 @@ that `engagement_router`'s docstring and `EngagementClient` already agree on.
 - `dwell_seconds` below `VISIT_MIN_DWELL_SECONDS` (default 60) is rejected as
   GPS jitter. Configurable, because the device applies the same floor and the
   two must be tunable together.
-- `arrived_at` must parse as a timezone-aware timestamp, must not be more than
-  `VISIT_MAX_CLOCK_SKEW_SECONDS` (default 300) in the future, and must not be
-  older than `VISIT_MAX_BACKFILL_DAYS` (default 30). A device buffering longer
-  than that has data too stale to trust against a moved or renamed venue.
+- `arrived_at` must parse as a timezone-aware timestamp and must not be older
+  than `VISIT_MAX_BACKFILL_DAYS` (default 30). A device buffering longer than
+  that has data too stale to trust against a moved or renamed venue.
+- **Clock skew is CLAMPED, not rejected.** A device whose clock is a few minutes
+  fast is routine, and rejecting on skew would reject 100% of that device's
+  visits forever with no recovery path — the device has no way to learn it is
+  the problem, so it retries the same rows until the backfill window expires and
+  they are lost. Instead: the device sends `clock_offset_seconds` (captured from
+  the server `Date` header on any successful call) with each batch, and the
+  server stores `min(arrived_at + offset, received_at)`, incrementing
+  `ENGAGEMENT_VISIT_CLOCK_CORRECTED_TOTAL`. `VISIT_MAX_CLOCK_SKEW_SECONDS`
+  becomes 3600 and bounds the clamp rather than triggering a rejection; only a
+  timestamp beyond that bound is rejected as `future_timestamp`.
 - `source` must be one of `geofence` / `foreground`. An unrecognized source from
   a future client build is rejected rather than stored, so the column stays a
   usable dimension.
 - `client_visit_id` and `venue_id` must be non-empty.
-- The batch itself is capped at `VISIT_MAX_BATCH_SIZE` (default 200) items;
-  an oversized batch is a 422 at the Pydantic boundary, not a partial write.
+- The batch is capped at `VISIT_MAX_BATCH_SIZE` (default 500), and an oversized
+  batch is **accepted and truncated**, never 422'd. Rejecting the whole batch
+  strands a device permanently: it has no way to split what it already built, so
+  it retries the same oversized payload forever. This is the same
+  "never strand the buffer" rule that governs the per-visit rejections above —
+  the size cap was the one place the original plan violated it. The surplus is
+  reported in `rejected` so the loss is visible rather than silent.
 
 **Config** — the six `VISIT_*` values land in `app/config.py` and
 `config.example.json` with the defaults above.
@@ -227,8 +242,26 @@ response  { "status": "ok", "accepted": 3, "duplicate": 1, "rejected": 0 }
 Additive only.
 
 **Config** — six new keys: `VISIT_MIN_DWELL_SECONDS` (60),
-`VISIT_MAX_DWELL_SECONDS` (86400), `VISIT_MAX_CLOCK_SKEW_SECONDS` (300),
-`VISIT_MAX_BACKFILL_DAYS` (30), `VISIT_MAX_BATCH_SIZE` (200).
+`VISIT_MAX_DWELL_SECONDS` (86400), `VISIT_MAX_CLOCK_SKEW_SECONDS` (3600, a clamp
+bound — see the validation rules), `VISIT_MAX_BACKFILL_DAYS` (30),
+`VISIT_MAX_BATCH_SIZE` (500), `VISIT_RETENTION_DAYS` (365).
+
+**Retention** — a nightly job hard-deletes `venue_visit` rows older than
+`VISIT_RETENTION_DAYS` (365). Registered through `main.py`'s existing
+`register_*_jobs` skeleton so it inherits the `BACKGROUND_JOB_*` instrumentation
+and the concurrency lock. This is **in scope, not follow-up**: the plan cannot
+call this table "the most sensitive thing this system holds" and simultaneously
+let it grow forever, and a retention window is one of the things the privacy
+policy has to state.
+
+**Infrastructure precondition (must merge first, via Terraform)** —
+`cs-server/infra/rds/main.tf` sets `allocated_storage` from
+`var.allocated_storage_gb` (default 20) and declares **no**
+`max_allocated_storage`, so RDS storage autoscaling is OFF on a
+`db.t4g.small`. A new append-only table on a volume that cannot grow turns a
+capacity problem into a **write outage for the whole database** — pipelines and
+venue upserts included, not just visits. Add `max_allocated_storage = 100`
+before any ingest code ships. One line converts an outage into a bill.
 
 **Migration ordering** — `0044` must be applied to RDS **before** the vibes_bot
 release that starts calling `/v1/visits`, or the endpoint 500s on a missing
@@ -273,8 +306,11 @@ Scenarios:
   `client_visit_id`s must both persist.
 - **A visit shorter than the minimum dwell is rejected** — counted in
   `rejected`, no row written, `dwell_too_short` reason recorded.
-- **A visit with a future arrival beyond the skew allowance is rejected** —
-  `future_timestamp`, no row.
+- **A visit from a device with a fast clock is clamped, not rejected** — a
+  device six minutes ahead has its `arrived_at` corrected by the reported
+  offset, the row persists, and the clock-corrected counter is incremented.
+- **A visit beyond the clamp bound is rejected** — an arrival further ahead than
+  `VISIT_MAX_CLOCK_SKEW_SECONDS` is `future_timestamp`, no row.
 - **A visit older than the backfill window is rejected** — `too_old`, no row.
 - **An unrecognized source is rejected** — `bad_source`, no row.
 - **One invalid visit does not reject the valid ones in the same batch** — the
@@ -284,7 +320,13 @@ Scenarios:
   the offset the client sent.
 - **A visit to an unknown venue is stored, not rejected** — the row exists and
   the unknown-venue counter is incremented.
-- **An oversized batch is refused with 422** — nothing is written.
+- **An oversized batch is truncated, not refused** — a batch above
+  `VISIT_MAX_BATCH_SIZE` writes the first `VISIT_MAX_BATCH_SIZE` visits, reports
+  the surplus in `rejected`, and returns 200 so the device can drain its buffer
+  instead of retrying the same payload forever.
+- **Retention deletes visits past the window** — a row older than
+  `VISIT_RETENTION_DAYS` is removed by the nightly job; a row inside the window
+  survives.
 - **Account deletion erases visits** — `DELETE /v1/user-data` removes every
   `venue_visit` row for the user and reports the count.
 
@@ -318,10 +360,12 @@ Manual or integration checks:
   reports the deleted count.
 - No raw user id and no coordinates appear in any log line on this path.
 - `0044` is alembic head and applies cleanly on a database already at `0043`.
+- A device with a modestly skewed clock can persist visits; no device is ever
+  put in a state where every visit it holds is permanently rejected.
+- An oversized batch never strands a device's buffer.
+- Rows older than `VISIT_RETENTION_DAYS` do not survive the nightly job.
+- `max_allocated_storage` is set on the RDS instance before ingest ships.
 
 ## Open Questions
 
-- None blocking. **Follow-up, out of scope:** this table has no retention
-  policy, so a location history grows unbounded. A retention window (and the
-  privacy-policy sentence that states it) should be planned before the dataset
-  is large enough to matter.
+- None blocking.
