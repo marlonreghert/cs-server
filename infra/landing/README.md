@@ -11,8 +11,26 @@ email (`@vibesense.live`).
 ## Prerequisites
 
 - `aws sso login --profile vibesense`
+- `export AWS_PROFILE=vibesense` in the shell you run `terraform` from — the
+  backend and provider blocks intentionally have no hardcoded profile (backend
+  blocks cannot reference variables, and a hardcoded profile would break CI,
+  which authenticates via OIDC-assumed role credentials instead of a named
+  profile). `aws` CLI commands below still take `--profile vibesense`
+  explicitly as before.
 - The shared state bucket exists — run [`../backend-bootstrap`](../backend-bootstrap) first.
 - You control DNS for `vibesense.live` at GoDaddy.
+
+## CI/CD
+
+Every merge to `main` touching `infra/landing/**` deploys automatically via
+`.github/workflows/landing-deploy.yml`, using a least-privilege, OIDC-assumed
+role (`infra/landing/ci.tf`) — no human runs `terraform apply` for a routine
+content change. That role can only write site content, invalidate this one
+CloudFront distribution, and touch its own `landing/` state key; it cannot
+change the distribution config, ACM cert, or bucket policy. A change to any of
+those still needs the manual runbook below, run under your own SSO role — the
+CI job will fail closed with `AccessDenied` in that case, which is the
+intended guardrail, not a bug.
 
 ## Why two-phase apply
 
