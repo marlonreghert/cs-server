@@ -100,9 +100,12 @@ resource "aws_iam_role_policy" "landing_release" {
       # the exact same object set this role can already overwrite — it adds
       # no new resource exposure.
       {
+        # s3:GetObjectTagging is a separate action from s3:GetObject (object
+        # tags are a distinct API), needed for the same per-object drift
+        # refresh as GetObject above.
         Sid      = "ReadSiteContentForDriftDetection"
         Effect   = "Allow"
-        Action   = "s3:GetObject"
+        Action   = ["s3:GetObject", "s3:GetObjectTagging"]
         Resource = "${aws_s3_bucket.site.arn}/*"
       },
 
@@ -159,9 +162,24 @@ resource "aws_iam_role_policy" "landing_release" {
       # protected.
       # ------------------------------------------------------------------
       {
-        Sid      = "ReadSiteBucketMetadata"
-        Effect   = "Allow"
-        Action   = "s3:GetBucket*"
+        # s3:GetBucket* covers most bucket-level reads (Acl, Cors, Logging,
+        # Policy, RequestPayment, Tagging, Versioning, Website, ...), but four
+        # S3 IAM action names break that naming convention and must be listed
+        # explicitly — confirmed empirically via a full `terraform plan`
+        # under TF_LOG=debug, cross-checking every AWS API call made against
+        # this policy: GetBucketAccelerateConfiguration's IAM action is
+        # `GetAccelerateConfiguration` (no "Bucket"), and likewise
+        # GetEncryptionConfiguration, GetLifecycleConfiguration, and
+        # GetReplicationConfiguration.
+        Sid    = "ReadSiteBucketMetadata"
+        Effect = "Allow"
+        Action = [
+          "s3:GetBucket*",
+          "s3:GetAccelerateConfiguration",
+          "s3:GetEncryptionConfiguration",
+          "s3:GetLifecycleConfiguration",
+          "s3:GetReplicationConfiguration",
+        ]
         Resource = aws_s3_bucket.site.arn
       },
       {
@@ -202,23 +220,6 @@ resource "aws_iam_role_policy" "landing_release" {
         Resource = aws_cloudfront_distribution.site.arn
       },
       {
-        # cloudfront:ListDistributions (explicitly named in the plan) has no
-        # resource-level permission support in AWS's IAM model at all — it
-        # enumerates every distribution in the account and the API takes no
-        # resource identifier, so it cannot be scoped to this one
-        # distribution's ARN. This is an AWS-imposed constraint, not a
-        # design shortcut: the action itself is still read-only, and every
-        # other statement in this policy stays resource-scoped. (Two
-        # analogous list actions, cloudfront:ListOriginAccessControls and
-        # cloudfront:ListFunctions, were deliberately left out — not in the
-        # plan's list, and refreshing an already-tracked-by-ID resource uses
-        # the Get/Describe calls above, not a list-and-filter.)
-        Sid      = "ListDistributionsForRefresh"
-        Effect   = "Allow"
-        Action   = "cloudfront:ListDistributions"
-        Resource = "*"
-      },
-      {
         # Read-only: no acm:RequestCertificate, no acm:DeleteCertificate.
         # `aws_acm_certificate.site` sets `tags = var.tags`, and ACM tags are
         # likewise read via a separate call (ListTagsForCertificate), not
@@ -228,14 +229,40 @@ resource "aws_iam_role_policy" "landing_release" {
         Action   = ["acm:DescribeCertificate", "acm:ListTagsForCertificate"]
         Resource = aws_acm_certificate.site.arn
       },
+
+      # ------------------------------------------------------------------
+      # READ ONLY — this role's own IAM resources (itself), and the shared
+      # OIDC provider `data` source it's looked up through by URL.
+      #
+      # Not a privilege-escalation surface: none of this grants any write
+      # action on IAM. A role reading its own role/policy metadata cannot
+      # change its own permissions, and CloudFront/ACM's equivalent
+      # already-tracked-by-ARN resources don't need this pattern — the OIDC
+      # provider is looked up by `url`, not ARN, which is the one `data`
+      # source in this whole module that has no ID to Get-by-ARN with
+      # directly; it must List first, then Get the match. Confirmed via the
+      # same TF_LOG=debug cross-check as the S3 fixes above: unlike
+      # cloudfront:ListDistributions / acm:ListCertificates (removed — never
+      # actually called, since those resources ARE tracked by ID in state),
+      # iam:ListOpenIDConnectProviders genuinely is called on every refresh.
+      # ------------------------------------------------------------------
       {
-        # ListCertificates enumerates every certificate in the account and
-        # does not accept a resource ARN — AWS requires Resource "*" here too
-        # (same documented constraint as the CloudFront List* actions above).
-        Sid      = "ListCertificatesForRefresh"
+        Sid      = "ListOpenIDConnectProvidersForRefresh"
         Effect   = "Allow"
-        Action   = "acm:ListCertificates"
-        Resource = "*"
+        Action   = "iam:ListOpenIDConnectProviders"
+        Resource = "*" # No resource-level permission support for this action.
+      },
+      {
+        Sid      = "ReadOpenIDConnectProviderOnly"
+        Effect   = "Allow"
+        Action   = "iam:GetOpenIDConnectProvider"
+        Resource = data.aws_iam_openid_connect_provider.github.arn
+      },
+      {
+        Sid      = "ReadOwnRoleAndPolicyOnly"
+        Effect   = "Allow"
+        Action   = ["iam:GetRole", "iam:GetRolePolicy", "iam:ListRolePolicies", "iam:ListAttachedRolePolicies"]
+        Resource = aws_iam_role.landing_release.arn
       },
     ]
   })
