@@ -1484,3 +1484,262 @@ def test_the_estimate_endpoint_rejects_an_unknown_mode():
             router_module.estimate_instagram_profile_photos({"mode": "nope"})
         )
     assert excinfo.value.status_code == 400
+
+
+# ── the edge-colour backfill mode (free: no Apify, no upload) ───────────────
+
+
+def _edge_avatar(border_hex: str, size: int = 60) -> bytes:
+    """A square avatar with a flat frame of `border_hex`, PNG-encoded."""
+    import io as _io
+
+    from PIL import Image
+
+    rgb = tuple(int(border_hex[i:i + 2], 16) for i in (1, 3, 5))
+    img = Image.new("RGB", (size, size), rgb)
+    inset = size // 4
+    img.paste(
+        Image.new("RGB", (size - 2 * inset,) * 2, (255 - rgb[0], 255 - rgb[1], 255 - rgb[2])),
+        (inset, inset),
+    )
+    buf = _io.BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def _edge_harness(restore_settings, rows: dict):
+    """A catalog of already-stored photo rows, with the image fetcher
+    programmed against each row's own CDN URL — the way the backfill reads."""
+    settings.instagram_profile_photo_enabled = True
+    settings.media_bucket = "vibesense-media-000000000000"
+    settings.media_cdn_base_url = _CDN
+    settings.instagram_profile_photo_max_venues_per_run = 50
+
+    _redis, _geo, store, repo = _harness()
+    s3 = _RecordingS3()
+    media_store = VenueMediaStore(
+        bucket=settings.media_bucket, region="us-east-1",
+        cdn_base_url=_CDN, s3_client=s3,
+    )
+    apify = _FakeApify()
+    payloads = {}
+    for vid, (handle, data) in rows.items():
+        _seed(store, repo, vid, handle)
+        url = _seed_photo_row(store, vid, handle, data, days_old=1)
+        payloads[url] = (data, "image/png")
+    return store, repo, apify, media_store, payloads, s3
+
+
+def _payload_of(store, vid):
+    return store.enrichment[PROFILE_PHOTO_TABLE][vid]["payload"]
+
+
+def test_edge_color_mode_fills_rows_without_apify_or_upload(restore_settings):
+    data = _edge_avatar("#004A9D")
+    store, repo, apify, media_store, payloads, s3 = _edge_harness(
+        restore_settings, {"v-1": ("onebar", data)}
+    )
+    service = _service(store, repo, apify, media_store, payloads)
+
+    summary = asyncio.run(service.run({"mode": "edge_color"}))
+
+    assert _payload_of(store, "v-1")["edge_color"] == "#004A9D"
+    # The two cost guarantees, asserted at the boundaries themselves rather
+    # than inferred from a log line.
+    assert apify.calls == []
+    assert s3.puts == []
+    assert summary["counts"]["edge_color_sampled"] == 1
+
+
+def test_edge_color_mode_preserves_the_hash_and_handle(restore_settings):
+    """`_has_current_photo` reads both. Rewriting either would make the next
+    scheduled backfill re-buy an Apify scrape for every row this job touched."""
+    data = _edge_avatar("#171717")
+    store, repo, apify, media_store, payloads, s3 = _edge_harness(
+        restore_settings, {"v-1": ("onebar", data)}
+    )
+    before = dict(_payload_of(store, "v-1"))
+    service = _service(store, repo, apify, media_store, payloads)
+
+    asyncio.run(service.run({"mode": "edge_color"}))
+
+    after = _payload_of(store, "v-1")
+    for field in ("photo_url", "s3_key", "content_hash", "byte_size", "instagram_handle"):
+        assert after[field] == before[field], field
+
+    # And the proof of what that preservation buys: a following BACKFILL run
+    # skips the venue instead of scraping it.
+    apify.calls.clear()
+    summary = asyncio.run(service.run())
+    assert summary["outcomes"]["v-1"] == "skipped_has_photo"
+    assert apify.calls == []
+
+
+def test_edge_color_mode_skips_a_row_that_already_has_a_colour(restore_settings):
+    data = _edge_avatar("#FFFFFF")
+    store, repo, apify, media_store, payloads, s3 = _edge_harness(
+        restore_settings, {"v-1": ("onebar", data)}
+    )
+    _payload_of(store, "v-1")["edge_color"] = "#ABCDEF"
+    service = _service(store, repo, apify, media_store, payloads)
+
+    summary = asyncio.run(service.run({"mode": "edge_color"}))
+
+    assert _payload_of(store, "v-1")["edge_color"] == "#ABCDEF"
+    assert summary["venues_selected"] == 0
+
+
+def test_edge_color_mode_leaves_a_failed_row_untouched_and_retries(restore_settings):
+    """A failure must not stamp a null over the row: the next run has to pick
+    it up again, and that is affordable precisely because the run is free."""
+    data = _edge_avatar("#004A9D")
+    store, repo, apify, media_store, payloads, s3 = _edge_harness(
+        restore_settings, {"v-1": ("onebar", data)}
+    )
+    url = _payload_of(store, "v-1")["photo_url"]
+    payloads[url] = RuntimeError("CDN unreachable")
+    service = _service(store, repo, apify, media_store, payloads)
+
+    summary = asyncio.run(service.run({"mode": "edge_color"}))
+
+    assert "edge_color" not in _payload_of(store, "v-1")
+    assert summary["counts"]["edge_color_fetch_failed"] == 1
+    assert service.estimate({"mode": "edge_color"})["venues_to_process"] == 1
+
+
+def test_edge_color_mode_isolates_one_bad_row_from_the_rest(restore_settings):
+    good = _edge_avatar("#3154A5")
+    bad = _edge_avatar("#000000")
+    store, repo, apify, media_store, payloads, s3 = _edge_harness(
+        restore_settings, {"v-good": ("goodbar", good), "v-bad": ("badbar", bad)}
+    )
+    payloads[_payload_of(store, "v-bad")["photo_url"]] = RuntimeError("boom")
+    service = _service(store, repo, apify, media_store, payloads)
+
+    asyncio.run(service.run({"mode": "edge_color"}))
+
+    assert _payload_of(store, "v-good")["edge_color"] == "#3154A5"
+
+
+def test_edge_color_mode_selects_a_venue_whose_handle_is_gone(restore_settings):
+    """The row holds its own URL, so a venue whose handle discovery later lost
+    still has a photo the app serves — and it must still get a colour."""
+    data = _edge_avatar("#004A9D")
+    store, repo, apify, media_store, payloads, s3 = _edge_harness(
+        restore_settings, {"v-1": (None, data)}
+    )
+    service = _service(store, repo, apify, media_store, payloads)
+
+    asyncio.run(service.run({"mode": "edge_color"}))
+
+    assert _payload_of(store, "v-1")["edge_color"] == "#004A9D"
+
+
+def test_edge_color_estimate_is_free_and_matches_the_run(restore_settings):
+    store, repo, apify, media_store, payloads, s3 = _edge_harness(
+        restore_settings,
+        {"v-1": ("onebar", _edge_avatar("#004A9D")),
+         "v-2": ("twobar", _edge_avatar("#FFFFFF"))},
+    )
+    service = _service(store, repo, apify, media_store, payloads)
+
+    estimate = service.estimate({"mode": "edge_color"})
+
+    assert estimate["venues_to_process"] == 2
+    assert estimate["est_cost_usd"] == 0.0
+    assert apify.calls == [] and s3.puts == []
+
+    summary = asyncio.run(service.run({"mode": "edge_color"}))
+    assert summary["venues_selected"] == estimate["venues_to_process"]
+
+
+def test_edge_color_mode_honours_the_per_run_cap(restore_settings):
+    store, repo, apify, media_store, payloads, s3 = _edge_harness(
+        restore_settings,
+        {"v-1": ("onebar", _edge_avatar("#004A9D")),
+         "v-2": ("twobar", _edge_avatar("#FFFFFF"))},
+    )
+    settings.instagram_profile_photo_max_venues_per_run = 1
+    service = _service(store, repo, apify, media_store, payloads)
+
+    summary = asyncio.run(service.run({"mode": "edge_color"}))
+
+    coloured = sum(
+        1 for vid in ("v-1", "v-2") if _payload_of(store, vid).get("edge_color")
+    )
+    assert coloured == 1
+    assert summary["deferred"] == 1
+
+
+def test_a_stored_photo_records_its_edge_colour(restore_settings):
+    """The store path samples from the bytes it already holds — no extra call."""
+    data = _edge_avatar("#3154A5")
+    settings.instagram_profile_photo_enabled = True
+    settings.media_bucket = "vibesense-media-000000000000"
+    settings.media_cdn_base_url = _CDN
+    settings.instagram_profile_photo_max_venues_per_run = 50
+
+    _redis, _geo, store, repo = _harness()
+    _seed(store, repo, "v-1", "onebar")
+    s3 = _RecordingS3()
+    media_store = VenueMediaStore(
+        bucket=settings.media_bucket, region="us-east-1",
+        cdn_base_url=_CDN, s3_client=s3,
+    )
+    apify = _FakeApify()
+    apify.programmed["onebar"] = ProfileFetchResult(
+        username="onebar", profile_pic_url=_pic("onebar")
+    )
+    service = _service(
+        store, repo, apify, media_store, {_pic("onebar"): (data, "image/png")}
+    )
+
+    summary = asyncio.run(service.run())
+
+    assert summary["outcomes"]["v-1"] == "stored"
+    assert _payload_of(store, "v-1")["edge_color"] == "#3154A5"
+
+
+def test_an_undecodable_image_is_still_stored_without_a_colour(restore_settings):
+    """A missing colour is an ABSENCE. Refusing to store a paid-for scrape over
+    an unreadable colour would be strictly worse."""
+    settings.instagram_profile_photo_enabled = True
+    settings.media_bucket = "vibesense-media-000000000000"
+    settings.media_cdn_base_url = _CDN
+    settings.instagram_profile_photo_max_venues_per_run = 50
+
+    _redis, _geo, store, repo = _harness()
+    _seed(store, repo, "v-1", "onebar")
+    s3 = _RecordingS3()
+    media_store = VenueMediaStore(
+        bucket=settings.media_bucket, region="us-east-1",
+        cdn_base_url=_CDN, s3_client=s3,
+    )
+    apify = _FakeApify()
+    apify.programmed["onebar"] = ProfileFetchResult(
+        username="onebar", profile_pic_url=_pic("onebar")
+    )
+    service = _service(
+        store, repo, apify, media_store,
+        {_pic("onebar"): (b"\xff\xd8\xff\xe0not-a-jpeg", "image/jpeg")},
+    )
+
+    summary = asyncio.run(service.run())
+
+    assert summary["outcomes"]["v-1"] == "stored"
+    assert _payload_of(store, "v-1").get("edge_color") is None
+
+
+def test_an_unknown_mode_is_rejected_rather_than_defaulted(restore_settings):
+    store, repo, apify, media_store, payloads, s3 = _edge_harness(
+        restore_settings, {"v-1": ("onebar", _edge_avatar("#004A9D"))}
+    )
+    service = _service(store, repo, apify, media_store, payloads)
+
+    summary = asyncio.run(service.run({"mode": "edge_colour"}))
+
+    assert summary["status"] == "invalid_mode"
+    assert "edge_color" not in _payload_of(store, "v-1")
+    assert apify.calls == []
+    with pytest.raises(InvalidProfilePhotoMode):
+        service.estimate({"mode": "edge_colour"})

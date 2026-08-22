@@ -137,6 +137,7 @@ from app.models.instagram import (
     VenueInstagramProfilePhoto,
     VenueInstagramProfilePhotoAttempt,
 )
+from app.services.image_edge_color import sample_edge_color
 from app.services.pipeline_run_registry import new_run_id
 
 logger = logging.getLogger(__name__)
@@ -151,7 +152,18 @@ PROFILE_PHOTO_ATTEMPT_TABLE = "instagram.profile_photo_attempt"
 # reaches after `estimate()` has priced the run.
 MODE_BACKFILL = "backfill"
 MODE_REFRESH_ALL = "refresh_all"
-MODES = (MODE_BACKFILL, MODE_REFRESH_ALL)
+# Fill `edge_color` on photo rows that already exist. FREE: it never touches
+# Apify and never uploads — it re-reads each object over the public CloudFront
+# URL the row already holds. cs-server has `s3:PutObject` and nothing else on
+# that bucket (infra/media/main.tf:279), so an S3 read-back is not merely
+# undesirable here, it is impossible without a Terraform change. The CDN is the
+# route, and it is the same anonymous HTTPS GET every installed app already
+# makes.
+#
+# Manual only. `main.py` passes MODE_BACKFILL explicitly to the APScheduler
+# job, so a cron can never enter this mode either.
+MODE_BACKFILL_EDGE_COLOR = "edge_color"
+MODES = (MODE_BACKFILL, MODE_REFRESH_ALL, MODE_BACKFILL_EDGE_COLOR)
 
 
 class InvalidProfilePhotoMode(ValueError):
@@ -200,6 +212,16 @@ OUTCOME_FETCH_FAILED = "fetch_failed"
 OUTCOME_DOWNLOAD_FAILED = "download_failed"
 OUTCOME_UPLOAD_FAILED = "upload_failed"
 OUTCOME_CREDIT_EXHAUSTED = "credit_exhausted"
+
+# ── edge-colour backfill outcomes (mode `edge_color` only) ──────────────────
+# A closed set, like the ones above: an outcome label that never appears in
+# Prometheus is itself the diagnostic that its code path never ran. None of
+# these can move `venue_profile_photo_apify_calls_total`, which is the cost
+# guarantee stated as a metric rather than as a comment.
+OUTCOME_EDGE_COLOR_SAMPLED = "edge_color_sampled"
+OUTCOME_EDGE_COLOR_NO_URL = "edge_color_no_url"
+OUTCOME_EDGE_COLOR_FETCH_FAILED = "edge_color_fetch_failed"
+OUTCOME_EDGE_COLOR_DECODE_FAILED = "edge_color_decode_failed"
 
 # The outcomes that produced NO photo and were paid for anyway. Each writes an
 # attempt row so the next run can skip the venue before spending again.
@@ -434,6 +456,27 @@ class VenueProfilePhotoService:
             selection.skipped[venue_id] = outcome
             selection.counts[outcome] = selection.counts.get(outcome, 0) + 1
 
+        if mode == MODE_BACKFILL_EDGE_COLOR:
+            # A separate gate, not an extra condition on the one below, because
+            # it selects on a different question entirely: not "does this venue
+            # need a photo bought" but "does the photo we ALREADY own carry a
+            # colour". A handle is irrelevant (the row holds its own URL) and
+            # the negative cache is irrelevant too (nothing is bought, so there
+            # is no spend to suppress; a failed fetch is simply retried next
+            # run, which costs nothing).
+            for venue_id in servable_ids:
+                row = existing.get(venue_id)
+                if row is None:
+                    continue
+                if (row.get("payload") or {}).get("edge_color"):
+                    continue
+                selection.due.append((venue_id, handles.get(venue_id) or ""))
+            cap = settings.instagram_profile_photo_max_venues_per_run
+            selection.selected = (
+                selection.due[:cap] if cap and cap > 0 else list(selection.due)
+            )
+            return selection
+
         for venue_id in servable_ids:
             handle = handles.get(venue_id)
             if not handle:
@@ -487,7 +530,14 @@ class VenueProfilePhotoService:
         mode = parse_mode(config)
         selection = self.select(mode)
         to_scrape = len(selection.selected)
-        unit = settings.apify_instagram_profile_cost_usd
+        # The edge-colour backfill buys nothing: no actor run, no upload, only
+        # an anonymous CDN GET of an object we already paid for. Pricing it at
+        # the Apify unit rate would misreport a free job as a paid one and
+        # invite an operator to defer it.
+        unit = (
+            0.0 if mode == MODE_BACKFILL_EDGE_COLOR
+            else settings.apify_instagram_profile_cost_usd
+        )
         cost = round(to_scrape * unit, 4)
 
         warning = None
@@ -505,6 +555,13 @@ class VenueProfilePhotoService:
             warning = (
                 "Venue selection failed, so this estimate is not a real figure; "
                 "check the logs before triggering a run."
+            )
+        elif mode == MODE_BACKFILL_EDGE_COLOR:
+            warning = (
+                f"edge_color re-reads {to_scrape} already-stored photo(s) over "
+                "the public CDN to record their edge colour. It makes no Apify "
+                "call and uploads nothing, so it costs $0.00 and is safe to "
+                "re-run."
             )
         elif mode == MODE_REFRESH_ALL:
             # The "warning sign with cost estimative" the operator asked for.
@@ -534,6 +591,11 @@ class VenueProfilePhotoService:
             # THE number: what this run would actually scrape, and what the
             # run's billed-call count is asserted equal to.
             "venues_to_scrape": to_scrape,
+            # Same number under a mode-neutral name. `venues_to_scrape` would
+            # be a lie for edge_color, which scrapes nothing, but the admin
+            # panel's generic renderer already reads it — so both are emitted
+            # from the one selection rather than either being dropped.
+            "venues_to_process": to_scrape,
             "venues_deferred": selection.deferred,
             "max_venues_per_run": settings.instagram_profile_photo_max_venues_per_run,
             "unit_cost_usd": unit,
@@ -622,6 +684,39 @@ class VenueProfilePhotoService:
             f"{summary['counts'].get(OUTCOME_SKIPPED_RECENT_FAILURE, 0)} "
             f"no_handle={summary['counts'].get(OUTCOME_NO_HANDLE, 0)}"
         )
+
+        # ── the FREE mode: no scrape, no upload, no attempt bookkeeping ────
+        if mode == MODE_BACKFILL_EDGE_COLOR:
+            summary["deferred"] = selection.deferred
+            for venue_id, _handle in selected:
+                try:
+                    outcome = await self._process_edge_color(
+                        venue_id, existing.get(venue_id)
+                    )
+                except Exception as e:
+                    # Failure isolation, same rule as the paid run: one bad row
+                    # must never abort a pass over the rest.
+                    logger.warning(
+                        f"[ProfilePhoto] edge colour for {venue_id} failed "
+                        f"unexpectedly: {e}"
+                    )
+                    outcome = OUTCOME_EDGE_COLOR_FETCH_FAILED
+                record(venue_id, outcome)
+            # `_note_attempt` is deliberately NOT called: the negative cache
+            # exists to stop re-BUYING a scrape, and nothing here is bought.
+            # Writing an attempt row would also suppress a later real scrape
+            # for a venue whose only problem was an unreachable CDN.
+            failed = sum(
+                summary["counts"].get(o, 0)
+                for o in (
+                    OUTCOME_EDGE_COLOR_FETCH_FAILED,
+                    OUTCOME_EDGE_COLOR_DECODE_FAILED,
+                    OUTCOME_EDGE_COLOR_NO_URL,
+                )
+            )
+            return self._finish(
+                summary, "partial" if failed else "success", started, job_id
+            )
 
         # ── spend ──────────────────────────────────────────────────────────
         for venue_id, handle in selected:
@@ -719,6 +814,12 @@ class VenueProfilePhotoService:
         content_hash = hashlib.sha256(data).hexdigest()
         key = self.media_store.profile_photo_key(venue_id, content_hash)
         photo_url = self.media_store.cdn_url(key)
+        # Sampled from the bytes already in memory: no extra network call, and
+        # it happens AFTER the download so it cannot move the Apify counter or
+        # change which venues `select()` chose. `None` is a normal result — the
+        # photo is stored either way (see the module's "what is never a
+        # failure").
+        edge_color = sample_edge_color(data)
 
         unchanged = (
             existing_row is not None
@@ -730,8 +831,11 @@ class VenueProfilePhotoService:
             # nothing; the row IS re-asserted, and that is deliberate — it
             # restarts the freshness clock so an unchanged avatar is not
             # re-scraped on every single cycle.
+            # The re-persist also fills a MISSING colour for free: the bytes
+            # are already here, so a row stored before this field existed
+            # gains one the next time its venue is legitimately re-scraped.
             self._persist(venue_id, handle, photo_url, key, content_hash,
-                          normalized_type, len(data))
+                          normalized_type, len(data), edge_color)
             return OUTCOME_UNCHANGED
 
         try:
@@ -751,8 +855,67 @@ class VenueProfilePhotoService:
         # object exists, and the projector turns that row into a URL the app
         # will render.
         self._persist(venue_id, handle, photo_url, key, content_hash,
-                      normalized_type, len(data))
+                      normalized_type, len(data), edge_color)
         return OUTCOME_STORED
+
+    # ── one venue, edge-colour backfill (free) ──────────────────────────────
+    async def _process_edge_color(self, venue_id: str, row: Optional[dict]) -> str:
+        """Fill `edge_color` on a row that already has a photo.
+
+        Reads the object back over the row's own **public CloudFront URL** —
+        the one field of the row that is already a durable, anonymously
+        readable address. cs-server holds `s3:PutObject` on this bucket and
+        nothing else, so this is not a shortcut around an S3 read, it is the
+        only route there is.
+
+        Every other field of the row is carried over verbatim.
+        `content_hash` and `instagram_handle` are the load-bearing pair:
+        `_has_current_photo` reads both, so rewriting either would make the
+        next scheduled backfill re-buy an Apify scrape for every row this job
+        touched. `fetched_at` is preserved too — this job did not fetch a
+        photo, it read one we already had.
+
+        A failure leaves the row COMPLETELY untouched rather than stamping a
+        null colour over it, so the next run simply picks it up again. That is
+        affordable precisely because the run is free.
+        """
+        payload = (row or {}).get("payload") or {}
+        url = payload.get("photo_url")
+        if not url:
+            logger.warning(
+                f"[ProfilePhoto] {venue_id} has a photo row with no URL; "
+                "nothing to read an edge colour from"
+            )
+            return OUTCOME_EDGE_COLOR_NO_URL
+
+        try:
+            data, _content_type = await self._fetch_image(url)
+        except Exception as e:
+            logger.warning(
+                f"[ProfilePhoto] {venue_id} edge colour: fetching {url} failed "
+                f"({type(e).__name__}: {e}); the row is left untouched and will "
+                "be retried"
+            )
+            return OUTCOME_EDGE_COLOR_FETCH_FAILED
+
+        edge_color = sample_edge_color(data)
+        if not edge_color:
+            return OUTCOME_EDGE_COLOR_DECODE_FAILED
+
+        self.repo.set_venue_profile_photo(
+            VenueInstagramProfilePhoto(
+                venue_id=venue_id,
+                instagram_handle=payload.get("instagram_handle"),
+                photo_url=url,
+                s3_key=payload.get("s3_key") or "",
+                content_hash=payload.get("content_hash") or "",
+                content_type=payload.get("content_type") or "image/jpeg",
+                byte_size=payload.get("byte_size") or 0,
+                edge_color=edge_color,
+                fetched_at=_coerce_dt(payload.get("fetched_at")) or self._now(),
+            )
+        )
+        return OUTCOME_EDGE_COLOR_SAMPLED
 
     # ── helpers ─────────────────────────────────────────────────────────────
     def _has_current_photo(self, row: dict, handle: str) -> bool:
@@ -856,6 +1019,7 @@ class VenueProfilePhotoService:
     def _persist(
         self, venue_id: str, handle: str, photo_url: str, key: str,
         content_hash: str, content_type: str, byte_size: int,
+        edge_color: Optional[str] = None,
     ) -> None:
         self.repo.set_venue_profile_photo(
             VenueInstagramProfilePhoto(
@@ -866,6 +1030,7 @@ class VenueProfilePhotoService:
                 content_hash=content_hash,
                 content_type=content_type,
                 byte_size=byte_size,
+                edge_color=edge_color,
                 fetched_at=self._now(),
             )
         )
