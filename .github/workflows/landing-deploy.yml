@@ -1,0 +1,90 @@
+name: landing-deploy
+
+# Publishes the VibeSense landing site (infra/landing/) on every merge to
+# `main` that touches it, and on manual dispatch.
+#
+# Before this workflow existed, publishing was a human running
+# `terraform apply` by hand from whatever branch happened to be checked out
+# locally — which is exactly how a `terraform apply` from the wrong checkout
+# once silently overwrote a colleague's already-deployed-but-unmerged branch.
+# This workflow always applies a clean checkout of `main`, so what gets
+# deployed is always exactly what's on `main`, never a stray local branch.
+#
+# OIDC, not a stored AWS credential: `aws-actions/configure-aws-credentials`
+# exchanges this job's GitHub-issued OIDC token for short-lived AWS
+# credentials by assuming `vibesense-landing-release`
+# (infra/landing/ci.tf). The role's trust policy pins both this repository
+# and the `main` branch, so nothing else can assume it.
+#
+# FAIL-CLOSED BY DESIGN: `vibesense-landing-release` can write site-bucket
+# objects, invalidate this one CloudFront distribution, and read/write only
+# its own `landing/` Terraform state key. It deliberately CANNOT modify the
+# CloudFront distribution config, the ACM certificate, the bucket policy, or
+# the public-access-block. If a merged `infra/landing/main.tf` change touches
+# any of those, `terraform apply` below fails with `AccessDenied` — that is
+# the intended guardrail, not a bug to work around by widening the role. Such
+# a topology change still requires a human to run `terraform apply` under
+# their own SSO admin role, exactly as documented in infra/landing/README.md.
+# Do not "fix" an AccessDenied failure here by adding permissions to the
+# role; re-read infra/landing/ci.tf's comments first.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'infra/landing/**'
+  workflow_dispatch: {}
+
+# Queue rather than race two merges that land close together. S3-native state
+# locking (backend.tf's use_lockfile) would also block a true concurrent
+# apply, but queuing avoids a failed/retried run.
+concurrency:
+  group: landing-deploy
+  cancel-in-progress: false
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  deploy:
+    name: Deploy landing site
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: infra/landing
+
+    steps:
+      - name: Check out main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: '1.15.6'
+
+      - name: Assume the landing release role
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.LANDING_RELEASE_ROLE_ARN }}
+          aws-region: us-east-1
+
+      - name: Terraform init
+        run: terraform init -input=false
+
+      # -auto-approve is safe here specifically because the role that runs it
+      # cannot touch anything outside the write set described above — the
+      # blast radius of an unattended apply is bounded by IAM, not by a human
+      # reading the plan output first.
+      - name: Terraform apply
+        run: terraform apply -input=false -auto-approve
+
+      - name: Invalidate CloudFront cache
+        run: |
+          set -euo pipefail
+          DISTRIBUTION_ID="$(terraform output -raw cloudfront_distribution_id)"
+          aws cloudfront create-invalidation \
+            --distribution-id "$DISTRIBUTION_ID" \
+            --paths '/*'
