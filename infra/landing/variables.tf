@@ -20,3 +20,15 @@ variable "tags" {
   type    = map(string)
   default = { project = "vibesense", component = "landing-site" }
 }
+
+variable "release_repository" {
+  description = "GitHub repository allowed to assume the landing release role, as owner/name."
+  type        = string
+  default     = "marlonreghert/cs-server"
+}
+
+variable "release_branch" {
+  description = "The only branch whose workflow runs may assume the landing release role."
+  type        = string
+  default     = "main"
+}
