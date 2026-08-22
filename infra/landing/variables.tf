@@ -1,9 +1,3 @@
-variable "aws_profile" {
-  description = "Local AWS SSO profile used for apply."
-  type        = string
-  default     = "vibesense"
-}
-
 variable "domain" {
   description = "Apex domain the company owns (registered at GoDaddy)."
   type        = string
