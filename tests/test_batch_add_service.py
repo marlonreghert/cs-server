@@ -1,7 +1,9 @@
 """Unit tests for the server-side batch venue-add service."""
+import asyncio
 import pytest
 
 from app.handlers.add_venue_handler import AddVenueOutcome
+from app.config import settings
 from app.models.batch_add import BatchAddRequest
 import app.services.batch_add_service as bas
 from app.services.batch_add_service import BatchAddService, _classify
@@ -239,6 +241,11 @@ async def test_batch_runs_all_rows_and_summarizes():
 
 @pytest.mark.asyncio
 async def test_quota_exhausted_stops_the_batch():
+    """Pinned to concurrency 1, where "stop" means STRICTLY no further row is
+    attempted. That exact guarantee cannot survive parallelism — see the
+    sibling test below — so it is asserted in the regime where it holds rather
+    than quietly relaxed for both."""
+    settings.batch_add_concurrency = 1
     handler = _Handler({
         "A": AddVenueOutcome(201, {"status": "created", "venue_id": "vA"}),
         "B": AddVenueOutcome(429, {"detail": "Monthly venue quota exhausted"}),
@@ -530,3 +537,160 @@ def test_on_done_crash_path_resave_preserves_job_type():
     assert stored["job_type"] == "batch"
     assert stored["status"] == "failed"
     assert "RuntimeError" in stored["stopped_reason"]
+
+
+# ── concurrency (settings.batch_add_concurrency) ────────────────────────────
+
+
+@pytest.fixture(autouse=True)
+def _restore_concurrency():
+    """Every test in this module runs at the shipped default unless it says
+    otherwise, and no test can leak its setting into the next one."""
+    saved = settings.batch_add_concurrency
+    yield
+    settings.batch_add_concurrency = saved
+
+
+@pytest.mark.asyncio
+async def test_a_stop_outcome_halts_dispatch_and_only_drains_what_is_in_flight():
+    """Parallel stop semantics, stated as a BOUND rather than an exact count.
+
+    In flight rows cannot be un-started, so a stop can still complete up to
+    `concurrency - 1` extra rows. What must hold is that dispatch stops: the
+    remaining rows are never attempted. With 10 rows at concurrency 2 and a
+    stop on row 0, anything approaching 10 would mean the stop did nothing.
+    """
+    settings.batch_add_concurrency = 2
+    outcomes = {"A": AddVenueOutcome(429, {"detail": "Monthly venue quota exhausted"})}
+    names = ["A"] + [f"R{i}" for i in range(9)]
+    for n in names[1:]:
+        outcomes[n] = AddVenueOutcome(201, {"status": "created", "venue_id": f"v{n}"})
+    handler = _Handler(outcomes)
+    google = _Google({n: (-9.6, -35.7) for n in names})
+    svc = _service(handler, google)
+    req = BatchAddRequest(venues=[
+        {"venue_name": n, "venue_address": n.lower()} for n in names
+    ])
+    job = await _run_to_completion(svc, req)
+    assert job["status"] == "stopped"
+    assert "quota_exhausted" in job["stopped_reason"]
+    # The bound: the stopping row plus at most (concurrency - 1) already in
+    # flight. Not 10 — that would mean dispatch never stopped.
+    assert job["processed"] <= 2
+    assert len(handler.calls) <= 2
+
+
+@pytest.mark.asyncio
+async def test_duplicate_rows_in_one_batch_are_serialized_so_only_one_is_bought():
+    """The money bug parallelism would otherwise introduce.
+
+    Sequential execution protected duplicates only by accident of ordering:
+    row 1's add made the venue cache-visible before row 2 read the cache. Run
+    them concurrently with no lock and both miss `_already_active_id`, both
+    reach the handler, and both pay a BestTime credit to create the same venue
+    twice.
+
+    The module's shared `_Handler` has a static `cached` map, so it cannot
+    express "a created venue becomes visible to the next lookup" — the exact
+    behaviour under test. This local subclass adds only that, mirroring what
+    the real handler does via `_save_address_cache`.
+
+    Rows are byte-identical on purpose. The dispatch lock also folds case, but
+    whether the REAL address cache normalizes case is a property of
+    `_lookup_cached_venue_id`, not of this change, so asserting a
+    different-case guarantee here would be claiming something this test does
+    not establish.
+    """
+    settings.batch_add_concurrency = 4
+
+    class _CachingHandler(_Handler):
+        async def add(self, request, *, coordinates_trusted=True):
+            outcome = await super().add(
+                request, coordinates_trusted=coordinates_trusted
+            )
+            # The await is load bearing, not cosmetic. A fake that records the
+            # call and writes the cache without ever yielding cannot overlap
+            # two rows, so the test would pass with NO lock at all — verified
+            # by mutation. This yield opens the exact window the per-key lock
+            # exists to close.
+            await asyncio.sleep(0.02)
+            vid = (outcome.body or {}).get("venue_id")
+            if vid:
+                self._cached[request.venue_name] = vid
+                self.venue_dao.venues[vid] = _Venue(active=True)
+            return outcome
+
+    handler = _CachingHandler({
+        "Dup": AddVenueOutcome(201, {"status": "created", "venue_id": "vDup"}),
+    })
+    google = _Google({"Dup": (-9.6, -35.7)})
+    svc = _service(handler, google)
+    req = BatchAddRequest(venues=[
+        {"venue_name": "Dup", "venue_address": "same place"},
+        {"venue_name": "Dup", "venue_address": "same place"},
+        {"venue_name": "Dup", "venue_address": "same place"},
+    ])
+    job = await _run_to_completion(svc, req)
+    assert job["status"] == "done"
+    # Exactly one paid add for three identical rows; the other two short
+    # circuit on the address-hash hit the first one created.
+    assert handler.calls.count("Dup") == 1
+    assert job["summary"].get("created") == 1
+    assert job["summary"].get("already_exists") == 2
+
+
+@pytest.mark.asyncio
+async def test_results_are_reported_in_submission_order_not_completion_order():
+    """Workers finish out of order; the report must stay diffable against the
+    input list."""
+    settings.batch_add_concurrency = 8
+    names = [f"V{i}" for i in range(8)]
+
+    class _SkewedHandler(_Handler):
+        """Row 0 is the slowest, row 7 the fastest, so completion order is the
+        REVERSE of submission order. Without the skew every row completes in
+        dispatch order and the sort is unobservable — the test would pass with
+        the sort deleted, verified by mutation."""
+        async def add(self, request, *, coordinates_trusted=True):
+            await asyncio.sleep(0.02 * (8 - int(request.venue_name[1:])))
+            return await super().add(
+                request, coordinates_trusted=coordinates_trusted
+            )
+
+    handler = _SkewedHandler({
+        n: AddVenueOutcome(201, {"status": "created", "venue_id": f"v{n}"})
+        for n in names
+    })
+    google = _Google({n: (-9.6, -35.7) for n in names})
+    svc = _service(handler, google)
+    req = BatchAddRequest(venues=[
+        {"venue_name": n, "venue_address": n.lower()} for n in names
+    ])
+    job = await _run_to_completion(svc, req)
+    assert job["status"] == "done"
+    assert [r["index"] for r in job["results"]] == list(range(8))
+    assert [r["venue_name"] for r in job["results"]] == names
+    assert job["processed"] == 8
+    # The premise: they really did finish out of order. If this ever fails the
+    # test above has stopped proving anything.
+    assert handler.calls != names
+
+
+@pytest.mark.asyncio
+async def test_concurrency_one_is_exactly_the_sequential_path():
+    """The way back. Same inputs, same outcomes, strict submission order."""
+    settings.batch_add_concurrency = 1
+    names = [f"V{i}" for i in range(5)]
+    handler = _Handler({
+        n: AddVenueOutcome(201, {"status": "created", "venue_id": f"v{n}"})
+        for n in names
+    })
+    google = _Google({n: (-9.6, -35.7) for n in names})
+    svc = _service(handler, google)
+    req = BatchAddRequest(venues=[
+        {"venue_name": n, "venue_address": n.lower()} for n in names
+    ])
+    job = await _run_to_completion(svc, req)
+    assert handler.calls == names          # strict order, one at a time
+    assert job["processed"] == 5
+    assert job["summary"] == {"created": 5}

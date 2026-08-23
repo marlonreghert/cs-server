@@ -502,6 +502,15 @@ class Settings(BaseSettings):
     # an emoji placeholder for a day looks broken, and the operator has already
     # paid far more than $0.003 to add it. Off restores the old behaviour
     # exactly — the backfill still picks the venue up on its next sweep.
+    # How many batch-add rows run at once. 1 is the historical sequential
+    # behaviour and the way back if the parallel path misbehaves. 4 is chosen
+    # to hide the ~13s inline profile-photo capture without outrunning the
+    # shared Google pacer or BestTime's own client-side venue-search limiter;
+    # a stop outcome halts DISPATCH, so a stop can still spend up to
+    # `concurrency - 1` in-flight rows, which is the other reason to keep it
+    # small.
+    batch_add_concurrency: int = 4
+
     add_venue_profile_photo_enabled: bool = True
     # The add is a background job, so this is a safety valve against a hung
     # actor rather than a latency budget. Generous enough that a normal

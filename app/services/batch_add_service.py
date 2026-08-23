@@ -18,6 +18,7 @@ import uuid
 from typing import Optional
 
 from app.handlers.add_venue_handler import AddVenueByAddressRequest
+from app.config import settings
 from app.metrics import VENUE_ADD_JOB_PERSIST_FAILURES_TOTAL
 from app.models.batch_add import BatchAddRequest, BatchAddRow
 from app.services import job_lock
@@ -48,6 +49,35 @@ _STOP_OUTCOMES = {"quota_exhausted", "besttime_monthly_cap", "besttime_bad_respo
 # retry a transient miss with backoff so a momentary 429 recovers.
 _GOOGLE_PACE_SECONDS = 0.3
 _COORD_RETRY_BACKOFFS = (2.0, 5.0)
+
+
+class _Pacer:
+    """A minimum-interval gate shared by every worker.
+
+    The sequential loop paced Google by sleeping AFTER each Google-touching
+    row, which only works because there is exactly one row in flight. Under
+    concurrency that sleep paces nothing — N workers would each sleep in
+    parallel and still burst N calls at once. This moves the pacing to a
+    single shared gate in front of the call, so the aggregate rate is the same
+    whatever the worker count: with `interval` 0.3s, at most one Google call
+    starts every 300ms, period.
+    """
+
+    def __init__(self, interval: float) -> None:
+        self._interval = interval
+        self._lock = asyncio.Lock()
+        self._next_at = 0.0
+
+    async def wait(self) -> None:
+        if self._interval <= 0:
+            return
+        async with self._lock:
+            now = time.monotonic()
+            delay = self._next_at - now
+            if delay > 0:
+                await asyncio.sleep(delay)
+                now = time.monotonic()
+            self._next_at = now + self._interval
 
 
 class BatchAddService:
@@ -189,7 +219,7 @@ class BatchAddService:
         return None
 
     async def _resolve_coords(
-        self, row: BatchAddRow
+        self, row: BatchAddRow, pacer: Optional[_Pacer] = None
     ) -> tuple[Optional[str], Optional[float], Optional[float], bool]:
         """Resolve (place_id, lat, lng, coordinates_trusted) for one batch
         row. coordinates_trusted mirrors AddVenueHandler.add()'s trust gate
@@ -215,6 +245,10 @@ class BatchAddService:
         for i, backoff in enumerate(attempts):
             if backoff:
                 await asyncio.sleep(backoff)
+            # Shared gate, in front of the call rather than a sleep after it:
+            # under concurrency only this ordering bounds the aggregate rate.
+            if pacer is not None:
+                await pacer.wait()
             pid, lat, lng = await self.google.resolve_coordinates(
                 row.venue_name,
                 row.venue_address,
@@ -226,13 +260,31 @@ class BatchAddService:
                 return pid, lat, lng, trusted
         return pid, None, None, trusted
 
-    async def _run_job(self, job: dict, rows: list[BatchAddRow]) -> None:
-        summary: dict[str, int] = {}
-        for idx, row in enumerate(rows):
-            t0 = time.perf_counter()
-            result = {"index": idx, "venue_name": row.venue_name,
-                      "venue_address": row.venue_address}
-            used_google = False
+    async def _process_row(
+        self,
+        idx: int,
+        row: BatchAddRow,
+        pacer: Optional[_Pacer],
+        key_locks: dict,
+    ) -> tuple[dict, bool]:
+        """One row, start to finish. Returns (result, used_google).
+
+        Identical to the sequential loop's body except for the duplicate lock.
+        Rows that share a name+address key are serialized against each other so
+        the first one's address-cache write is visible to the second, which is
+        what makes `_already_active_id` short-circuit the duplicate. Without
+        this, two rows for the same venue run concurrently, both miss the
+        cache, and both pay a BestTime credit to create the same place twice —
+        a protection the sequential loop provided only by accident of ordering.
+        Rows with different keys never contend for the same lock.
+        """
+        t0 = time.perf_counter()
+        result = {"index": idx, "venue_name": row.venue_name,
+                  "venue_address": row.venue_address}
+        used_google = False
+        key = f"{(row.venue_name or '').strip().casefold()}|{(row.venue_address or '').strip().casefold()}"
+        lock = key_locks.setdefault(key, asyncio.Lock())
+        async with lock:
             try:
                 # Re-run fast-path: already-active by address hash → record
                 # already_exists without any Google/BestTime call.
@@ -247,7 +299,9 @@ class BatchAddService:
                         self.google is not None
                         and (row.venue_lat is None or row.venue_lng is None)
                     )
-                    place_id, lat, lng, coordinates_trusted = await self._resolve_coords(row)
+                    place_id, lat, lng, coordinates_trusted = await self._resolve_coords(
+                        row, pacer
+                    )
                     if lat is None or lng is None:
                         result.update(outcome="skipped_unresolved_coords",
                                       http=None, venue_id=None,
@@ -273,36 +327,80 @@ class BatchAddService:
                               venue_id=None,
                               detail=f"{type(e).__name__}: {e}"[:300])
 
-            result["secs"] = round(time.perf_counter() - t0, 1)
-            summary[result["outcome"]] = summary.get(result["outcome"], 0) + 1
-            job["results"].append(result)
-            job["processed"] = idx + 1
-            job["summary"] = summary
-            await self._save(job)
+        result["secs"] = round(time.perf_counter() - t0, 1)
+        return result, used_google
 
-            # Steady pace on Google-touching rows: keeps the resolve rate under
-            # the Places QPM quota so a burst never trips the cascade in the
-            # first place (retry backoff above recovers if one slips through).
-            if used_google and idx < len(rows) - 1:
-                await asyncio.sleep(_GOOGLE_PACE_SECONDS)
+    async def _run_job(self, job: dict, rows: list[BatchAddRow]) -> None:
+        """Run every row through the single-add path, up to
+        `settings.batch_add_concurrency` at a time.
 
-            if result["outcome"] in _STOP_OUTCOMES:
-                job["status"] = "stopped"
-                job["stopped_reason"] = (
-                    f"row {idx} '{row.venue_name}' -> {result['outcome']}"
+        Concurrency 1 is exactly the previous sequential behaviour and is the
+        way back if anything about the parallel path misbehaves. Above 1, three
+        things that the sequential loop got for free have to be paid for
+        explicitly: Google pacing moves to a shared `_Pacer` in front of the
+        call (a trailing per-row sleep paces nothing when N rows are in
+        flight), duplicate rows are serialized by key so the address-cache
+        short-circuit still fires, and the job dict is mutated under a lock
+        because workers finish out of order.
+
+        Stop outcomes stop DISPATCH, not execution: rows already in flight run
+        to completion, so a stop can still spend up to `concurrency - 1` more
+        rows. That is inherent to running work in parallel, and the reason the
+        cap stays small.
+        """
+        summary: dict[str, int] = {}
+        concurrency = max(1, int(getattr(settings, "batch_add_concurrency", 1) or 1))
+        pacer = _Pacer(_GOOGLE_PACE_SECONDS)
+        key_locks: dict = {}
+        state_lock = asyncio.Lock()
+        stop = asyncio.Event()
+        nxt = iter(range(len(rows)))
+        completed = 0
+
+        async def worker() -> None:
+            nonlocal completed
+            while not stop.is_set():
+                try:
+                    idx = next(nxt)
+                except StopIteration:
+                    return
+                result, _used_google = await self._process_row(
+                    idx, rows[idx], pacer, key_locks
                 )
-                job["finished_at"] = time.time()
-                job["budget_after"] = self._budget_snapshot()
-                await self._save(job)
-                logger.warning(
-                    f"[BatchAddService] job {job['job_id']} stopped: "
-                    f"{job['stopped_reason']}"
-                )
-                return
+                async with state_lock:
+                    completed += 1
+                    summary[result["outcome"]] = summary.get(result["outcome"], 0) + 1
+                    job["results"].append(result)
+                    # Rows finish out of order, so `processed` is a COUNT of
+                    # completed rows, not `idx + 1` — which would jump around
+                    # and go backwards for a poller watching the job.
+                    job["processed"] = completed
+                    job["summary"] = summary
+                    await self._save(job)
+                    if result["outcome"] in _STOP_OUTCOMES and not stop.is_set():
+                        stop.set()
+                        job["status"] = "stopped"
+                        job["stopped_reason"] = (
+                            f"row {idx} '{rows[idx].venue_name}' -> "
+                            f"{result['outcome']}"
+                        )
 
-        job["status"] = "done"
+        await asyncio.gather(*(worker() for _ in range(min(concurrency, len(rows) or 1))))
+
+        # Report rows in submission order regardless of completion order, so a
+        # result list stays diffable against the input list.
+        job["results"].sort(key=lambda r: r.get("index", 0))
         job["finished_at"] = time.time()
         job["budget_after"] = self._budget_snapshot()
+        if job.get("status") == "stopped":
+            await self._save(job)
+            logger.warning(
+                f"[BatchAddService] job {job['job_id']} stopped: "
+                f"{job.get('stopped_reason')}"
+            )
+            return
+
+        job["status"] = "done"
         await self._save(job)
         logger.info(
             f"[BatchAddService] job {job['job_id']} done: {summary}"
