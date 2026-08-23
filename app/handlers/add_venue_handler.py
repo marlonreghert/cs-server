@@ -29,6 +29,7 @@ from app.metrics import (
     ADD_VENUE_BY_ADDRESS_TOTAL,
     ADD_VENUE_GEO_FALLBACK_SKIPPED_UNTRUSTED_TOTAL,
     ADD_VENUE_INSTAGRAM_TOTAL,
+    ADD_VENUE_PROFILE_PHOTO_TOTAL,
     VENUE_MONTHLY_NEW_COUNT,
 )
 from app.models import (
@@ -175,6 +176,7 @@ class AddVenueHandler:
         timeout_recovery_grace_seconds: float = DEFAULT_TIMEOUT_RECOVERY_GRACE_SECONDS,
         admin_config_service=None,
         instagram_cascade_service=None,
+        venue_profile_photo_service=None,
     ) -> None:
         self.venue_dao = venue_dao
         self.besttime = besttime_api
@@ -204,6 +206,11 @@ class AddVenueHandler:
         # every add reports instagram.status="skipped" and still succeeds
         # (dependency-aware, same guardrail as the Google enrichment service).
         self.instagram_cascade_service = instagram_cascade_service
+        # Optional: captures the venue's Instagram profile photo inline, right
+        # after the handle is known. Absent -> every add reports
+        # profile_photo.status="skipped" and the 24h backfill picks it up
+        # instead, which is exactly the pre-existing behaviour.
+        self.venue_profile_photo_service = venue_profile_photo_service
 
     async def add(
         self,
@@ -433,6 +440,15 @@ class AddVenueHandler:
         # add: see _discover_instagram_handle.
         instagram = await self._discover_instagram_handle(venue)
 
+        # Capture the profile photo for that handle, now. Runs AFTER discovery
+        # so a just-found handle is usable on this very add. A None handle is
+        # NOT the end of it: the service falls back to the venue's stored
+        # handle, which is what the recovered / geo-linked paths need — there
+        # discovery reports "skipped" precisely because a handle already exists.
+        profile_photo = await self._capture_profile_photo(
+            venue, instagram.get("handle")
+        )
+
         # Best-effort cache of week_raw days if BestTime included them.
         for day in analysis:
             try:
@@ -465,6 +481,7 @@ class AddVenueHandler:
             "venue_lng": venue.venue_lng,
             "source": source,
             "instagram": instagram,
+            "profile_photo": profile_photo,
         }
         if recovered_from_timeout:
             body["recovered_from_timeout"] = True
@@ -789,6 +806,7 @@ class AddVenueHandler:
         existing = self.venue_dao.get_venue(match.venue_id)
         was_new = existing is None
         instagram = None
+        profile_photo = None
         if was_new:
             # Geo-link provenance, persisted at link time: undo_geo_link
             # requires geo_linked=True (a normally-created venue must never
@@ -821,6 +839,17 @@ class AddVenueHandler:
             # already-catalogued match already had its chance (or is due for
             # one on the next cascade run, not a second inline attempt).
             instagram = await self._discover_instagram_handle(venue)
+            # Capture the profile photo for that handle, now — same call
+            # _finalize_created_venue makes, and for the same reason: a
+            # geo-linked venue is exactly the "recovered" shape the service's
+            # own handle fallback exists for (discovery above often reports
+            # "skipped" precisely because the venue already carries a
+            # handle). Missing this call was itself a defect: the venue's
+            # docstring already justified the fallback lookup by this path,
+            # but nothing here ever invoked it.
+            profile_photo = await self._capture_profile_photo(
+                venue, instagram.get("handle")
+            )
         VENUE_MONTHLY_NEW_COUNT.set(self.budget.get_snapshot().month_counter)
         self._save_address_cache(
             request.venue_name, request.venue_address, match.venue_id
@@ -843,6 +872,7 @@ class AddVenueHandler:
         }
         if was_new:
             body["instagram"] = instagram
+            body["profile_photo"] = profile_photo
         return AddVenueOutcome(status_code=200, body=body)
 
     # ── Google-only catalog path (no BestTime venue exists) ──────────────────
@@ -1365,6 +1395,70 @@ class AddVenueHandler:
                 f"[AddVenueHandler] Google enrichment failed for {venue.venue_id}: "
                 f"{type(e).__name__}: {e}"
             )
+
+    async def _capture_profile_photo(
+        self, venue: Venue, handle: Optional[str]
+    ) -> dict:
+        """Best-effort profile-photo capture for a venue that has a handle.
+
+        The scheduled backfill runs every 24h behind a 200-venue cap, so
+        without this an added venue shows an emoji placeholder in the list for
+        up to a day. The service applies its own gates (already has a photo for
+        this handle, or failed inside the retry window), so this neither
+        re-buys nor re-bills; it only moves the capture earlier.
+
+        The add-time deadline is enforced INSIDE the service now, not by an
+        `asyncio.wait_for` wrapped around this whole call: the service bounds
+        only its Apify fetch + image download (both cancellable), never the
+        S3 upload or the RDS persist that follows a successful download —
+        wrapping the entire call here could cancel mid-upload and leave an S3
+        object with no RDS row behind (`asyncio.to_thread` cannot stop the
+        underlying OS thread). See `VenueProfilePhotoService._process_venue`'s
+        docstring. One accepted consequence: a pathologically slow S3/RDS
+        outage can make this call — and therefore the add response — take
+        longer than `add_venue_profile_photo_deadline_seconds`, bounded
+        instead by botocore's and the RDS engine's own client-side timeouts
+        (which always eventually raise, landing in the existing
+        `upload_failed` outcome with its now-guaranteed attempt-row write).
+
+        Never raises and never blocks the add, exactly like
+        `_discover_instagram_handle`: an unconfigured service or any
+        exception degrades to a "skipped"/"error" outcome and the venue the
+        caller already persisted is still returned as a successful 201/200.
+        The backfill remains the safety net for every one of those paths.
+        """
+        empty = {"status": "skipped", "outcome": None, "cost_usd": 0.0}
+        if (
+            not settings.add_venue_profile_photo_enabled
+            or self.venue_profile_photo_service is None
+        ):
+            ADD_VENUE_PROFILE_PHOTO_TOTAL.labels(result="skipped").inc()
+            return empty
+        try:
+            summary = await self.venue_profile_photo_service.capture_for_venue(
+                venue.venue_id, handle,
+                deadline_seconds=settings.add_venue_profile_photo_deadline_seconds,
+            )
+        except Exception as e:
+            logger.warning(
+                f"[AddVenueHandler] profile-photo capture failed for "
+                f"{venue.venue_id}: {type(e).__name__}: {e}"
+            )
+            ADD_VENUE_PROFILE_PHOTO_TOTAL.labels(result="error").inc()
+            return {**empty, "status": "error"}
+
+        outcome = (summary or {}).get("outcome")
+        ADD_VENUE_PROFILE_PHOTO_TOTAL.labels(result=outcome or "error").inc()
+        logger.info(
+            f"[AddVenueHandler] profile photo for {venue.venue_id} "
+            f"(@{handle}): {outcome} "
+            f"(${(summary or {}).get('estimated_cost_usd', 0.0):.4f})"
+        )
+        return {
+            "status": outcome,
+            "outcome": outcome,
+            "cost_usd": (summary or {}).get("estimated_cost_usd", 0.0),
+        }
 
     async def _discover_instagram_handle(self, venue: Venue) -> dict:
         """Best-effort Instagram discovery for a just-created or just-newly-

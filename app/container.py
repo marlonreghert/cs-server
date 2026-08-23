@@ -1019,6 +1019,12 @@ class Container:
             # instagram.status to "skipped" in that case.
             # See plans/260811_add-venue-instagram-discovery.md.
             instagram_cascade_service=self.instagram_cascade_service,
+            # Inline profile-photo capture at add time (default on via
+            # settings.add_venue_profile_photo_enabled). None when the photo
+            # service itself is unconfigured (no Apify token / media bucket) —
+            # the handler degrades every add's profile_photo.status to
+            # "skipped" and the 24h backfill remains the safety net.
+            venue_profile_photo_service=self.venue_profile_photo_service,
         )
 
         # Server-side batch venue-add: runs a curated list through the same

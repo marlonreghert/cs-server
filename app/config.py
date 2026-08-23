@@ -496,6 +496,26 @@ class Settings(BaseSettings):
     # Per-run venue ceiling, so one tick — or one refresh_all click — can never
     # re-buy the whole catalog at once.
     instagram_profile_photo_max_venues_per_run: int = 200
+
+    # Capture the profile photo inline when a venue is added, instead of
+    # leaving it to the 24h backfill. On by default: an added venue that shows
+    # an emoji placeholder for a day looks broken, and the operator has already
+    # paid far more than $0.003 to add it. Off restores the old behaviour
+    # exactly — the backfill still picks the venue up on its next sweep.
+    # How many batch-add rows run at once. 1 is the historical sequential
+    # behaviour and the way back if the parallel path misbehaves. 4 is chosen
+    # to hide the ~13s inline profile-photo capture without outrunning the
+    # shared Google pacer or BestTime's own client-side venue-search limiter;
+    # a stop outcome halts DISPATCH, so a stop can still spend up to
+    # `concurrency - 1` in-flight rows, which is the other reason to keep it
+    # small.
+    batch_add_concurrency: int = 4
+
+    add_venue_profile_photo_enabled: bool = True
+    # The add is a background job, so this is a safety valve against a hung
+    # actor rather than a latency budget. Generous enough that a normal
+    # capture (~13s observed across 517 venues) never trips it.
+    add_venue_profile_photo_deadline_seconds: int = 60
     # An Instagram avatar is a small square JPEG; anything past this is not one,
     # and is discarded without an S3 write.
     instagram_profile_photo_max_bytes: int = 5_242_880  # 5 MiB

@@ -262,6 +262,18 @@ class RdsVenueStore:
                 "SELECT venue_id FROM serving.eligible_venue"
             ))]
 
+    def is_venue_servable(self, venue_id: str) -> bool:
+        """Single-venue counterpart of `list_servable_venue_ids()`, for a
+        per-venue caller (add-time profile-photo capture) that does not want
+        to pull the whole servable set to answer one question. `serving.
+        eligible_venue` is a plain view, so this pushes down to an indexed
+        point lookup rather than costing an O(catalog) read per call."""
+        with self.engine.connect() as conn:
+            row = conn.execute(text(
+                "SELECT 1 FROM serving.eligible_venue WHERE venue_id = :v LIMIT 1"
+            ), {"v": venue_id}).first()
+            return row is not None
+
     # ── admin.venue_closure_signal ────────────────────────────────────────────
     # Closure is evidence-derived and reversible: these rows gate
     # serving.eligible_venue without touching lifecycle_status, so a reopened

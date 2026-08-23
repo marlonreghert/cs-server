@@ -113,6 +113,7 @@ the run deliberately — continuing would only produce more 402s.
 """
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import logging
 import time
@@ -165,6 +166,19 @@ MODE_REFRESH_ALL = "refresh_all"
 MODE_BACKFILL_EDGE_COLOR = "edge_color"
 MODES = (MODE_BACKFILL, MODE_REFRESH_ALL, MODE_BACKFILL_EDGE_COLOR)
 
+# ── metric `source` label values ─────────────────────────────────────────────
+# Both `run()` (the scheduled job, including its edge_color mode) and
+# `capture_for_venue` (the add-time path) share `_process_venue` /
+# `_fetch_and_download`, which increment the same Apify-calls / cost / bytes
+# / outcome counters. Without a label the two volumes are inseparable: the
+# add-time path deliberately ignores `max_venues_per_run` (see
+# `capture_for_venue`'s docstring), so a dashboard built against the
+# unlabeled counters silently absorbed uncapped add-time volume into what
+# looked like job-bounded volume. See ADD_VENUE_PROFILE_PHOTO_TOTAL's
+# docstring in app/metrics.py for the counter this is distinct from.
+SOURCE_BACKFILL = "backfill"
+SOURCE_ADD_TIME = "add_time"
+
 
 class InvalidProfilePhotoMode(ValueError):
     """An unrecognised mode. Raised instead of quietly defaulting: the two
@@ -213,6 +227,27 @@ OUTCOME_DOWNLOAD_FAILED = "download_failed"
 OUTCOME_UPLOAD_FAILED = "upload_failed"
 OUTCOME_CREDIT_EXHAUSTED = "credit_exhausted"
 
+# ── add-time capture outcome (`capture_for_venue` only) ─────────────────────
+# The job has no per-venue equivalent: when the feature is off or the media
+# store is unconfigured, `select()` returns a run-level `status` and scrapes
+# NOTHING, so there is no venue to label. The add-time path is called for one
+# venue at a time and still has to say what happened to it, hence a label the
+# job can never emit.
+OUTCOME_SKIPPED_UNAVAILABLE = "skipped_unavailable"
+# Mirrors select()'s `serving.eligible_venue` gate for a single venue: a
+# blocked type or a hard-blocked name keyword means the scheduled job would
+# never buy this venue a photo either, and no user will ever see it. The job
+# has no equivalent label because it only ever iterates servable_ids in the
+# first place.
+OUTCOME_SKIPPED_INELIGIBLE = "skipped_ineligible"
+# The Apify fetch + image download exceeded the add-time deadline. Job mode
+# never passes a deadline, so this outcome is add-time-only too. Recorded as
+# an attempt (see ATTEMPT_RECORDED_OUTCOMES below) because Apify may already
+# have been billed by the time the download step timed out, and
+# negative-caching a timeout is strictly safer than re-buying it on the very
+# next add.
+OUTCOME_TIMEOUT = "timeout"
+
 # ── edge-colour backfill outcomes (mode `edge_color` only) ──────────────────
 # A closed set, like the ones above: an outcome label that never appears in
 # Prometheus is itself the diagnostic that its code path never ran. None of
@@ -232,6 +267,7 @@ ATTEMPT_RECORDED_OUTCOMES = frozenset({
     OUTCOME_FETCH_FAILED,
     OUTCOME_DOWNLOAD_FAILED,
     OUTCOME_UPLOAD_FAILED,
+    OUTCOME_TIMEOUT,
 })
 
 # What we are willing to store and serve. A datacenter IP asking Instagram for
@@ -246,6 +282,18 @@ ATTEMPT_RECORDED_OUTCOMES = frozenset({
 ALLOWED_IMAGE_CONTENT_TYPES = frozenset(
     {"image/jpeg", "image/jpg", "image/png", "image/webp"}
 )
+
+
+class _EarlyOutcome(Exception):
+    """Carries a terminal outcome decided during `_fetch_and_download` (the
+    Apify call + image download) out of `_process_venue`'s optional
+    `asyncio.wait_for`, without being confused with the real
+    `asyncio.TimeoutError` that same `wait_for` can also raise. Never leaves
+    `_process_venue` — always caught there."""
+
+    def __init__(self, outcome: str):
+        super().__init__(outcome)
+        self.outcome = outcome
 
 
 @dataclass
@@ -650,7 +698,9 @@ class VenueProfilePhotoService:
         def record(venue_id: str, outcome: str) -> None:
             summary["outcomes"][venue_id] = outcome
             summary["counts"][outcome] = summary["counts"].get(outcome, 0) + 1
-            VENUE_PROFILE_PHOTO_VENUES_TOTAL.labels(outcome=outcome).inc()
+            VENUE_PROFILE_PHOTO_VENUES_TOTAL.labels(
+                outcome=outcome, source=SOURCE_BACKFILL
+            ).inc()
 
         try:
             mode = parse_mode(config)
@@ -764,38 +814,246 @@ class VenueProfilePhotoService:
         return self._finish(summary, status, started, job_id)
 
     # ── one venue ───────────────────────────────────────────────────────────
-    async def _process_venue(
-        self, venue_id: str, handle: str, existing_row: Optional[dict], summary: dict
-    ) -> str:
+    # ── add-time capture: one venue, now ────────────────────────────────────
+    async def capture_for_venue(
+        self, venue_id: str, handle: Optional[str], *,
+        deadline_seconds: Optional[float] = None,
+    ) -> dict:
+        """Capture ONE venue's profile photo immediately, at add time.
+
+        The scheduled backfill runs on a 24h interval behind a 200-venue cap,
+        so a venue added today could wait a day or more for its picture and
+        show an emoji placeholder in the list until then. This is the same
+        capture, run inline for the venue that was just added.
+
+        Every gate `select()` applies per venue is applied here too, and for
+        the same reasons — a venue outside `serving.eligible_venue` is never
+        scraped, a venue that already holds a photo for this handle is not
+        re-bought, and one that failed inside the retry window is not
+        re-billed. What is NOT shared is the bulk read: `select()` reads the
+        whole catalog to decide a run, this reads one row (or one indexed
+        point lookup, for eligibility).
+
+        The per-run cap deliberately does not apply. It bounds a sweep of the
+        catalog; this is a single venue the operator just paid to add, and
+        capping it at anything would only ever mean "sometimes silently skip".
+
+        `deadline_seconds`, when given, bounds ONLY the Apify fetch + image
+        download inside `_process_venue` — never the upload or the RDS
+        persist that follows a successful download. See `_process_venue`'s
+        docstring for why: those two calls cannot be safely cancelled
+        (`VenueMediaStore.put_profile_photo` is `asyncio.to_thread`-wrapped
+        boto3, and cancelling the await does not stop the underlying OS
+        thread), so wrapping them in the same deadline the caller previously
+        used could leave an S3 object with no RDS row behind it.
+
+        Every outcome that produced no photo — including a timeout — writes
+        or refreshes an `instagram.profile_photo_attempt` row, exactly like
+        `run()` does, so a repeat add or the next backfill tick is
+        suppressed by the same negative cache rather than re-billing.
+
+        Returns a one-venue summary. Raises nothing the caller must handle:
+        the outcome string carries the failure, exactly as the job's does.
+        """
+        summary: dict = {
+            "venue_id": venue_id,
+            "outcome": None,
+            "apify_calls": 0,
+            "bytes_stored": 0,
+            "estimated_cost_usd": 0.0,
+        }
+
+        def done(outcome: str) -> dict:
+            summary["outcome"] = outcome
+            VENUE_PROFILE_PHOTO_VENUES_TOTAL.labels(
+                outcome=outcome, source=SOURCE_ADD_TIME
+            ).inc()
+            return summary
+
+        # ── the config gates, BEFORE anything can be billed ─────────────────
+        if not settings.instagram_profile_photo_enabled:
+            return done(OUTCOME_SKIPPED_UNAVAILABLE)
+        if self.media_store is None or not settings.media_cdn_base_url:
+            return done(OUTCOME_SKIPPED_UNAVAILABLE)
+        if self.rds_store is None:  # pragma: no cover - defensive
+            return done(OUTCOME_SKIPPED_UNAVAILABLE)
+
+        # ── eligibility gate: select()'s servable-ids read, for one venue ───
+        # A venue outside serving.eligible_venue (blocked type, hard-blocked
+        # name keyword) would never be bought by the scheduled job either,
+        # and no user will ever see it — so this must run before any read
+        # that could otherwise let the venue reach a billed call.
+        try:
+            servable = self.rds_store.is_venue_servable(venue_id)
+        except Exception as e:  # pragma: no cover - defensive
+            logger.warning(
+                f"[ProfilePhoto] add-time eligibility read failed for "
+                f"{venue_id}; nothing spent: {e}"
+            )
+            return done(OUTCOME_SKIPPED_UNAVAILABLE)
+        if not servable:
+            return done(OUTCOME_SKIPPED_INELIGIBLE)
+
+        if not _normalize_handle(handle):
+            # The caller had no handle to offer. That is the NORMAL shape for a
+            # recovered or geo-linked add, where discovery reports "skipped"
+            # precisely because the venue already carries one — so look it up
+            # rather than treating the caller's None as "no handle exists".
+            # `Venue` has no handle field (it lives on `MinifiedVenue`), which
+            # is why the lookup belongs here and not in the handler. A
+            # single-row read, off the event loop: unlike select()'s bulk
+            # list_instagram_handles() (one full-table scan for the whole
+            # run), this runs once per add — including inside
+            # BatchAddService's per-row loop — so a full scan there would be
+            # an O(catalog) synchronous read on the event loop per row.
+            try:
+                loop = asyncio.get_event_loop()
+                record = await loop.run_in_executor(
+                    None, self.rds_store.get_enrichment, "instagram.handle", venue_id
+                )
+            except Exception as e:  # pragma: no cover - defensive
+                logger.warning(
+                    f"[ProfilePhoto] add-time handle lookup failed for "
+                    f"{venue_id}; nothing spent: {e}"
+                )
+                return done(OUTCOME_SKIPPED_UNAVAILABLE)
+            if record is not None and record.get("deleted_at") is None:
+                handle = (record.get("payload") or {}).get("instagram_handle")
+        if not _normalize_handle(handle):
+            # Genuinely nothing to scrape. Handle discovery is a different
+            # pipeline's job.
+            return done(OUTCOME_NO_HANDLE)
+
+        # ── the per-venue gates, one row each, still free ───────────────────
+        try:
+            existing = self.rds_store.get_enrichment_bulk(
+                PROFILE_PHOTO_TABLE, [venue_id]
+            )
+            attempts = self.rds_store.get_enrichment_bulk(
+                PROFILE_PHOTO_ATTEMPT_TABLE, [venue_id]
+            )
+        except Exception as e:
+            # Read failed, so the gates cannot be evaluated. Skipping is the
+            # only safe answer: scraping anyway could re-buy a photo we already
+            # own, and the scheduled backfill will pick this venue up.
+            logger.warning(
+                f"[ProfilePhoto] add-time gate read failed for {venue_id}; "
+                f"nothing spent: {e}"
+            )
+            return done(OUTCOME_SKIPPED_UNAVAILABLE)
+
+        row = existing.get(venue_id)
+        if row is not None and self._has_current_photo(row, handle):
+            return done(OUTCOME_SKIPPED_HAS_PHOTO)
+
+        retry_days = settings.instagram_profile_photo_retry_days
+        attempt = attempts.get(venue_id)
+        if retry_days > 0 and attempt is not None:
+            cutoff = self._now() - timedelta(days=retry_days)
+            if self._attempt_suppresses(attempt, cutoff, handle):
+                return done(OUTCOME_SKIPPED_RECENT_FAILURE)
+
+        outcome = await self._process_venue(
+            venue_id, handle, row, summary,
+            deadline_seconds=deadline_seconds, source=SOURCE_ADD_TIME,
+        )
+        # Mirrors run()'s call after every _process_venue: an outcome that
+        # produced no photo negative-caches the venue so the next add or
+        # backfill tick skips it before spending, instead of re-buying it.
+        self._note_attempt(venue_id, handle, outcome, had_attempt=attempt is not None)
+        return done(outcome)
+
+    async def _fetch_and_download(
+        self, venue_id: str, handle: str, summary: dict, source: str
+    ) -> tuple[bytes, str]:
+        """The two genuinely cancellable I/O calls: the Apify scrape and the
+        image download, both real `httpx.AsyncClient` requests. Split out of
+        `_process_venue` so an add-time deadline can bound ONLY this pair —
+        see `_process_venue`'s docstring for why the upload+persist tail must
+        never share that bound. Raises `_EarlyOutcome` for a terminal result
+        decided in-band (no picture, a scrape error, a download failure) so
+        it can escape an enclosing `asyncio.wait_for` without being confused
+        with a real timeout; `ApifyCreditExhaustedError` is deliberately left
+        to propagate uncaught, exactly as before this split (`run()` catches
+        it specially; `capture_for_venue` lets the handler's generic
+        exception handling degrade it to an "error" outcome).
+        """
         result = await self.apify_client.fetch_profile(handle)
         # Counted only on a RETURN: a 402 never ran the actor, so it is not a
         # billed call and must not appear in the cost figure. A returned
         # dataset — even an empty or error one — did run.
         summary["apify_calls"] += 1
-        VENUE_PROFILE_PHOTO_APIFY_CALLS_TOTAL.inc()
+        VENUE_PROFILE_PHOTO_APIFY_CALLS_TOTAL.labels(source=source).inc()
         cost = settings.apify_instagram_profile_cost_usd
         summary["estimated_cost_usd"] = round(summary["estimated_cost_usd"] + cost, 6)
-        VENUE_PROFILE_PHOTO_ESTIMATED_COST_USD.inc(cost)
+        VENUE_PROFILE_PHOTO_ESTIMATED_COST_USD.labels(source=source).inc(cost)
 
         if getattr(result, "error_code", None):
             logger.warning(
                 f"[ProfilePhoto] {venue_id} (@{handle}) scrape failed: "
                 f"{result.error_code}"
             )
-            return OUTCOME_FETCH_FAILED
+            raise _EarlyOutcome(OUTCOME_FETCH_FAILED)
 
         pic_url = getattr(result, "profile_pic_url", None)
         if not pic_url:
             # An absence, not an error: this profile has no picture to store.
             logger.info(f"[ProfilePhoto] {venue_id} (@{handle}) has no profile picture")
-            return OUTCOME_NO_PIC
+            raise _EarlyOutcome(OUTCOME_NO_PIC)
 
         max_bytes = settings.instagram_profile_photo_max_bytes
         try:
             data, content_type = await self._fetch_image(pic_url, max_bytes=max_bytes)
         except Exception as e:
             logger.warning(f"[ProfilePhoto] {venue_id} download failed: {e}")
-            return OUTCOME_DOWNLOAD_FAILED
+            raise _EarlyOutcome(OUTCOME_DOWNLOAD_FAILED)
+        return data, content_type
+
+    async def _process_venue(
+        self, venue_id: str, handle: str, existing_row: Optional[dict], summary: dict,
+        *, deadline_seconds: Optional[float] = None, source: str = SOURCE_BACKFILL,
+    ) -> str:
+        """Fetch, validate, and store one venue's profile photo.
+
+        `deadline_seconds` (add-time only; `run()` never passes one) bounds
+        ONLY `_fetch_and_download` below. Everything from content-type
+        validation onward — hashing, the unchanged short-circuit, the S3
+        upload, and the RDS persist — runs OUTSIDE any `wait_for`, on
+        purpose: `VenueMediaStore.put_profile_photo` awaits
+        `asyncio.to_thread(self._s3.put_object, ...)`, and cancelling that
+        await does not stop the underlying OS thread — the PUT can still
+        complete after the coroutine has already unwound, leaving an S3
+        object with no RDS row and no attempt row (the exact defect an
+        adversarial review of PR #215 found: the object then looks
+        "never attempted" and gets re-bought). A deadline that is still
+        allowed to cancel the upload is a deadline that can still orphan an
+        object, so it must stop at the boundary of the last genuinely
+        cancellable call.
+        """
+        max_bytes = settings.instagram_profile_photo_max_bytes
+        fetch_and_download = self._fetch_and_download(venue_id, handle, summary, source)
+        try:
+            if deadline_seconds is not None:
+                data, content_type = await asyncio.wait_for(
+                    fetch_and_download, timeout=deadline_seconds
+                )
+            else:
+                data, content_type = await fetch_and_download
+        except _EarlyOutcome as e:
+            return e.outcome
+        except asyncio.TimeoutError:
+            # The Apify call may already be billed (or the download may have
+            # already started) by the time this fires; the log says so
+            # rather than letting a timeout read as free. Never reached from
+            # run() (deadline_seconds is always None there).
+            logger.warning(
+                f"[ProfilePhoto] {venue_id} (@{handle}) fetch/download exceeded "
+                f"the {deadline_seconds}s add-time deadline; an in-flight "
+                "Apify call may still complete and be billed, but the "
+                "upload/persist step is never cancelled once it starts, so "
+                "this cannot leave an orphaned S3 object"
+            )
+            return OUTCOME_TIMEOUT
 
         normalized_type = (content_type or "").split(";")[0].strip().lower()
         if normalized_type not in ALLOWED_IMAGE_CONTENT_TYPES:
@@ -850,7 +1108,7 @@ class VenueProfilePhotoService:
             return OUTCOME_UPLOAD_FAILED
 
         summary["bytes_stored"] += len(data)
-        VENUE_PROFILE_PHOTO_BYTES_STORED_TOTAL.inc(len(data))
+        VENUE_PROFILE_PHOTO_BYTES_STORED_TOTAL.labels(source=source).inc(len(data))
         # Written only AFTER the upload returned: a row is a promise that the
         # object exists, and the projector turns that row into a URL the app
         # will render.

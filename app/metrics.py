@@ -1050,6 +1050,21 @@ ADD_VENUE_INSTAGRAM_TOTAL = Counter(
     ["result"],  # found | low_confidence | not_found | timeout | skipped | error
 )
 
+ADD_VENUE_PROFILE_PHOTO_TOTAL = Counter(
+    "add_venue_profile_photo_total",
+    "Outcomes of the Instagram profile-photo capture run inline at venue-add "
+    "time, as seen by the HANDLER. Distinct from "
+    "venue_profile_photo_venues_total{source=\"add_time\"}: that series is "
+    "the SERVICE's own view (capture_for_venue's outcomes only) and cannot "
+    "see a handler-level failure — the service absent/disabled (\"skipped\") "
+    "or the service call raising unexpectedly (\"error\") — so the two are "
+    "complementary, not duplicates. venue_profile_photo_venues_total's "
+    "source label is what lets you tell add-time spend from sweep spend on "
+    "the shared Apify-calls/cost/bytes counters; this counter is the "
+    "handler's own outcome tally.",
+    ["result"],  # stored | no_handle | timeout | skipped | error | <service outcome>
+)
+
 # plans/260816_venue-address-cache-integrity.md: an add-venue attempt whose
 # coordinate could not be trusted (no caller-supplied lat/lng and no
 # caller-supplied place_id — resolved instead from a bare, unbiased Text
@@ -1823,11 +1838,19 @@ VENUE_PROFILE_PHOTO_RUN_DURATION_SECONDS = Histogram(
 
 VENUE_PROFILE_PHOTO_VENUES_TOTAL = Counter(
     "venue_profile_photo_venues_total",
-    "Venues processed by the Instagram profile photo job, by outcome",
-    ["outcome"],
+    "Venues processed by the Instagram profile photo capture, by outcome and "
+    "source",
+    ["outcome", "source"],
     # outcome: stored, unchanged, skipped_has_photo, skipped_recent_failure,
     #          no_handle, no_pic, fetch_failed, download_failed,
-    #          upload_failed, credit_exhausted
+    #          upload_failed, credit_exhausted, skipped_ineligible (add_time
+    #          only), timeout (add_time only)
+    # source: backfill (the scheduled job, run() — including its edge_color
+    #         mode) | add_time (capture_for_venue, called inline from an add).
+    #         The add-time path deliberately ignores max_venues_per_run (see
+    #         capture_for_venue's docstring), so a query that assumes this
+    #         counter stays bounded by that cap must select
+    #         {source="backfill"} explicitly.
     #
     # `unchanged` and `stored` are deliberately distinct: both are successes,
     # but only one of them spent an S3 write, and a run that is all `unchanged`
@@ -1848,12 +1871,17 @@ VENUE_PROFILE_PHOTO_VENUES_TOTAL = Counter(
 
 VENUE_PROFILE_PHOTO_BYTES_STORED_TOTAL = Counter(
     "venue_profile_photo_bytes_stored_total",
-    "Bytes uploaded to the media bucket by the Instagram profile photo job",
+    "Bytes uploaded to the media bucket by the Instagram profile photo "
+    "capture, by source (backfill | add_time — see "
+    "venue_profile_photo_venues_total)",
+    ["source"],
 )
 
 VENUE_PROFILE_PHOTO_APIFY_CALLS_TOTAL = Counter(
     "venue_profile_photo_apify_calls_total",
-    "Apify profile scrapes issued by the Instagram profile photo job",
+    "Apify profile scrapes issued by the Instagram profile photo capture, by "
+    "source (backfill | add_time — see venue_profile_photo_venues_total)",
+    ["source"],
     # THE cost gate's evidence. A venue skipped by the freshness check must not
     # move this counter — that is the acceptance criterion, asserted as the
     # absence of a billed call rather than as a log line.
@@ -1862,7 +1890,9 @@ VENUE_PROFILE_PHOTO_APIFY_CALLS_TOTAL = Counter(
 VENUE_PROFILE_PHOTO_ESTIMATED_COST_USD = Counter(
     "venue_profile_photo_estimated_cost_usd",
     "Cumulative estimated USD spent on Instagram profile scrapes "
-    "(scrapes x apify_instagram_profile_cost_usd)",
+    "(scrapes x apify_instagram_profile_cost_usd), by source (backfill | "
+    "add_time — see venue_profile_photo_venues_total)",
+    ["source"],
 )
 
 # What a run WOULD cost, last time someone priced one — deliberately a Gauge
