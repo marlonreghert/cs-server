@@ -806,6 +806,7 @@ class AddVenueHandler:
         existing = self.venue_dao.get_venue(match.venue_id)
         was_new = existing is None
         instagram = None
+        profile_photo = None
         if was_new:
             # Geo-link provenance, persisted at link time: undo_geo_link
             # requires geo_linked=True (a normally-created venue must never
@@ -838,6 +839,17 @@ class AddVenueHandler:
             # already-catalogued match already had its chance (or is due for
             # one on the next cascade run, not a second inline attempt).
             instagram = await self._discover_instagram_handle(venue)
+            # Capture the profile photo for that handle, now — same call
+            # _finalize_created_venue makes, and for the same reason: a
+            # geo-linked venue is exactly the "recovered" shape the service's
+            # own handle fallback exists for (discovery above often reports
+            # "skipped" precisely because the venue already carries a
+            # handle). Missing this call was itself a defect: the venue's
+            # docstring already justified the fallback lookup by this path,
+            # but nothing here ever invoked it.
+            profile_photo = await self._capture_profile_photo(
+                venue, instagram.get("handle")
+            )
         VENUE_MONTHLY_NEW_COUNT.set(self.budget.get_snapshot().month_counter)
         self._save_address_cache(
             request.venue_name, request.venue_address, match.venue_id
@@ -860,6 +872,7 @@ class AddVenueHandler:
         }
         if was_new:
             body["instagram"] = instagram
+            body["profile_photo"] = profile_photo
         return AddVenueOutcome(status_code=200, body=body)
 
     # ── Google-only catalog path (no BestTime venue exists) ──────────────────
@@ -1394,11 +1407,25 @@ class AddVenueHandler:
         this handle, or failed inside the retry window), so this neither
         re-buys nor re-bills; it only moves the capture earlier.
 
+        The add-time deadline is enforced INSIDE the service now, not by an
+        `asyncio.wait_for` wrapped around this whole call: the service bounds
+        only its Apify fetch + image download (both cancellable), never the
+        S3 upload or the RDS persist that follows a successful download —
+        wrapping the entire call here could cancel mid-upload and leave an S3
+        object with no RDS row behind (`asyncio.to_thread` cannot stop the
+        underlying OS thread). See `VenueProfilePhotoService._process_venue`'s
+        docstring. One accepted consequence: a pathologically slow S3/RDS
+        outage can make this call — and therefore the add response — take
+        longer than `add_venue_profile_photo_deadline_seconds`, bounded
+        instead by botocore's and the RDS engine's own client-side timeouts
+        (which always eventually raise, landing in the existing
+        `upload_failed` outcome with its now-guaranteed attempt-row write).
+
         Never raises and never blocks the add, exactly like
-        `_discover_instagram_handle`: an unconfigured service, a deadline, or
-        any exception degrades to a "skipped" outcome and the venue the caller
-        already persisted is still returned as a successful 201/200. The
-        backfill remains the safety net for every one of those paths.
+        `_discover_instagram_handle`: an unconfigured service or any
+        exception degrades to a "skipped"/"error" outcome and the venue the
+        caller already persisted is still returned as a successful 201/200.
+        The backfill remains the safety net for every one of those paths.
         """
         empty = {"status": "skipped", "outcome": None, "cost_usd": 0.0}
         if (
@@ -1408,24 +1435,10 @@ class AddVenueHandler:
             ADD_VENUE_PROFILE_PHOTO_TOTAL.labels(result="skipped").inc()
             return empty
         try:
-            summary = await asyncio.wait_for(
-                self.venue_profile_photo_service.capture_for_venue(
-                    venue.venue_id, handle
-                ),
-                timeout=settings.add_venue_profile_photo_deadline_seconds,
+            summary = await self.venue_profile_photo_service.capture_for_venue(
+                venue.venue_id, handle,
+                deadline_seconds=settings.add_venue_profile_photo_deadline_seconds,
             )
-        except asyncio.TimeoutError:
-            # The Apify call may well still be running and may still be billed;
-            # the deadline bounds the ADD, not the spend. Saying so in the log
-            # keeps a timeout from being read as a free outcome.
-            logger.warning(
-                "[AddVenueHandler] profile-photo deadline "
-                f"({settings.add_venue_profile_photo_deadline_seconds}s) exceeded "
-                f"for {venue.venue_id}; venue stays created without a photo "
-                "(an in-flight scrape may still complete and be billed)"
-            )
-            ADD_VENUE_PROFILE_PHOTO_TOTAL.labels(result="timeout").inc()
-            return {**empty, "status": "timeout"}
         except Exception as e:
             logger.warning(
                 f"[AddVenueHandler] profile-photo capture failed for "

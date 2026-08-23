@@ -2232,3 +2232,264 @@ async def test_instagram_object_is_additive_to_existing_response_fields(
     assert outcome.body["venue_lng"] == -34.88
     assert outcome.body["source"] == "besttime_new"
     assert "instagram" in outcome.body
+
+
+# ── add-time profile-photo capture (_capture_profile_photo) ────────────────
+# plans/260823_add-time-profile-photo.md, defect 7: this boundary — the
+# guarantee that a photo-capture failure never fails the add — had ZERO
+# direct test coverage. Narrowing `_capture_profile_photo`'s
+# `except Exception` to `except ZeroDivisionError` kept every other test in
+# this repo green; these tests are what catches that.
+
+
+def _photo_handler(venue_dao, besttime, budget, fake, venue_profile_photo_service):
+    """Handler wired with an injected profile-photo service (a stub, not a
+    mock of the real VenueProfilePhotoService — the contract under test is
+    the HANDLER's degrade-safety around whatever the service returns/raises,
+    not the service's own internals, which tests/test_venue_profile_photo.py
+    already covers directly)."""
+    return AddVenueHandler(
+        venue_dao=venue_dao,
+        besttime_api=besttime,
+        budget_service=budget,
+        redis_client=fake,
+        venue_profile_photo_service=venue_profile_photo_service,
+    )
+
+
+def _photo_venue(venue_id="ven_photo") -> Venue:
+    return Venue(
+        processed=True,
+        forecast=True,
+        venue_id=venue_id,
+        venue_name="Bar da Foto",
+        venue_address="Rua das Flores 123, Recife - PE",
+        venue_lat=-8.05,
+        venue_lng=-34.88,
+    )
+
+
+class _StubPhotoService:
+    """A minimal stand-in for VenueProfilePhotoService.capture_for_venue,
+    covering the three shapes the handler must degrade-safely handle."""
+
+    def __init__(self, *, outcome=None, raises=None, deadline_respecting=False):
+        self.outcome = outcome
+        self.raises = raises
+        self.deadline_respecting = deadline_respecting
+        self.calls: list[tuple] = []
+
+    async def capture_for_venue(self, venue_id, handle, *, deadline_seconds=None):
+        self.calls.append((venue_id, handle, deadline_seconds))
+        if self.raises is not None:
+            raise self.raises
+        if self.deadline_respecting:
+            # Mirrors the real service's own internal wait_for: this stub
+            # never blocks past its OWN deadline, exactly like the fixed
+            # VenueProfilePhotoService.capture_for_venue does — proving the
+            # handler correctly awaits the call directly (no second,
+            # now-removed wait_for of its own) rather than hanging.
+            try:
+                await _asyncio.wait_for(_asyncio.sleep(1e6), timeout=deadline_seconds)
+            except _asyncio.TimeoutError:
+                return {
+                    "venue_id": venue_id, "outcome": "timeout", "apify_calls": 0,
+                    "bytes_stored": 0, "estimated_cost_usd": 0.0,
+                }
+        return {
+            "venue_id": venue_id, "outcome": self.outcome, "apify_calls": 1,
+            "bytes_stored": 512, "estimated_cost_usd": 0.003,
+        }
+
+
+@pytest.mark.asyncio
+async def test_capture_profile_photo_success_is_well_formed(
+    venue_dao, besttime, budget, fake, monkeypatch
+):
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "add_venue_profile_photo_enabled", True)
+    service = _StubPhotoService(outcome="stored")
+    handler = _photo_handler(venue_dao, besttime, budget, fake, service)
+
+    result = await handler._capture_profile_photo(_photo_venue(), "bardafoto")
+
+    assert result == {
+        "status": "stored", "outcome": "stored", "cost_usd": 0.003,
+    }
+    assert service.calls == [("ven_photo", "bardafoto", settings.add_venue_profile_photo_deadline_seconds)]
+
+
+@pytest.mark.asyncio
+async def test_capture_profile_photo_survives_a_raising_service(
+    venue_dao, besttime, budget, fake, monkeypatch
+):
+    """The add must succeed even when the service call raises unexpectedly.
+    Mutation target: narrowing the handler's `except Exception` to
+    `except ZeroDivisionError` turns this red — the RuntimeError below would
+    propagate out of _capture_profile_photo uncaught."""
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "add_venue_profile_photo_enabled", True)
+    service = _StubPhotoService(raises=RuntimeError("simulated capture bug"))
+    handler = _photo_handler(venue_dao, besttime, budget, fake, service)
+
+    result = await handler._capture_profile_photo(_photo_venue(), "bardafoto")
+
+    assert result["status"] == "error"
+    assert result["outcome"] is None
+    assert result["cost_usd"] == 0.0
+
+
+@pytest.mark.asyncio
+async def test_capture_profile_photo_survives_a_service_that_times_out_internally(
+    venue_dao, besttime, budget, fake, monkeypatch
+):
+    """The deadline is enforced INSIDE the service now (see
+    VenueProfilePhotoService._process_venue), not by a second
+    `asyncio.wait_for` here — the handler must simply await the call and
+    surface whatever outcome the service settles on, including "timeout",
+    without hanging past the service's own bound."""
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "add_venue_profile_photo_enabled", True)
+    monkeypatch.setattr(settings, "add_venue_profile_photo_deadline_seconds", 0.02)
+    service = _StubPhotoService(deadline_respecting=True)
+    handler = _photo_handler(venue_dao, besttime, budget, fake, service)
+
+    result = await _asyncio.wait_for(
+        handler._capture_profile_photo(_photo_venue(), "bardafoto"), timeout=2.0
+    )
+
+    assert result == {"status": "timeout", "outcome": "timeout", "cost_usd": 0.0}
+
+
+@pytest.mark.asyncio
+async def test_capture_profile_photo_skipped_when_disabled_via_settings(
+    venue_dao, besttime, budget, fake, monkeypatch
+):
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "add_venue_profile_photo_enabled", False)
+    service = _StubPhotoService(outcome="stored")
+    handler = _photo_handler(venue_dao, besttime, budget, fake, service)
+
+    result = await handler._capture_profile_photo(_photo_venue(), "bardafoto")
+
+    assert result == {"status": "skipped", "outcome": None, "cost_usd": 0.0}
+    assert service.calls == []
+
+
+@pytest.mark.asyncio
+async def test_add_still_succeeds_when_photo_capture_raises(
+    venue_dao, besttime, budget, fake, monkeypatch
+):
+    """End-to-end: a raising profile-photo service must not fail the whole
+    add, exactly like a raising Instagram cascade does not."""
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "add_venue_profile_photo_enabled", True)
+    besttime.add_venue_to_account.return_value = _ok_response("ven_photo_boom")
+    besttime.get_live_forecast.return_value = _live_unavailable("ven_photo_boom")
+    service = _StubPhotoService(raises=RuntimeError("simulated capture bug"))
+    handler = _photo_handler(venue_dao, besttime, budget, fake, service)
+
+    outcome = await handler.add(_req())
+
+    assert outcome.status_code == 201
+    assert outcome.body["profile_photo"]["status"] == "error"
+
+
+# ── defect 4: the geo-fallback newly-linked branch must also capture ───────
+
+
+@pytest.mark.asyncio
+async def test_geo_fallback_captures_profile_photo_for_a_newly_linked_venue(
+    venue_dao, besttime, budget, fake, monkeypatch
+):
+    """BLOCKER-adjacent (defect 4): `_geo_fallback`'s `was_new` branch calls
+    `_discover_instagram_handle` but, before this fix, never called
+    `_capture_profile_photo` — even though the service's own docstring
+    justifies its handle-fallback lookup by exactly this path. Mutation
+    target: removing the `_capture_profile_photo` call from `_geo_fallback`
+    turns this red (no "profile_photo" key in the body at all)."""
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "add_venue_profile_photo_enabled", True)
+    besttime.add_venue_to_account.return_value = NewVenueResponse.model_validate(
+        {"status": "Error", "message": "Could not geocode address"}
+    )
+    matched = VenueFilterVenue(
+        venue_id="ven_geo_photo",
+        venue_name="Bar do Joao",
+        venue_address="any addr",
+        venue_lat=-8.05,
+        venue_lng=-34.88,
+        venue_type="BAR",
+        day_int=0,
+        day_raw=[0] * 24,
+    )
+    besttime.venue_filter.return_value = VenueFilterResponse(
+        status="OK", venues=[matched], venues_n=1
+    )
+    service = _StubPhotoService(outcome="stored")
+    handler = _photo_handler(venue_dao, besttime, budget, fake, service)
+
+    outcome = await handler.add(_req())
+
+    assert outcome.status_code == 200
+    assert outcome.body["status"] == "matched_via_geo_fallback"
+    assert outcome.body["newly_linked"] is True
+    assert outcome.body["profile_photo"] == {
+        "status": "stored", "outcome": "stored", "cost_usd": 0.003,
+    }
+    assert service.calls and service.calls[0][0] == "ven_geo_photo"
+
+
+@pytest.mark.asyncio
+async def test_geo_fallback_skips_profile_photo_when_not_newly_linked(
+    handler, besttime, venue_dao, fake, monkeypatch
+):
+    """The geo-fallback link to an ALREADY-catalogued venue must not attempt
+    a second capture — mirrors the existing Instagram-discovery behavior for
+    the same branch."""
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "add_venue_profile_photo_enabled", True)
+    existing = Venue(
+        processed=True, forecast=True, venue_id="ven_geo_existing_photo",
+        venue_name="Bar do Joao", venue_address="A different, previously-catalogued address",
+        # Far from _req()'s default (-8.05, -34.88) so AddVenueHandler's own
+        # Redis-geo short-circuit (add()'s step 2, same 50m radius as the
+        # fallback) does NOT fire before BestTime is even called — only the
+        # fully-stubbed BestTime venues/filter response below "finds" it,
+        # exactly like add_venue_instagram_discovery_steps.py's analogous
+        # fixture.
+        venue_lat=-8.30, venue_lng=-35.10,
+    )
+    venue_dao.upsert_venue(existing)
+    besttime.add_venue_to_account.return_value = NewVenueResponse.model_validate(
+        {"status": "Error", "message": "Could not geocode address"}
+    )
+    matched = VenueFilterVenue(
+        venue_id="ven_geo_existing_photo",
+        venue_name="Bar do Joao",
+        venue_address="any addr",
+        venue_lat=-8.05,
+        venue_lng=-34.88,
+        venue_type="BAR",
+        day_int=0,
+        day_raw=[0] * 24,
+    )
+    besttime.venue_filter.return_value = VenueFilterResponse(
+        status="OK", venues=[matched], venues_n=1
+    )
+    service = _StubPhotoService(outcome="stored")
+    handler.venue_profile_photo_service = service
+
+    outcome = await handler.add(_req())
+
+    assert outcome.status_code == 200
+    assert outcome.body["newly_linked"] is False
+    assert "profile_photo" not in outcome.body
+    assert service.calls == []

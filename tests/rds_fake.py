@@ -307,6 +307,12 @@ class InMemoryRdsVenueStore:
             out.append(vid)
         return out
 
+    def is_venue_servable(self, venue_id: str) -> bool:
+        """Single-venue counterpart of `list_servable_venue_ids()`. Reuses it
+        rather than re-deriving the eligibility predicate, so the fake never
+        drifts into a second copy of that logic."""
+        return venue_id in set(self.list_servable_venue_ids())
+
     # ── admin.venue_closure_signal ────────────────────────────────────────────
     def set_closure_signal(self, venue_id: str, signal: dict) -> None:
         self._guard()

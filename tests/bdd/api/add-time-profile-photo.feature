@@ -1,4 +1,3 @@
-@wip
 Feature: Capture a venue's Instagram profile photo when the venue is added
 
   As an operator adding a venue to the catalog

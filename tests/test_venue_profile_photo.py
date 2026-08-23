@@ -52,13 +52,17 @@ from app.services.venue_profile_photo_service import (
     OUTCOME_NO_HANDLE,
     OUTCOME_NO_PIC,
     OUTCOME_SKIPPED_HAS_PHOTO,
+    OUTCOME_SKIPPED_INELIGIBLE,
     OUTCOME_SKIPPED_RECENT_FAILURE,
     OUTCOME_SKIPPED_UNAVAILABLE,
     OUTCOME_STORED,
+    OUTCOME_TIMEOUT,
     OUTCOME_UNCHANGED,
     OUTCOME_UPLOAD_FAILED,
     PROFILE_PHOTO_ATTEMPT_TABLE,
     PROFILE_PHOTO_TABLE,
+    SOURCE_ADD_TIME,
+    SOURCE_BACKFILL,
     VenueProfilePhotoService,
     parse_mode,
 )
@@ -1753,7 +1757,13 @@ def test_an_unknown_mode_is_rejected_rather_than_defaulted(restore_settings):
 # job's spend gates rather than carrying a second, drifting copy of them.
 
 
-def _capture_harness(handle="bar", *, pic=True):
+def _capture_harness(handle="bar", *, pic=True, data: bytes = None):
+    """`data` defaults to a real, decodable PNG (via `_edge_avatar`) rather
+    than an opaque `b"x"`: a garbage payload makes `sample_edge_color` return
+    `None`, which would make a test asserting on the sampled colour pass
+    vacuously regardless of whether sampling actually ran."""
+    if data is None:
+        data = _edge_avatar("#3154A5")
     _, _, store, repo = _harness()
     _seed(store, repo, "v-1", handle)
     apify, s3 = _FakeApify(), _RecordingS3()
@@ -1764,7 +1774,7 @@ def _capture_harness(handle="bar", *, pic=True):
     media = VenueMediaStore(
         bucket="b", region="us-east-1", cdn_base_url=_CDN, s3_client=s3
     )
-    service = _service(store, repo, apify, media, {_pic(handle): (b"x", "image/jpeg")})
+    service = _service(store, repo, apify, media, {_pic(handle): (data, "image/png")})
     return store, repo, apify, s3, service
 
 
@@ -1779,11 +1789,16 @@ def test_add_time_capture_stores_the_photo_for_a_new_venue(restore_settings):
 
 def test_add_time_capture_records_the_edge_colour_like_the_job_does(restore_settings):
     """The grey-border treatment is not a separate pass: the colour the card
-    paints behind a fitted avatar is sampled from the bytes at capture time."""
+    paints behind a fitted avatar is sampled from the bytes at capture time.
+
+    Asserts the sampled VALUE, not merely the key's presence — `_persist`
+    always writes an `edge_color` key, even when sampling failed and the
+    value is `None`, so `"edge_color" in payload` passes whether or not
+    sampling actually ran."""
     store, _, _, _, service = _capture_harness()
     asyncio.run(service.capture_for_venue("v-1", "bar"))
     row = store.enrichment[PROFILE_PHOTO_TABLE]["v-1"]
-    assert "edge_color" in (row.get("payload") or {})
+    assert row["payload"]["edge_color"] == "#3154A5"
 
 
 def test_add_time_capture_does_not_re_buy_a_photo_the_venue_already_has(restore_settings):
@@ -1873,3 +1888,203 @@ def test_add_time_capture_ignores_the_per_run_cap(restore_settings):
         OUTCOME_STORED
     )
     assert apify.calls == ["bar"]
+
+
+# ── add-time capture: defects found in the pre-lifecycle PR #215 review ─────
+# plans/260823_add-time-profile-photo.md
+
+
+def test_add_time_capture_records_an_attempt_on_every_no_photo_outcome(restore_settings):
+    """BLOCKER: capture_for_venue must mirror run()'s call to _note_attempt
+    exactly. Without it, an add-time failure (no_pic here) leaves no trace,
+    so the same venue is re-billed by the next add AND by the 24h sweep."""
+    store, _, apify, _, service = _capture_harness(pic=False)
+    summary = asyncio.run(service.capture_for_venue("v-1", "bar"))
+    assert summary["outcome"] == OUTCOME_NO_PIC
+    attempt = store.get_enrichment(PROFILE_PHOTO_ATTEMPT_TABLE, "v-1")
+    assert attempt is not None, "no attempt recorded; the venue will be re-billed"
+    assert attempt["payload"]["outcome"] == OUTCOME_NO_PIC
+    assert attempt["payload"]["instagram_handle"] == "bar"
+
+
+def test_add_time_capture_clears_a_prior_attempt_on_success(restore_settings):
+    """Symmetric with the job: a success must clear an old negative-cache row
+    so a venue that now works is never shadowed by a stale failure."""
+    store, _, apify, _, service = _capture_harness(pic=False)
+    asyncio.run(service.capture_for_venue("v-1", "bar"))
+    assert store.get_enrichment(PROFILE_PHOTO_ATTEMPT_TABLE, "v-1") is not None
+
+    _age(store, PROFILE_PHOTO_ATTEMPT_TABLE, "v-1", 99)
+    apify.programmed["bar"] = ProfileFetchResult(
+        username="bar", profile_pic_url=_pic("bar")
+    )
+    second = asyncio.run(service.capture_for_venue("v-1", "bar"))
+    assert second["outcome"] == OUTCOME_STORED
+    row = store.get_enrichment(PROFILE_PHOTO_ATTEMPT_TABLE, "v-1")
+    assert row["deleted_at"] is not None, "the attempt row outlived the success"
+
+
+def test_add_time_capture_deadline_never_wraps_the_upload_or_persist(restore_settings):
+    """BLOCKER (structural fix): the add-time deadline must bound ONLY the
+    Apify fetch + image download, never the S3 upload or the RDS persist.
+    `VenueMediaStore.put_profile_photo` is `asyncio.to_thread`-wrapped boto3;
+    cancelling the await does not stop the underlying OS thread, so a
+    deadline that still covers the upload can let the PUT complete after the
+    coroutine has already unwound — an S3 object with no RDS row and no
+    attempt row, invisible to every cost gate."""
+    store, _, apify, s3, service = _capture_harness()
+    real_put = service.media_store.put_profile_photo
+
+    async def _slow_put(**kwargs):
+        await asyncio.sleep(0.2)
+        return await real_put(**kwargs)
+
+    service.media_store.put_profile_photo = _slow_put
+
+    summary = asyncio.run(
+        service.capture_for_venue("v-1", "bar", deadline_seconds=0.02)
+    )
+    assert summary["outcome"] == OUTCOME_STORED, summary
+    row = store.get_enrichment(PROFILE_PHOTO_TABLE, "v-1")
+    assert row is not None and row["payload"]["photo_url"], (
+        "the upload must complete and persist even though it ran longer than "
+        "the add-time deadline"
+    )
+
+
+def test_add_time_capture_deadline_bounds_the_apify_fetch(restore_settings):
+    """The other half of the same fix: the deadline must still bound the
+    genuinely cancellable calls (Apify fetch, image download) — narrowing its
+    scope must not mean removing it. A timeout here also negative-caches the
+    venue (OUTCOME_TIMEOUT is in ATTEMPT_RECORDED_OUTCOMES)."""
+    store, _, apify, s3, service = _capture_harness()
+    real_fetch = apify.fetch_profile
+
+    async def _slow_fetch(handle):
+        await asyncio.sleep(0.2)
+        return await real_fetch(handle)
+
+    apify.fetch_profile = _slow_fetch
+
+    summary = asyncio.run(
+        service.capture_for_venue("v-1", "bar", deadline_seconds=0.02)
+    )
+    assert summary["outcome"] == OUTCOME_TIMEOUT
+    assert store.get_enrichment(PROFILE_PHOTO_TABLE, "v-1") is None
+    attempt = store.get_enrichment(PROFILE_PHOTO_ATTEMPT_TABLE, "v-1")
+    assert attempt is not None
+    assert attempt["payload"]["outcome"] == OUTCOME_TIMEOUT
+
+
+def test_add_time_capture_skips_a_venue_the_eligibility_gate_blocks(restore_settings):
+    """SHOULD-FIX: a venue outside serving.eligible_venue must never be
+    scraped at add time — the scheduled job would never buy it a photo
+    either, and no user will ever see it."""
+    store, repo, apify, s3, service = _capture_harness()
+    repo.upsert_venue(Venue(
+        forecast=True, processed=True, venue_id="v-1", venue_name="v-1",
+        venue_address="v-1 address", venue_lat=-8.05, venue_lng=-34.88,
+        venue_type="GYM",  # DEFAULT_BLOCKED_VENUE_TYPES
+    ))
+    summary = asyncio.run(service.capture_for_venue("v-1", "bar"))
+    assert summary["outcome"] == OUTCOME_SKIPPED_INELIGIBLE
+    assert apify.calls == []
+    assert s3.puts == []
+
+
+def test_is_venue_servable_agrees_with_list_servable_venue_ids(restore_settings):
+    """The single-row eligibility read must never drift from the bulk one
+    select() uses — both are backed by the same evaluate() call in the fake."""
+    _, _, store, repo = _harness()
+    repo.upsert_venue(_venue("v-1"))  # BAR: eligible
+    repo.upsert_venue(Venue(
+        forecast=True, processed=True, venue_id="v-2", venue_name="v-2",
+        venue_address="v-2 address", venue_lat=-8.05, venue_lng=-34.88,
+        venue_type="GYM",
+    ))
+    servable = set(store.list_servable_venue_ids())
+    assert store.is_venue_servable("v-1") is True
+    assert store.is_venue_servable("v-2") is False
+    assert ("v-1" in servable) == store.is_venue_servable("v-1")
+    assert ("v-2" in servable) == store.is_venue_servable("v-2")
+
+
+def test_add_time_capture_labels_metrics_with_the_add_time_source(restore_settings):
+    """SHOULD-FIX (metrics conflation): add-time volume must land on its own
+    `source` label so it is separable from the job's own, cap-bounded
+    volume on the same counter family."""
+    from app.metrics import (
+        VENUE_PROFILE_PHOTO_APIFY_CALLS_TOTAL,
+        VENUE_PROFILE_PHOTO_VENUES_TOTAL,
+    )
+
+    before_add_time = VENUE_PROFILE_PHOTO_VENUES_TOTAL.labels(
+        outcome=OUTCOME_STORED, source=SOURCE_ADD_TIME
+    )._value.get()
+    before_backfill = VENUE_PROFILE_PHOTO_VENUES_TOTAL.labels(
+        outcome=OUTCOME_STORED, source=SOURCE_BACKFILL
+    )._value.get()
+    before_calls = VENUE_PROFILE_PHOTO_APIFY_CALLS_TOTAL.labels(
+        source=SOURCE_ADD_TIME
+    )._value.get()
+
+    _, _, apify, _, service = _capture_harness()
+    summary = asyncio.run(service.capture_for_venue("v-1", "bar"))
+    assert summary["outcome"] == OUTCOME_STORED
+
+    after_add_time = VENUE_PROFILE_PHOTO_VENUES_TOTAL.labels(
+        outcome=OUTCOME_STORED, source=SOURCE_ADD_TIME
+    )._value.get()
+    after_backfill = VENUE_PROFILE_PHOTO_VENUES_TOTAL.labels(
+        outcome=OUTCOME_STORED, source=SOURCE_BACKFILL
+    )._value.get()
+    after_calls = VENUE_PROFILE_PHOTO_APIFY_CALLS_TOTAL.labels(
+        source=SOURCE_ADD_TIME
+    )._value.get()
+
+    assert after_add_time == before_add_time + 1
+    assert after_backfill == before_backfill, (
+        "an add-time capture must not move the backfill-labeled series"
+    )
+    assert after_calls == before_calls + 1
+
+
+def test_add_time_handle_fallback_uses_a_single_row_lookup(restore_settings):
+    """Nit: the handle fallback must read one row (get_enrichment), not scan
+    the whole instagram.handle table (list_instagram_handles) — this runs
+    once per add, including inside BatchAddService's per-row loop."""
+    _, _, store, repo = _harness()
+    _seed(store, repo, "v-1", "bar")
+    apify, s3 = _FakeApify(), _RecordingS3()
+    apify.programmed["bar"] = ProfileFetchResult(
+        username="bar", profile_pic_url=_pic("bar")
+    )
+    media = VenueMediaStore(bucket="b", region="us-east-1", cdn_base_url=_CDN, s3_client=s3)
+    service = _service(
+        store, repo, apify, media,
+        {_pic("bar"): (_edge_avatar("#123456"), "image/png")},
+    )
+
+    calls = {"scan": 0, "single": 0}
+    real_scan = store.list_instagram_handles
+    real_single = store.get_enrichment
+
+    def _tracked_scan():
+        calls["scan"] += 1
+        return real_scan()
+
+    def _tracked_single(table_key, venue_id):
+        if table_key == "instagram.handle":
+            calls["single"] += 1
+        return real_single(table_key, venue_id)
+
+    store.list_instagram_handles = _tracked_scan
+    store.get_enrichment = _tracked_single
+
+    summary = asyncio.run(service.capture_for_venue("v-1", None))
+    assert summary["outcome"] == OUTCOME_STORED
+    assert calls["scan"] == 0, (
+        "list_instagram_handles was called — a full-table scan, not a "
+        "single-row read"
+    )
+    assert calls["single"] >= 1
