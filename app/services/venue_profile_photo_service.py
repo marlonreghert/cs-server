@@ -213,6 +213,14 @@ OUTCOME_DOWNLOAD_FAILED = "download_failed"
 OUTCOME_UPLOAD_FAILED = "upload_failed"
 OUTCOME_CREDIT_EXHAUSTED = "credit_exhausted"
 
+# ── add-time capture outcome (`capture_for_venue` only) ─────────────────────
+# The job has no per-venue equivalent: when the feature is off or the media
+# store is unconfigured, `select()` returns a run-level `status` and scrapes
+# NOTHING, so there is no venue to label. The add-time path is called for one
+# venue at a time and still has to say what happened to it, hence a label the
+# job can never emit.
+OUTCOME_SKIPPED_UNAVAILABLE = "skipped_unavailable"
+
 # ── edge-colour backfill outcomes (mode `edge_color` only) ──────────────────
 # A closed set, like the ones above: an outcome label that never appears in
 # Prometheus is itself the diagnostic that its code path never ran. None of
@@ -764,6 +772,103 @@ class VenueProfilePhotoService:
         return self._finish(summary, status, started, job_id)
 
     # ── one venue ───────────────────────────────────────────────────────────
+    # ── add-time capture: one venue, now ────────────────────────────────────
+    async def capture_for_venue(
+        self, venue_id: str, handle: Optional[str]
+    ) -> dict:
+        """Capture ONE venue's profile photo immediately, at add time.
+
+        The scheduled backfill runs on a 24h interval behind a 200-venue cap,
+        so a venue added today could wait a day or more for its picture and
+        show an emoji placeholder in the list until then. This is the same
+        capture, run inline for the venue that was just added.
+
+        Every gate `select()` applies per venue is applied here too, and for
+        the same reasons — a venue that already holds a photo for this handle
+        is not re-bought, and one that failed inside the retry window is not
+        re-billed. What is NOT shared is the bulk read: `select()` reads the
+        whole catalog to decide a run, this reads one row.
+
+        The per-run cap deliberately does not apply. It bounds a sweep of the
+        catalog; this is a single venue the operator just paid to add, and
+        capping it at anything would only ever mean "sometimes silently skip".
+
+        Returns a one-venue summary. Raises nothing the caller must handle:
+        the outcome string carries the failure, exactly as the job's does.
+        """
+        summary: dict = {
+            "venue_id": venue_id,
+            "outcome": None,
+            "apify_calls": 0,
+            "bytes_stored": 0,
+            "estimated_cost_usd": 0.0,
+        }
+
+        def done(outcome: str) -> dict:
+            summary["outcome"] = outcome
+            VENUE_PROFILE_PHOTO_VENUES_TOTAL.labels(outcome=outcome).inc()
+            return summary
+
+        # ── the config gates, BEFORE anything can be billed ─────────────────
+        if not settings.instagram_profile_photo_enabled:
+            return done(OUTCOME_SKIPPED_UNAVAILABLE)
+        if self.media_store is None or not settings.media_cdn_base_url:
+            return done(OUTCOME_SKIPPED_UNAVAILABLE)
+        if self.rds_store is None:  # pragma: no cover - defensive
+            return done(OUTCOME_SKIPPED_UNAVAILABLE)
+
+        if not _normalize_handle(handle):
+            # The caller had no handle to offer. That is the NORMAL shape for a
+            # recovered or geo-linked add, where discovery reports "skipped"
+            # precisely because the venue already carries one — so look it up
+            # rather than treating the caller's None as "no handle exists".
+            # `Venue` has no handle field (it lives on `MinifiedVenue`), which
+            # is why the lookup belongs here and not in the handler.
+            try:
+                handle = self.rds_store.list_instagram_handles().get(venue_id)
+            except Exception as e:  # pragma: no cover - defensive
+                logger.warning(
+                    f"[ProfilePhoto] add-time handle lookup failed for "
+                    f"{venue_id}; nothing spent: {e}"
+                )
+                return done(OUTCOME_SKIPPED_UNAVAILABLE)
+        if not _normalize_handle(handle):
+            # Genuinely nothing to scrape. Handle discovery is a different
+            # pipeline's job.
+            return done(OUTCOME_NO_HANDLE)
+
+        # ── the per-venue gates, one row each, still free ───────────────────
+        try:
+            existing = self.rds_store.get_enrichment_bulk(
+                PROFILE_PHOTO_TABLE, [venue_id]
+            )
+            attempts = self.rds_store.get_enrichment_bulk(
+                PROFILE_PHOTO_ATTEMPT_TABLE, [venue_id]
+            )
+        except Exception as e:
+            # Read failed, so the gates cannot be evaluated. Skipping is the
+            # only safe answer: scraping anyway could re-buy a photo we already
+            # own, and the scheduled backfill will pick this venue up.
+            logger.warning(
+                f"[ProfilePhoto] add-time gate read failed for {venue_id}; "
+                f"nothing spent: {e}"
+            )
+            return done(OUTCOME_SKIPPED_UNAVAILABLE)
+
+        row = existing.get(venue_id)
+        if row is not None and self._has_current_photo(row, handle):
+            return done(OUTCOME_SKIPPED_HAS_PHOTO)
+
+        retry_days = settings.instagram_profile_photo_retry_days
+        attempt = attempts.get(venue_id)
+        if retry_days > 0 and attempt is not None:
+            cutoff = self._now() - timedelta(days=retry_days)
+            if self._attempt_suppresses(attempt, cutoff, handle):
+                return done(OUTCOME_SKIPPED_RECENT_FAILURE)
+
+        outcome = await self._process_venue(venue_id, handle, row, summary)
+        return done(outcome)
+
     async def _process_venue(
         self, venue_id: str, handle: str, existing_row: Optional[dict], summary: dict
     ) -> str:

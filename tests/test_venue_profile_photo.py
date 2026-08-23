@@ -53,6 +53,7 @@ from app.services.venue_profile_photo_service import (
     OUTCOME_NO_PIC,
     OUTCOME_SKIPPED_HAS_PHOTO,
     OUTCOME_SKIPPED_RECENT_FAILURE,
+    OUTCOME_SKIPPED_UNAVAILABLE,
     OUTCOME_STORED,
     OUTCOME_UNCHANGED,
     OUTCOME_UPLOAD_FAILED,
@@ -1743,3 +1744,132 @@ def test_an_unknown_mode_is_rejected_rather_than_defaulted(restore_settings):
     assert apify.calls == []
     with pytest.raises(InvalidProfilePhotoMode):
         service.estimate({"mode": "edge_colour"})
+
+
+# ── add-time capture (capture_for_venue) ────────────────────────────────────
+# The scheduled job runs every 24h behind a 200-venue cap, so a venue added
+# today could show an emoji placeholder for a day. These cover the one-venue
+# path that closes that window — and, more importantly, that it reuses the
+# job's spend gates rather than carrying a second, drifting copy of them.
+
+
+def _capture_harness(handle="bar", *, pic=True):
+    _, _, store, repo = _harness()
+    _seed(store, repo, "v-1", handle)
+    apify, s3 = _FakeApify(), _RecordingS3()
+    if pic:
+        apify.programmed[handle] = ProfileFetchResult(
+            username=handle, profile_pic_url=_pic(handle)
+        )
+    media = VenueMediaStore(
+        bucket="b", region="us-east-1", cdn_base_url=_CDN, s3_client=s3
+    )
+    service = _service(store, repo, apify, media, {_pic(handle): (b"x", "image/jpeg")})
+    return store, repo, apify, s3, service
+
+
+def test_add_time_capture_stores_the_photo_for_a_new_venue(restore_settings):
+    store, _, apify, s3, service = _capture_harness()
+    summary = asyncio.run(service.capture_for_venue("v-1", "bar"))
+    assert summary["outcome"] == OUTCOME_STORED
+    assert apify.calls == ["bar"]
+    assert len(s3.puts) == 1
+    assert summary["estimated_cost_usd"] == settings.apify_instagram_profile_cost_usd
+
+
+def test_add_time_capture_records_the_edge_colour_like_the_job_does(restore_settings):
+    """The grey-border treatment is not a separate pass: the colour the card
+    paints behind a fitted avatar is sampled from the bytes at capture time."""
+    store, _, _, _, service = _capture_harness()
+    asyncio.run(service.capture_for_venue("v-1", "bar"))
+    row = store.enrichment[PROFILE_PHOTO_TABLE]["v-1"]
+    assert "edge_color" in (row.get("payload") or {})
+
+
+def test_add_time_capture_does_not_re_buy_a_photo_the_venue_already_has(restore_settings):
+    """The gate that makes this safe to call on every add, including re-adds."""
+    store, _, apify, s3, service = _capture_harness()
+    _seed_photo_row(store, "v-1", "bar", b"x", days_old=400)
+    summary = asyncio.run(service.capture_for_venue("v-1", "bar"))
+    assert summary["outcome"] == OUTCOME_SKIPPED_HAS_PHOTO
+    assert apify.calls == []          # nothing bought
+    assert s3.puts == []
+    assert summary["estimated_cost_usd"] == 0.0
+
+
+def test_add_time_capture_still_re_buys_when_the_handle_changed(restore_settings):
+    """Age-blind, but NOT handle-blind — a stored photo for a superseded handle
+    is another business's logo, so this one must spend."""
+    store, _, apify, _, service = _capture_harness()
+    # Deliberately DIFFERENT bytes from what the fetcher returns: seeding the
+    # same bytes makes the capture short-circuit to `unchanged` (no re-upload,
+    # URL kept), which would still prove the gate opened but would hide the
+    # store. This asserts the whole path.
+    _seed_photo_row(store, "v-1", "old-handle", b"old-bytes", days_old=1)
+    assert asyncio.run(service.capture_for_venue("v-1", "bar"))["outcome"] == (
+        OUTCOME_STORED
+    )
+    assert apify.calls == ["bar"]
+
+
+def test_add_time_capture_honours_the_negative_cache(restore_settings):
+    """A handle that failed yesterday is not re-billed just because someone
+    re-added the venue."""
+    store, _, apify, _, service = _capture_harness()
+    store.upsert_enrichment(
+        PROFILE_PHOTO_ATTEMPT_TABLE, "v-1",
+        {"venue_id": "v-1", "instagram_handle": "bar"}, history=False,
+    )
+    _age(store, PROFILE_PHOTO_ATTEMPT_TABLE, "v-1", 1)
+    summary = asyncio.run(service.capture_for_venue("v-1", "bar"))
+    assert summary["outcome"] == OUTCOME_SKIPPED_RECENT_FAILURE
+    assert apify.calls == []
+
+
+def test_add_time_capture_with_no_handle_anywhere_spends_nothing(restore_settings):
+    """No handle from the caller AND none in the store — nothing to scrape."""
+    _, _, store, repo = _harness()
+    _seed(store, repo, "v-1")  # venue, but no instagram.handle row
+    apify, s3 = _FakeApify(), _RecordingS3()
+    media = VenueMediaStore(
+        bucket="b", region="us-east-1", cdn_base_url=_CDN, s3_client=s3
+    )
+    service = _service(store, repo, apify, media, {})
+    for handle in (None, "", "   "):
+        summary = asyncio.run(service.capture_for_venue("v-1", handle))
+        assert summary["outcome"] == OUTCOME_NO_HANDLE
+    assert apify.calls == []
+
+
+def test_add_time_capture_falls_back_to_the_stored_handle(restore_settings):
+    """The recovered / geo-linked add: discovery reports "skipped" because the
+    venue already HAS a handle, so the caller passes None. Treating that as
+    "no handle" would leave exactly those venues without a photo — the ones
+    most likely to be re-added by an operator who noticed something missing."""
+    _, _, apify, _, service = _capture_harness()
+    summary = asyncio.run(service.capture_for_venue("v-1", None))
+    assert summary["outcome"] == OUTCOME_STORED
+    assert apify.calls == ["bar"]
+
+
+def test_add_time_capture_is_inert_when_the_feature_is_off(restore_settings):
+    """Same kill switch as the job: off means nothing is bought, not that the
+    add fails."""
+    _, _, apify, _, service = _capture_harness()
+    settings.instagram_profile_photo_enabled = False
+    summary = asyncio.run(service.capture_for_venue("v-1", "bar"))
+    assert summary["outcome"] == OUTCOME_SKIPPED_UNAVAILABLE
+    assert apify.calls == []
+    assert summary["estimated_cost_usd"] == 0.0
+
+
+def test_add_time_capture_ignores_the_per_run_cap(restore_settings):
+    """The cap bounds a catalog sweep. This is one venue the operator just paid
+    to add, so a cap of zero must not silently skip it — that would make the
+    add-time path invisible exactly when the backfill queue is longest."""
+    _, _, apify, _, service = _capture_harness()
+    settings.instagram_profile_photo_max_venues_per_run = 0
+    assert asyncio.run(service.capture_for_venue("v-1", "bar"))["outcome"] == (
+        OUTCOME_STORED
+    )
+    assert apify.calls == ["bar"]

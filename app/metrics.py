@@ -1050,6 +1050,15 @@ ADD_VENUE_INSTAGRAM_TOTAL = Counter(
     ["result"],  # found | low_confidence | not_found | timeout | skipped | error
 )
 
+ADD_VENUE_PROFILE_PHOTO_TOTAL = Counter(
+    "add_venue_profile_photo_total",
+    "Outcomes of the Instagram profile-photo capture run inline at venue-add "
+    "time. Separate from venue_profile_photo_venues_total, which counts the "
+    "same outcomes for the scheduled job: keeping them apart is what lets you "
+    "tell add-time spend from sweep spend.",
+    ["result"],  # stored | no_handle | timeout | skipped | error | <service outcome>
+)
+
 # plans/260816_venue-address-cache-integrity.md: an add-venue attempt whose
 # coordinate could not be trusted (no caller-supplied lat/lng and no
 # caller-supplied place_id — resolved instead from a bare, unbiased Text
