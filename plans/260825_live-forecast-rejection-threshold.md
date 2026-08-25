@@ -244,6 +244,19 @@ rejections seen across refresh cycles. On a rejection:
   label value, `result="rejected_streak_below_threshold"`, and update the
   comment enumerating the label's possible values. `deleted_not_ok` keeps its
   existing meaning ("cache was actually deleted").
+- **Existing BDD scenario needs reconciling**:
+  `tests/bdd/refresh/live-forecast-pacing-retry.feature`'s scenario "A
+  BestTime business rejection is never retried and still clears stale cache"
+  (from the already-merged pacing/retry PR) asserts that a SINGLE `status:
+  "Error"` response deletes an already-cached forecast — the exact `N=1`
+  assumption this plan changes the default away from. That scenario's title
+  and rejection-is-never-retried assertion (`exactly 1 live-forecast call was
+  made`) stay true and out of scope; only its cache-clearing assertion is now
+  default-threshold-dependent. `/execute-feature` must update that scenario
+  (e.g. set the streak threshold to 1 in its Background/Given, or otherwise
+  make the scenario explicit about which threshold it exercises) so it keeps
+  passing under the new default without silently asserting the old N=1
+  behavior as if it were still the default.
 
 ## Data, Config, And API Impact
 - New Redis key family: `live_forecast_rejection_streak_v1:{venue_id}`,
@@ -312,6 +325,14 @@ Pytest unit tests (`tests/test_services.py`,
   `increment_live_forecast_rejection_streak` (atomic increment, correct key)
   and `reset_live_forecast_rejection_streak` (delete, idempotent on an absent
   key).
+
+Existing coverage to reconcile (not new, but will break under the new default
+if left untouched):
+- `tests/bdd/refresh/live-forecast-pacing-retry.feature`'s "A BestTime
+  business rejection is never retried and still clears stale cache" scenario
+  — see Implementation Approach.
+- `tests/test_services.py::test_live_forecast_delete_when_status_not_ok` —
+  see above.
 
 Manual or integration checks:
 - None required beyond `make test-unit` and `make test-bdd` passing. No live
