@@ -2,6 +2,7 @@
 import pytest
 from unittest.mock import Mock, AsyncMock, patch
 
+from app.config import settings
 from app.services import VenuesRefresherService
 from app.metrics import LIVE_FORECAST_FETCH_RESULTS
 from app.models import (
@@ -302,6 +303,9 @@ class TestVenuesRefresherService:
             LIVE_FORECAST_FETCH_RESULTS.labels(result="cached")._value.get()
             == cached_before + 1
         )
+        # A status "OK" outcome resets any in-progress rejection streak.
+        mock_venue_dao.reset_live_forecast_rejection_streak.assert_called_once_with("v1")
+        mock_venue_dao.increment_live_forecast_rejection_streak.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_live_forecast_skipped_when_venue_dao_reports_absent(
@@ -336,6 +340,9 @@ class TestVenuesRefresherService:
         )
         assert LIVE_FORECAST_FETCH_RESULTS.labels(result="error")._value.get() == error_before
         assert LIVE_FORECAST_FETCH_RESULTS.labels(result="cached")._value.get() == cached_before
+        # Still a status "OK" outcome (BestTime successfully forecast the
+        # venue) even though our own persistence skipped the write.
+        mock_venue_dao.reset_live_forecast_rejection_streak.assert_called_once_with("v1")
 
     @pytest.mark.asyncio
     async def test_live_forecast_set_failure_still_counts_as_error(
@@ -366,32 +373,116 @@ class TestVenuesRefresherService:
             LIVE_FORECAST_FETCH_RESULTS.labels(result="skipped_venue_absent")._value.get()
             == skipped_before
         )
+        # The status was still "OK" — only our own SetLiveForecast failed —
+        # so the rejection streak still resets.
+        mock_venue_dao.reset_live_forecast_rejection_streak.assert_called_once_with("v1")
 
-    @pytest.mark.asyncio
-    async def test_live_forecast_delete_when_status_not_ok(
-        self, refresher_service, mock_besttime_api, mock_venue_dao
-    ):
-        """Test CRITICAL live forecast filtering - delete cache when status not OK."""
-        mock_besttime_api.get_live_forecast.return_value = LiveForecastResponse(
+    @staticmethod
+    def _not_ok_response(vid: str = "v1") -> LiveForecastResponse:
+        return LiveForecastResponse(
             status="ERROR",  # Not OK
-            venue_info=VenueInfo(venue_id="v1"),
+            venue_info=VenueInfo(venue_id=vid),
             analysis=Analysis(
                 venue_live_busyness=0,
                 venue_live_busyness_available=False,
             ),
         )
 
+    @pytest.mark.asyncio
+    async def test_live_forecast_rejection_below_threshold_keeps_cache(
+        self, refresher_service, mock_besttime_api, mock_venue_dao, monkeypatch
+    ):
+        """A rejection whose streak (after incrementing) is still below the
+        configured threshold must NOT delete the cache
+        (plans/260825_live-forecast-rejection-threshold.md) — a single
+        clean rejection is more often a flaky one-off than a durable
+        "can't forecast this venue" signal."""
+        monkeypatch.setattr(settings, "live_forecast_rejection_streak_threshold", 2)
+        mock_besttime_api.get_live_forecast.return_value = self._not_ok_response()
+        mock_venue_dao.increment_live_forecast_rejection_streak.return_value = 1
+
+        below_before = LIVE_FORECAST_FETCH_RESULTS.labels(
+            result="rejected_streak_below_threshold"
+        )._value.get()
+        deleted_before = LIVE_FORECAST_FETCH_RESULTS.labels(result="deleted_not_ok")._value.get()
+
         await refresher_service._fetch_and_cache_live_forecasts(["v1"])
 
-        # Should delete cache, not set
+        mock_venue_dao.increment_live_forecast_rejection_streak.assert_called_once_with("v1")
+        mock_venue_dao.delete_live_forecast.assert_not_called()
+        mock_venue_dao.reset_live_forecast_rejection_streak.assert_not_called()
+        assert (
+            LIVE_FORECAST_FETCH_RESULTS.labels(
+                result="rejected_streak_below_threshold"
+            )._value.get()
+            == below_before + 1
+        )
+        assert (
+            LIVE_FORECAST_FETCH_RESULTS.labels(result="deleted_not_ok")._value.get()
+            == deleted_before
+        )
+
+    @pytest.mark.asyncio
+    async def test_live_forecast_rejection_at_threshold_deletes_and_resets_streak(
+        self, refresher_service, mock_besttime_api, mock_venue_dao, monkeypatch
+    ):
+        """The rejection that brings the streak to the configured threshold
+        deletes the cache (existing `deleted_not_ok` behavior) and resets the
+        streak counter."""
+        monkeypatch.setattr(settings, "live_forecast_rejection_streak_threshold", 2)
+        mock_besttime_api.get_live_forecast.return_value = self._not_ok_response()
+        mock_venue_dao.increment_live_forecast_rejection_streak.return_value = 2
+
+        deleted_before = LIVE_FORECAST_FETCH_RESULTS.labels(result="deleted_not_ok")._value.get()
+
+        await refresher_service._fetch_and_cache_live_forecasts(["v1"])
+
+        mock_venue_dao.increment_live_forecast_rejection_streak.assert_called_once_with("v1")
         mock_venue_dao.delete_live_forecast.assert_called_once_with("v1")
+        mock_venue_dao.reset_live_forecast_rejection_streak.assert_called_once_with("v1")
         mock_venue_dao.set_live_forecast.assert_not_called()
+        assert (
+            LIVE_FORECAST_FETCH_RESULTS.labels(result="deleted_not_ok")._value.get()
+            == deleted_before + 1
+        )
+
+    @pytest.mark.asyncio
+    async def test_live_forecast_threshold_of_one_reproduces_legacy_behavior(
+        self, refresher_service, mock_besttime_api, mock_venue_dao, monkeypatch
+    ):
+        """threshold=1 must delete on the very first rejection — the
+        instant, code-change-free rollback lever to today's behavior."""
+        monkeypatch.setattr(settings, "live_forecast_rejection_streak_threshold", 1)
+        mock_besttime_api.get_live_forecast.return_value = self._not_ok_response()
+        mock_venue_dao.increment_live_forecast_rejection_streak.return_value = 1
+
+        await refresher_service._fetch_and_cache_live_forecasts(["v1"])
+
+        mock_venue_dao.delete_live_forecast.assert_called_once_with("v1")
+
+    @pytest.mark.asyncio
+    async def test_live_forecast_transport_error_does_not_touch_streak(
+        self, refresher_service, mock_besttime_api, mock_venue_dao
+    ):
+        """A transport failure (GetLiveForecast exception) carries no
+        information about whether BestTime would have accepted or rejected
+        the venue — it must neither advance nor reset the streak."""
+        mock_besttime_api.get_live_forecast.side_effect = RuntimeError("timeout")
+
+        await refresher_service._fetch_and_cache_live_forecasts(["v1"])
+
+        mock_venue_dao.increment_live_forecast_rejection_streak.assert_not_called()
+        mock_venue_dao.reset_live_forecast_rejection_streak.assert_not_called()
+        mock_venue_dao.delete_live_forecast.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_live_forecast_delete_when_not_available(
         self, refresher_service, mock_besttime_api, mock_venue_dao
     ):
-        """Test CRITICAL live forecast filtering - delete when not available (venue closed)."""
+        """Test CRITICAL live forecast filtering - delete when not available
+        (venue closed). Unaffected by the rejection-streak threshold — status
+        "OK" means BestTime successfully classified the venue, so this deletes
+        immediately every time and resets any in-progress rejection streak."""
         mock_besttime_api.get_live_forecast.return_value = LiveForecastResponse(
             status="OK",
             venue_info=VenueInfo(venue_id="v1"),
@@ -406,6 +497,8 @@ class TestVenuesRefresherService:
         # Should delete cache because not available
         mock_venue_dao.delete_live_forecast.assert_called_once_with("v1")
         mock_venue_dao.set_live_forecast.assert_not_called()
+        mock_venue_dao.reset_live_forecast_rejection_streak.assert_called_once_with("v1")
+        mock_venue_dao.increment_live_forecast_rejection_streak.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_refresh_venues_by_filter_with_live_fetch(

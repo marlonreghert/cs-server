@@ -89,6 +89,16 @@ class _ScriptedLiveForecastTransport:
             return httpx.Response(200, json=body, request=request)
         if step == "ok":
             return httpx.Response(200, json=_live_ok_body(vid), request=request)
+        if step == "closed":
+            # status "OK" but no live busyness available — e.g. the venue is
+            # currently closed. Used by live-forecast-rejection-threshold.feature
+            # to prove this branch deletes immediately, unaffected by the
+            # rejection-streak threshold (a materially different signal than a
+            # business rejection: BestTime successfully classified the venue).
+            body = _live_ok_body(vid)
+            body["analysis"]["venue_live_busyness_available"] = False
+            body["analysis"]["venue_live_busyness"] = 0
+            return httpx.Response(200, json=body, request=request)
         if isinstance(step, int):
             # Retry-After: 0 keeps any status-code-triggered retry backoff
             # near-instant in this suite — no scenario needs a real wait.
@@ -125,7 +135,10 @@ def _build_live_client(context) -> BestTimeAPIClient:
         # disabled here so these scenarios test retry, not pacing delay.
         kwargs["live_min_interval_seconds"] = 0.0
     if "live_retry_max_attempts" in accepted:
-        kwargs["live_retry_max_attempts"] = context.live_retry_max_attempts
+        # Default 1 (no retry) for scenarios that don't set the Background
+        # retry budget — e.g. live-forecast-rejection-threshold.feature, which
+        # reuses this harness but isn't exercising retry behavior.
+        kwargs["live_retry_max_attempts"] = getattr(context, "live_retry_max_attempts", 1)
     client = BestTimeAPIClient(**kwargs)
     client.client = httpx.AsyncClient(transport=httpx.MockTransport(_transport(context).handler))
     return client
@@ -186,6 +199,11 @@ def step_answers_rejected(context, vid):
     _transport(context).scripts.setdefault(vid, []).append("rejected")
 
 
+@given('BestTime answers "{vid}" with status "OK" and busyness not available')
+def step_answers_closed(context, vid):
+    _transport(context).scripts.setdefault(vid, []).append("closed")
+
+
 @given('the live forecast for "{vid}" is already cached')
 def step_seed_cached(context, vid):
     context.repository.set_live_forecast(
@@ -202,6 +220,23 @@ def step_seed_cached(context, vid):
 def step_run_refresh(context):
     context.live_forecast_error_baseline = (
         REGISTRY.get_sample_value("live_forecast_fetch_results_total", {"result": "error"})
+        or 0.0
+    )
+    # Baselines for the rejection-streak-threshold outcomes
+    # (live-forecast-rejection-threshold.feature). Captured unconditionally —
+    # harmless for scenarios that never assert on them — so a single shared
+    # "When" step serves both features without duplicating the run logic.
+    context.live_forecast_deleted_not_ok_baseline = (
+        REGISTRY.get_sample_value(
+            "live_forecast_fetch_results_total", {"result": "deleted_not_ok"}
+        )
+        or 0.0
+    )
+    context.live_forecast_rejected_streak_below_threshold_baseline = (
+        REGISTRY.get_sample_value(
+            "live_forecast_fetch_results_total",
+            {"result": "rejected_streak_below_threshold"},
+        )
         or 0.0
     )
     client = _build_live_client(context)

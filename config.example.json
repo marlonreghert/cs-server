@@ -13,6 +13,7 @@
     "_comment": "Venue data refresh schedules",
     "venues_catalog_refresh_minutes": 43200,
     "venues_live_refresh_minutes": 5,
+    "live_forecast_rejection_streak_threshold": 2,
     "weekly_forecast_cron": "0 0 * * 0"
   },
 

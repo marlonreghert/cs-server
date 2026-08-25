@@ -7,6 +7,7 @@ from collections import defaultdict
 from typing import Optional
 
 from app.api import BestTimeAPIClient
+from app.config import settings
 from app.dao import RedisVenueDAO
 from app.models import (
     Venue,
@@ -700,7 +701,45 @@ class VenuesRefresherService:
                         f"[VenuesRefresherService] Error LiveForecast status={lf.status!r} "
                         f"for {vid}, removing cache"
                     )
+                    # Gate the delete on N CONSECUTIVE rejections for this venue
+                    # (plans/260825_live-forecast-rejection-threshold.md) — a
+                    # single clean rejection is more often a flaky one-off than
+                    # a durable "can't forecast this venue" signal (live prod
+                    # evidence: only 3.3% of ever-rejected venues were rejected
+                    # in exactly one cycle). Below threshold: record the
+                    # outcome but LEAVE the cache alone. At threshold: delete
+                    # (existing behavior) and reset the streak.
+                    try:
+                        streak = self.venue_dao.increment_live_forecast_rejection_streak(vid)
+                    except Exception as e:
+                        logger.error(
+                            f"[VenuesRefresherService] Failed to increment rejection "
+                            f"streak for {vid}: {e}"
+                        )
+                        # Fail-safe: without a reliable streak count, fall back to
+                        # today's behavior (delete on this rejection) rather than
+                        # silently keep stale-but-wrong data forever.
+                        streak = settings.live_forecast_rejection_streak_threshold
+
+                    if streak < settings.live_forecast_rejection_streak_threshold:
+                        LIVE_FORECAST_FETCH_RESULTS.labels(
+                            result="rejected_streak_below_threshold"
+                        ).inc()
+                        logger.info(
+                            f"[VenuesRefresherService] {vid} rejection streak="
+                            f"{streak}/{settings.live_forecast_rejection_streak_threshold}; "
+                            "keeping cache"
+                        )
+                        continue
+
                     LIVE_FORECAST_FETCH_RESULTS.labels(result="deleted_not_ok").inc()
+                    try:
+                        self.venue_dao.reset_live_forecast_rejection_streak(vid)
+                    except Exception as e:
+                        logger.error(
+                            f"[VenuesRefresherService] Failed to reset rejection "
+                            f"streak for {vid}: {e}"
+                        )
                 else:
                     logger.info(
                         f"[VenuesRefresherService] No error but LiveForecast not available, "
@@ -709,6 +748,16 @@ class VenuesRefresherService:
                     LIVE_FORECAST_FETCH_RESULTS.labels(
                         result="deleted_not_available"
                     ).inc()
+                    # status "OK" — BestTime successfully classified the venue
+                    # (it's just closed right now), which is the opposite of a
+                    # business rejection. Reset any in-progress streak.
+                    try:
+                        self.venue_dao.reset_live_forecast_rejection_streak(vid)
+                    except Exception as e:
+                        logger.error(
+                            f"[VenuesRefresherService] Failed to reset rejection "
+                            f"streak for {vid}: {e}"
+                        )
 
                 try:
                     self.venue_dao.delete_live_forecast(vid)
@@ -718,6 +767,17 @@ class VenuesRefresherService:
                         f"for {vid}: {e}"
                     )
                 continue
+
+            # status "OK" and available — reset any in-progress rejection
+            # streak before caching (the transport-error path above this
+            # try/except block deliberately never reaches here).
+            try:
+                self.venue_dao.reset_live_forecast_rejection_streak(vid)
+            except Exception as e:
+                logger.error(
+                    f"[VenuesRefresherService] Failed to reset rejection streak "
+                    f"for {vid}: {e}"
+                )
 
             # Cache the live forecast
             logger.debug(
