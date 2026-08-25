@@ -22,7 +22,9 @@
     "besttime_public_key": "",
     "besttime_endpoint_base_v1": "https://besttime.app/api/v1",
     "besttime_search_polling_wait_seconds": 15,
-    "besttime_add_venue_timeout_seconds": 60.0
+    "besttime_add_venue_timeout_seconds": 60.0,
+    "besttime_live_min_interval_seconds": 0.5,
+    "besttime_live_retry_max_attempts": 2
   },
 
   "google_places_api": {

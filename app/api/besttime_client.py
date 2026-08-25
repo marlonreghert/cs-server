@@ -22,6 +22,7 @@ from app.metrics import (
     BESTTIME_API_CALL_DURATION_SECONDS,
     BESTTIME_API_ERRORS_TOTAL,
     BESTTIME_SEARCH_RATE_LIMIT_TOTAL,
+    BESTTIME_LIVE_FORECAST_RESILIENCE_TOTAL,
 )
 
 logger = logging.getLogger(__name__)
@@ -140,6 +141,53 @@ class _SearchRateLimiter:
             waited_total += wait
 
 
+class _LiveForecastPacer:
+    """Client-side minimum-spacing pacer for the live-forecast family (POST
+    /forecasts/live), documented separately by BestTime under a per-second-
+    granularity limit ("New Forecast & Live Endpoints: 10 requests per
+    second") — a different shape than the venue-search family's dual
+    per-minute/per-hour windows above, so this is deliberately simpler than
+    `_SearchRateLimiter`: a single minimum interval since the previous call,
+    no deque, no dual windows. Because the enforced interval is always small
+    (a conservative fraction of a second — see
+    `besttime_live_min_interval_seconds`), the worst-case wait is bounded by
+    that interval itself, so unlike `_SearchRateLimiter` this never fail-fast
+    rejects — a wait budget worth failing on is not a realistic scenario here.
+    Clock and sleep are injectable so tests never sleep for real.
+    """
+
+    def __init__(
+        self,
+        min_interval_seconds: float,
+        time_func: Callable[[], float] = time.monotonic,
+        sleep_func: Callable[[float], "asyncio.Future"] = asyncio.sleep,
+    ):
+        self.min_interval_seconds = min_interval_seconds
+        self._time = time_func
+        self._sleep = sleep_func
+        self._last_call: Optional[float] = None
+        self._lock = asyncio.Lock()
+
+    async def acquire(self, endpoint: str) -> None:
+        if self.min_interval_seconds <= 0:
+            return
+        async with self._lock:
+            now = self._time()
+            if self._last_call is not None:
+                wait = self._last_call + self.min_interval_seconds - now
+                if wait > 0:
+                    BESTTIME_LIVE_FORECAST_RESILIENCE_TOTAL.labels(
+                        endpoint=endpoint, event="paced"
+                    ).inc()
+                    logger.info(
+                        f"[BestTimeAPIClient] pacing {endpoint}: waiting "
+                        f"{wait:.2f}s (live-forecast spacing)"
+                    )
+                    await self._sleep(wait)
+                    now = self._time()
+            self._last_call = now
+
+
 class BestTimeAPIClient:
     """Async HTTP client for BestTime API."""
 
@@ -153,6 +201,8 @@ class BestTimeAPIClient:
         search_rate_per_minute: int = 30,
         search_rate_per_hour: int = 300,
         rate_max_wait_seconds: float = 75.0,
+        live_min_interval_seconds: float = 0.5,
+        live_retry_max_attempts: int = 2,
         datalake=None,
     ):
         """Initialize BestTime API client.
@@ -171,6 +221,13 @@ class BestTimeAPIClient:
                 calls client-side. <=0 disables that window.
             rate_max_wait_seconds: longest total pacing/429 wait per call before
                 failing fast with BestTimeRateLimitedError.
+            live_min_interval_seconds: minimum spacing between consecutive
+                POST /forecasts/live calls (a different, per-second-granularity
+                BestTime limit than the search family above). <=0 disables
+                pacing.
+            live_retry_max_attempts: total attempts (including the first) for
+                a POST /forecasts/live call that times out or gets HTTP
+                503/504. <=1 disables retry.
             datalake: optional data-lake writer. When set, every response —
                 success or failure — is archived verbatim. Archival is
                 fire-and-forget and fully isolated: see `_archive`.
@@ -181,11 +238,15 @@ class BestTimeAPIClient:
         self.timeout = timeout
         self.add_venue_timeout = add_venue_timeout
         self.rate_max_wait_seconds = rate_max_wait_seconds
+        self.live_retry_max_attempts = live_retry_max_attempts
         self._datalake = datalake
         self._search_limiter = _SearchRateLimiter(
             per_minute=search_rate_per_minute,
             per_hour=search_rate_per_hour,
             max_wait_seconds=rate_max_wait_seconds,
+        )
+        self._live_forecast_pacer = _LiveForecastPacer(
+            min_interval_seconds=live_min_interval_seconds,
         )
 
         # Create async HTTP client with connection pooling
@@ -240,15 +301,18 @@ class BestTimeAPIClient:
             )
 
     @staticmethod
-    def _retry_after_seconds(response: httpx.Response, attempt: int) -> float:
-        """Wait before retrying a 429: honor Retry-After when parseable, else
-        exponential backoff (1s, 2s, ...)."""
-        header = response.headers.get("retry-after")
-        if header is not None:
-            try:
-                return max(0.0, float(header))
-            except ValueError:
-                pass
+    def _retry_after_seconds(response: Optional[httpx.Response], attempt: int) -> float:
+        """Wait before retrying: honor a response's Retry-After when
+        parseable, else exponential backoff (1s, 2s, ...). `response` is None
+        for a retried transport timeout (no response to read a header from),
+        which always falls back to the exponential backoff."""
+        if response is not None:
+            header = response.headers.get("retry-after")
+            if header is not None:
+                try:
+                    return max(0.0, float(header))
+                except ValueError:
+                    pass
         return float(2**attempt)
 
     async def _send_with_retry(
@@ -263,15 +327,20 @@ class BestTimeAPIClient:
         retry_429: bool = False,
         stop_retry_on: Optional[Callable[[httpx.Response], bool]] = None,
         retry_log_suffix: str = "",
+        retry_on_timeout: bool = False,
+        retry_transient_status: frozenset[int] = frozenset(),
+        transient_retry_max_attempts: int = 3,
     ) -> httpx.Response:
-        """Send the request, applying the bounded, Retry-After-aware 429 retry.
+        """Send the request, applying the bounded, Retry-After-aware retry.
 
         The single retry loop shared by `_request` (search-family reads, via
-        ``retry_429``) and `add_venue_to_account` (the create, via ``timeout`` +
-        ``stop_retry_on``), so the two can no longer drift. Returns the final
-        `httpx.Response`; the caller owns all response parsing, ``raise_for_status``,
-        and success/error result metrics + logs. Transport errors from
-        ``client.request`` propagate to the caller's own except blocks unchanged.
+        ``retry_429``, and the live-forecast read, via ``retry_on_timeout`` /
+        ``retry_transient_status``) and `add_venue_to_account` (the create, via
+        ``timeout`` + ``stop_retry_on``), so callers can no longer drift.
+        Returns the final `httpx.Response`; the caller owns all response
+        parsing, ``raise_for_status``, and success/error result metrics + logs.
+        A transport error (including an exhausted ``retry_on_timeout``)
+        propagates to the caller's own except blocks unchanged.
 
         Args:
             timeout: per-call timeout passed to ``client.request`` (omitted when
@@ -282,6 +351,25 @@ class BestTimeAPIClient:
                 monthly-cap 429 for the create.
             retry_log_suffix: appended after ``<method> <endpoint>`` in the retry
                 warning (e.g. " (create)"), preserving the original messages.
+            retry_on_timeout: retry a client-side ``httpx.TimeoutException``
+                (bounded by ``transient_retry_max_attempts``). Exhausting the
+                budget re-raises the original exception unchanged — no new
+                exception type — so the caller's existing timeout handling
+                (metrics, logs) covers the final outcome exactly as it does an
+                unretried timeout today.
+            retry_transient_status: HTTP status codes (e.g. 503, 504) that
+                retry the same way a 429 does (bounded, Retry-After-aware, same
+                shared attempt/wait accounting as every other retry reason for
+                this call). Exhausting the budget returns the final failing
+                response as-is (not raised) so the caller's normal
+                ``raise_for_status`` path covers the final outcome exactly as
+                it does an unretried 503/504 today.
+            transient_retry_max_attempts: total attempts (including the
+                first) for ``retry_on_timeout`` / ``retry_transient_status``.
+                Independent of 429's own fixed 3-attempt bound below — kept
+                separate and configurable because each attempt on a
+                timeout-prone call can be far more expensive than a 429's
+                usually-fast response.
 
         Raises:
             BestTimeRateLimitedError: bounded 429 retries were exhausted.
@@ -299,32 +387,83 @@ class BestTimeAPIClient:
         attempt = 0
         waited = 0.0
         while True:
-            response = await self.client.request(**request_kwargs)
-            if not (retry_429 and response.status_code == 429):
-                break
-            # A 429 the predicate claims as terminal (e.g. the monthly-cap body)
-            # flows to the caller's normal parse path — never retried.
-            if stop_retry_on is not None and stop_retry_on(response):
-                break
-            wait = self._retry_after_seconds(response, attempt)
-            if attempt >= 2 or waited + wait > self.rate_max_wait_seconds:
-                BESTTIME_SEARCH_RATE_LIMIT_TOTAL.labels(
-                    endpoint=endpoint, event="rejected"
+            try:
+                response = await self.client.request(**request_kwargs)
+            except httpx.TimeoutException:
+                if not retry_on_timeout:
+                    raise
+                wait = self._retry_after_seconds(None, attempt)
+                if (
+                    attempt >= transient_retry_max_attempts - 1
+                    or waited + wait > self.rate_max_wait_seconds
+                ):
+                    # Exhausted: let the original TimeoutException propagate
+                    # unchanged, exactly like an unretried timeout today.
+                    raise
+                BESTTIME_LIVE_FORECAST_RESILIENCE_TOTAL.labels(
+                    endpoint=endpoint, event="retry_timeout"
                 ).inc()
-                BESTTIME_API_CALLS_TOTAL.labels(endpoint=endpoint, status="error").inc()
-                raise BestTimeRateLimitedError(
-                    f"BestTime kept answering 429 on {method} {endpoint}"
+                logger.warning(
+                    f"[BestTimeAPIClient] timeout on {method} {endpoint}"
+                    f"{retry_log_suffix}; retrying in {wait:.1f}s "
+                    f"(attempt {attempt + 1}/{transient_retry_max_attempts})"
                 )
-            BESTTIME_SEARCH_RATE_LIMIT_TOTAL.labels(
-                endpoint=endpoint, event="retry_429"
-            ).inc()
-            logger.warning(
-                f"[BestTimeAPIClient] 429 on {method} {endpoint}{retry_log_suffix}; "
-                f"retrying in {wait:.1f}s (attempt {attempt + 1}/3)"
-            )
-            await asyncio.sleep(wait)
-            waited += wait
-            attempt += 1
+                await asyncio.sleep(wait)
+                waited += wait
+                attempt += 1
+                continue
+
+            if retry_429 and response.status_code == 429:
+                # A 429 the predicate claims as terminal (e.g. the monthly-cap
+                # body) flows to the caller's normal parse path — never retried.
+                if stop_retry_on is not None and stop_retry_on(response):
+                    break
+                wait = self._retry_after_seconds(response, attempt)
+                if attempt >= 2 or waited + wait > self.rate_max_wait_seconds:
+                    BESTTIME_SEARCH_RATE_LIMIT_TOTAL.labels(
+                        endpoint=endpoint, event="rejected"
+                    ).inc()
+                    BESTTIME_API_CALLS_TOTAL.labels(endpoint=endpoint, status="error").inc()
+                    raise BestTimeRateLimitedError(
+                        f"BestTime kept answering 429 on {method} {endpoint}"
+                    )
+                BESTTIME_SEARCH_RATE_LIMIT_TOTAL.labels(
+                    endpoint=endpoint, event="retry_429"
+                ).inc()
+                logger.warning(
+                    f"[BestTimeAPIClient] 429 on {method} {endpoint}{retry_log_suffix}; "
+                    f"retrying in {wait:.1f}s (attempt {attempt + 1}/3)"
+                )
+                await asyncio.sleep(wait)
+                waited += wait
+                attempt += 1
+                continue
+
+            if response.status_code in retry_transient_status:
+                wait = self._retry_after_seconds(response, attempt)
+                if (
+                    attempt >= transient_retry_max_attempts - 1
+                    or waited + wait > self.rate_max_wait_seconds
+                ):
+                    # Exhausted: return the failing response as-is — the
+                    # caller's normal raise_for_status path covers it exactly
+                    # like an unretried 503/504 today.
+                    break
+                BESTTIME_LIVE_FORECAST_RESILIENCE_TOTAL.labels(
+                    endpoint=endpoint, event="retry_http_5xx"
+                ).inc()
+                logger.warning(
+                    f"[BestTimeAPIClient] HTTP {response.status_code} on "
+                    f"{method} {endpoint}{retry_log_suffix}; retrying in "
+                    f"{wait:.1f}s (attempt {attempt + 1}/"
+                    f"{transient_retry_max_attempts})"
+                )
+                await asyncio.sleep(wait)
+                waited += wait
+                attempt += 1
+                continue
+
+            break
 
         return response
 
@@ -335,6 +474,9 @@ class BestTimeAPIClient:
         params: Optional[dict] = None,
         json_body: Optional[dict] = None,
         retry_429: bool = False,
+        retry_on_timeout: bool = False,
+        retry_transient_status: frozenset[int] = frozenset(),
+        transient_retry_max_attempts: int = 3,
     ) -> dict:
         """Make an HTTP request to the BestTime API.
 
@@ -346,6 +488,10 @@ class BestTimeAPIClient:
             retry_429: retry HTTP 429 answers (bounded, Retry-After-aware) —
                 used by the venue-search-family calls, which BestTime rate
                 limits at 30/min and 300/hour.
+            retry_on_timeout / retry_transient_status /
+                transient_retry_max_attempts: passthrough to
+                `_send_with_retry` — used by `get_live_forecast` to retry a
+                client timeout or HTTP 503/504 (see that method's docstring).
 
         Returns:
             JSON response as dict
@@ -369,6 +515,9 @@ class BestTimeAPIClient:
                 endpoint=endpoint,
                 json_body=json_body,
                 retry_429=retry_429,
+                retry_on_timeout=retry_on_timeout,
+                retry_transient_status=retry_transient_status,
+                transient_retry_max_attempts=transient_retry_max_attempts,
             )
 
             logger.debug(f"[BestTimeAPIClient] Response status: {response.status_code}")
@@ -505,6 +654,18 @@ class BestTimeAPIClient:
     ) -> LiveForecastResponse:
         """Retrieve live busyness forecast for a venue.
 
+        Paced by `_live_forecast_pacer` (a minimum spacing between calls) and
+        retried, bounded by `live_retry_max_attempts`, on a client timeout or
+        HTTP 503/504 — the two transport failure modes actually observed on
+        this endpoint in prod (34.3% timeout, 19.1% 503/504 over a 44h
+        window; see plans/260825_live-forecast-pacing-retry.md). HTTP 429 is
+        deliberately NOT retried here (never observed on this endpoint;
+        handled defensively already for the venue-search family above via
+        `retry_429`), and a clean BestTime business rejection
+        (`status != "OK"`) is never retried — it is a real "can't forecast
+        this venue" answer, not a transport failure, and retrying it would
+        only waste calls.
+
         Args:
             venue_id: Venue ID (preferred)
             venue_name: Venue name (required if venue_id not provided)
@@ -529,9 +690,17 @@ class BestTimeAPIClient:
             query_params["venue_name"] = venue_name
             query_params["venue_address"] = venue_address
 
+        endpoint = "/forecasts/live"
+        await self._live_forecast_pacer.acquire(endpoint)
+
         # Construct endpoint with query params
         response_data = await self._request(
-            "POST", "/forecasts/live", params=query_params
+            "POST",
+            endpoint,
+            params=query_params,
+            retry_on_timeout=True,
+            retry_transient_status=frozenset({503, 504}),
+            transient_retry_max_attempts=self.live_retry_max_attempts,
         )
 
         return LiveForecastResponse(**response_data)

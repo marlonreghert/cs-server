@@ -232,6 +232,8 @@ class Container:
             search_rate_per_minute=settings.besttime_search_rate_per_minute,
             search_rate_per_hour=settings.besttime_search_rate_per_hour,
             rate_max_wait_seconds=settings.besttime_rate_max_wait_seconds,
+            live_min_interval_seconds=settings.besttime_live_min_interval_seconds,
+            live_retry_max_attempts=settings.besttime_live_retry_max_attempts,
             datalake=self.datalake_writer,
         )
 

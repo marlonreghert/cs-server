@@ -651,3 +651,236 @@ class TestVenueFilter404Empty:
             with pytest.raises(httpx.HTTPStatusError):
                 await api_client.venue_filter(
                     VenueFilterParams(lat=-9.67, lng=-35.72, radius=50, limit=25))
+
+
+class TestLiveForecastPacing:
+    """Window math for the live-forecast minimum-spacing pacer (injected fake
+    clock — no real sleeping). See plans/260825_live-forecast-pacing-retry.md."""
+
+    def _pacer(self, min_interval=1.0):
+        from app.api.besttime_client import _LiveForecastPacer
+
+        clock = {"now": 1000.0}
+        sleeps: list[float] = []
+
+        async def fake_sleep(seconds: float) -> None:
+            sleeps.append(seconds)
+            clock["now"] += seconds
+
+        pacer = _LiveForecastPacer(
+            min_interval_seconds=min_interval,
+            time_func=lambda: clock["now"],
+            sleep_func=fake_sleep,
+        )
+        return pacer, clock, sleeps
+
+    @staticmethod
+    def _paced_metric() -> float:
+        from prometheus_client import REGISTRY
+
+        return (
+            REGISTRY.get_sample_value(
+                "besttime_live_forecast_resilience_total",
+                {"endpoint": "/forecasts/live", "event": "paced"},
+            )
+            or 0.0
+        )
+
+    @pytest.mark.asyncio
+    async def test_first_call_never_waits(self):
+        pacer, _, sleeps = self._pacer()
+        await pacer.acquire("/forecasts/live")
+        assert sleeps == []
+
+    @pytest.mark.asyncio
+    async def test_second_call_within_interval_waits_the_exact_shortfall(self):
+        pacer, clock, sleeps = self._pacer(min_interval=1.0)
+        before = self._paced_metric()
+        await pacer.acquire("/forecasts/live")
+        clock["now"] += 0.4
+        await pacer.acquire("/forecasts/live")
+        assert sleeps == [pytest.approx(0.6)]
+        assert self._paced_metric() - before == 1
+
+    @pytest.mark.asyncio
+    async def test_call_after_interval_has_elapsed_never_waits(self):
+        pacer, clock, sleeps = self._pacer(min_interval=1.0)
+        await pacer.acquire("/forecasts/live")
+        clock["now"] += 1.5
+        await pacer.acquire("/forecasts/live")
+        assert sleeps == []
+
+    @pytest.mark.asyncio
+    async def test_non_positive_interval_disables_pacing(self):
+        pacer, _, sleeps = self._pacer(min_interval=0.0)
+        await pacer.acquire("/forecasts/live")
+        await pacer.acquire("/forecasts/live")  # would need to wait if enabled
+        assert sleeps == []
+
+    def test_default_client_wires_the_settings_derived_interval(self):
+        from app.config import Settings, settings
+
+        client = BestTimeAPIClient(
+            base_url="https://besttime.app/api/v1",
+            api_key_public="pub",
+            api_key_private="priv",
+        )
+        assert client._live_forecast_pacer.min_interval_seconds == 0.5
+        assert (
+            Settings.model_fields["besttime_live_min_interval_seconds"].default
+            == 0.5
+        )
+        assert settings.besttime_live_min_interval_seconds == 0.5
+
+
+class TestLiveForecastRetry:
+    """Bounded retry of a client timeout or HTTP 503/504 on POST
+    /forecasts/live — the two transport failure modes actually observed in
+    prod for this endpoint (34.3% timeout, 19.1% 503/504 over a 44h window;
+    429 was never observed). See plans/260825_live-forecast-pacing-retry.md.
+    """
+
+    def _client(self, retry_max_attempts=2):
+        return BestTimeAPIClient(
+            base_url="https://besttime.app/api/v1",
+            api_key_public="pub",
+            api_key_private="priv",
+            live_min_interval_seconds=0.0,  # pacing covered by TestLiveForecastPacing
+            live_retry_max_attempts=retry_max_attempts,
+        )
+
+    @staticmethod
+    def _ok_response(vid="ven-1"):
+        response = Mock()
+        response.status_code = 200
+        response.json.return_value = {
+            "status": "OK",
+            "venue_info": {"venue_id": vid},
+            "analysis": {
+                "venue_live_busyness": 60,
+                "venue_live_busyness_available": True,
+            },
+        }
+        return response
+
+    @staticmethod
+    def _http_response(status):
+        return httpx.Response(
+            status,
+            json={"status": "Error", "message": "simulated"},
+            headers={"Retry-After": "0"},
+            request=httpx.Request("POST", "https://besttime.app/api/v1/forecasts/live"),
+        )
+
+    @staticmethod
+    def _timeout():
+        return httpx.ReadTimeout(
+            "simulated", request=httpx.Request("POST", "https://besttime.app/api/v1/forecasts/live")
+        )
+
+    @staticmethod
+    def _errors_metric(error_type: str) -> float:
+        from prometheus_client import REGISTRY
+
+        return (
+            REGISTRY.get_sample_value(
+                "besttime_api_errors_total",
+                {"endpoint": "/forecasts/live", "error_type": error_type},
+            )
+            or 0.0
+        )
+
+    @staticmethod
+    def _resilience_metric(event: str) -> float:
+        from prometheus_client import REGISTRY
+
+        return (
+            REGISTRY.get_sample_value(
+                "besttime_live_forecast_resilience_total",
+                {"endpoint": "/forecasts/live", "event": event},
+            )
+            or 0.0
+        )
+
+    @pytest.mark.asyncio
+    async def test_timeout_then_success_is_retried(self):
+        client = self._client()
+        before = self._resilience_metric("retry_timeout")
+        with patch.object(client.client, "request", new_callable=AsyncMock) as mock_request:
+            mock_request.side_effect = [self._timeout(), self._ok_response()]
+            result = await client.get_live_forecast(venue_id="ven-1")
+        assert mock_request.await_count == 2
+        assert result.status == "OK"
+        assert self._resilience_metric("retry_timeout") - before == 1
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("status", [503, 504])
+    async def test_5xx_then_success_is_retried(self, status):
+        client = self._client()
+        before = self._resilience_metric("retry_http_5xx")
+        with patch.object(client.client, "request", new_callable=AsyncMock) as mock_request:
+            mock_request.side_effect = [self._http_response(status), self._ok_response()]
+            result = await client.get_live_forecast(venue_id="ven-1")
+        assert mock_request.await_count == 2
+        assert result.status == "OK"
+        assert self._resilience_metric("retry_http_5xx") - before == 1
+
+    @pytest.mark.asyncio
+    async def test_persistent_timeout_raises_after_exactly_the_configured_budget(self):
+        client = self._client(retry_max_attempts=2)
+        before = self._errors_metric("timeout")
+        with patch.object(client.client, "request", new_callable=AsyncMock) as mock_request:
+            mock_request.side_effect = self._timeout()
+            with pytest.raises(httpx.TimeoutException):
+                await client.get_live_forecast(venue_id="ven-1")
+        assert mock_request.await_count == 2  # exactly the configured budget
+        # The final exhausted attempt fires the existing metric exactly once —
+        # not once per retried attempt.
+        assert self._errors_metric("timeout") - before == 1
+
+    @pytest.mark.asyncio
+    async def test_429_is_not_retried_by_live_forecast(self):
+        """429 was never observed on this endpoint in the diagnosed window
+        (see the plan); get_live_forecast deliberately does not opt into
+        retry_429 the way the venue-search family does."""
+        client = self._client()
+        with patch.object(client.client, "request", new_callable=AsyncMock) as mock_request:
+            mock_request.return_value = self._http_response(429)
+            with pytest.raises(httpx.HTTPStatusError):
+                await client.get_live_forecast(venue_id="ven-1")
+        assert mock_request.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_business_rejection_is_not_retried(self):
+        """A clean status != 'OK' response is a real BestTime answer, not a
+        transport failure — retrying it would only waste calls, and this path
+        feeds venues_refresher_service's deleted_not_ok cache-wipe, which this
+        change deliberately does not touch."""
+        client = self._client()
+        rejected = Mock()
+        rejected.status_code = 200
+        rejected.json.return_value = {
+            "status": "Error",
+            "venue_info": {"venue_id": "ven-1"},
+            "analysis": {},
+        }
+        with patch.object(client.client, "request", new_callable=AsyncMock) as mock_request:
+            mock_request.return_value = rejected
+            result = await client.get_live_forecast(venue_id="ven-1")
+        assert result.status == "Error"
+        assert mock_request.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_retry_max_attempts_of_1_disables_retry(self):
+        client = self._client(retry_max_attempts=1)
+        with patch.object(client.client, "request", new_callable=AsyncMock) as mock_request:
+            mock_request.side_effect = self._timeout()
+            with pytest.raises(httpx.TimeoutException):
+                await client.get_live_forecast(venue_id="ven-1")
+        assert mock_request.await_count == 1
+
+    def test_settings_default_retry_max_attempts_is_2(self):
+        from app.config import Settings, settings
+
+        assert Settings.model_fields["besttime_live_retry_max_attempts"].default == 2
+        assert settings.besttime_live_retry_max_attempts == 2
