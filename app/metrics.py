@@ -965,7 +965,13 @@ LIVE_FORECAST_FETCH_RESULTS = Counter(
     # result: cached, deleted_not_ok, deleted_not_available, error,
     # skipped_venue_absent (benign: the live-forecast payload's venue_id has no
     # row in venues.venue — RdsVenueStore.upsert_live_forecast no-ops instead of
-    # raising ForeignKeyViolation; see venues_refresher_service.py)
+    # raising ForeignKeyViolation; see venues_refresher_service.py),
+    # rejected_streak_below_threshold (a status != "OK" rejection whose
+    # consecutive-rejection streak for that venue has not yet reached
+    # live_forecast_rejection_streak_threshold — the cache is intentionally
+    # NOT deleted this cycle; deleted_not_ok now fires only once the streak
+    # actually reaches the threshold and the cache is deleted, keeping its
+    # existing meaning intact)
     ["result"],
 )
 

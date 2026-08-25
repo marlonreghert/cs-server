@@ -90,6 +90,20 @@ class GeoRedisClient:
         """
         self.client.setex(key, ttl_seconds, value)
 
+    def incr(self, key: str) -> int:
+        """Atomically increment a key by 1 and return the new value (creating
+        it at 1 if absent). A single atomic INCR — no read-modify-write — so
+        this is safe under concurrent callers (see RedisVenueDAO's live-forecast
+        rejection streak, reachable from two separate scheduled jobs).
+
+        Args:
+            key: Redis key
+
+        Returns:
+            The counter's new value after incrementing.
+        """
+        return self.client.incr(key)
+
     def del_(self, key: str) -> int:
         """Delete a key from Redis.
 

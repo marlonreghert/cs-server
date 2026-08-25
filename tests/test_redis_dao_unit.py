@@ -154,6 +154,31 @@ class TestRedisVenueDAOUnit:
 
         mock_redis_client.del_.assert_called_once_with("live_forecast_v1:venue_123")
 
+    def test_increment_live_forecast_rejection_streak_uses_correct_key(
+        self, venue_dao, mock_redis_client
+    ):
+        """Atomic INCR against the streak key, returning the new count."""
+        mock_redis_client.incr.return_value = 3
+
+        result = venue_dao.increment_live_forecast_rejection_streak("venue_123")
+
+        assert result == 3
+        mock_redis_client.incr.assert_called_once_with(
+            "live_forecast_rejection_streak_v1:venue_123"
+        )
+
+    def test_reset_live_forecast_rejection_streak_deletes_correct_key(
+        self, venue_dao, mock_redis_client
+    ):
+        """Reset deletes the streak key — idempotent on an absent key (DEL of
+        a missing key is a harmless no-op, matching delete_live_forecast's
+        own del_ semantics)."""
+        venue_dao.reset_live_forecast_rejection_streak("venue_123")
+
+        mock_redis_client.del_.assert_called_once_with(
+            "live_forecast_rejection_streak_v1:venue_123"
+        )
+
     def test_list_all_venue_ids_strips_prefix(self, venue_dao, mock_redis_client):
         """Test that list_all_venue_ids strips the key prefix correctly."""
         mock_redis_client.keys.return_value = [

@@ -144,6 +144,21 @@ class Settings(BaseSettings):
     # 43200 minutes = 30 days
     venues_catalog_refresh_minutes: int = 43200
     venues_live_refresh_minutes: int = 5
+    # How many CONSECUTIVE clean BestTime rejections (status != "OK") for the
+    # same venue before its cached live forecast is wiped. Below this count,
+    # a rejection is recorded but the previously-cached good forecast is left
+    # in place (plans/260825_live-forecast-rejection-threshold.md: a live
+    # 46.5h/20-cycle prod observation found only 3.3% of ever-rejected venues
+    # were rejected in exactly one cycle, while 94.3% went on to 2+
+    # consecutive rejections and 82.3% went on to 3+ — a single rejection is
+    # rarely the durable signal, so deleting on the first one mostly just
+    # flaps coverage). Any status "OK" outcome for the venue (cached,
+    # skipped-venue-absent, or the closed-venue "not available" branch, which
+    # keeps deleting immediately regardless of this setting) resets the
+    # streak to 0; a transport error leaves it untouched. `1` reproduces the
+    # legacy immediate-delete behavior — the instant, code-change-free
+    # rollback lever if this ever needs undoing.
+    live_forecast_rejection_streak_threshold: int = 2
     # "Sundays at 00:00" is this setting's INTENT, not its verified behavior:
     # main.py registers it via bare `CronTrigger.from_crontab`, whose
     # day-of-week field is APScheduler-native (0=Monday), not standard cron

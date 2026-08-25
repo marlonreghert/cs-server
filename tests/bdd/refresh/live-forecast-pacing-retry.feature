@@ -44,8 +44,13 @@ Feature: Live-forecast refresh retries transient BestTime failures
     And exactly 2 live-forecast calls were made for "ven-always-timeout"
     And the live forecast for "ven-healthy" is cached
 
-  Scenario: A BestTime business rejection is never retried and still clears stale cache
-    Given venue "ven-rejected" exists
+  Scenario: A BestTime business rejection is never retried
+    # Rejection-streak gating (plans/260825_live-forecast-rejection-threshold.md)
+    # is orthogonal to this feature's concern (retry, not cache-wipe timing) —
+    # pin the threshold to 1 so this scenario keeps proving the un-retried,
+    # single-call behavior, not the separate consecutive-rejection count.
+    Given the live-forecast rejection streak threshold is 1 consecutive rejections
+    And venue "ven-rejected" exists
     And the live forecast for "ven-rejected" is already cached
     And BestTime answers "ven-rejected" with status "Error"
     When the live forecast refresh runs against the scripted BestTime transport

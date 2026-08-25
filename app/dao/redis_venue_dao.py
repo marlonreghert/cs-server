@@ -25,6 +25,14 @@ logger = logging.getLogger(__name__)
 VENUES_GEO_KEY_V1 = "venues_geo_v1"
 VENUES_GEO_PLACE_MEMBER_FORMAT_V1 = "venues_geo_place_v1:{}"
 LIVE_FORECAST_KEY_FORMAT = "live_forecast_v1:{}"
+# Ephemeral operational counter (not system-of-record venue data, so no RDS
+# backing — mirrors VenueBudgetDao/CrawlBudgetDao's Redis-only counter
+# convention): consecutive clean BestTime rejections (status != "OK") for a
+# venue, since the last success or the last actual cache wipe. See
+# RedisVenueDAO.increment_live_forecast_rejection_streak /
+# reset_live_forecast_rejection_streak and
+# plans/260825_live-forecast-rejection-threshold.md.
+LIVE_FORECAST_REJECTION_STREAK_KEY_FORMAT = "live_forecast_rejection_streak_v1:{}"
 WEEKLY_FORECAST_KEY_FORMAT = "weekly_forecast_v1:{}_{}"
 VIBE_ATTRIBUTES_KEY_FORMAT = "vibe_attributes_v1:{}"
 VENUE_PHOTOS_KEY_FORMAT = "venue_photos_v1:{}"
@@ -410,6 +418,36 @@ class RedisVenueDAO:
         if removed:
             logger.debug(f"[RedisVenueDAO] Deleted live forecast cache for {venue_id}")
         return removed
+
+    def increment_live_forecast_rejection_streak(self, venue_id: str) -> int:
+        """Atomically increment the venue's consecutive-clean-rejection streak
+        and return the new count. Call ONLY on a `status != "OK"` BestTime
+        response; a genuine atomic INCR (never GET-then-SET) because this is
+        reachable from two separate scheduled jobs
+        (`live_forecast_refresh`, locked; `venue_catalog_refresh`, unlocked)
+        that can in principle call it concurrently for the same venue.
+
+        Args:
+            venue_id: Venue identifier
+
+        Returns:
+            The streak count after this rejection (starts at 1).
+        """
+        key = LIVE_FORECAST_REJECTION_STREAK_KEY_FORMAT.format(venue_id)
+        return self.client.incr(key)
+
+    def reset_live_forecast_rejection_streak(self, venue_id: str) -> None:
+        """Clear the venue's consecutive-rejection streak back to 0. Call on
+        any `status == "OK"` outcome (cached, skipped-venue-absent, or the
+        closed-venue "not available" branch) and after an actual cache wipe
+        once the streak reaches the configured threshold. Idempotent — safe
+        to call when no streak is in progress.
+
+        Args:
+            venue_id: Venue identifier
+        """
+        key = LIVE_FORECAST_REJECTION_STREAK_KEY_FORMAT.format(venue_id)
+        self.client.del_(key)
 
     def list_active_venue_ids(self) -> list[str]:
         """Return venue IDs that are not deprecated."""
