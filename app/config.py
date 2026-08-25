@@ -205,6 +205,25 @@ class Settings(BaseSettings):
     besttime_search_rate_per_hour: int = 300
     besttime_rate_max_wait_seconds: float = 75.0
 
+    # Client-side pacing + bounded retry for the live-forecast family (POST
+    # /forecasts/live), documented separately by BestTime from the
+    # venue-search family above — "New Forecast & Live Endpoints: 10 requests
+    # per second" (documentation.besttime.app), a different, more generous,
+    # per-second-granularity limit than the search family's per-minute/
+    # per-hour figures. besttime_live_min_interval_seconds paces consecutive
+    # live-forecast calls at ~2 req/sec by default — a conservative margin
+    # under that 10 req/sec ceiling, sized to smooth the BestTime-side
+    # ~250ms-apart 503/504 burst clustering observed in prod rather than to
+    # approach the documented limit (<=0 disables pacing). besttime_live_
+    # retry_max_attempts bounds retry of a client timeout or HTTP 503/504 on
+    # this call (<=1 disables retry) — a deliberately small default since
+    # each retried attempt can itself cost a full ~10s timeout; the instant,
+    # code-change-free rollback lever if retrying ever makes refresh-cycle
+    # duration worse instead of better. See
+    # plans/260825_live-forecast-pacing-retry.md for the diagnosed evidence.
+    besttime_live_min_interval_seconds: float = 0.5
+    besttime_live_retry_max_attempts: int = 2
+
     # Google Places API Configuration
     # Enrichment includes: vibe attributes, business status checks, permanently closed detection
     google_places_api_key: str = ""

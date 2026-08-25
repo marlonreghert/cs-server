@@ -90,6 +90,20 @@ BESTTIME_SEARCH_RATE_LIMIT_TOTAL = Counter(
     # rejected (wait budget exhausted)
 )
 
+# Client-side pacing + bounded retry for the live-forecast family (POST
+# /forecasts/live), which BestTime documents separately from the venue-search
+# family (BESTTIME_SEARCH_RATE_LIMIT_TOTAL above) under a per-second-
+# granularity limit. Kept as its own metric rather than folded into
+# BESTTIME_SEARCH_RATE_LIMIT_TOTAL, whose name and docstring are explicitly
+# scoped to the venue-search family.
+BESTTIME_LIVE_FORECAST_RESILIENCE_TOTAL = Counter(
+    "besttime_live_forecast_resilience_total",
+    "Client-side pacing + bounded retry events for the live-forecast family",
+    ["endpoint", "event"],  # event: paced (pacer waited before send),
+    # retry_timeout (retrying after a client timeout),
+    # retry_http_5xx (retrying after HTTP 503/504)
+)
+
 # Analysis day entries dropped while parsing a POST /forecasts (create venue)
 # response. Analysis is best-effort on creates: a malformed day never fails
 # the envelope, but each drop is counted here (and WARNING-logged).
