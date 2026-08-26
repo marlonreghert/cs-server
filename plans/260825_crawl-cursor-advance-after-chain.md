@@ -217,16 +217,55 @@ plain `Optional[str]` (`admin_crawl_router.py:195`), not an enum, so the new
   failed"}` counter increment (reusing the existing counter, a new label
   value) plus an ERROR log naming the handle and post count on a chain
   failure.
-- Explicit, stated trade-off: this fix cannot make the fetch → archive →
-  extract pipeline transactional (Apify + S3 + OpenAI + Postgres cannot share
-  a transaction, and a SIGKILL between any two statements is not observable
-  by this process at all). What it changes is the FAILURE MODE: today a
-  crash mid-chain is silent, permanent data loss with money already spent;
-  after this fix, the same crash leaves the cursor unmoved, so the exact same
-  posts are safely re-fetched (and re-billed to Apify, and re-run through
-  OpenAI extraction — a real, additional cost, not just Apify's) on the next
-  scheduled run. Money is recoverable; silently discarded data was not — this
-  is the deliberate trade-off, not an oversight.
+- CONFIRMED mechanism (this session, cross-checked against the live
+  incident): this container is recreated by every deploy (6 times in the 7
+  days preceding this plan), and shutdown does not drain in-flight work —
+  it hard-CANCELS it. A `CancelledError` on an in-flight job was captured
+  during the exact deploy that lost the clubmetropole run's 50 posts. This
+  matters at the code level: `asyncio.CancelledError` has inherited from
+  `BaseException`, not `Exception`, since Python 3.8, so a bare `except
+  Exception:` around the chain call would silently MISS it — the new
+  `except (Exception, asyncio.CancelledError)` around `_chain(...)` in
+  `run_target` is deliberate, not defensive boilerplate, and was added
+  after verifying empirically (`issubclass(asyncio.CancelledError,
+  Exception)` is `False` on this repo's Python 3.12) that the plain form
+  would not have caught the failure mode actually seen in production. The
+  handler always re-raises the SAME exception object via a bare `raise`
+  (never swallows `CancelledError`), preserving asyncio's own cancellation
+  contract — the task still reports itself cancelled to whatever is
+  awaiting it.
+- Explicit, stated trade-off: this fix still cannot make the fetch →
+  archive → extract pipeline transactional (Apify + S3 + OpenAI + Postgres
+  cannot share a transaction). Two distinct residual failure modes remain,
+  and neither is fully closed by this plan:
+  1. A cancellation delivered while `run_target` is `await`ing `_chain(...)`
+     IS now caught, logged, and counted (see above) — the common,
+     confirmed-in-production case.
+  2. A true SIGKILL (OOM, `docker kill -s SIGKILL`, or a shutdown grace
+     period expiring before the cancellation above finishes running) allows
+     NO Python code to run at all — not even this plan's new `except`
+     block. In that case the diagnostic (log line, `chain_failed` metric,
+     `last_failure_kind`) is lost, exactly like today. The SAFETY property
+     still holds regardless (the cursor write is later in the method and is
+     simply never reached), but the OBSERVABILITY improvement this plan
+     adds is specific to the exception-based paths (a raised bug, an
+     outage, or the confirmed `CancelledError`) — not to an unconditional,
+     no-code-runs process kill. What changes either way is the FAILURE
+     MODE: today a crash mid-chain is silent, permanent data loss with
+     money already spent; after this fix, the same crash leaves the cursor
+     unmoved, so the exact same posts are safely re-fetched (and re-billed
+     to Apify, and re-run through OpenAI extraction — a real, additional
+     cost, not just Apify's) on the next scheduled run. Money is
+     recoverable; silently discarded data was not — this is the deliberate
+     trade-off, not an oversight.
+  3. A fetch (`await self._run_stream(...)`, earlier in `run_target`) that
+     is itself cancelled or crashes is UNCHANGED by this plan (Non-goals) —
+     it already propagates with no bookkeeping write attempted at all,
+     exactly as before. If Apify already answered before the cancellation
+     landed, that spend can go unrecorded the same way it always could;
+     this plan closes the CHAIN-side gap, not this pre-existing fetch-side
+     one, which is out of scope and not evidenced as part of the incidents
+     this plan responds to.
 - Loop safety: a chain failure increments the SAME `consecutive_failures`
   counter `run_target`'s own `enabled`/`max_consecutive_failures` gate reads
   at the top of the method, and the SAME `OUTCOME_SKIPPED_FAILURES` skip path
