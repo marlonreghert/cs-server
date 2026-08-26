@@ -428,6 +428,42 @@ class EventPostSource:
         return await self.media_store.read_image_data_uri(key)
 
 
+def _sort_newest_first(posts: list[ArchivedPost]) -> list[ArchivedPost]:
+    """Newest first by each post's OWN `timestamp` -- never by the order
+    `posts_for_venue`/`posts_for_handle` happen to return, which is
+    manifest-insertion order (a mix of run order and, within a run, this
+    actor's own array order -- neither is a reliable proxy for recency).
+    plans/260826_extraction-newest-posts-first.md: a venue's oldest
+    in-window manifest run can alone hold more posts than
+    `max_posts_per_venue`, permanently starving every newer run's posts if
+    the cap is applied to the raw (oldest-first) list -- this is why the
+    fix is an explicit sort on the post's own timestamp, not a `reversed()`
+    of that list or a trust in manifest order.
+
+    Mirrors `archive_sources._sort_posts_newest_first`'s own convention
+    (that function operates on pre-archival post dicts with a raw string
+    timestamp; `ArchivedPost.timestamp` here is already a parsed
+    `Optional[datetime]`, via `_post_from_bucket` -> `_parse_timestamp`, so
+    it is not directly reusable): a post with no usable timestamp sorts
+    LAST, stable among ties, so a missing value can never displace a dated
+    post out of a size-bounded cap -- the same "a bad or missing value
+    never disqualifies, it just behaves conservatively" convention
+    `instagram_crawl_service._split_kept_and_dropped` documents. Never
+    raises."""
+    dated: list[tuple[datetime, ArchivedPost]] = []
+    undated: list[ArchivedPost] = []
+    for post in posts:
+        if post.timestamp is None:
+            undated.append(post)
+        else:
+            dated.append((post.timestamp, post))
+    # list.sort is stable, and Python's docs guarantee reverse=True preserves
+    # that stability (ties keep their original relative order) rather than
+    # literally reversing the list.
+    dated.sort(key=lambda pair: pair[0], reverse=True)
+    return [post for _, post in dated] + undated
+
+
 # ── the pre-filter: the whole cost guarantee ─────────────────────────────────
 def post_qualifies(
     post: ArchivedPost, *, flyer_confidence_floor: float = DEFAULT_FLYER_CONFIDENCE_FLOOR,
@@ -584,6 +620,7 @@ class EventExtractionService:
             venue_ids = self._resolve_venue_ids(cfg)
             for venue_id in venue_ids:
                 posts = await self.post_source.posts_for_venue(venue_id, since)
+                posts = _sort_newest_first(posts)
                 if cfg["max_posts_per_venue"]:
                     posts = posts[: cfg["max_posts_per_venue"]]
                 handle = self._handle_for(venue_id)
@@ -686,6 +723,7 @@ class EventExtractionService:
                 })
                 continue
 
+            posts = _sort_newest_first(posts)
             if cfg["max_posts_per_venue"]:
                 posts = posts[: cfg["max_posts_per_venue"]]
 
