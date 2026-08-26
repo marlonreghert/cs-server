@@ -135,6 +135,25 @@ OUTCOME_NOT_FOUND = "not_found"
 # `consecutive_failures` alone would hide until an operator happened to
 # notice `last_run_at` had stopped advancing.
 OUTCOME_BOOKKEEPING_FAILED = "bookkeeping_failed"
+# plans/260825_crawl-cursor-advance-after-chain.md: the archive/classify/
+# extract chain (`run_target`'s call to `_chain`, which runs AFTER the
+# posts/reels fetch and AFTER the attempt/billing bookkeeping write, never
+# before) raised past everything it already catches internally — a single
+# photo download, a single post's classification, and a single post's
+# extraction all degrade gracefully today and are never surfaced as a "chain
+# failure" (see `InstagramCrawlChainer`'s own docstring). Distinct from
+# OUTCOME_BOOKKEEPING_FAILED: the attempt/billing write (`last_run_at`/
+# `last_run_results`/`last_run_cost_usd`/...) already landed by the time this
+# can happen — the fetch succeeded and was recorded; only the CURSOR's own
+# write is withheld (a claim — "this has been successfully processed" — not
+# a fact about billing), so the SAME already-billed posts are re-fetched and
+# re-attempted on the next run rather than marked done when the chain never
+# actually finished with them. Counted toward `consecutive_failures`/
+# `max_consecutive_failures` exactly like a fetch failure, so a chain that is
+# permanently (not just transiently) broken still trips
+# OUTCOME_SKIPPED_FAILURES eventually instead of re-fetching and re-billing
+# the same posts forever.
+OUTCOME_CHAIN_FAILED = "chain_failed"
 # plans/260812_crawl-error-visibility.md §A/§B: Apify's own error item, read
 # instead of discarded. `OUTCOME_BLOCKED` is Instagram rate-limiting/blocking
 # the scrape — TRANSIENT, worth retrying on the next scheduled fire.
@@ -162,7 +181,11 @@ OUTCOME_HANDLE_NOT_FOUND = "handle_not_found"
 # The set of per-stream outcomes that count as a FAILED fetch — increments
 # `consecutive_failures` in `run_target`, unlike OUTCOME_EMPTY (a real empty
 # stream, not a failure) or a skip/credit-exhaustion outcome (never even
-# attempted, or stopped before an answer was known).
+# attempted, or stopped before an answer was known). OUTCOME_BOOKKEEPING_
+# FAILED and OUTCOME_CHAIN_FAILED are deliberately NOT here — neither is
+# ever a per-stream outcome `_run_stream` can return; both still bump
+# `consecutive_failures`, just through `run_target`'s own post-fetch write/
+# chain handling, never through this tuple.
 FAILURE_OUTCOMES = (OUTCOME_FAILED, OUTCOME_BLOCKED, OUTCOME_HANDLE_NOT_FOUND)
 # plans/260814_seeded-state-and-config-validation.md §A: outcomes where the
 # reels stream was never actually asked to a trustworthy conclusion at all —
@@ -1372,10 +1395,12 @@ class ScheduledInstagramCrawlService:
             # OUTCOME_SUCCESS above, which is exactly the bug: an empty
             # seed has no cursor to advance and used to be indistinguishable
             # from a failure. Folded into `cursor_updates` (despite not
-            # being a cursor) so it rides the SAME single bookkeeping write
-            # `updates` becomes below — never a separate write, so a write
-            # that fails leaves `reels_seeded_at` unset exactly like it
-            # leaves the cursor unset (the OUTCOME_BOOKKEEPING_FAILED
+            # being a cursor) so it rides the SAME deferred cursor write
+            # `cursor_updates` becomes, below — written only after the
+            # archive/extract chain completes (§crawl-cursor-advance-after-
+            # chain), never a separate or earlier write, so a chain failure
+            # or a failed write leaves `reels_seeded_at` unset exactly like
+            # it leaves the cursor unset (the OUTCOME_BOOKKEEPING_FAILED
             # non-negotiable: a seed marker written before its own
             # bookkeeping commits would reintroduce the 2026-08-09
             # entreamigos.praia incident).
@@ -1397,12 +1422,27 @@ class ScheduledInstagramCrawlService:
             CRAWL_RUNS_TOTAL.labels(handle_kind=kind, result_type=STREAM_REELS, outcome=skip_reels).inc()
 
         total_results = sum(r.get("results", 0) for r in stream_reports.values())
-        updates: dict = dict(cursor_updates)
+        # §crawl-cursor-advance-after-chain: two claims that must NOT share a
+        # write. `attempt_updates` is true the moment Apify answered —
+        # billing/attempt bookkeeping that must land even if the archive/
+        # classify/extract chain below never runs or blows up (otherwise a
+        # chain failure would ALSO hide the spend, repeating the 2026-08-09
+        # entreamigos.praia bookkeeping-failure incident by a different
+        # route). `cursor_updates` (built above, during the stream loop) is
+        # the DIFFERENT claim "everything up to here has been successfully
+        # processed" — written ONLY after the chain has actually run to
+        # completion (see the write near `return`, below the chain call),
+        # so a process death or an exception mid-chain leaves the cursor
+        # exactly where it was and the SAME posts are re-fetched — and
+        # re-billed, a deliberate, stated trade-off: money is recoverable,
+        # silently discarded data is not — on the next run rather than
+        # skipped forever.
+        attempt_updates: dict = {}
         if not credit_exhausted:
-            updates["last_run_at"] = now
-            updates["last_run_results"] = total_results
-            updates["last_run_cost_usd"] = round(total_results * self.config.result_cost_usd, 6)
-            updates["consecutive_failures"] = (
+            attempt_updates["last_run_at"] = now
+            attempt_updates["last_run_results"] = total_results
+            attempt_updates["last_run_cost_usd"] = round(total_results * self.config.result_cost_usd, 6)
+            attempt_updates["consecutive_failures"] = (
                 int(target.get("consecutive_failures") or 0) + 1 if any_failed else 0
             )
             # plans/260813_dormant-vs-broken-targets.md §A: recomputed and
@@ -1419,7 +1459,7 @@ class ScheduledInstagramCrawlService:
             # no trustworthy posts-stream answer to record.
             new_dormant = bool(stream_reports[STREAM_POSTS].get("dormant", False))
             was_dormant = bool(target.get("posts_dormant"))
-            updates["posts_dormant"] = new_dormant
+            attempt_updates["posts_dormant"] = new_dormant
             if new_dormant:
                 CRAWL_DORMANT_TOTAL.labels(handle_kind=kind).inc()
             # §Error Handling: "A target that flips from dormant to
@@ -1443,8 +1483,8 @@ class ScheduledInstagramCrawlService:
             # always answer "what was the last failure and when," even if
             # that failure was several runs ago.
             if failure_kind is not None:
-                updates["last_failure_kind"] = failure_kind
-                updates["last_failure_at"] = now
+                attempt_updates["last_failure_kind"] = failure_kind
+                attempt_updates["last_failure_at"] = now
                 if failure_kind == OUTCOME_HANDLE_NOT_FOUND:
                     # Permanent: Instagram says the handle does not exist, so
                     # retrying on the next scheduled fire can only ever spend
@@ -1453,7 +1493,7 @@ class ScheduledInstagramCrawlService:
                     # never silently: a target vanishing from the rotation
                     # with no explanation is the failure mode this plan is
                     # about (plan §B).
-                    updates["enabled"] = False
+                    attempt_updates["enabled"] = False
                     logger.warning(
                         f"[InstagramCrawl] {handle}: Instagram reports this handle "
                         "does not exist -- disabling the target rather than "
@@ -1481,11 +1521,11 @@ class ScheduledInstagramCrawlService:
                 )
                 if overlap_count:
                     CRAWL_STREAM_OVERLAP_TOTAL.labels(result_type=STREAM_REELS).inc(overlap_count)
-                updates["last_run_reels_fetched"] = reels_report["results"]
-                updates["last_run_reels_new"] = len(reel_posts) - overlap_count
-        if updates:
+                attempt_updates["last_run_reels_fetched"] = reels_report["results"]
+                attempt_updates["last_run_reels_new"] = len(reel_posts) - overlap_count
+        if attempt_updates:
             try:
-                self.venue_dao.update_crawl_target(handle, updates)
+                self.venue_dao.update_crawl_target(handle, attempt_updates)
             except Exception as e:
                 # Results for this run are already scraped and BILLED (see
                 # `_run_stream`'s CRAWL_RESULTS_TOTAL/budget increment, which
@@ -1500,14 +1540,15 @@ class ScheduledInstagramCrawlService:
                 # healthy, and keep spending on every future run while
                 # landing nothing (the exact production incident this guards
                 # against: 2026-08-09, entreamigos.praia, $0.10 billed and
-                # discarded with `consecutive_failures` still 0).
+                # discarded with `consecutive_failures` still 0). `_chain`
+                # (below) is never reached — the whole method exits here.
                 CRAWL_RUNS_TOTAL.labels(
                     handle_kind=kind, result_type=STREAM_POSTS, outcome=OUTCOME_BOOKKEEPING_FAILED,
                 ).inc()
                 logger.error(
                     f"[InstagramCrawl] {handle}: post-run bookkeeping write failed "
                     f"AFTER {total_results} results were already scraped and billed "
-                    f"(≈${updates.get('last_run_cost_usd', 0):.4f}): {e}"
+                    f"(≈${attempt_updates.get('last_run_cost_usd', 0):.4f}): {e}"
                 )
                 failures = int(target.get("consecutive_failures") or 0) + 1
                 try:
@@ -1520,8 +1561,6 @@ class ScheduledInstagramCrawlService:
                     )
                 raise
 
-        self._record_cursor_age(handle, target, updates, now)
-
         # §A: merge every stream's kept posts into one set keyed by
         # shortcode BEFORE chaining — deduping is about what gets
         # PROCESSED; the per-stream cursor advances above already used each
@@ -1529,7 +1568,120 @@ class ScheduledInstagramCrawlService:
         all_new_posts = dedupe_posts_by_shortcode(new_posts_by_stream)
         chained = None
         if all_new_posts and not credit_exhausted and self.chainer is not None:
-            chained = await self._chain(target, all_new_posts, now)
+            try:
+                chained = await self._chain(target, all_new_posts, now)
+            except (Exception, asyncio.CancelledError) as e:
+                # §crawl-cursor-advance-after-chain: the chain did not reach
+                # a trustworthy conclusion — everything it already catches
+                # internally (a photo download, a classification, a single
+                # post's extraction) degrades gracefully and never raises;
+                # this is something else. CONFIRMED in production (2026-08-
+                # 25/26): a deploy recreates this container -- 6 times in 7
+                # days -- and shutdown hard-CANCELS an in-flight asyncio
+                # task rather than draining it, delivering `asyncio.
+                # CancelledError` here. Caught explicitly (`asyncio.
+                # CancelledError` is a `BaseException`, not an `Exception`,
+                # since Python 3.8 -- a bare `except Exception` would miss
+                # it) so this, the SINGLE MOST COMMON real trigger, still
+                # gets the same logging/metric/consecutive_failures
+                # accounting below rather than skipping it silently. Always
+                # re-raised (never swallowed) via the bare `raise` at the
+                # end of this block, preserving asyncio's own cancellation
+                # contract. A true SIGKILL (OOM, `docker kill`) is the
+                # residual case this still cannot observe at all -- no
+                # Python code runs, so nothing below executes either -- but
+                # the cursor is STILL never written in that case (this
+                # whole method simply stops existing), so the safety
+                # property holds either way; only this diagnostic would be
+                # missing. `cursor_updates` below is
+                # therefore never written: the target's stored cursor stays
+                # exactly where it was, so the SAME already-billed posts in
+                # `all_new_posts` are re-fetched and re-attempted next run
+                # instead of being marked done when they were not
+                # (re-processing is safe — `reconcile_post_events` matches
+                # by `source_event_key` and updates in place rather than
+                # duplicating; `uq_post_item_source_post` is the backstop).
+                # Counted toward the SAME `consecutive_failures` counter a
+                # fetch failure feeds, so a chain that is permanently (not
+                # just transiently) broken still trips
+                # OUTCOME_SKIPPED_FAILURES instead of re-fetching and
+                # re-billing the same posts forever.
+                CRAWL_RUNS_TOTAL.labels(
+                    handle_kind=kind, result_type=STREAM_POSTS, outcome=OUTCOME_CHAIN_FAILED,
+                ).inc()
+                logger.error(
+                    f"[InstagramCrawl] {handle}: archive/classify/extract chain "
+                    f"failed for {len(all_new_posts)} already-billed post(s) -- "
+                    f"cursor left unchanged so they are re-fetched and "
+                    f"re-processed next run: {e}"
+                )
+                # Based on `target` — the PRE-RUN value fetched at the top
+                # of this method — never on `attempt_updates`' own value.
+                # `attempt_updates` may already have reset `consecutive_
+                # failures` to 0 (the FETCH itself succeeded this run); if
+                # this fallback added 1 to THAT, a target whose fetch always
+                # succeeds but whose chain always fails would be stuck
+                # re-deriving 0 -> 1 every single run and would NEVER cross
+                # `max_consecutive_failures` — exactly the unbounded re-
+                # fetch/re-bill loop this plan must not introduce. Basing it
+                # on the pre-run value instead makes this run's chain
+                # failure the ONE new failure on top of the target's real
+                # streak, accumulating across runs regardless of whether
+                # this run's own fetch happened to succeed.
+                failures = int(target.get("consecutive_failures") or 0) + 1
+                try:
+                    self.venue_dao.update_crawl_target(handle, {
+                        "consecutive_failures": failures,
+                        "last_failure_kind": OUTCOME_CHAIN_FAILED,
+                        "last_failure_at": now,
+                    })
+                except Exception as e2:
+                    logger.error(
+                        f"[InstagramCrawl] {handle}: could not even record the "
+                        f"chain failure itself -- target will look healthier "
+                        f"than it is until this is fixed: {e2}"
+                    )
+                raise
+
+        if cursor_updates:
+            try:
+                self.venue_dao.update_crawl_target(handle, cursor_updates)
+            except Exception as e:
+                # The chain (if any) already completed -- only the SEPARATE
+                # write persisting the cursor advance itself failed. Still a
+                # bookkeeping write failing after real work was already
+                # billed/performed, just the second one instead of the
+                # first, so it reuses the SAME outcome/metric and the SAME
+                # consecutive_failures accounting OUTCOME_BOOKKEEPING_FAILED
+                # already uses above. The cursor stays unchanged (safe: the
+                # same posts are re-fetched and re-processed next run, and
+                # re-processing is idempotent -- see the chain-failure
+                # branch above).
+                CRAWL_RUNS_TOTAL.labels(
+                    handle_kind=kind, result_type=STREAM_POSTS, outcome=OUTCOME_BOOKKEEPING_FAILED,
+                ).inc()
+                logger.error(
+                    f"[InstagramCrawl] {handle}: cursor bookkeeping write failed "
+                    f"AFTER the archive/extract chain already completed for "
+                    f"{len(all_new_posts)} post(s) -- they will be safely "
+                    f"re-fetched and re-processed next run: {e}"
+                )
+                # Same reasoning as the chain-failure branch above: based on
+                # `target`'s PRE-RUN value, never on `attempt_updates`' own
+                # (already-reset) value, so this failure accumulates across
+                # runs instead of being capped at 1 forever.
+                failures = int(target.get("consecutive_failures") or 0) + 1
+                try:
+                    self.venue_dao.update_crawl_target(handle, {"consecutive_failures": failures})
+                except Exception as e2:
+                    logger.error(
+                        f"[InstagramCrawl] {handle}: could not even record the "
+                        f"cursor bookkeeping failure itself -- target will look "
+                        f"healthier than it is until this is fixed: {e2}"
+                    )
+                raise
+
+        self._record_cursor_age(handle, target, cursor_updates, now)
 
         return {
             "handle": handle, "kind": kind, "streams": stream_reports,

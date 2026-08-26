@@ -37,10 +37,12 @@ from app.models.venue import Venue
 from app.services import job_lock
 from app.services.instagram_crawl_service import (
     FAILURE_OUTCOMES,
+    OUTCOME_CHAIN_FAILED,
     OUTCOME_CREDIT_EXHAUSTED,
     OUTCOME_EMPTY,
     OUTCOME_SKIPPED_BUDGET,
     OUTCOME_SKIPPED_DISABLED,
+    OUTCOME_SKIPPED_FAILURES,
     OUTCOME_SKIPPED_SEEDED,
     OUTCOME_SUCCESS,
     STREAM_POSTS,
@@ -2052,6 +2054,227 @@ class TestBookkeepingWriteFailureCountsAsAFailure:
             _run(service.run_target("bookkeepfail4"))
 
         assert chainer.calls == 0, "archiving must never run past a failed bookkeeping write"
+
+
+# ── plans/260825_crawl-cursor-advance-after-chain.md ────────────────────────
+# Production incident, 2026-08-25/26 (clubmetropole): the cursor used to
+# advance BEFORE the archive/classify/extract chain ran. A container restart
+# mid-chain left 50 already-billed posts with zero rows in
+# events.post_item_source and a cursor that had already moved past them —
+# permanently unrecoverable without manually NULLing the cursor and re-
+# paying for the same posts. `run_target` now writes the cursor advance only
+# AFTER the chain completes without raising.
+class _FailingChainer:
+    """Raises for both kinds — simulates the chain reaching something it
+    does NOT already catch internally (a real bug, an outage, or standing in
+    for the process dying mid-chain, which is not an exception at all)."""
+
+    async def chain_venue(self, **kwargs):
+        raise RuntimeError("chain blew up")
+
+    async def chain_promoter(self, **kwargs):
+        raise RuntimeError("chain blew up")
+
+
+class _SucceedingChainer:
+    """A chain that completes cleanly -- used to isolate the SECOND
+    (cursor-only) bookkeeping write's own failure mode from a chain
+    failure."""
+
+    async def chain_venue(self, **kwargs):
+        return None
+
+    async def chain_promoter(self, **kwargs):
+        return None
+
+
+def _crawl_target_with_venue(dao, handle: str, *, consecutive_failures: int = 0) -> None:
+    dao.upsert_venue(Venue(venue_id=f"{handle}_v", venue_name=handle, venue_lat=-8.0, venue_lng=-34.9))
+    dao.set_venue_instagram(VenueInstagram(venue_id=f"{handle}_v", instagram_handle=handle, status="found"))
+    fields = {"kind": "venue", "cron": "0 22 * * *"}
+    if consecutive_failures:
+        fields["consecutive_failures"] = consecutive_failures
+    dao.upsert_crawl_target(handle, fields)
+
+
+class TestChainFailureLeavesCursorUnchanged:
+    def test_billing_lands_but_the_cursor_does_not_advance(self):
+        inner = _venue_dao()
+        _crawl_target_with_venue(inner, "chainfail1")
+        apify = _FakeApifyClient()
+        apify.program("chainfail1", "posts", [
+            {"shortcode": "a", "timestamp": "2026-08-08T10:00:00.000Z"},
+        ])
+        service = _service(inner, apify, _FakeBudgetDao())
+        service.chainer = _FailingChainer()
+
+        with pytest.raises(RuntimeError, match="chain blew up"):
+            _run(service.run_target("chainfail1"))
+
+        row = inner.get_crawl_target("chainfail1")
+        assert row["cursor_posts_at"] is None, "the chain failed -- the cursor must not advance"
+        assert row["reels_seeded_at"] is None
+        # The fetch already happened and was already billed -- this must
+        # still be recorded even though the chain that follows it failed.
+        assert row["last_run_at"] == NOW
+        assert row["last_run_results"] == 1
+        assert row["last_run_cost_usd"] == round(1 * 0.0027, 6)
+        assert row["last_failure_kind"] == OUTCOME_CHAIN_FAILED
+        assert row["last_failure_at"] == NOW
+
+    def test_consecutive_failures_accumulates_across_runs_even_though_the_fetch_keeps_succeeding(self):
+        """The fetch itself SUCCEEDS every run (so `attempt_updates`, in
+        isolation, resets `consecutive_failures` to 0 every time) -- but the
+        CHAIN keeps failing. The final count must be based on the target's
+        PRE-RUN streak (3) plus this one new chain failure (4), never on
+        `attempt_updates`' own transient reset-to-0 -- otherwise a target
+        whose fetch always succeeds but whose chain is permanently broken
+        would be stuck re-deriving 0 -> 1 every run and would NEVER cross
+        `max_consecutive_failures` (see TestChainFailureLoopSafety)."""
+        inner = _venue_dao()
+        _crawl_target_with_venue(inner, "chainfail2", consecutive_failures=3)
+        apify = _FakeApifyClient()
+        apify.program("chainfail2", "posts", [
+            {"shortcode": "a", "timestamp": "2026-08-08T10:00:00.000Z"},
+        ])
+        service = _service(inner, apify, _FakeBudgetDao())
+        service.chainer = _FailingChainer()
+
+        with pytest.raises(RuntimeError):
+            _run(service.run_target("chainfail2"))
+
+        row = inner.get_crawl_target("chainfail2")
+        assert row["consecutive_failures"] == 4, row
+
+    def test_a_fetch_failure_followed_by_a_chain_that_never_runs_keeps_its_own_count(self):
+        """Sanity check the two failure counters never double-count each
+        other: a run with NO new posts (so no chain call happens at all)
+        must still use the plain fetch-outcome accounting, untouched by any
+        of the new chain-failure code."""
+        inner = _venue_dao()
+        _crawl_target_with_venue(inner, "nochaintarget")
+        apify = _FakeApifyClient()
+        apify.program("nochaintarget", "posts", [])
+        service = _service(inner, apify, _FakeBudgetDao())
+        service.chainer = _FailingChainer()
+
+        report = _run(service.run_target("nochaintarget"))
+
+        assert report["chained"] is None
+        row = inner.get_crawl_target("nochaintarget")
+        assert row["consecutive_failures"] == 0
+        assert row["last_failure_kind"] is None
+
+    def test_a_cancelled_error_mid_chain_is_recorded_and_still_propagates(self):
+        """CONFIRMED in production (2026-08-25/26): this container is
+        recreated by every deploy, and shutdown hard-CANCELS an in-flight
+        job rather than draining it -- a real `asyncio.CancelledError` was
+        captured during the exact deploy that lost 50 already-billed posts.
+        `asyncio.CancelledError` is a `BaseException`, not an `Exception`,
+        since Python 3.8 (verified: `issubclass(asyncio.CancelledError,
+        Exception)` is `False`) -- a bare `except Exception:` around the
+        chain call would silently miss the SINGLE MOST COMMON real trigger
+        for this whole bug. This proves `run_target` both records it (same
+        as any other chain failure) AND re-raises the SAME CancelledError
+        (never swallows it, preserving asyncio's own cancellation
+        contract)."""
+        class _CancellingChainer:
+            async def chain_venue(self, **kwargs):
+                raise asyncio.CancelledError()
+
+            async def chain_promoter(self, **kwargs):
+                raise asyncio.CancelledError()
+
+        inner = _venue_dao()
+        _crawl_target_with_venue(inner, "chaincancel")
+        apify = _FakeApifyClient()
+        apify.program("chaincancel", "posts", [
+            {"shortcode": "a", "timestamp": "2026-08-08T10:00:00.000Z"},
+        ])
+        service = _service(inner, apify, _FakeBudgetDao())
+        service.chainer = _CancellingChainer()
+
+        with pytest.raises(asyncio.CancelledError):
+            _run(service.run_target("chaincancel"))
+
+        row = inner.get_crawl_target("chaincancel")
+        assert row["cursor_posts_at"] is None, "cancellation must not advance the cursor"
+        assert row["last_run_at"] == NOW, "billing must still be recorded"
+        assert row["consecutive_failures"] == 1
+        assert row["last_failure_kind"] == OUTCOME_CHAIN_FAILED
+
+
+class TestChainFailureLoopSafety:
+    def test_repeated_chain_failures_eventually_trip_skipped_failures(self):
+        """§Error Handling: not advancing the cursor on a chain failure
+        means the SAME posts are re-fetched (and re-billed) next run --
+        this must not become an unbounded loop. A chain that is
+        PERMANENTLY (not just transiently) broken must still stop spending
+        once `max_consecutive_failures` is crossed, exactly like a
+        permanently-failing fetch already does."""
+        inner = _venue_dao()
+        _crawl_target_with_venue(inner, "chainloop")
+        apify = _FakeApifyClient()
+        apify.program("chainloop", "posts", [
+            {"shortcode": "a", "timestamp": "2026-08-08T10:00:00.000Z"},
+        ])
+        service = _service(inner, apify, _FakeBudgetDao(), max_consecutive_failures=2)
+        service.chainer = _FailingChainer()
+
+        for _ in range(2):
+            with pytest.raises(RuntimeError):
+                _run(service.run_target("chainloop"))
+
+        assert len(apify.calls) == 2, "both prior runs must have genuinely re-fetched"
+
+        report = _run(service.run_target("chainloop"))
+
+        assert report["outcome"] == OUTCOME_SKIPPED_FAILURES
+        assert len(apify.calls) == 2, "the third run must refuse before ever calling Apify again"
+
+
+class _CursorWriteFailsDao:
+    """Wraps a real dao; the FIRST `update_crawl_target` call (the attempt/
+    billing write, no cursor fields) goes through untouched; a call carrying
+    a cursor field (the SECOND, deferred write this plan introduces) raises
+    instead -- simulating the cursor write itself failing AFTER a chain that
+    completed successfully."""
+
+    def __init__(self, inner):
+        self._inner = inner
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+    def update_crawl_target(self, handle, fields):
+        if "cursor_posts_at" in fields or "cursor_reels_at" in fields:
+            raise RuntimeError("cursor write connection reset")
+        return self._inner.update_crawl_target(handle, fields)
+
+
+class TestCursorWriteFailureCountsAsAFailure:
+    def test_a_successful_chain_whose_cursor_write_then_fails_reraises_and_still_bills(self):
+        inner = _venue_dao()
+        _crawl_target_with_venue(inner, "cursorwritefail")
+        dao = _CursorWriteFailsDao(inner)
+        apify = _FakeApifyClient()
+        apify.program("cursorwritefail", "posts", [
+            {"shortcode": "a", "timestamp": "2026-08-08T10:00:00.000Z"},
+        ])
+        service = _service(dao, apify, _FakeBudgetDao())
+        service.chainer = _SucceedingChainer()
+
+        with pytest.raises(RuntimeError, match="cursor write connection reset"):
+            _run(service.run_target("cursorwritefail"))
+
+        row = inner.get_crawl_target("cursorwritefail")
+        assert row["cursor_posts_at"] is None, "the cursor write failed -- the cursor must stay unset"
+        # The attempt/billing write is a SEPARATE, EARLIER call -- it must
+        # have already landed for real (through the wrapper's pass-through),
+        # even though the later cursor-only write failed.
+        assert row["last_run_at"] == NOW
+        assert row["last_run_results"] == 1
+        assert row["consecutive_failures"] == 1
 
 
 # ── §A dedupe: plans/260810_stream-dedupe-and-venue-attribution.md ─────────

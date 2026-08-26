@@ -1667,7 +1667,9 @@ CRAWL_RUNS_TOTAL = Counter(
     # result_type: posts, reels
     # outcome: success, empty, failed, blocked, handle_not_found,
     #          skipped_disabled, skipped_failures, skipped_budget,
-    #          credit_exhausted
+    #          credit_exhausted, chain_failed (the archive/classify/extract
+    #          chain that follows a successful fetch raised; see
+    #          plans/260825_crawl-cursor-advance-after-chain.md)
     # plans/260812_crawl-error-visibility.md §Error Handling: `blocked` and
     # `handle_not_found` are ADDITIVE labels on this SAME counter — a
     # Prometheus series only exists after its first increment, so the
