@@ -1,4 +1,3 @@
-@wip
 Feature: Advance the crawl cursor only after the chain that follows it completes
   A scheduled Instagram crawl fetches and bills posts, then archives,
   classifies, and extracts them (the "chain"). The cursor must only advance

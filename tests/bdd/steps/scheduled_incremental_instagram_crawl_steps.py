@@ -812,3 +812,66 @@ def step_then_new_posts_are_archived(context):
 @then("event extraction runs for them")
 def step_then_event_extraction_runs_for_them(context):
     assert context.ic_openai.calls >= 1, "expected the extraction OpenAI client to be called"
+
+
+# ── Cursor advances only after the chain completes ──────────────────────
+# tests/bdd/enrichment/crawl-cursor-advance-after-chain.feature
+@given("a crawl target with a known cursor that will return new posts")
+def step_given_target_with_cursor_that_returns_new_posts(context):
+    _ensure_context(context)
+    context.ic_cursor = datetime(2026, 8, 1, 12, 0, tzinfo=timezone.utc)
+    context.ic_handle = _create_target(
+        context, "cursorchaintarget", cursor_posts_at=context.ic_cursor,
+    )
+    context.ic_new_post_time = datetime(2026, 8, 5, 20, 0, tzinfo=timezone.utc)
+    _program_posts(context, context.ic_handle, "posts", [
+        _post(
+            "cursorchainpost1", "2026-08-05T20:00:00.000Z",
+            caption="Festa hoje! Ingressos abertos, vem cedo.",
+            image_urls=["https://cdn.example.com/cursorchainpost1.jpg"],
+        ),
+    ])
+    context.ic_openai.program(_extraction_json())
+
+
+@when("its scheduled crawl runs but the chain fails")
+def step_when_crawl_runs_but_chain_fails(context):
+    """Arms the REAL `InstagramCrawlChainer` instance's `chain_venue` to
+    raise -- simulating a chain that blows up past everything it already
+    catches internally (a photo download, a classification, a single post's
+    extraction all degrade gracefully today; this simulates something else
+    going wrong, or the process dying, which `run_target` cannot tell apart
+    from any other escaping exception). `run_target` is expected to re-raise
+    after recording what it safely can, exactly like the pre-existing
+    bookkeeping-write-failure path already does -- caught here so the
+    scenario can go on to inspect the persisted state."""
+    async def _boom(**kwargs):
+        raise RuntimeError("simulated chain failure")
+
+    context.ic_chainer.chain_venue = _boom
+    context.ic_chain_exception = None
+    try:
+        context.ic_last_report = _run(context.ic_service.run_target(context.ic_handle))
+    except RuntimeError as e:
+        context.ic_chain_exception = e
+        context.ic_last_report = None
+
+
+@then("the run's billing is still recorded")
+def step_then_billing_still_recorded(context):
+    row = context.ic_dao.get_crawl_target(context.ic_handle)
+    assert row["last_run_at"] is not None, "expected last_run_at to be recorded despite the chain failure"
+    assert row["last_run_results"] == 1, row
+    assert row["last_run_cost_usd"] == round(1 * context.ic_config.result_cost_usd, 6), row
+
+
+@then("the target's consecutive-failure count increases")
+def step_then_consecutive_failures_increases(context):
+    row = context.ic_dao.get_crawl_target(context.ic_handle)
+    assert int(row["consecutive_failures"] or 0) >= 1, row
+
+
+@then("the target's cursor advances to the newest returned post's time")
+def step_then_cursor_advances_to_newest(context):
+    row = context.ic_dao.get_crawl_target(context.ic_handle)
+    assert row["cursor_posts_at"] == context.ic_new_post_time, row
