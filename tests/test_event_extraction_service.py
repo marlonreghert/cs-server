@@ -30,7 +30,10 @@ from app.services.event_extraction_service import (
     OUTCOME_EXTRACTION_FAILED,
     OUTCOME_LOW_CONFIDENCE,
     OUTCOME_NOT_EVENT_LIKE,
+    OUTCOME_SKIPPED_SEEN,
     OUTCOME_UNREAD_TIME,
+    STATUS_EXTRACTION_FAILED,
+    _already_extracted,
     _sort_newest_first,
     post_qualifies,
 )
@@ -141,6 +144,16 @@ class _FakePostSource:
     async def posts_for_venue(self, venue_id, since):
         return self.posts_by_venue.get(venue_id, [])
 
+    async def posts_for_handle(self, handle, venue_ids, since):
+        # plans/260826_skip-already-extracted-posts.md: a few tests below
+        # deliberately re-extract an already-successful post through
+        # `_run_handles` (mode="handles") now that the venue_ids/
+        # event_candidates path skips it -- no handle-archive bucket exists
+        # in this fake (nothing writes one), so this simply concatenates
+        # each requested venue's own posts, mirroring the real
+        # `EventPostSource.posts_for_handle`'s venue_id= half.
+        return [p for vid in (venue_ids or []) for p in self.posts_by_venue.get(vid, [])]
+
     async def image_data_uri(self, key):
         return f"data:image/jpeg;base64,FAKE_{key}" if key else None
 
@@ -228,6 +241,16 @@ class TestZeroModelCallsForNonQualifying:
 
 
 class TestIdempotentReExtraction:
+    """plans/260826_skip-already-extracted-posts.md: the venue_ids/
+    event_candidates path (`cfg`) now SKIPS an already-successfully-
+    extracted post instead of re-sending it, so the SECOND run in each test
+    below goes through the deliberate re-extraction path (`cfg2`,
+    mode="handles") to still force a genuine second model call over the
+    SAME post -- byte-identical behaviour to the first run's own
+    `_extract_one` call (see that plan's own evidence), so this changes
+    ONLY which eligibility mode reaches the second call, not what it proves.
+    """
+
     def test_two_runs_with_the_same_answer_leave_one_row(self):
         """A stable re-extraction (same title, same content) must not
         duplicate the row — the content-derived key matches directly."""
@@ -239,12 +262,13 @@ class TestIdempotentReExtraction:
         )
         posts = {"v1": [post]}
         cfg = {"eligibility": {"mode": "venue_ids", "venue_ids": "v1"}}
+        cfg2 = {"eligibility": {"mode": "handles", "handles": "v1_handle"}}
 
         client = _FakeOpenAIClient([_extraction_json(), _extraction_json()])
         service = EventExtractionService(dao, _FakePostSource(posts), client)
 
         r1 = _run(service.run(cfg))
-        r2 = _run(service.run(cfg))
+        r2 = _run(service.run(cfg2))
 
         assert r1["outcomes"].get(OUTCOME_ACCEPTED) == 1
         assert r2["outcomes"].get(OUTCOME_ACCEPTED) == 1
@@ -273,12 +297,13 @@ class TestIdempotentReExtraction:
         )
         posts = {"v1": [post]}
         cfg = {"eligibility": {"mode": "venue_ids", "venue_ids": "v1"}}
+        cfg2 = {"eligibility": {"mode": "handles", "handles": "v1_handle"}}
 
         client = _FakeOpenAIClient([_extraction_json(), _extraction_json(title="Festa 2")])
         service = EventExtractionService(dao, _FakePostSource(posts), client)
 
         r1 = _run(service.run(cfg))
-        r2 = _run(service.run(cfg))
+        r2 = _run(service.run(cfg2))
 
         assert r1["outcomes"].get(OUTCOME_ACCEPTED) == 1
         assert r2["outcomes"].get(OUTCOME_ACCEPTED) == 1
@@ -296,6 +321,11 @@ class TestIdempotentReExtraction:
 
 class TestConfirmedIsNeverReverted:
     def test_confirmed_title_and_date_survive_reextraction(self):
+        """plans/260826_skip-already-extracted-posts.md: the SECOND run
+        goes through mode="handles" — the venue_ids path would now skip
+        this already-successfully-extracted post rather than re-sending it,
+        which would leave `client2` unconsumed and prove nothing about
+        confirmed-row protection."""
         dao = _dao()
         _seed_venue(dao, "v1", "v1_handle")
         post = _post(
@@ -304,6 +334,7 @@ class TestConfirmedIsNeverReverted:
         )
         posts = {"v1": [post]}
         cfg = {"eligibility": {"mode": "venue_ids", "venue_ids": "v1"}}
+        cfg2 = {"eligibility": {"mode": "handles", "handles": "v1_handle"}}
 
         client = _FakeOpenAIClient([_extraction_json(title="Original title")])
         service = EventExtractionService(dao, _FakePostSource(posts), client)
@@ -315,7 +346,7 @@ class TestConfirmedIsNeverReverted:
 
         client2 = _FakeOpenAIClient([_extraction_json(title="A completely different title")])
         service2 = EventExtractionService(dao, _FakePostSource(posts), client2)
-        _run(service2.run(cfg))
+        _run(service2.run(cfg2))
 
         after = dao.get_event_by_source("v1_handle", "s1")
         assert after["status"] == "confirmed"
@@ -901,3 +932,117 @@ class TestRunTruncatesToNewestPosts:
         assert result["qualifying_posts"] == 2
         assert dao.get_event_by_source("v1_handle", "newest") is not None
         assert dao.get_event_by_source("v1_handle", "oldest") is not None
+
+
+class TestAlreadyExtractedPredicate:
+    """plans/260826_skip-already-extracted-posts.md: `_already_extracted`
+    decides, from the SAME `existing_events` list `_extract_one` already
+    fetches, whether a post has a real prior success worth skipping a model
+    call for. Every status in `event_reconciliation.ALL_STATUSES` other
+    than `extraction_failed` counts; a post whose every row failed must
+    never be treated as already-extracted (constraint: retried, not
+    skipped forever)."""
+
+    def test_empty_list_is_not_already_extracted(self):
+        assert _already_extracted([]) is False
+
+    def test_all_rows_extraction_failed_is_not_already_extracted(self):
+        rows = [{"status": STATUS_EXTRACTION_FAILED}, {"status": STATUS_EXTRACTION_FAILED}]
+        assert _already_extracted(rows) is False
+
+    def test_one_non_failed_row_among_failed_ones_is_already_extracted(self):
+        rows = [{"status": STATUS_EXTRACTION_FAILED}, {"status": "accepted"}]
+        assert _already_extracted(rows) is True
+
+    @pytest.mark.parametrize(
+        "status", ["pending_review", "confirmed", "rejected", "superseded", "accepted"],
+    )
+    def test_every_non_failed_status_counts_as_already_extracted(self, status):
+        assert _already_extracted([{"status": status}]) is True
+
+
+class TestTouchSeen:
+    """`EventExtractionService._touch_seen` is the ONLY side effect a skip
+    performs: refresh `last_seen_at` on a post's own LIVE rows so menu-item
+    freshness (`app.models.menu_lifecycle.is_menu_item_current`) keeps
+    advancing even though the model is never called — without touching a
+    superseded row, mirroring `event_reconciliation.py`'s own "never
+    touched once superseded" invariant."""
+
+    def _service(self):
+        dao = _dao()
+        _seed_venue(dao, "v1", "v1_handle")
+        service = EventExtractionService(dao, _FakePostSource({}), _FakeOpenAIClient([]))
+        return dao, service
+
+    def test_touch_refreshes_last_seen_at_on_a_live_row(self):
+        dao, service = self._service()
+        old_seen = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        dao.insert_event({
+            "event_id": "evt_live", "venue_id": "v1", "source_kind": "venue_post",
+            "source_handle": "v1_handle", "source_shortcode": "s1",
+            "source_event_key": "s1_key", "status": "accepted", "title": "Festa",
+            "last_seen_at": old_seen,
+        })
+        existing = dao.list_events_by_source("v1_handle", "s1")
+        now = datetime(2026, 8, 1, tzinfo=timezone.utc)
+
+        service._touch_seen(existing, "v1_handle", _post("s1"), now)
+
+        after = dao.get_event_by_source("v1_handle", "s1")
+        assert after["last_seen_at"] == now
+        assert service.openai_client.calls == 0
+
+    def test_touch_never_updates_a_superseded_row(self):
+        dao, service = self._service()
+        old_seen = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        dao.insert_event({
+            "event_id": "evt_dead", "venue_id": "v1", "source_kind": "venue_post",
+            "source_handle": "v1_handle", "source_shortcode": "s1",
+            "source_event_key": "s1_key", "status": "superseded", "title": "Festa",
+            "last_seen_at": old_seen,
+        })
+        existing = dao.list_events_by_source("v1_handle", "s1")
+        now = datetime(2026, 8, 1, tzinfo=timezone.utc)
+
+        service._touch_seen(existing, "v1_handle", _post("s1"), now)
+
+        after = dao.get_event("evt_dead")
+        assert after["last_seen_at"] == old_seen
+
+
+class TestSkipIntegrationThroughRun:
+    """End-to-end through `service.run()`: proves the cap (constraint 2 of
+    plans/260826_skip-already-extracted-posts.md) is spent on the genuinely
+    new post, never on the already-extracted one sharing the same run."""
+
+    def test_already_extracted_post_is_skipped_and_cap_goes_to_the_new_post(self):
+        dao = _dao()
+        _seed_venue(dao, "v1", "v1_handle")
+        seen_post = _post(
+            "seen", caption="Ingressos abertos!", flyer_photo_key="seen.jpg",
+            flyer_confidence=0.9, timestamp=datetime(2026, 8, 10, 12, tzinfo=timezone.utc),
+        )
+        new_post = _post(
+            "brand_new", caption="Ingressos abertos!", flyer_photo_key="new.jpg",
+            flyer_confidence=0.9, timestamp=datetime(2026, 7, 1, 12, tzinfo=timezone.utc),
+        )
+        dao.insert_event({
+            "event_id": "evt_seen", "venue_id": "v1", "source_kind": "venue_post",
+            "source_handle": "v1_handle", "source_shortcode": "seen",
+            "source_event_key": "seen_key", "status": "accepted", "title": "Festa Vista",
+        })
+        posts = {"v1": [seen_post, new_post]}
+        client = _FakeOpenAIClient([_extraction_json()])
+        service = EventExtractionService(dao, _FakePostSource(posts), client)
+
+        result = _run(service.run({
+            "eligibility": {"mode": "venue_ids", "venue_ids": "v1"},
+            "max_posts_per_venue": 1,
+        }))
+
+        assert dao.get_event_by_source("v1_handle", "brand_new") is not None, (
+            "the cap starved the new post instead of the already-extracted one"
+        )
+        assert client.calls == 1
+        assert result["outcomes"].get(OUTCOME_SKIPPED_SEEN) == 1

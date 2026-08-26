@@ -221,6 +221,27 @@ def _run_extraction(context, **overrides) -> dict:
     return context.ee_result
 
 
+def _run_reextraction(context, **overrides) -> dict:
+    """Explicitly re-run extraction over the SAME already-archived post(s) —
+    plans/260826_skip-already-extracted-posts.md means the venue_ids/
+    event_candidates branch (what a bare `_run_extraction(context)` drives)
+    no longer re-sends an already-successfully-extracted post to the model,
+    so every "runs again"/"re-extracted" scenario that means to force a
+    genuine SECOND model call over the SAME post must go through the
+    handles/deliberate-re-extraction path instead (`_run_handles`,
+    `TRIGGER_HANDLE_REEXTRACTION`) — exactly the path that plan carves out
+    for this purpose (constraint 4). `context.ee_handle` is always a
+    single-venue handle in every scenario that calls this (the shared
+    Background), so this exercises `_run_handles`' single-venue branch,
+    which calls `_extract_one` with the exact same `venue_id`/`handle`/
+    `attribute_fn=None` the non-handles branch does — byte-identical
+    behaviour, the ONLY difference being which eligibility mode reaches it.
+    """
+    cfg = {"eligibility": {"mode": "handles", "handles": context.ee_handle}}
+    cfg.update(overrides)
+    return _run_extraction(context, **cfg)
+
+
 def _stored_event(context) -> dict:
     row = context.ee_dao.get_event_by_source(context.ee_handle, context.ee_last_shortcode)
     assert row is not None, (
@@ -475,8 +496,15 @@ def step_when_event_extraction_runs_again_over_that_post(context):
     # list (which still includes the first post) — without this, the fake
     # client would raise "called more times than programmed" and the run
     # would be misread as a genuine re-extraction success.
+    #
+    # plans/260826_skip-already-extracted-posts.md: the scheduled path
+    # (`_run_extraction`) now SKIPS an already-successfully-extracted post
+    # instead of re-sending it, so "runs again" here must go through the
+    # deliberate re-extraction path (`_run_reextraction`, mode="handles") to
+    # still exercise a genuine second model call — see that helper's own
+    # docstring for why this is behaviour-preserving for this fixture.
     context.ee_openai.program(_extraction_json(date_text="15/08", time_text="20h"))
-    _run_extraction(context)
+    _run_reextraction(context)
 
 
 @when("event extraction runs again over its post")
@@ -489,10 +517,13 @@ def step_when_event_extraction_runs_again_over_its_post(context):
     # indistinguishable from an unrelated event replacing this one, and is
     # no longer absorbed into the confirmed row. This scenario is about the
     # title diverging, so the date is held constant to isolate exactly that.
+    #
+    # plans/260826_skip-already-extracted-posts.md: see the sibling step
+    # above — "runs again" now means the deliberate re-extraction path.
     context.ee_openai.program(_extraction_json(
         title="A completely different title", date_text="15/08", time_text="20h",
     ))
-    _run_extraction(context)
+    _run_reextraction(context)
 
 
 @when("the operator confirms it")

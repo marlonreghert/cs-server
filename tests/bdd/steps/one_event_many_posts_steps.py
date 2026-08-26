@@ -56,6 +56,7 @@ from tests.bdd.steps.instagram_event_extraction_steps import (
     _add_post,
     _build_admin_events_app,
     _run_extraction,
+    _run_reextraction,
 )
 from tests.bdd.steps.instagram_event_extraction_steps import (
     step_given_an_event_candidate_venue_with_an_instagram_handle as _seed_venue,
@@ -350,10 +351,17 @@ def step_given_a_post_that_already_produced_an_event(context):
 
 @when("that post is extracted again")
 def step_when_that_post_is_extracted_again(context):
+    # plans/260826_skip-already-extracted-posts.md: the scheduled path now
+    # skips an already-successfully-extracted post instead of re-sending
+    # it, so a genuine second model call over the SAME post requires the
+    # deliberate re-extraction path (`_run_reextraction`, mode="handles") —
+    # see that helper's own docstring. Without this, `_run_extraction`
+    # would silently skip "oemp_idempotent" and this scenario would stop
+    # proving idempotent re-extraction at all.
     context.ee_openai.program(_events_json([
         {"title": "Noite da Patroa", "date_text": "08/08", "time_text": "22h"},
     ]))
-    _run_extraction(context)
+    _run_reextraction(context)
 
 
 @then("the event carries one source")

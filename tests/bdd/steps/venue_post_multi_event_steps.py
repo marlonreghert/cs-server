@@ -50,6 +50,7 @@ from tests.bdd.steps.instagram_event_extraction_steps import (
     RECIFE_LNG,
     _add_post,
     _run_extraction,
+    _run_reextraction,
 )
 from tests.bdd.steps.multi_event_posts_steps import (
     GENERIC_EVENT_CAPTION,
@@ -183,12 +184,18 @@ def step_given_a_venue_post_that_already_produced_three_events(context):
 
 @when("venue event extraction runs again and returns them in a different order")
 def step_when_venue_event_extraction_runs_again_reordered(context):
+    # plans/260826_skip-already-extracted-posts.md: the scheduled path now
+    # skips an already-successfully-extracted post, so every "runs again"
+    # step in this file goes through the deliberate re-extraction path
+    # (`_run_reextraction`, mode="handles") to still force a genuine second
+    # model call — see that helper's own docstring for why this is
+    # behaviour-preserving for this fixture (single-venue handle).
     context.ee_openai.program(_events_json([
         {"title": THREE_TITLES[2], "date_text": "01/07", "time_text": "22h"},
         {"title": THREE_TITLES[0], "date_text": "01/07", "time_text": "20h"},
         {"title": THREE_TITLES[1], "date_text": "01/07", "time_text": "21h"},
     ]))
-    _run_extraction(context)
+    _run_reextraction(context)
 
 
 @then("three venue events exist for that post")
@@ -227,11 +234,13 @@ def step_then_the_confirmed_venue_events_corrected_title_is_unchanged(context):
 
 @when("venue event extraction runs again and returns only two of them")
 def step_when_venue_event_extraction_runs_again_only_two(context):
+    # See the "runs again ... different order" step above for why this is
+    # `_run_reextraction`, not `_run_extraction`.
     context.ee_openai.program(_events_json([
         {"title": THREE_TITLES[0], "date_text": "01/07", "time_text": "20h"},
         {"title": THREE_TITLES[1], "date_text": "01/07", "time_text": "21h"},
     ]))
-    _run_extraction(context)
+    _run_reextraction(context)
 
 
 @then('the missing venue event has the status "{status}"')
@@ -266,10 +275,12 @@ def step_given_a_confirmed_venue_event(context):
 
 @when("venue event extraction runs again and returns a different title")
 def step_when_venue_event_extraction_runs_again_different_title(context):
+    # See the "runs again ... different order" step above for why this is
+    # `_run_reextraction`, not `_run_extraction`.
     context.ee_openai.program(_events_json([
         {"title": "Festa Totalmente Diferente Venue", "date_text": "01/07", "time_text": "20h"},
     ]))
-    _run_extraction(context)
+    _run_reextraction(context)
 
 
 @when("venue event extraction runs again and returns a different date")
@@ -277,7 +288,7 @@ def step_when_venue_event_extraction_runs_again_different_date(context):
     context.ee_openai.program(_events_json([
         {"title": "Festa Confirmada Venue", "date_text": "15/08", "time_text": "20h"},
     ]))
-    _run_extraction(context)
+    _run_reextraction(context)
 
 
 @then("the confirmed venue event is flagged as diverging from the model")
@@ -369,8 +380,10 @@ def step_given_a_venue_post_that_already_produced_a_manually_linked_event(contex
 
 @when("venue event extraction runs again and no longer returns that event")
 def step_when_venue_event_extraction_runs_again_no_longer_returns_that_event(context):
+    # See the "runs again ... different order" step above for why this is
+    # `_run_reextraction`, not `_run_extraction`.
     context.ee_openai.program(_events_json([]))
-    _run_extraction(context)
+    _run_reextraction(context)
 
 
 @then("the confirmed venue event keeps its status")

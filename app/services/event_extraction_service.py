@@ -484,6 +484,26 @@ def post_qualifies(
     return False, OUTCOME_NOT_EVENT_LIKE
 
 
+def _already_extracted(existing_events: list[dict]) -> bool:
+    """Whether a post has already been successfully turned into at least one
+    event, from the SAME `existing_events` list `_extract_one` already fetches
+    via `venue_dao.list_events_by_source(handle, shortcode)` (plans/260826_
+    skip-already-extracted-posts.md — no new storage needed to answer this).
+
+    True iff at least one row's status is not `extraction_failed`: every
+    other status (`pending_review`, `confirmed`, `rejected`, `superseded`,
+    `accepted`) means the model produced a real answer for this post at
+    least once, so a scheduled run has nothing new to pay for. A post whose
+    EVERY row is `extraction_failed` (including one that started as a
+    success and was later downgraded by a failed re-extraction attempt —
+    see `_record_failure`) is NOT considered already-extracted: it must be
+    retried, not skipped forever. An empty list (a brand-new post) is
+    likewise never already-extracted."""
+    return bool(existing_events) and any(
+        row.get("status") != STATUS_EXTRACTION_FAILED for row in existing_events
+    )
+
+
 # ── run configuration ─────────────────────────────────────────────────────────
 class InvalidEventExtractionConfig(ValueError):
     pass
@@ -621,11 +641,39 @@ class EventExtractionService:
             for venue_id in venue_ids:
                 posts = await self.post_source.posts_for_venue(venue_id, since)
                 posts = _sort_newest_first(posts)
-                if cfg["max_posts_per_venue"]:
-                    posts = posts[: cfg["max_posts_per_venue"]]
                 handle = self._handle_for(venue_id)
 
+                # plans/260826_skip-already-extracted-posts.md: filter OUT
+                # already-successfully-extracted posts BEFORE the
+                # max_posts_per_venue cap, never after — otherwise the cap
+                # is spent on posts about to be skipped and the ordering
+                # fix's own starvation bug reappears in a new form. A post
+                # with no shortcode passes through unprocessed unchanged
+                # (it cannot be looked up by shortcode, and the per-post
+                # loop below already silently skips it, exactly as before
+                # this change).
+                unprocessed_posts: list[ArchivedPost] = []
                 for post in posts:
+                    if not post.shortcode:
+                        unprocessed_posts.append(post)
+                        continue
+                    existing_events = self.venue_dao.list_events_by_source(
+                        handle, post.shortcode,
+                    )
+                    if _already_extracted(existing_events):
+                        self._touch_seen(existing_events, handle, post, now)
+                        logger.info(
+                            f"[EventExtraction] {handle}/{post.shortcode}: already "
+                            "successfully extracted -- skipping the model call"
+                        )
+                        _bump(OUTCOME_SKIPPED_SEEN)
+                        continue
+                    unprocessed_posts.append(post)
+
+                if cfg["max_posts_per_venue"]:
+                    unprocessed_posts = unprocessed_posts[: cfg["max_posts_per_venue"]]
+
+                for post in unprocessed_posts:
                     if not post.shortcode:
                         continue
                     qualifies, _via = post_qualifies(
@@ -1231,6 +1279,33 @@ class EventExtractionService:
             # persisted" case (the retired OUTCOME_NOT_AN_EVENT).
             outcome = OUTCOME_EXTRACTED
         return outcome, kind_label
+
+    def _touch_seen(
+        self, existing_events: list[dict], handle: str, post: ArchivedPost, now: datetime,
+    ) -> None:
+        """The ONLY side effect of skipping an already-extracted post
+        (plans/260826_skip-already-extracted-posts.md §5b): refresh
+        `last_seen_at` on the post's own LIVE (non-superseded) rows, without
+        touching `status`/`review_reason`/`raw_extraction` — nothing failed
+        and nothing was re-examined, so nothing else may change. This is the
+        same `update_event(event_id, {"last_seen_at": ...})` poke this file
+        and its tests already use elsewhere (see `_record_failure` below);
+        the only thing new here is calling it WITHOUT a status change.
+
+        `app.models.menu_lifecycle.is_menu_item_current` derives a menu item's
+        expiry purely from `last_seen_at` at read time — skipping the model
+        call must not silently stop that clock advancing for a post the
+        crawl keeps re-seeing every run. A superseded row is left alone,
+        mirroring `event_reconciliation.py`'s own "never touched once
+        superseded" invariant — it no longer represents anything a reader
+        sees."""
+        for row in existing_events:
+            if row.get("status") == STATUS_SUPERSEDED:
+                continue
+            self.venue_dao.update_event(row["event_id"], {
+                "last_seen_at": now, "source_handle": handle,
+                "source_shortcode": post.shortcode,
+            })
 
     def _record_failure(
         self, venue_id: Optional[str], handle: str, post: ArchivedPost,
