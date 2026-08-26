@@ -429,6 +429,19 @@ class TestSupersessionOnReExtraction:
         post_source = _StubPostSource()
         post_source.posts_by_handle["entreamigosobode"] = [_post("s1")]
 
+        # A snapshot BEFORE the run under test, not an assumed-zero absolute
+        # reading: `event_extraction_superseded_total` is a process-global
+        # Prometheus counter, and other tests in the same pytest session
+        # legitimately increment this exact `trigger="handle_reextraction"`
+        # label too (e.g. plans/260826_skip-already-extracted-posts.md's own
+        # retargeted `TestConfirmedIsNeverReverted`/`TestIdempotentReExtraction`
+        # in test_event_extraction_service.py, run earlier in the same
+        # process). Only the DELTA this test's own second run produces is
+        # what "supersedes nothing" actually means.
+        before = REGISTRY.get_sample_value(
+            "event_extraction_superseded_total", {"trigger": "handle_reextraction"},
+        ) or 0.0
+
         first = self._seed_and_extract(
             dao, post_source, _FakeOpenAIClient([_event_json(title="Show", date_text="01/07/2026")]),
         )
@@ -439,10 +452,10 @@ class TestSupersessionOnReExtraction:
         assert rows[0]["event_id"] == first["event_id"]
         assert rows[0]["status"] != "superseded"
 
-        superseded_metric = REGISTRY.get_sample_value(
+        after = REGISTRY.get_sample_value(
             "event_extraction_superseded_total", {"trigger": "handle_reextraction"},
         ) or 0.0
-        assert superseded_metric == 0.0
+        assert after - before == 0.0
 
     def test_a_corrected_date_supersedes_the_stale_row_and_inserts_the_corrected_one(self):
         dao = _dao()
