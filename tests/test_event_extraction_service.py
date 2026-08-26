@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -31,6 +31,7 @@ from app.services.event_extraction_service import (
     OUTCOME_LOW_CONFIDENCE,
     OUTCOME_NOT_EVENT_LIKE,
     OUTCOME_UNREAD_TIME,
+    _sort_newest_first,
     post_qualifies,
 )
 from tests.rds_fake import InMemoryRdsVenueStore
@@ -807,3 +808,96 @@ class TestEventPostSourceThreadsFlyerNamesTime:
             "classification_confidence": 0.95,
         }])
         assert posts[0].flyer_names_time is None
+
+
+# ── plans/260826_extraction-newest-posts-first.md: the ordering fix ─────────
+class TestSortNewestFirst:
+    """Unit coverage for `_sort_newest_first` in isolation, independent of
+    `EventExtractionService.run()`'s own orchestration (covered by
+    TestRunTruncatesToNewestPosts below and by
+    tests/bdd/enrichment/extraction-newest-posts-first.feature)."""
+
+    def _ts(self, days_ago: int) -> datetime:
+        return datetime(2026, 8, 20, 12, 0, tzinfo=timezone.utc) - timedelta(days=days_ago)
+
+    def test_dated_posts_come_back_newest_first_regardless_of_input_order(self):
+        oldest = _post("oldest", timestamp=self._ts(20))
+        middle = _post("middle", timestamp=self._ts(10))
+        newest = _post("newest", timestamp=self._ts(0))
+        # Deliberately scrambled input order -- a naive `reversed()` of THIS
+        # exact input would produce [oldest, newest, middle], not the true
+        # newest-first order, so this proves an explicit sort, not a
+        # reversal.
+        result = _sort_newest_first([middle, oldest, newest])
+        assert [p.shortcode for p in result] == ["newest", "middle", "oldest"]
+
+    def test_undated_posts_are_appended_after_every_dated_post(self):
+        dated_a = _post("dated_a", timestamp=self._ts(5))
+        dated_b = _post("dated_b", timestamp=self._ts(1))
+        undated = _post("undated", timestamp=None)
+        result = _sort_newest_first([undated, dated_a, dated_b])
+        assert [p.shortcode for p in result] == ["dated_b", "dated_a", "undated"]
+
+    def test_all_undated_never_raises_and_preserves_order(self):
+        posts = [_post("a", timestamp=None), _post("b", timestamp=None)]
+        result = _sort_newest_first(posts)
+        assert [p.shortcode for p in result] == ["a", "b"]
+
+    def test_empty_list_never_raises(self):
+        assert _sort_newest_first([]) == []
+
+    def test_ties_preserve_input_order_stability(self):
+        same_ts = self._ts(3)
+        first = _post("first", timestamp=same_ts)
+        second = _post("second", timestamp=same_ts)
+        result = _sort_newest_first([first, second])
+        assert [p.shortcode for p in result] == ["first", "second"]
+
+
+class TestRunTruncatesToNewestPosts:
+    """`EventExtractionService.run()`'s `event_candidates`/`venue_ids` branch
+    must select the NEWEST `max_posts_per_venue` posts by timestamp, not by
+    whichever order `EventPostSource.posts_for_venue` returns them in."""
+
+    def _ts(self, days_ago: int) -> datetime:
+        return datetime(2026, 8, 20, 12, 0, tzinfo=timezone.utc) - timedelta(days=days_ago)
+
+    def _service(self, posts_by_venue, responses):
+        dao = _dao()
+        _seed_venue(dao, "v1", "v1_handle")
+        post_source = _FakePostSource(posts_by_venue)
+        openai = _FakeOpenAIClient(responses)
+        service = EventExtractionService(
+            dao, post_source, openai, min_confidence=0.5, flyer_confidence_floor=0.6,
+        )
+        return dao, service
+
+    def test_truncation_keeps_the_newest_posts_by_timestamp_not_input_position(self):
+        # Scrambled insertion order, exactly like the real archive's
+        # manifest-insertion order (never a recency order).
+        oldest = _post("oldest", timestamp=self._ts(20), flyer_photo_key="oldest.jpg", flyer_confidence=0.9)
+        middle = _post("middle", timestamp=self._ts(10), flyer_photo_key="middle.jpg", flyer_confidence=0.9)
+        newest = _post("newest", timestamp=self._ts(0), flyer_photo_key="newest.jpg", flyer_confidence=0.9)
+        dao, service = self._service(
+            {"v1": [middle, oldest, newest]},
+            [_extraction_json(), _extraction_json()],
+        )
+        result = _run(service.run({"eligibility": {"mode": "venue_ids", "venue_ids": "v1"}, "max_posts_per_venue": 2}))
+
+        assert result["qualifying_posts"] == 2
+        assert dao.get_event_by_source("v1_handle", "newest") is not None
+        assert dao.get_event_by_source("v1_handle", "middle") is not None
+        assert dao.get_event_by_source("v1_handle", "oldest") is None
+
+    def test_fewer_posts_than_cap_processes_all_of_them_regardless_of_order(self):
+        oldest = _post("oldest", timestamp=self._ts(20), flyer_photo_key="oldest.jpg", flyer_confidence=0.9)
+        newest = _post("newest", timestamp=self._ts(0), flyer_photo_key="newest.jpg", flyer_confidence=0.9)
+        dao, service = self._service(
+            {"v1": [newest, oldest]},  # already newest-first on input; must not matter
+            [_extraction_json(), _extraction_json()],
+        )
+        result = _run(service.run({"eligibility": {"mode": "venue_ids", "venue_ids": "v1"}, "max_posts_per_venue": 10}))
+
+        assert result["qualifying_posts"] == 2
+        assert dao.get_event_by_source("v1_handle", "newest") is not None
+        assert dao.get_event_by_source("v1_handle", "oldest") is not None
