@@ -26,6 +26,12 @@ Feature: Events serving projection
     And the occurrence carries "starts_at" as a UTC timestamp
     And the Recife events index contains the occurrence scored by its "starts_at" epoch
 
+  Scenario: Carry the price text and the ticket info independently
+    Given an accepted event whose price text is "R$100 em consumação"
+    And whose ticket info is "Grátis até 23:30"
+    When the events projection runs
+    Then the occurrence payload reports both strings on their own fields
+
   Scenario: Project an event whose stated time is unknown
     Given an accepted event at "Casa Bacurau" starting 2026-09-06 with no stated clock time
     When the events projection runs
@@ -93,6 +99,18 @@ Feature: Events serving projection
 
   # ── re-assertion and failure posture ──────────────────────────────────────
 
+  Scenario: Index every occurrence by city and by venue
+    Given an accepted event at "Casa Bacurau" starting 2026-09-06 20:00
+    When the events projection runs
+    Then the Recife events index contains the occurrence
+    And the venue events index for "Casa Bacurau" contains the same occurrence
+    And the occurrence carries the same score in both indexes
+
+  Scenario: Read one venue's week from its own index
+    Given two accepted events at "Casa Bacurau" and one at another venue
+    When the events projection runs
+    Then the venue events index for "Casa Bacurau" contains exactly its two occurrences
+
   Scenario: Remove an occurrence once its event stops qualifying
     Given an accepted event at "Casa Bacurau" starting 2026-09-06 20:00
     And the events projection has run
@@ -100,6 +118,7 @@ Feature: Events serving projection
     And the events projection runs
     Then the occurrence key is deleted
     And the occurrence is no longer a member of the Recife events index
+    And the occurrence is no longer a member of the venue events index
 
   Scenario: Leave the projection intact when the source query fails
     Given the events projection has run and projected three occurrences
