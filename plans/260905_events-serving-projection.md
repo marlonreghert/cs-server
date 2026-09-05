@@ -95,7 +95,12 @@ reads.
   this exists for. Its "Backend pendente" section names the projection, the
   date-range read and the recurrence expansion; the flyer-media and
   neighbourhood gaps below are NOT in that list and were found by reading the
-  code.
+  code. Two further needs come from reading the mockups themselves rather than
+  its checklist: card option C's second shelf is per-venue ("Casa Bacurau esta
+  semana"), which is why `events_venue_v1` exists; and card option A's last
+  card is a "foto real do local" fallback for an event with no flyer, which is
+  served by vibes_bot from the venue photo families it already reads and needs
+  nothing from this repo.
 
 ## Current Behavior
 - Extracted events live in `events.post_item` and are reachable only through
@@ -119,6 +124,9 @@ reads.
   in the Cross-Repo Contract below, so vibes_bot serves a list or a detail
   screen from Redis alone, with no RDS read and no S3 call on the request
   path.
+- Every projected occurrence is reachable both by city window and by venue, so
+  a per-venue shelf is one indexed read rather than a client-side filter over
+  a whole city.
 - A serving-eligible event with an archived flyer carries a stable, immutable,
   CDN-hosted `flyer_url` the app can load and cache directly. An event with no
   usable flyer carries `flyer_url: null` and is still projected — the card
@@ -207,7 +215,9 @@ reads.
 ### Phase 4 — the projection (cs-server is the sole writer)
 1. `RedisVenueDAO` gains the event key family (formats in Data section) and
    `set_event_occurrence` / `delete_event_occurrence` / index writers,
-   following the existing `*_KEY_FORMAT` + setter/deleter convention.
+   following the existing `*_KEY_FORMAT` + setter/deleter convention. Both
+   indexes — city and venue — are written and pruned by the same code path, so
+   one can never outlive the other.
 2. `RedisProjectionService` gains `project_events()`, called from the same
    cycle as `rebuild_redis_from_rds` but as a **sibling pass**, not a
    `_REBUILD_MODELS` entry: the map's contract is one venue-keyed record per
@@ -225,8 +235,8 @@ reads.
    the venue's name/lat/lng/neighborhood, and write one JSON key per
    occurrence plus its index membership.
 5. **Re-assert and prune, like the venue projection.** Each cycle computes the
-   full occurrence-id set; index members outside it are removed and their JSON
-   keys deleted. This is what makes a rejected, superseded, re-dated or
+   full occurrence-id set; members outside it are removed from BOTH indexes and
+   their JSON keys deleted. This is what makes a rejected, superseded, re-dated or
    expired event actually disappear, and what makes a Redis flush self-heal.
    A failed selection query aborts the cycle and leaves Redis intact — the
    same fail-safe posture `rebuild_redis_from_rds` takes on a serving-view
@@ -254,6 +264,14 @@ finally get a writer.
   `starts_at` epoch seconds (UTC). One key per city. A date range is one
   `ZRANGEBYSCORE`; day grouping is derived by the reader from each payload's
   own `occurrence_date`, so no key multiplies per day.
+- `events_venue_v1:<venue_id>` → ZSET, same members and same scores, scoped to
+  one venue. This exists for the blueprint's **card option C**, whose second
+  shelf is "Casa Bacurau esta semana" — a per-venue rail. Without it that
+  shelf can only be built by pulling the whole city window and filtering
+  client-side, which is exactly how the venue list already lost its backend
+  ordering guarantees. It is a second index over occurrences that are being
+  written anyway: no extra payload, and both indexes are pruned in the same
+  pass.
 
 No existing key format changes; nothing already projected is touched.
 
@@ -270,6 +288,14 @@ No existing key format changes; nothing already projected is touched.
 not classify them into enums here — the blueprint descoped that, and
 `plans/260806_filter-label-casing.md` is on record that exact-matching an
 LLM-produced value against a configured label zeroes the result.
+
+`price_text` and `ticket_info` are both carried and are NOT interchangeable,
+even though the blueprint renders the same sentence in both places ("Grátis
+até 23:30" as the card's money chip and again under "Como Entrar" on the
+detail screen). They are separate extracted columns that can disagree — one
+card in the blueprint shows "R$100 em consumação" as its money chip — so both
+travel and the client decides which to render where. Collapsing them here
+would destroy a distinction this repo already stores.
 
 **Settings:** `events_projection_enabled` (default false — ships dark, turned
 on after the terraform apply is verified), `events_projection_horizon_days`
@@ -318,10 +344,15 @@ Scenarios:
 - Project a "toda semana"/"sempre" recurrence as a single occurrence at its
   resolved `starts_at`, inventing no days.
 - Project no occurrence at all for a row whose `starts_at` is null.
+- Index an occurrence in both its city index and its venue index, with the
+  same score in each.
+- Read one venue's window from `events_venue_v1` without touching the city
+  index.
 - Prune: an occurrence projected last cycle whose event was then rejected is
-  gone from both the index and its JSON key on the next cycle.
+  gone from BOTH indexes and its JSON key on the next cycle.
 - Fail-safe: a failing selection query leaves the previous cycle's projection
   intact and reports an error.
+- Carry `price_text` and `ticket_info` independently when the two disagree.
 - Copy an archived flyer to the media bucket and project the CDN url; re-run
   the cycle and re-upload nothing (identical hash → identical key).
 - Project an event with no archived cover with `flyer_url: null`, still
@@ -360,7 +391,9 @@ Manual or integration checks:
 - `events.post_item` rows that qualify for serving are present in Redis as
   occurrences carrying every field in the contract, re-asserted each cycle.
 - A rejected, superseded, re-dated, expired or newly-hidden event disappears
-  from the projection within one cycle.
+  from both indexes and its payload key within one cycle.
+- Every occurrence is reachable by city window and by venue, with identical
+  scores in both indexes.
 - A weekly recurring announcement occupies every one of its nights inside the
   horizon; a "toda semana" one occupies exactly one.
 - A copied flyer is reachable at a stable CDN url with the immutable cache
