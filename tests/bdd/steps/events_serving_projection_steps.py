@@ -248,6 +248,21 @@ def step_given_recurrence_text_and_time(context, text, time):
     })
 
 
+@given("its sources were last seen {days:d} days ago")
+def step_given_sources_last_seen_days_ago(context, days):
+    """Pokes the last event's ONLY event_source row's own `last_seen_at` —
+    the same direct `update_event({"last_seen_at": ...})` pattern this
+    fake's own `_resolve_source_for_update` docstring names as the
+    established convention for a single-source event. Bounds recurring
+    selection by SOURCE FRESHNESS (plans/260905_events-serving-
+    projection.md's phantom-recurring-event fix): a recurring row's own
+    `starts_at` is deliberately stale by construction (see
+    step_given_named_recurring_event above), so ONLY this field decides
+    whether "Forró da Quinta" still projects."""
+    seen_at = _now(context) - timedelta(days=days)
+    context.rds_store.update_event(context.evs_last_event_id, {"last_seen_at": seen_at})
+
+
 @given('an accepted recurring event at "{venue}" whose recurrence text is "{text}"')
 def step_given_recurring_event_with_text(context, venue, text):
     stale = (_now(context) - timedelta(days=60)).astimezone(RECIFE_TZ)

@@ -895,15 +895,37 @@ class InMemoryRdsVenueStore:
         needs a GROUPED read of every event's sources, which
         RedisProjectionService.project_events does itself in one pass over
         the selected set, exactly as the plan specifies (never one query
-        per row)."""
+        per row).
+
+        `is_selectable`'s recurring branch needs `last_seen_at` — the MAX
+        across every attached `event_sources` row — which is NOT one of
+        `self.events`' own stored fields (see `_merged_view`'s docstring:
+        it is derived, exactly like `venue_name`). Computed here via
+        `_seen_bounds` and attached to a shallow copy before the predicate
+        runs, mirroring how the real store's `agg` LEFT JOIN LATERAL puts
+        the identical aggregate on the SQL row before its own WHERE clause
+        ever evaluates it — never a second definition of the aggregate."""
+        from datetime import timedelta
+
+        from app.config import settings
         from app.services.event_projection_selection import is_selectable
 
         self._guard()
         servable = set(self.list_servable_venue_ids())
-        out = [
-            self._merged_view(row) for row in self.events.values()
-            if is_selectable(row, now=now) and row.get("venue_id") in servable
-        ]
+        max_recurring_source_age = timedelta(
+            days=settings.events_recurring_max_source_age_days
+        )
+        out = []
+        for row in self.events.values():
+            if row.get("venue_id") not in servable:
+                continue
+            _, last_seen_at = self._seen_bounds(row["event_id"])
+            candidate = {**row, "last_seen_at": last_seen_at}
+            if not is_selectable(
+                candidate, now=now, max_recurring_source_age=max_recurring_source_age,
+            ):
+                continue
+            out.append(self._merged_view(row))
         out.sort(key=lambda r: (r.get("starts_at") is None, r.get("starts_at"), r["event_id"]))
         return out
 

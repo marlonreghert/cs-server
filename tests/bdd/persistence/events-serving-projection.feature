@@ -84,6 +84,20 @@ Feature: Events serving projection
     And each occurrence starts at 21:00 Recife time on its own date
     And no occurrence is projected beyond the horizon
 
+  Scenario: Stop projecting a recurring event once every source has gone stale
+    Given an accepted recurring event "Forró da Quinta" at "Casa Bacurau"
+    And its recurrence text is "toda quinta" and its resolved time is 21:00
+    And its sources were last seen 90 days ago
+    When the events projection runs
+    Then no occurrence is projected for that event
+
+  Scenario: Keep expanding a recurring event whose sources are still fresh
+    Given an accepted recurring event "Forró da Quinta" at "Casa Bacurau"
+    And its recurrence text is "toda quinta" and its resolved time is 21:00
+    And its sources were last seen 2 days ago
+    When the events projection runs
+    Then an occurrence is projected for every Thursday within the horizon
+
   Scenario: Expand a daily announcement into one occurrence per day
     Given an accepted recurring event at "Casa Bacurau" whose recurrence text is "todo dia"
     When the events projection runs

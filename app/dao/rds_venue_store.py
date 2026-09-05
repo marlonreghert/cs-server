@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional
 
 from sqlalchemy import bindparam, create_engine, text
@@ -1094,27 +1094,48 @@ class RdsVenueStore:
         `scripts.backfill_source_provenance` pass; project_events must
         never call it, since it runs every `redis_projection_minutes`.)
 
-        `is_selectable`'s temporal rule — recurring OR null starts_at is
-        ALWAYS selectable; a non-recurring row needs
-        `starts_at >= now - 1 day` — is expressed directly as SQL so the two
-        never drift silently; a pytest test pins the Python predicate's own
-        behaviour, and this query's shape is reviewed against it by hand.
+        `is_selectable`'s temporal rule is expressed directly as SQL so the
+        two never drift silently; a pytest test pins the Python predicate's
+        own behaviour, and this query's shape is reviewed against it by
+        hand. The rule now splits on `is_recurring`:
+          - NON-recurring: UNCHANGED — `starts_at IS NULL OR
+            starts_at >= now - 1 day` (PAST_GRACE).
+          - RECURRING: bounded by SOURCE FRESHNESS instead of its own
+            (possibly long-stale) `starts_at` —
+            `agg.last_seen_at >= now - events_recurring_max_source_age_days`.
+            `agg.last_seen_at` needs no new join: `_EVENT_SELECT`'s own
+            `agg` LEFT JOIN LATERAL already selects it. A row whose
+            `agg.last_seen_at` IS NULL (no `post_item_source` row at all —
+            should not occur in practice, but never assumed) is excluded by
+            SQL's own three-valued logic with no extra NULL-guard needed:
+            `NULL >= :recurring_cutoff` is UNKNOWN, which a WHERE clause
+            treats as false — the same fail-toward-honest answer
+            `is_selectable` gives in Python (see its own docstring).
         """
+        from app.config import settings
         from app.services.event_projection_selection import PAST_GRACE
 
         cutoff = now - PAST_GRACE
+        recurring_cutoff = now - timedelta(days=settings.events_recurring_max_source_age_days)
         sql = (
             f"{self._EVENT_SELECT} "
             "WHERE e.post_type = 'event' "
             "AND e.status IN ('accepted', 'confirmed') "
             "AND e.venue_id IS NOT NULL "
             "AND e.superseded_by IS NULL "
-            "AND (e.is_recurring OR e.starts_at IS NULL OR e.starts_at >= :cutoff) "
+            "AND ("
+            "  (NOT e.is_recurring AND (e.starts_at IS NULL OR e.starts_at >= :cutoff))"
+            "  OR (e.is_recurring AND agg.last_seen_at >= :recurring_cutoff)"
+            ") "
             "AND e.venue_id IN (SELECT venue_id FROM serving.eligible_venue) "
             "ORDER BY e.starts_at NULLS LAST, e.post_item_id"
         )
         with self.engine.connect() as conn:
-            return [dict(r) for r in conn.execute(text(sql), {"cutoff": cutoff}).mappings()]
+            return [
+                dict(r) for r in conn.execute(
+                    text(sql), {"cutoff": cutoff, "recurring_cutoff": recurring_cutoff}
+                ).mappings()
+            ]
 
     def get_address_bulk(self, venue_ids: list[str]) -> dict[str, dict]:
         """One `venues.address` row per requested venue_id, keyed by

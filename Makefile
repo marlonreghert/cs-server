@@ -158,6 +158,7 @@ test-unit:
 		tests/test_event_flyer_service.py \
 		tests/test_event_city_slug.py \
 		tests/test_event_projection_selection.py \
+		tests/test_events_selection_parity.py \
 		tests/test_events_redis_dao.py \
 		tests/test_events_promoter_source_scoping.py \
 		-v

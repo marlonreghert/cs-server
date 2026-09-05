@@ -864,6 +864,19 @@ class Settings(BaseSettings):
     # long enough for a date picker to have content, short enough to bound
     # the size of the Redis index.
     events_projection_horizon_days: int = 21
+    # Bounds RECURRING-event selection by SOURCE FRESHNESS. A recurring row is
+    # selectable regardless of its own (possibly long-stale) `starts_at` — see
+    # app/services/event_projection_selection.py's docstring for why that OR
+    # -branch must stay — but with no bound at all that means forever: a
+    # "toda quinta" post whose venue stopped running that night a year ago,
+    # and that has not been re-crawled since, would generate a phantom
+    # Thursday occurrence every week, indefinitely. This caps it instead: a
+    # recurring event stops projecting once none of its sources (`agg.
+    # last_seen_at`, already selected by `_EVENT_SELECT` — no new join) has
+    # been seen within this many days. Default 45 — generous enough that a
+    # venue's normal crawl cadence never lapses it by accident, tight enough
+    # that a genuinely abandoned recurring post eventually drops out.
+    events_recurring_max_source_age_days: int = 45
     # Per-cycle cap on how many events the flyer copier (Phase 1) attempts:
     # bounds a first-enable backlog so it cannot monopolise one projection
     # tick. An event whose flyer_url is already set is never re-attempted
