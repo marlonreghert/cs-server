@@ -8,13 +8,23 @@ URLs refetch instead of serving stale.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
+import time
 from datetime import datetime, timezone
 from typing import Optional
 
+from app.config import settings
 from app.dao.venue_row import venue_from_row
 from app.metrics import (
     DEEP_REVIEWS_PROJECTED_VENUES,
+    EVENT_FLYER_BYTES,
+    EVENT_FLYER_OBJECTS,
+    EVENTS_PROJECTED_OCCURRENCES,
+    EVENTS_PROJECTION_BYTES,
+    EVENTS_PROJECTION_DURATION_SECONDS,
+    EVENTS_PROJECTION_ERRORS_TOTAL,
+    EVENTS_PROJECTION_SOURCE_ROWS,
     REDIS_PROJECTION_ENTITY_DELETES_TOTAL,
     REDIS_PROJECTION_REMOVED_TOTAL,
     REDIS_PROJECTION_VENUES,
@@ -27,6 +37,10 @@ from app.models import (
     LiveForecastResponse,
     WeekRawDay,
 )
+from app.models.event_occurrence import EventOccurrence
+from app.models.promoter_event_visibility import is_promoter_only_item, load_hide_promoter_events
+from app.services.event_city_slug import nearest_city_slug
+from app.services.event_occurrences import expand_occurrences
 from app.models.vibe_attributes import VibeAttributes
 from app.models.opening_hours import OpeningHours
 from app.models.instagram import (
@@ -103,6 +117,13 @@ class RedisProjectionService:
         # re-asserted from its rows each cycle so a Redis flush self-heals,
         # symmetric with the venue projection. Delegated + isolated.
         self.eligibility_rule_service = eligibility_rule_service
+        # Optional, wired post-construction by the container exactly like
+        # eligibility_rule_service above (plans/260905_events-serving-
+        # projection.md): the flyer copier (app.services.event_flyer_
+        # service.EventFlyerService). None when the media bucket/CDN is not
+        # configured — project_events() then simply never copies a flyer,
+        # never a reason to fail the cycle.
+        self.event_flyer_service = None
 
     # ── rebuild: RDS -> Redis (incl. geo index + live busyness) ───────────────
     def rebuild_redis_from_rds(self) -> dict:
@@ -296,3 +317,232 @@ class RedisProjectionService:
             )
         else:
             self.redis_only_dao.delete_venue_photos(venue_id)
+
+    # ── events serving projection (plans/260905_events-serving-projection.md) ─
+    # A SIBLING pass, never a _REBUILD_MODELS entry: rebuild_redis_from_rds's
+    # contract is one venue-keyed record per venue; the unit here is an
+    # occurrence. Isolation is structural, not just a try/except: this method
+    # runs to completion (or aborts) entirely on its own Redis key family
+    # (event_occurrence_v1:*, events_index_v1:*, events_venue_v1:*) — it
+    # never calls any venue-projection setter, so nothing it does can
+    # corrupt or partially roll back what rebuild_redis_from_rds already
+    # wrote. Callers (main.py) additionally wrap the call itself so an
+    # escaping exception here can never fail the shared scheduled job.
+    def project_events(self, *, now: Optional[datetime] = None) -> dict:
+        """`now` defaults to the real wall clock; overridable for
+        deterministic tests (mirrors event_date_resolver.resolve_event_
+        datetime's own "never reads the wall clock internally, the caller
+        supplies it" discipline, one level up)."""
+        summary = {
+            "occurrences": 0, "source_rows": 0, "bytes": 0, "errors": 0,
+            "error_events": [], "flyer": {},
+        }
+        if not settings.events_projection_enabled:
+            return summary
+
+        started = time.perf_counter()
+        now = now or datetime.now(timezone.utc)
+
+        # ── preparation: selection + geo-fence + address join ────────────
+        # All-or-nothing, mirroring rebuild_redis_from_rds's own fail-safe
+        # posture on a serving-view read failure: an empty/partial read here
+        # must never be mistaken for "there are no events", so any failure
+        # aborts the WHOLE cycle before a single Redis key is touched.
+        try:
+            rows = self.rds_store.list_events_for_projection(now=now)
+            fence = self.rds_store.get_geo_fence()
+            cities = fence.get("cities") or []
+            venue_ids = sorted({r["venue_id"] for r in rows if r.get("venue_id")})
+            address_by_venue = self.rds_store.get_address_bulk(venue_ids)
+            hide_promoter, _ = load_hide_promoter_events(self.redis_only_dao.client)
+            sources_by_event: dict[str, list[dict]] = {}
+            if hide_promoter:
+                selected_event_ids = sorted({
+                    r["event_id"] for r in rows if r.get("event_id")
+                })
+                for source in self.rds_store.list_event_sources_bulk(selected_event_ids):
+                    sources_by_event.setdefault(source["event_id"], []).append(source)
+        except Exception as e:
+            logger.error(
+                f"[EventsProjection] preparation read failed; aborting cycle, "
+                f"Redis left intact: {e}"
+            )
+            summary["errors"] += 1
+            EVENTS_PROJECTION_ERRORS_TOTAL.labels(stage="selection").inc()
+            return summary
+
+        if hide_promoter:
+            rows = [
+                r for r in rows
+                if not is_promoter_only_item(sources_by_event.get(r["event_id"], []))
+            ]
+        summary["source_rows"] = len(rows)
+        EVENTS_PROJECTION_SOURCE_ROWS.set(len(rows))
+
+        # ── flyer copy (Phase 1) — isolated, never aborts the cycle ──────
+        flyer_summary: dict = {}
+        if self.event_flyer_service is not None:
+            try:
+                flyer_summary = asyncio.run(
+                    self.event_flyer_service.copy_flyers(
+                        rows, max_per_cycle=settings.event_flyer_copy_max_per_cycle,
+                    )
+                )
+            except Exception as e:  # pragma: no cover - defensive
+                logger.error(
+                    f"[EventsProjection] flyer copy pass failed, continuing "
+                    f"without fresh flyer urls this cycle: {e}"
+                )
+        flyer_urls = flyer_summary.get("flyer_urls", {})
+        summary["flyer"] = {
+            k: v for k, v in flyer_summary.items() if k != "flyer_urls"
+        }
+
+        # ── per-event expansion + payload construction ───────────────────
+        # Isolated per event: a single bad row (a Pydantic validation
+        # failure, a city_slug that cannot be derived) degrades to "this
+        # event waits for next cycle" instead of losing every other event
+        # in the same run.
+        fresh_by_venue: dict[str, dict[str, float]] = {}
+        fresh_by_city: dict[str, dict[str, float]] = {}
+        occurrences: list[EventOccurrence] = []
+        error_events: list[str] = []
+        for row in rows:
+            event_id = row.get("event_id")
+            try:
+                venue_id = row["venue_id"]
+                addr = address_by_venue.get(venue_id) or {}
+                lat, lng = addr.get("lat"), addr.get("lng")
+                city_slug = nearest_city_slug(lat, lng, cities)
+                if city_slug is None:
+                    raise ValueError(
+                        "no geo-fence city configured; city_slug cannot be derived"
+                    )
+                flyer_url = flyer_urls.get(event_id, row.get("flyer_url"))
+
+                for occ in expand_occurrences(
+                    row,
+                    horizon_days=settings.events_projection_horizon_days,
+                    reference_time=now,
+                ):
+                    score = occ.starts_at.timestamp()
+                    payload = EventOccurrence(
+                        occurrence_id=occ.occurrence_id,
+                        event_id=event_id,
+                        occurrence_date=occ.occurrence_date,
+                        starts_at=occ.starts_at,
+                        ends_at=row.get("ends_at"),
+                        time_known=bool(row.get("time_known")),
+                        is_recurring=bool(row.get("is_recurring")),
+                        recurrence_text=row.get("recurrence_text"),
+                        title=row.get("title"),
+                        description=row.get("description"),
+                        category=row.get("category"),
+                        price_text=row.get("price_text"),
+                        ticket_info=row.get("ticket_info"),
+                        ticket_url=row.get("ticket_url"),
+                        lineup=row.get("lineup"),
+                        attractions=row.get("attractions"),
+                        flyer_url=flyer_url,
+                        venue_id=venue_id,
+                        venue_name=row.get("venue_name"),
+                        venue_neighborhood=addr.get("neighborhood"),
+                        venue_lat=lat,
+                        venue_lng=lng,
+                        source_permalink=row.get("source_permalink"),
+                        source_handle=row.get("source_handle"),
+                        city_slug=city_slug,
+                        status=row.get("status"),
+                        updated_at=row.get("updated_at"),
+                    )
+                    occurrences.append(payload)
+                    fresh_by_venue.setdefault(venue_id, {})[occ.occurrence_id] = score
+                    fresh_by_city.setdefault(city_slug, {})[occ.occurrence_id] = score
+            except Exception as e:
+                summary["errors"] += 1
+                error_events.append(event_id)
+                EVENTS_PROJECTION_ERRORS_TOTAL.labels(stage="event").inc()
+                logger.warning(f"[EventsProjection] event {event_id} failed: {e}")
+                continue
+        summary["error_events"] = error_events
+
+        # ── write pass ────────────────────────────────────────────────────
+        total_bytes = 0
+        for payload in occurrences:
+            self.redis_only_dao.set_event_occurrence(payload)
+            score = fresh_by_venue[payload.venue_id][payload.occurrence_id]
+            self.redis_only_dao.index_event_occurrence(
+                city_slug=payload.city_slug, venue_id=payload.venue_id,
+                occurrence_id=payload.occurrence_id, score=score,
+            )
+            total_bytes += len(payload.model_dump_json(by_alias=True).encode("utf-8"))
+
+        # ── re-assert and prune — enumerable id spaces, never KEYS/SCAN ──
+        # Mirrors rebuild_redis_from_rds's own reconcile-listing fail-safe:
+        # a failed venue-id listing SKIPS the prune (logs + moves on) rather
+        # than risking a bad delete, exactly like that method's own
+        # `rds_known = set()` fallback.
+        removed_ids: set[str] = set()
+        try:
+            rds_known = set(self.rds_store.list_active_venue_ids()) | set(
+                self.rds_store.list_deprecated_venue_ids()
+            )
+        except Exception as e:
+            logger.warning(
+                f"[EventsProjection] venue-id listing failed; skipping "
+                f"venue-index prune: {e}"
+            )
+            rds_known = set()
+        for venue_id in rds_known:
+            current = set(self.redis_only_dao.get_venue_events_index(venue_id))
+            fresh = set(fresh_by_venue.get(venue_id, {}).keys())
+            for occ_id in current - fresh:
+                self.redis_only_dao.remove_from_venue_events_index(venue_id, occ_id)
+                removed_ids.add(occ_id)
+        # City slugs to visit: the currently-configured set UNION every slug
+        # ever written (the durable `events_known_cities_v1` set —
+        # `remember_city_slug`'s docstring). `admin.geo_fence_city` alone is
+        # NOT durable: `set_geo_fence` does a literal DELETE with no
+        # history, so a city removed from the fence would otherwise vanish
+        # from `cities` on this very cycle and never be visited (or
+        # emptied) again — the city-side analogue of `rds_known` above. A
+        # failed known-slugs read degrades to pruning only the currently
+        # configured cities this cycle (never risking a bad delete, and
+        # `cities` itself is already known-good from the preparation step
+        # above), rather than skipping the whole city prune.
+        try:
+            known_slugs = set(self.redis_only_dao.list_known_city_slugs())
+        except Exception as e:
+            logger.warning(
+                f"[EventsProjection] known-city-slug read failed; pruning "
+                f"only currently configured cities this cycle: {e}"
+            )
+            known_slugs = set()
+        configured_slugs = {city["slug"] for city in cities}
+        for slug in configured_slugs | known_slugs:
+            current = set(self.redis_only_dao.get_city_events_index(slug))
+            fresh = set(fresh_by_city.get(slug, {}).keys())
+            for occ_id in current - fresh:
+                self.redis_only_dao.remove_from_city_events_index(slug, occ_id)
+                removed_ids.add(occ_id)
+        for occ_id in removed_ids:
+            self.redis_only_dao.delete_event_occurrence(occ_id)
+
+        summary["occurrences"] = len(occurrences)
+        summary["bytes"] = total_bytes
+        EVENTS_PROJECTED_OCCURRENCES.set(len(occurrences))
+        EVENTS_PROJECTION_BYTES.set(total_bytes)
+
+        # Flyer retention gauges (Phase 1) — computed fresh from RDS every
+        # cycle, best-effort: a failure here must never undo the write pass
+        # above.
+        try:
+            obj_count, obj_bytes = self.rds_store.count_event_flyers()
+            EVENT_FLYER_OBJECTS.set(obj_count)
+            EVENT_FLYER_BYTES.set(obj_bytes)
+        except Exception as e:  # pragma: no cover - defensive
+            logger.warning(f"[EventsProjection] flyer gauge read failed: {e}")
+
+        EVENTS_PROJECTION_DURATION_SECONDS.observe(time.perf_counter() - started)
+        logger.info(f"[EventsProjection] {summary}")
+        return summary

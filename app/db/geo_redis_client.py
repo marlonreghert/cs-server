@@ -129,6 +129,50 @@ class GeoRedisClient:
         """
         return self.client.zrem(name, *values)
 
+    def zadd(self, name: str, mapping: dict) -> int:
+        """Add/update members of a sorted set (plans/260905_events-serving-
+        projection.md — the events city/venue indexes). ZADD without NX/XX
+        is an upsert: an existing member's score is simply overwritten,
+        which is exactly what a changed `starts_at` needs on re-assertion.
+
+        Args:
+            name: Redis sorted set key
+            mapping: {member: score}
+
+        Returns:
+            Number of NEW members added (unchanged existing members do not
+            count, matching the underlying ZADD return value)
+        """
+        return self.client.zadd(name, mapping)
+
+    def zrange(self, name: str, start: int, end: int) -> list[str]:
+        """Members of a sorted set by rank range, ascending score order.
+        `(0, -1)` is the whole set — small by construction here (one city's
+        or one venue's event occurrences), never a keyspace-scale read."""
+        return self.client.zrange(name, start, end)
+
+    def zscore(self, name: str, member: str) -> Optional[float]:
+        """A single member's score, or None if the member/key is absent."""
+        return self.client.zscore(name, member)
+
+    def sadd(self, name: str, *values: str) -> int:
+        """Add members to a Redis SET (plans/260905_events-serving-
+        projection.md — the durable "every city slug ever written" set the
+        events city-index prune reads so a removed geo-fence city is never
+        forgotten; `RedisVenueDAO.remember_city_slug` is its only caller).
+
+        Returns:
+            Number of NEW members added (an already-present member does not
+            count, matching the underlying SADD return value).
+        """
+        return self.client.sadd(name, *values)
+
+    def smembers(self, name: str) -> set:
+        """Every member of a Redis SET — small by construction here (the
+        events-known-cities set, bounded by the real number of cities ever
+        configured), never a keyspace-scale read."""
+        return self.client.smembers(name)
+
     def add_location_with_json(
         self,
         geo_key: str,

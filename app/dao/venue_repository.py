@@ -60,6 +60,14 @@ class VenueRepository(RedisVenueDAO):
         row = self.rds_store.get_venue(venue_id)
         return venue_from_row(row) if row else None
 
+    def update_venue_address_components(self, venue_id, **components) -> None:
+        """Forwards to the RDS store's never-clobber structured-address
+        write (plans/260905_events-serving-projection.md Phase 2) — no
+        Redis counterpart, exactly like every other RDS-only pipeline
+        write here; the projector re-asserts venues.address.neighborhood
+        into the events projection on its own schedule."""
+        self.rds_store.update_venue_address_components(venue_id, **components)
+
     def get_vibe_attributes(self, venue_id):
         return self._rds_enrichment("google_places.vibe_attributes", VibeAttributes, venue_id)
 

@@ -28,6 +28,7 @@ import copy
 import json
 import logging
 import math
+import re
 from dataclasses import dataclass, field
 from typing import Optional, Protocol
 
@@ -98,6 +99,23 @@ STATE_CAPITALS: tuple[dict, ...] = (
     {"slug": "vitoria", "name": "Vitória", "lat": -20.3155, "lng": -40.3128},
 )
 CAPITALS_BY_SLUG: dict[str, dict] = {c["slug"]: c for c in STATE_CAPITALS}
+
+# plans/260905_events-serving-projection.md, Phase 4 §5's cross-repo
+# invariant: the slugs in admin.geo_fence_city ARE the serving city
+# vocabulary the events projection's `city_slug` is drawn from, and
+# vibes_bot canonicalises an incoming city through its OWN
+# `canonical_city_slug` (lowercase, `_`->`-`, THEN an alias table —
+# `sao-paulo`->`sp`, `joao-pessoa`->`jp`). This module never copies that
+# alias table (that would be the exact two-definitions drift app/models/
+# event_kind.py's docstring warns about) — it only enforces the FIRST,
+# alias-independent half of vibes_bot's own canonicalisation: a slug that
+# is not already lowercase/hyphen-separated can never survive that
+# canonicalisation unchanged, so it must never be written here at all.
+_CANONICAL_SLUG_RE = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")
+
+
+def is_canonical_slug(slug: str) -> bool:
+    return isinstance(slug, str) and bool(_CANONICAL_SLUG_RE.match(slug))
 
 # Admin-tunable circle radius bounds (km). The 1 km floor prevents the
 # serve-nothing cliff of a degenerate circle; 200 km comfortably covers any
@@ -545,6 +563,16 @@ def validate_geo_fence(data: dict) -> dict:
         if not isinstance(entry, dict):
             raise ValueError('each city must be an object with "slug" and "radius_km"')
         slug = entry.get("slug")
+        # Checked BEFORE the capitals-vocabulary lookup below, and with a
+        # DISTINCT message, so a malformed slug (wrong case, an underscore)
+        # reads as "non-canonical" rather than the unrelated "unknown
+        # capital" — see this module's is_canonical_slug docstring for why
+        # this check exists at all.
+        if isinstance(slug, str) and not is_canonical_slug(slug):
+            raise ValueError(
+                f"non-canonical capital slug: {slug!r} — must be lowercase "
+                "and hyphen-separated (e.g. 'sao-paulo')"
+            )
         capital = CAPITALS_BY_SLUG.get(slug) if isinstance(slug, str) else None
         if capital is None:
             raise ValueError(f"unknown capital slug: {slug!r}")

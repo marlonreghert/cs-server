@@ -271,6 +271,32 @@ reads.
    grouped query (`list_all_event_sources` already reads the table in a single
    query and can be filtered/grouped), then apply the unanimity rule in
    Python. "One bulk query" must be true, not aspirational.
+
+   A RECURRING row is exempted from the `starts_at >= now() - 1 day` rule
+   above — its own stored `starts_at` goes stale between crawls, and without
+   the exemption every weekly announcement would vanish the moment its
+   single stored date fell into the past (Phase 3 re-derives its actual
+   occurrence dates from today forward, from the weekday pattern, never from
+   this stored value). That exemption is unbounded on its own, though: a
+   "toda quinta" post whose venue stopped running that night a year ago, and
+   that has not been re-crawled since, would otherwise generate a phantom
+   Thursday occurrence every week, indefinitely. It is bounded instead by
+   SOURCE FRESHNESS: a recurring row stops being selected once none of its
+   sources has been seen within `events_recurring_max_source_age_days`
+   (default 45) — `agg.last_seen_at`, the MAX `last_seen_at` across every
+   attached `post_item_source` row, which `_EVENT_SELECT`'s own `agg` LEFT
+   JOIN LATERAL already selects, so this needs no new join and no migration.
+   A row whose `agg.last_seen_at` is NULL (no source row at all — should not
+   occur in practice, every event is created FROM a source, but never
+   assumed) is treated as maximally stale, not as a free pass — SQL's own
+   NULL-propagation excludes it with no extra guard needed, matching
+   `app.models.menu_lifecycle.is_menu_item_current`'s identical posture for
+   the same shape of question. This bound applies ONLY to recurring rows; a
+   non-recurring row's behaviour is exactly the `starts_at >= now() - 1 day`
+   rule above, unchanged. `app/services/event_projection_selection.py`'s own
+   `is_selectable` and `RdsVenueStore.list_events_for_projection`'s SQL
+   express this identically, hand-kept in lockstep exactly as the rest of
+   this predicate already is.
 4. **Venue join — a genuinely new access pattern.** `_EVENT_SELECT` cannot
    supply `venue_lat`/`venue_lng`/`venue_neighborhood`: those columns were
    dropped from `venues.venue` (migration 0007) and live only on
@@ -409,7 +435,10 @@ would destroy a distinction this repo already stores.
 
 **Settings:** `events_projection_enabled` (default false — ships dark, turned
 on after the terraform apply is verified), `events_projection_horizon_days`
-(21), `event_flyer_copy_max_per_cycle`.
+(21), `events_recurring_max_source_age_days` (45 — bounds a recurring row's
+selection by source freshness so an abandoned recurring post does not
+project forever; see Implementation Approach Phase 4 §3),
+`event_flyer_copy_max_per_cycle`.
 
 **Infra:** `infra/media/main.tf` writer policy widened to `event-flyers/*`
 (a Resource-list addition to the existing `media_profile_photo_writer` policy;
@@ -478,6 +507,9 @@ Scenarios:
 - Expand a weekly recurring announcement into one occurrence per matching local
   day inside the horizon, each with its own id and its own `starts_at`, and
   none beyond the horizon.
+- Stop projecting a recurring announcement once every one of its sources has
+  gone stale beyond `events_recurring_max_source_age_days`; keep expanding one
+  whose sources are still fresh.
 - Project a "toda semana"/"sempre" recurrence as a single occurrence at its
   resolved `starts_at`, inventing no days.
 - Project no occurrence at all for a row whose `starts_at` is null.
@@ -522,7 +554,17 @@ Pytest unit tests:
 - `app/dao/venue_media_store.py`: `event_flyer_key` shape, idempotence of the
   hash slice, cache header.
 - Address-component mapping: each fallback rung, and the never-clobber rule.
-- Projection selection predicate, as a pure function over rows.
+- Projection selection predicate, as a pure function over rows — including
+  the recurring source-freshness bound: a stale-sourced recurring row
+  excluded, a fresh-sourced one selected, the exact boundary day, a NULL
+  `last_seen_at` (no source rows at all) excluded, and confirmation that a
+  non-recurring row's own behaviour is unaffected by the bound.
+- A dedicated parity test (`tests/test_events_selection_parity.py`) proving
+  `list_events_for_projection`'s SQL and `is_selectable`'s Python agree on
+  the same fixtures — the fake store always, the real store too once
+  `RDS_TEST_URL` points at a migrated scratch Postgres — mirroring
+  `test_eligibility_serving_view_parity.py`'s own shape for the analogous
+  eligibility/serving-view pair.
 
 Manual or integration checks:
 - Real-Postgres migration check for `0044` against a throwaway `postgres:16`
@@ -553,6 +595,9 @@ Manual or integration checks:
 - No occurrence id contains a URI-reserved character.
 - A weekly recurring announcement occupies every one of its nights inside the
   horizon; a "toda semana" one occupies exactly one.
+- A recurring announcement stops being projected once none of its sources has
+  been seen within `events_recurring_max_source_age_days`; a non-recurring
+  event's own temporal rule is unaffected by that bound.
 - A copied flyer is reachable at a stable CDN url with the immutable cache
   header, and re-running the cycle uploads nothing.
 - A venue enriched after this change carries its bairro on

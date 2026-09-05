@@ -492,6 +492,13 @@ class TestSingleEventVenuePostIsByteIdenticalToTheOldPath:
             # visibility columns above — present on every insert, not just
             # once a structured date interpretation is actually stored.
             "date_interpretation",
+            # plans/260905_events-serving-projection.md Phase 1 (migration
+            # 0044): nullable flyer-media columns, filled only by
+            # app.services.event_flyer_service — unconditional keys of every
+            # prepared_events entry (all five default to None), like every
+            # other additive column above.
+            "flyer_url", "flyer_s3_key", "flyer_content_hash",
+            "flyer_copied_at", "flyer_byte_size",
         }
         assert set(stored.keys()) == expected_keys, set(stored.keys())
 

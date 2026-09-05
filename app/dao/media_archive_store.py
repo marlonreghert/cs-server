@@ -281,6 +281,37 @@ class MediaArchiveStore:
             logger.warning(f"[MediaArchiveStore] image read failed for {key}: {e}")
             return None
 
+    async def read_image_bytes(self, key: str) -> tuple[bytes, str]:
+        """One archived image's raw bytes + content type — the read side of
+        the event-flyer copy (plans/260905_events-serving-projection.md,
+        Phase 1: fetch bytes, hash, put to the media bucket).
+
+        Unlike every other read in this class, this does NOT swallow a
+        failure into None/False: the caller (EventFlyerService) needs to
+        tell "the archived object is genuinely gone" apart from "any other
+        read failure" for its own outcome metric. Raises `FileNotFoundError`
+        when S3 reports the key does not exist (`NoSuchKey`/404); re-raises
+        whatever boto3 raised otherwise. A permission failure here would be
+        a GENUINELY new problem, not the expected terraform-ordering one the
+        write side guards against — `retrieved/*` is already readable by
+        this role (infra/datalake/iam.tf's `ReadArchivedMedia` Sid).
+        """
+        try:
+            response = await asyncio.to_thread(
+                self._s3.get_object, Bucket=self.bucket, Key=key
+            )
+        except Exception as e:
+            error_code = None
+            error_response = getattr(e, "response", None)
+            if isinstance(error_response, dict):
+                error_code = (error_response.get("Error") or {}).get("Code")
+            if error_code in ("NoSuchKey", "404"):
+                raise FileNotFoundError(f"{key!r} not found in {self.bucket!r}") from e
+            raise
+        body = response["Body"].read()
+        content_type = response.get("ContentType") or "image/jpeg"
+        return body, content_type
+
     async def presign(self, key: str, expires_in: int = 900) -> Optional[str]:
         """A time-limited GET url for one archived object.
 

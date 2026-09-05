@@ -316,6 +316,41 @@ class TestValidateGeoFence:
         with pytest.raises(ValueError, match="unknown capital slug"):
             validate_geo_fence({"enabled": True, "cities": [{"slug": 7, "radius_km": 30}]})
 
+    def test_non_canonical_slug_is_rejected_as_non_canonical_not_unknown(self):
+        """plans/260905_events-serving-projection.md, Phase 4 §5: a slug
+        that could never survive vibes_bot's own canonicalisation (lowercase
+        + `_`->`-`) must be rejected with a message distinct from "unknown
+        capital slug" — even though "Sao_Paulo" also happens not to match
+        any known capital, the FORMAT is the actual problem here."""
+        with pytest.raises(ValueError, match="non-canonical capital slug"):
+            validate_geo_fence({"enabled": True, "cities": [{"slug": "Sao_Paulo", "radius_km": 30}]})
+
+    def test_uppercase_variant_of_a_real_capital_is_still_non_canonical(self):
+        with pytest.raises(ValueError, match="non-canonical capital slug"):
+            validate_geo_fence({"enabled": True, "cities": [{"slug": "Recife", "radius_km": 30}]})
+
+    def test_the_stored_fence_is_unchanged_after_a_non_canonical_rejection(self):
+        from app.services.venue_eligibility import default_geo_fence
+
+        before = default_geo_fence()
+        with pytest.raises(ValueError):
+            validate_geo_fence({"enabled": True, "cities": [{"slug": "Sao_Paulo", "radius_km": 30}]})
+        # validate_geo_fence never mutates anything itself — it is pure
+        # validation; asserting the DEFAULT is still what a fresh read
+        # produces is the closest a unit test gets to "nothing was
+        # persisted" without a store in play (the BDD scenario covers the
+        # end-to-end "stored geo-fence cities are unchanged" claim).
+        assert default_geo_fence() == before
+
+    def test_every_seeded_capital_slug_is_itself_canonical(self):
+        """The closed vocabulary must never itself violate the rule it
+        enforces on writes — otherwise the "every slug in that table is
+        canonical" acceptance criterion would be false on day one."""
+        from app.services.venue_eligibility import is_canonical_slug
+
+        for slug in CAPITALS_BY_SLUG:
+            assert is_canonical_slug(slug), slug
+
     def test_duplicate_slug_raises(self):
         with pytest.raises(ValueError, match="duplicate capital slug"):
             validate_geo_fence({"enabled": True, "cities": [

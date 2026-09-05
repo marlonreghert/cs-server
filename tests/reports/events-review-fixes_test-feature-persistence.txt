@@ -1,0 +1,566 @@
+.venv/bin/python -m behave "tests/bdd/persistence/events-serving-projection.feature"
+USING RUNNER: behave.runner:Runner
+Feature: Events serving projection # tests/bdd/persistence/events-serving-projection.feature:1
+  As the VibeSense app
+  I want extracted events to reach the shared Redis serving projection
+  So that the events list and detail screens can be served without touching
+  RDS or S3 on the request path
+  Feature: Events serving projection  # tests/bdd/persistence/events-serving-projection.feature:1
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: Project an accepted event with its full serving payload                                    # tests/bdd/persistence/events-serving-projection.feature:15
+    Given the events projection is enabled                                                             # tests/bdd/steps/events_serving_projection_steps.py:154
+    And the projection horizon is 21 days                                                              # tests/bdd/steps/events_serving_projection_steps.py:159
+    And "Casa Bacurau" is a servable venue in Recife                                                   # tests/bdd/steps/events_serving_projection_steps.py:164
+    And the current time is 2026-09-05 18:00 in Recife                                                 # tests/bdd/steps/events_serving_projection_steps.py:169
+    Given an accepted event "Grande Encontro Techno" at "Casa Bacurau" starting 2026-09-06 20:00       # tests/bdd/steps/events_serving_projection_steps.py:175
+    And the event has category "techno", price text "R$ 40", ticket info "Grátis até 23:30"            # tests/bdd/steps/events_serving_projection_steps.py:207
+    And the event has a description and an attractions list with one act on stage "Pista NY"           # tests/bdd/steps/events_serving_projection_steps.py:214
+    When the events projection runs                                                                    # tests/bdd/steps/events_serving_projection_steps.py:463
+LOG_INFO:app.services.redis_projection_service: [EventsProjection] {'occurrences': 1, 'source_rows': 1, 'bytes': 860, 'errors': 0, 'error_events': [], 'flyer': {}}
+    Then the occurrence payload contains the title, description, category, price text and ticket info  # tests/bdd/steps/events_serving_projection_steps.py:560
+    And the occurrence payload contains the attractions list with the act name, type, stage and styles # tests/bdd/steps/events_serving_projection_steps.py:570
+    And the occurrence payload contains the venue id, venue name, latitude and longitude               # tests/bdd/steps/events_serving_projection_steps.py:579
+    And the coordinates come from the venue address record, not from the venue row                     # tests/bdd/steps/events_serving_projection_steps.py:588
+    And the occurrence payload contains the source permalink and source handle                         # tests/bdd/steps/events_serving_projection_steps.py:602
+    And the occurrence carries the local occurrence date "2026-09-06"                                  # tests/bdd/steps/events_serving_projection_steps.py:609
+    And the occurrence carries "starts_at" as a UTC timestamp                                          # tests/bdd/steps/events_serving_projection_steps.py:615
+    And the Recife events index contains the occurrence scored by its "starts_at" epoch                # tests/bdd/steps/events_serving_projection_steps.py:623
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: Carry the price text and the ticket info independently       # tests/bdd/persistence/events-serving-projection.feature:29
+    Given the events projection is enabled                               # tests/bdd/steps/events_serving_projection_steps.py:154
+    And the projection horizon is 21 days                                # tests/bdd/steps/events_serving_projection_steps.py:159
+    And "Casa Bacurau" is a servable venue in Recife                     # tests/bdd/steps/events_serving_projection_steps.py:164
+    And the current time is 2026-09-05 18:00 in Recife                   # tests/bdd/steps/events_serving_projection_steps.py:169
+    Given an accepted event whose price text is "R$100 em consumação"    # tests/bdd/steps/events_serving_projection_steps.py:196
+    And whose ticket info is "Grátis até 23:30"                          # tests/bdd/steps/events_serving_projection_steps.py:202
+    When the events projection runs                                      # tests/bdd/steps/events_serving_projection_steps.py:463
+LOG_INFO:app.services.redis_projection_service: [EventsProjection] {'occurrences': 1, 'source_rows': 1, 'bytes': 741, 'errors': 0, 'error_events': [], 'flyer': {}}
+    Then the occurrence payload reports both strings on their own fields # tests/bdd/steps/events_serving_projection_steps.py:630
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: Project an event whose stated time is unknown                                   # tests/bdd/persistence/events-serving-projection.feature:35
+    Given the events projection is enabled                                                  # tests/bdd/steps/events_serving_projection_steps.py:154
+    And the projection horizon is 21 days                                                   # tests/bdd/steps/events_serving_projection_steps.py:159
+    And "Casa Bacurau" is a servable venue in Recife                                        # tests/bdd/steps/events_serving_projection_steps.py:164
+    And the current time is 2026-09-05 18:00 in Recife                                      # tests/bdd/steps/events_serving_projection_steps.py:169
+    Given an accepted event at "Casa Bacurau" starting 2026-09-06 with no stated clock time # tests/bdd/steps/events_serving_projection_steps.py:184
+    When the events projection runs                                                         # tests/bdd/steps/events_serving_projection_steps.py:463
+LOG_INFO:app.services.redis_projection_service: [EventsProjection] {'occurrences': 1, 'source_rows': 1, 'bytes': 707, 'errors': 0, 'error_events': [], 'flyer': {}}
+    Then the occurrence payload reports "time_known" as false                               # tests/bdd/steps/events_serving_projection_steps.py:638
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario Outline: Exclude events that must never be served -- @1.1                        # tests/bdd/persistence/events-serving-projection.feature:47
+    Given the events projection is enabled                                                  # tests/bdd/steps/events_serving_projection_steps.py:154
+    And the projection horizon is 21 days                                                   # tests/bdd/steps/events_serving_projection_steps.py:159
+    And "Casa Bacurau" is a servable venue in Recife                                        # tests/bdd/steps/events_serving_projection_steps.py:164
+    And the current time is 2026-09-05 18:00 in Recife                                      # tests/bdd/steps/events_serving_projection_steps.py:169
+    Given an event at "Casa Bacurau" starting 2026-09-06 20:00 that is still pending review # tests/bdd/steps/events_serving_projection_steps.py:262
+    When the events projection runs                                                         # tests/bdd/steps/events_serving_projection_steps.py:463
+LOG_INFO:app.services.redis_projection_service: [EventsProjection] {'occurrences': 0, 'source_rows': 0, 'bytes': 0, 'errors': 0, 'error_events': [], 'flyer': {}}
+    Then no occurrence is projected for that event                                          # tests/bdd/steps/events_serving_projection_steps.py:543
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario Outline: Exclude events that must never be served -- @1.2            # tests/bdd/persistence/events-serving-projection.feature:48
+    Given the events projection is enabled                                      # tests/bdd/steps/events_serving_projection_steps.py:154
+    And the projection horizon is 21 days                                       # tests/bdd/steps/events_serving_projection_steps.py:159
+    And "Casa Bacurau" is a servable venue in Recife                            # tests/bdd/steps/events_serving_projection_steps.py:164
+    And the current time is 2026-09-05 18:00 in Recife                          # tests/bdd/steps/events_serving_projection_steps.py:169
+    Given an event at "Casa Bacurau" starting 2026-09-06 20:00 that is rejected # tests/bdd/steps/events_serving_projection_steps.py:262
+    When the events projection runs                                             # tests/bdd/steps/events_serving_projection_steps.py:463
+LOG_INFO:app.services.redis_projection_service: [EventsProjection] {'occurrences': 0, 'source_rows': 0, 'bytes': 0, 'errors': 0, 'error_events': [], 'flyer': {}}
+    Then no occurrence is projected for that event                              # tests/bdd/steps/events_serving_projection_steps.py:543
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario Outline: Exclude events that must never be served -- @1.3                               # tests/bdd/persistence/events-serving-projection.feature:49
+    Given the events projection is enabled                                                         # tests/bdd/steps/events_serving_projection_steps.py:154
+    And the projection horizon is 21 days                                                          # tests/bdd/steps/events_serving_projection_steps.py:159
+    And "Casa Bacurau" is a servable venue in Recife                                               # tests/bdd/steps/events_serving_projection_steps.py:164
+    And the current time is 2026-09-05 18:00 in Recife                                             # tests/bdd/steps/events_serving_projection_steps.py:169
+    Given an event at "Casa Bacurau" starting 2026-09-06 20:00 that is superseded by another event # tests/bdd/steps/events_serving_projection_steps.py:262
+    When the events projection runs                                                                # tests/bdd/steps/events_serving_projection_steps.py:463
+LOG_INFO:app.services.redis_projection_service: [EventsProjection] {'occurrences': 1, 'source_rows': 1, 'bytes': 706, 'errors': 0, 'error_events': [], 'flyer': {}}
+    Then no occurrence is projected for that event                                                 # tests/bdd/steps/events_serving_projection_steps.py:543
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario Outline: Exclude events that must never be served -- @1.4                       # tests/bdd/persistence/events-serving-projection.feature:50
+    Given the events projection is enabled                                                 # tests/bdd/steps/events_serving_projection_steps.py:154
+    And the projection horizon is 21 days                                                  # tests/bdd/steps/events_serving_projection_steps.py:159
+    And "Casa Bacurau" is a servable venue in Recife                                       # tests/bdd/steps/events_serving_projection_steps.py:164
+    And the current time is 2026-09-05 18:00 in Recife                                     # tests/bdd/steps/events_serving_projection_steps.py:169
+    Given an event at "Casa Bacurau" starting 2026-09-06 20:00 that is of post type "menu" # tests/bdd/steps/events_serving_projection_steps.py:262
+    When the events projection runs                                                        # tests/bdd/steps/events_serving_projection_steps.py:463
+LOG_INFO:app.services.redis_projection_service: [EventsProjection] {'occurrences': 0, 'source_rows': 0, 'bytes': 0, 'errors': 0, 'error_events': [], 'flyer': {}}
+    Then no occurrence is projected for that event                                         # tests/bdd/steps/events_serving_projection_steps.py:543
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario Outline: Exclude events that must never be served -- @1.5                      # tests/bdd/persistence/events-serving-projection.feature:51
+    Given the events projection is enabled                                                # tests/bdd/steps/events_serving_projection_steps.py:154
+    And the projection horizon is 21 days                                                 # tests/bdd/steps/events_serving_projection_steps.py:159
+    And "Casa Bacurau" is a servable venue in Recife                                      # tests/bdd/steps/events_serving_projection_steps.py:164
+    And the current time is 2026-09-05 18:00 in Recife                                    # tests/bdd/steps/events_serving_projection_steps.py:169
+    Given an event at "Casa Bacurau" starting 2026-09-06 20:00 that is linked to no venue # tests/bdd/steps/events_serving_projection_steps.py:262
+    When the events projection runs                                                       # tests/bdd/steps/events_serving_projection_steps.py:463
+LOG_INFO:app.services.redis_projection_service: [EventsProjection] {'occurrences': 0, 'source_rows': 0, 'bytes': 0, 'errors': 0, 'error_events': [], 'flyer': {}}
+    Then no occurrence is projected for that event                                        # tests/bdd/steps/events_serving_projection_steps.py:543
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario Outline: Exclude events that must never be served -- @1.6                                  # tests/bdd/persistence/events-serving-projection.feature:52
+    Given the events projection is enabled                                                            # tests/bdd/steps/events_serving_projection_steps.py:154
+    And the projection horizon is 21 days                                                             # tests/bdd/steps/events_serving_projection_steps.py:159
+    And "Casa Bacurau" is a servable venue in Recife                                                  # tests/bdd/steps/events_serving_projection_steps.py:164
+    And the current time is 2026-09-05 18:00 in Recife                                                # tests/bdd/steps/events_serving_projection_steps.py:169
+    Given an event at "Casa Bacurau" starting 2026-09-06 20:00 that is linked to a non-servable venue # tests/bdd/steps/events_serving_projection_steps.py:262
+    When the events projection runs                                                                   # tests/bdd/steps/events_serving_projection_steps.py:463
+LOG_INFO:app.services.redis_projection_service: [EventsProjection] {'occurrences': 0, 'source_rows': 0, 'bytes': 0, 'errors': 0, 'error_events': [], 'flyer': {}}
+    Then no occurrence is projected for that event                                                    # tests/bdd/steps/events_serving_projection_steps.py:543
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: Hide promoter-sourced events while the admin flag is set              # tests/bdd/persistence/events-serving-projection.feature:54
+    Given the events projection is enabled                                        # tests/bdd/steps/events_serving_projection_steps.py:154
+    And the projection horizon is 21 days                                         # tests/bdd/steps/events_serving_projection_steps.py:159
+    And "Casa Bacurau" is a servable venue in Recife                              # tests/bdd/steps/events_serving_projection_steps.py:164
+    And the current time is 2026-09-05 18:00 in Recife                            # tests/bdd/steps/events_serving_projection_steps.py:169
+    Given "hide_promoter_events" is true                                          # tests/bdd/steps/events_serving_projection_steps.py:290
+    And an accepted event at "Casa Bacurau" whose every source is a promoter post # tests/bdd/steps/events_serving_projection_steps.py:295
+    When the events projection runs                                               # tests/bdd/steps/events_serving_projection_steps.py:463
+LOG_INFO:app.services.redis_projection_service: [EventsProjection] {'occurrences': 0, 'source_rows': 0, 'bytes': 0, 'errors': 0, 'error_events': [], 'flyer': {}}
+    Then no occurrence is projected for that event                                # tests/bdd/steps/events_serving_projection_steps.py:543
+    When an admin sets "hide_promoter_events" to false                            # tests/bdd/steps/events_serving_projection_steps.py:303
+    And the events projection runs                                                # tests/bdd/steps/events_serving_projection_steps.py:463
+LOG_INFO:app.services.redis_projection_service: [EventsProjection] {'occurrences': 1, 'source_rows': 1, 'bytes': 706, 'errors': 0, 'error_events': [], 'flyer': {}}
+    Then the occurrence is projected for that event                               # tests/bdd/steps/events_serving_projection_steps.py:548
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: Keep last night's event visible into the small hours        # tests/bdd/persistence/events-serving-projection.feature:63
+    Given the events projection is enabled                              # tests/bdd/steps/events_serving_projection_steps.py:154
+    And the projection horizon is 21 days                               # tests/bdd/steps/events_serving_projection_steps.py:159
+    And "Casa Bacurau" is a servable venue in Recife                    # tests/bdd/steps/events_serving_projection_steps.py:164
+    And the current time is 2026-09-05 18:00 in Recife                  # tests/bdd/steps/events_serving_projection_steps.py:169
+    Given an accepted event at "Casa Bacurau" starting 2026-09-04 22:00 # tests/bdd/steps/events_serving_projection_steps.py:184
+    And the current time is 2026-09-05 01:00 in Recife                  # tests/bdd/steps/events_serving_projection_steps.py:169
+    When the events projection runs                                     # tests/bdd/steps/events_serving_projection_steps.py:463
+LOG_INFO:app.services.redis_projection_service: [EventsProjection] {'occurrences': 1, 'source_rows': 1, 'bytes': 706, 'errors': 0, 'error_events': [], 'flyer': {}}
+    Then the occurrence is projected                                    # tests/bdd/steps/events_serving_projection_steps.py:548
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: Drop an event that is genuinely past                        # tests/bdd/persistence/events-serving-projection.feature:69
+    Given the events projection is enabled                              # tests/bdd/steps/events_serving_projection_steps.py:154
+    And the projection horizon is 21 days                               # tests/bdd/steps/events_serving_projection_steps.py:159
+    And "Casa Bacurau" is a servable venue in Recife                    # tests/bdd/steps/events_serving_projection_steps.py:164
+    And the current time is 2026-09-05 18:00 in Recife                  # tests/bdd/steps/events_serving_projection_steps.py:169
+    Given an accepted event at "Casa Bacurau" starting 2026-09-01 22:00 # tests/bdd/steps/events_serving_projection_steps.py:184
+    When the events projection runs                                     # tests/bdd/steps/events_serving_projection_steps.py:463
+LOG_INFO:app.services.redis_projection_service: [EventsProjection] {'occurrences': 0, 'source_rows': 0, 'bytes': 0, 'errors': 0, 'error_events': [], 'flyer': {}}
+    Then no occurrence is projected for that event                      # tests/bdd/steps/events_serving_projection_steps.py:543
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: Expand a weekly announcement into one occurrence per night       # tests/bdd/persistence/events-serving-projection.feature:76
+    Given the events projection is enabled                                   # tests/bdd/steps/events_serving_projection_steps.py:154
+    And the projection horizon is 21 days                                    # tests/bdd/steps/events_serving_projection_steps.py:159
+    And "Casa Bacurau" is a servable venue in Recife                         # tests/bdd/steps/events_serving_projection_steps.py:164
+    And the current time is 2026-09-05 18:00 in Recife                       # tests/bdd/steps/events_serving_projection_steps.py:169
+    Given an accepted recurring event "Forró da Quinta" at "Casa Bacurau"    # tests/bdd/steps/events_serving_projection_steps.py:228
+    And its recurrence text is "toda quinta" and its resolved time is 21:00  # tests/bdd/steps/events_serving_projection_steps.py:241
+    When the events projection runs                                          # tests/bdd/steps/events_serving_projection_steps.py:463
+LOG_INFO:app.services.redis_projection_service: [EventsProjection] {'occurrences': 3, 'source_rows': 1, 'bytes': 2217, 'errors': 0, 'error_events': [], 'flyer': {}}
+    Then an occurrence is projected for every Thursday within the horizon    # tests/bdd/steps/events_serving_projection_steps.py:662
+    And each occurrence carries its own occurrence id ending in its own date # tests/bdd/steps/events_serving_projection_steps.py:679
+    And no occurrence id contains a URI-reserved character                   # tests/bdd/steps/events_serving_projection_steps.py:685
+    And each occurrence id survives being placed in a URL path unchanged     # tests/bdd/steps/events_serving_projection_steps.py:695
+    And each occurrence starts at 21:00 Recife time on its own date          # tests/bdd/steps/events_serving_projection_steps.py:705
+    And no occurrence is projected beyond the horizon                        # tests/bdd/steps/events_serving_projection_steps.py:713
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: Expand a daily announcement into one occurrence per day                         # tests/bdd/persistence/events-serving-projection.feature:87
+    Given the events projection is enabled                                                  # tests/bdd/steps/events_serving_projection_steps.py:154
+    And the projection horizon is 21 days                                                   # tests/bdd/steps/events_serving_projection_steps.py:159
+    And "Casa Bacurau" is a servable venue in Recife                                        # tests/bdd/steps/events_serving_projection_steps.py:164
+    And the current time is 2026-09-05 18:00 in Recife                                      # tests/bdd/steps/events_serving_projection_steps.py:169
+    Given an accepted recurring event at "Casa Bacurau" whose recurrence text is "todo dia" # tests/bdd/steps/events_serving_projection_steps.py:251
+    When the events projection runs                                                         # tests/bdd/steps/events_serving_projection_steps.py:463
+LOG_INFO:app.services.redis_projection_service: [EventsProjection] {'occurrences': 22, 'source_rows': 1, 'bytes': 15884, 'errors': 0, 'error_events': [], 'flyer': {}}
+    Then an occurrence is projected for every day within the horizon                        # tests/bdd/steps/events_serving_projection_steps.py:723
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: Invent no days for a recurrence with no computable day                             # tests/bdd/persistence/events-serving-projection.feature:92
+    Given the events projection is enabled                                                     # tests/bdd/steps/events_serving_projection_steps.py:154
+    And the projection horizon is 21 days                                                      # tests/bdd/steps/events_serving_projection_steps.py:159
+    And "Casa Bacurau" is a servable venue in Recife                                           # tests/bdd/steps/events_serving_projection_steps.py:164
+    And the current time is 2026-09-05 18:00 in Recife                                         # tests/bdd/steps/events_serving_projection_steps.py:169
+    Given an accepted recurring event at "Casa Bacurau" whose recurrence text is "toda semana" # tests/bdd/steps/events_serving_projection_steps.py:251
+    When the events projection runs                                                            # tests/bdd/steps/events_serving_projection_steps.py:463
+LOG_INFO:app.services.redis_projection_service: [EventsProjection] {'occurrences': 1, 'source_rows': 1, 'bytes': 714, 'errors': 0, 'error_events': [], 'flyer': {}}
+    Then exactly one occurrence is projected at its resolved start time                        # tests/bdd/steps/events_serving_projection_steps.py:729
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: Project nothing for an event that has no start time at all    # tests/bdd/persistence/events-serving-projection.feature:97
+    Given the events projection is enabled                                # tests/bdd/steps/events_serving_projection_steps.py:154
+    And the projection horizon is 21 days                                 # tests/bdd/steps/events_serving_projection_steps.py:159
+    And "Casa Bacurau" is a servable venue in Recife                      # tests/bdd/steps/events_serving_projection_steps.py:164
+    And the current time is 2026-09-05 18:00 in Recife                    # tests/bdd/steps/events_serving_projection_steps.py:169
+    Given an accepted event at "Casa Bacurau" with no resolved start time # tests/bdd/steps/events_serving_projection_steps.py:222
+    When the events projection runs                                       # tests/bdd/steps/events_serving_projection_steps.py:463
+LOG_INFO:app.services.redis_projection_service: [EventsProjection] {'occurrences': 0, 'source_rows': 1, 'bytes': 0, 'errors': 0, 'error_events': [], 'flyer': {}}
+    Then no occurrence is projected for that event                        # tests/bdd/steps/events_serving_projection_steps.py:543
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: Index every occurrence by city and by venue                        # tests/bdd/persistence/events-serving-projection.feature:104
+    Given the events projection is enabled                                     # tests/bdd/steps/events_serving_projection_steps.py:154
+    And the projection horizon is 21 days                                      # tests/bdd/steps/events_serving_projection_steps.py:159
+    And "Casa Bacurau" is a servable venue in Recife                           # tests/bdd/steps/events_serving_projection_steps.py:164
+    And the current time is 2026-09-05 18:00 in Recife                         # tests/bdd/steps/events_serving_projection_steps.py:169
+    Given an accepted event at "Casa Bacurau" starting 2026-09-06 20:00        # tests/bdd/steps/events_serving_projection_steps.py:184
+    When the events projection runs                                            # tests/bdd/steps/events_serving_projection_steps.py:463
+LOG_INFO:app.services.redis_projection_service: [EventsProjection] {'occurrences': 1, 'source_rows': 1, 'bytes': 706, 'errors': 0, 'error_events': [], 'flyer': {}}
+    Then the Recife events index contains the occurrence                       # tests/bdd/steps/events_serving_projection_steps.py:737
+    And the venue events index for "Casa Bacurau" contains the same occurrence # tests/bdd/steps/events_serving_projection_steps.py:743
+    And the occurrence carries the same score in both indexes                  # tests/bdd/steps/events_serving_projection_steps.py:750
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: Read one venue's week from its own index                                    # tests/bdd/persistence/events-serving-projection.feature:111
+    Given the events projection is enabled                                              # tests/bdd/steps/events_serving_projection_steps.py:154
+    And the projection horizon is 21 days                                               # tests/bdd/steps/events_serving_projection_steps.py:159
+    And "Casa Bacurau" is a servable venue in Recife                                    # tests/bdd/steps/events_serving_projection_steps.py:164
+    And the current time is 2026-09-05 18:00 in Recife                                  # tests/bdd/steps/events_serving_projection_steps.py:169
+    Given two accepted events at "Casa Bacurau" and one at another venue                # tests/bdd/steps/events_serving_projection_steps.py:309
+    When the events projection runs                                                     # tests/bdd/steps/events_serving_projection_steps.py:463
+LOG_INFO:app.services.redis_projection_service: [EventsProjection] {'occurrences': 3, 'source_rows': 3, 'bytes': 2122, 'errors': 0, 'error_events': [], 'flyer': {}}
+    Then the venue events index for "Casa Bacurau" contains exactly its two occurrences # tests/bdd/steps/events_serving_projection_steps.py:758
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: Remove an occurrence once its event stops qualifying        # tests/bdd/persistence/events-serving-projection.feature:116
+    Given the events projection is enabled                              # tests/bdd/steps/events_serving_projection_steps.py:154
+    And the projection horizon is 21 days                               # tests/bdd/steps/events_serving_projection_steps.py:159
+    And "Casa Bacurau" is a servable venue in Recife                    # tests/bdd/steps/events_serving_projection_steps.py:164
+    And the current time is 2026-09-05 18:00 in Recife                  # tests/bdd/steps/events_serving_projection_steps.py:169
+    Given an accepted event at "Casa Bacurau" starting 2026-09-06 20:00 # tests/bdd/steps/events_serving_projection_steps.py:184
+    And the events projection has run                                   # tests/bdd/steps/events_serving_projection_steps.py:443
+LOG_INFO:app.services.redis_projection_service: [EventsProjection] {'occurrences': 1, 'source_rows': 1, 'bytes': 706, 'errors': 0, 'error_events': [], 'flyer': {}}
+    When an admin rejects the event                                     # tests/bdd/steps/events_serving_projection_steps.py:474
+    And the events projection runs                                      # tests/bdd/steps/events_serving_projection_steps.py:463
+LOG_INFO:app.services.redis_projection_service: [EventsProjection] {'occurrences': 0, 'source_rows': 0, 'bytes': 0, 'errors': 0, 'error_events': [], 'flyer': {}}
+    Then the occurrence key is deleted                                  # tests/bdd/steps/events_serving_projection_steps.py:769
+    And the occurrence is no longer a member of the Recife events index # tests/bdd/steps/events_serving_projection_steps.py:774
+    And the occurrence is no longer a member of the venue events index  # tests/bdd/steps/events_serving_projection_steps.py:779
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: Leave the projection intact when the source query fails     # tests/bdd/persistence/events-serving-projection.feature:125
+    Given the events projection is enabled                              # tests/bdd/steps/events_serving_projection_steps.py:154
+    And the projection horizon is 21 days                               # tests/bdd/steps/events_serving_projection_steps.py:159
+    And "Casa Bacurau" is a servable venue in Recife                    # tests/bdd/steps/events_serving_projection_steps.py:164
+    And the current time is 2026-09-05 18:00 in Recife                  # tests/bdd/steps/events_serving_projection_steps.py:169
+    Given the events projection has run and projected three occurrences # tests/bdd/steps/events_serving_projection_steps.py:448
+LOG_INFO:app.services.redis_projection_service: [EventsProjection] {'occurrences': 3, 'source_rows': 3, 'bytes': 2118, 'errors': 0, 'error_events': [], 'flyer': {}}
+    When the events selection query fails                               # tests/bdd/steps/events_serving_projection_steps.py:469
+    And the events projection runs                                      # tests/bdd/steps/events_serving_projection_steps.py:463
+LOG_ERROR:app.services.redis_projection_service: [EventsProjection] preparation read failed; aborting cycle, Redis left intact: RDS is unavailable (fake outage)
+    Then the three occurrences are still present in Redis               # tests/bdd/steps/events_serving_projection_steps.py:786
+    And the run summary reports an error                                # tests/bdd/steps/events_serving_projection_steps.py:794
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: Isolate a single failing event from the rest of the cycle  # tests/bdd/persistence/events-serving-projection.feature:132
+    Given the events projection is enabled                             # tests/bdd/steps/events_serving_projection_steps.py:154
+    And the projection horizon is 21 days                              # tests/bdd/steps/events_serving_projection_steps.py:159
+    And "Casa Bacurau" is a servable venue in Recife                   # tests/bdd/steps/events_serving_projection_steps.py:164
+    And the current time is 2026-09-05 18:00 in Recife                 # tests/bdd/steps/events_serving_projection_steps.py:169
+    Given three accepted events at "Casa Bacurau"                      # tests/bdd/steps/events_serving_projection_steps.py:317
+    And projecting the second one raises an error                      # tests/bdd/steps/events_serving_projection_steps.py:326
+    When the events projection runs                                    # tests/bdd/steps/events_serving_projection_steps.py:463
+LOG_WARNING:app.services.redis_projection_service: [EventsProjection] event d2e812731539431ea591aa6dcab94503 failed: 1 validation error for EventOccurrence
+attractions
+  Input should be a valid list [type=list_type, input_value='not-a-list-of-dicts', input_type=str]
+    For further information visit https://errors.pydantic.dev/2.9/v/list_type
+LOG_INFO:app.services.redis_projection_service: [EventsProjection] {'occurrences': 2, 'source_rows': 3, 'bytes': 1412, 'errors': 1, 'error_events': ['d2e812731539431ea591aa6dcab94503'], 'flyer': {}}
+    Then the other two occurrences are projected                       # tests/bdd/steps/events_serving_projection_steps.py:799
+    And the run summary names the failing event id                     # tests/bdd/steps/events_serving_projection_steps.py:807
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: Copy an archived flyer to the app media bucket and serve its url   # tests/bdd/persistence/events-serving-projection.feature:141
+    Given the events projection is enabled                                     # tests/bdd/steps/events_serving_projection_steps.py:154
+    And the projection horizon is 21 days                                      # tests/bdd/steps/events_serving_projection_steps.py:159
+    And "Casa Bacurau" is a servable venue in Recife                           # tests/bdd/steps/events_serving_projection_steps.py:164
+    And the current time is 2026-09-05 18:00 in Recife                         # tests/bdd/steps/events_serving_projection_steps.py:169
+    Given an accepted event at "Casa Bacurau" with an archived cover photo     # tests/bdd/steps/events_serving_projection_steps.py:343
+    When the events projection runs                                            # tests/bdd/steps/events_serving_projection_steps.py:463
+LOG_INFO:app.services.redis_projection_service: [EventsProjection] {'occurrences': 1, 'source_rows': 1, 'bytes': 802, 'errors': 0, 'error_events': [], 'flyer': {'attempted': 1, 'counts': {'copied': 1, 'unchanged': 0, 'no_key': 0, 'archive_missing': 0, 'access_denied': 0, 'failed': 0}}}
+    Then the flyer is stored in the media bucket under a content-addressed key # tests/bdd/steps/events_serving_projection_steps.py:814
+    And the stored object carries the immutable cache control header           # tests/bdd/steps/events_serving_projection_steps.py:822
+    And the occurrence payload carries the CloudFront flyer url                # tests/bdd/steps/events_serving_projection_steps.py:828
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: Upload nothing when the flyer bytes have not changed                  # tests/bdd/persistence/events-serving-projection.feature:148
+    Given the events projection is enabled                                        # tests/bdd/steps/events_serving_projection_steps.py:154
+    And the projection horizon is 21 days                                         # tests/bdd/steps/events_serving_projection_steps.py:159
+    And "Casa Bacurau" is a servable venue in Recife                              # tests/bdd/steps/events_serving_projection_steps.py:164
+    And the current time is 2026-09-05 18:00 in Recife                            # tests/bdd/steps/events_serving_projection_steps.py:169
+    Given an accepted event at "Casa Bacurau" whose flyer has already been copied # tests/bdd/steps/events_serving_projection_steps.py:352
+    When the events projection runs                                               # tests/bdd/steps/events_serving_projection_steps.py:463
+LOG_INFO:app.services.redis_projection_service: [EventsProjection] {'occurrences': 1, 'source_rows': 1, 'bytes': 774, 'errors': 0, 'error_events': [], 'flyer': {'attempted': 0, 'counts': {'copied': 0, 'unchanged': 0, 'no_key': 0, 'archive_missing': 0, 'access_denied': 0, 'failed': 0}}}
+    Then no object is uploaded to the media bucket                                # tests/bdd/steps/instagram_profile_photo_hero_steps.py:699
+    And the occurrence payload carries the same flyer url as before               # tests/bdd/steps/events_serving_projection_steps.py:835
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: Project an event that has no flyer at all                      # tests/bdd/persistence/events-serving-projection.feature:154
+    Given the events projection is enabled                                 # tests/bdd/steps/events_serving_projection_steps.py:154
+    And the projection horizon is 21 days                                  # tests/bdd/steps/events_serving_projection_steps.py:159
+    And "Casa Bacurau" is a servable venue in Recife                       # tests/bdd/steps/events_serving_projection_steps.py:164
+    And the current time is 2026-09-05 18:00 in Recife                     # tests/bdd/steps/events_serving_projection_steps.py:169
+    Given an accepted event at "Casa Bacurau" with no archived cover photo # tests/bdd/steps/events_serving_projection_steps.py:364
+    When the events projection runs                                        # tests/bdd/steps/events_serving_projection_steps.py:463
+LOG_INFO:app.services.redis_projection_service: [EventsProjection] {'occurrences': 1, 'source_rows': 1, 'bytes': 706, 'errors': 0, 'error_events': [], 'flyer': {'attempted': 1, 'counts': {'copied': 0, 'unchanged': 0, 'no_key': 1, 'archive_missing': 0, 'access_denied': 0, 'failed': 0}}}
+    Then the occurrence is projected with a null flyer url                 # tests/bdd/steps/events_serving_projection_steps.py:841
+    And the flyer copy outcome "no_key" is recorded                        # tests/bdd/steps/events_serving_projection_steps.py:848
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: Report a denied media write loudly and still project the event  # tests/bdd/persistence/events-serving-projection.feature:160
+    Given the events projection is enabled                                  # tests/bdd/steps/events_serving_projection_steps.py:154
+    And the projection horizon is 21 days                                   # tests/bdd/steps/events_serving_projection_steps.py:159
+    And "Casa Bacurau" is a servable venue in Recife                        # tests/bdd/steps/events_serving_projection_steps.py:164
+    And the current time is 2026-09-05 18:00 in Recife                      # tests/bdd/steps/events_serving_projection_steps.py:169
+    Given an accepted event at "Casa Bacurau" with an archived cover photo  # tests/bdd/steps/events_serving_projection_steps.py:343
+    And the media bucket rejects the write with access denied               # tests/bdd/steps/events_serving_projection_steps.py:371
+    When the events projection runs                                         # tests/bdd/steps/events_serving_projection_steps.py:463
+LOG_ERROR:app.services.event_flyer_service: [EventFlyer] 5179c5121f98414cab78b448b542b614: media bucket denied the flyer write (access_denied) — has infra/media's terraform apply for event-flyers/* landed and been verified? AccessDenied: not authorized to perform s3:PutObject
+LOG_INFO:app.services.redis_projection_service: [EventsProjection] {'occurrences': 1, 'source_rows': 1, 'bytes': 706, 'errors': 0, 'error_events': [], 'flyer': {'attempted': 1, 'counts': {'copied': 0, 'unchanged': 0, 'no_key': 0, 'archive_missing': 0, 'access_denied': 1, 'failed': 0}}}
+    Then the occurrence is projected with a null flyer url                  # tests/bdd/steps/events_serving_projection_steps.py:841
+    And the flyer copy outcome "access_denied" is recorded                  # tests/bdd/steps/events_serving_projection_steps.py:848
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: Never serve a data-lake object directly                        # tests/bdd/persistence/events-serving-projection.feature:167
+    Given the events projection is enabled                                 # tests/bdd/steps/events_serving_projection_steps.py:154
+    And the projection horizon is 21 days                                  # tests/bdd/steps/events_serving_projection_steps.py:159
+    And "Casa Bacurau" is a servable venue in Recife                       # tests/bdd/steps/events_serving_projection_steps.py:164
+    And the current time is 2026-09-05 18:00 in Recife                     # tests/bdd/steps/events_serving_projection_steps.py:169
+    Given an accepted event at "Casa Bacurau" with an archived cover photo # tests/bdd/steps/events_serving_projection_steps.py:343
+    When the events projection runs                                        # tests/bdd/steps/events_serving_projection_steps.py:463
+LOG_INFO:app.services.redis_projection_service: [EventsProjection] {'occurrences': 1, 'source_rows': 1, 'bytes': 802, 'errors': 0, 'error_events': [], 'flyer': {'attempted': 1, 'counts': {'copied': 1, 'unchanged': 0, 'no_key': 0, 'archive_missing': 0, 'access_denied': 0, 'failed': 0}}}
+    Then no occurrence payload contains a data-lake key or a presigned url # tests/bdd/steps/events_serving_projection_steps.py:855
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: Carry the bairro onto every occurrence at that venue              # tests/bdd/persistence/events-serving-projection.feature:175
+    Given the events projection is enabled                                    # tests/bdd/steps/events_serving_projection_steps.py:154
+    And the projection horizon is 21 days                                     # tests/bdd/steps/events_serving_projection_steps.py:159
+    And "Casa Bacurau" is a servable venue in Recife                          # tests/bdd/steps/events_serving_projection_steps.py:164
+    And the current time is 2026-09-05 18:00 in Recife                        # tests/bdd/steps/events_serving_projection_steps.py:169
+    Given the stored address neighborhood for "Casa Bacurau" is "Santo Amaro" # tests/bdd/steps/events_serving_projection_steps.py:378
+    And an accepted event at "Casa Bacurau" starting 2026-09-06 20:00         # tests/bdd/steps/events_serving_projection_steps.py:184
+    When the events projection runs                                           # tests/bdd/steps/events_serving_projection_steps.py:463
+LOG_INFO:app.services.redis_projection_service: [EventsProjection] {'occurrences': 1, 'source_rows': 1, 'bytes': 715, 'errors': 0, 'error_events': [], 'flyer': {}}
+    Then the occurrence payload reports the venue neighborhood "Santo Amaro"  # tests/bdd/steps/events_serving_projection_steps.py:867
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: Project a null neighbourhood for a venue that has never been enriched  # tests/bdd/persistence/events-serving-projection.feature:181
+    Given the events projection is enabled                                         # tests/bdd/steps/events_serving_projection_steps.py:154
+    And the projection horizon is 21 days                                          # tests/bdd/steps/events_serving_projection_steps.py:159
+    And "Casa Bacurau" is a servable venue in Recife                               # tests/bdd/steps/events_serving_projection_steps.py:164
+    And the current time is 2026-09-05 18:00 in Recife                             # tests/bdd/steps/events_serving_projection_steps.py:169
+    Given "Casa Bacurau" has no stored address neighborhood                        # tests/bdd/steps/events_serving_projection_steps.py:384
+    And an accepted event at "Casa Bacurau" starting 2026-09-06 20:00              # tests/bdd/steps/events_serving_projection_steps.py:184
+    When the events projection runs                                                # tests/bdd/steps/events_serving_projection_steps.py:463
+LOG_INFO:app.services.redis_projection_service: [EventsProjection] {'occurrences': 1, 'source_rows': 1, 'bytes': 706, 'errors': 0, 'error_events': [], 'flyer': {}}
+    Then the occurrence payload reports a null venue neighborhood                  # tests/bdd/steps/events_serving_projection_steps.py:873
+    And the occurrence is still projected                                          # tests/bdd/steps/events_serving_projection_steps.py:554
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: Derive the city from the geo-fence circle that already gates serving  # tests/bdd/persistence/events-serving-projection.feature:190
+    Given the events projection is enabled                                        # tests/bdd/steps/events_serving_projection_steps.py:154
+    And the projection horizon is 21 days                                         # tests/bdd/steps/events_serving_projection_steps.py:159
+    And "Casa Bacurau" is a servable venue in Recife                              # tests/bdd/steps/events_serving_projection_steps.py:164
+    And the current time is 2026-09-05 18:00 in Recife                            # tests/bdd/steps/events_serving_projection_steps.py:169
+    Given "Casa Bacurau" lies inside the "recife" geo-fence circle                # tests/bdd/steps/events_serving_projection_steps.py:390
+    And an accepted event at "Casa Bacurau" starting 2026-09-06 20:00             # tests/bdd/steps/events_serving_projection_steps.py:184
+    When the events projection runs                                               # tests/bdd/steps/events_serving_projection_steps.py:463
+LOG_INFO:app.services.redis_projection_service: [EventsProjection] {'occurrences': 1, 'source_rows': 1, 'bytes': 706, 'errors': 0, 'error_events': [], 'flyer': {}}
+    Then the occurrence reports the city "recife"                                 # tests/bdd/steps/events_serving_projection_steps.py:880
+    And the occurrence is a member of the "recife" events index                   # tests/bdd/steps/events_serving_projection_steps.py:886
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: Pick the nearest centre when two city circles overlap               # tests/bdd/persistence/events-serving-projection.feature:197
+    Given the events projection is enabled                                      # tests/bdd/steps/events_serving_projection_steps.py:154
+    And the projection horizon is 21 days                                       # tests/bdd/steps/events_serving_projection_steps.py:159
+    And "Casa Bacurau" is a servable venue in Recife                            # tests/bdd/steps/events_serving_projection_steps.py:164
+    And the current time is 2026-09-05 18:00 in Recife                          # tests/bdd/steps/events_serving_projection_steps.py:169
+    Given a venue lying inside both the "recife" and a neighbouring city circle # tests/bdd/steps/events_serving_projection_steps.py:395
+    And the neighbouring circle's centre is closer to the venue                 # tests/bdd/steps/events_serving_projection_steps.py:418
+    When the events projection runs                                             # tests/bdd/steps/events_serving_projection_steps.py:463
+LOG_INFO:app.services.redis_projection_service: [EventsProjection] {'occurrences': 1, 'source_rows': 1, 'bytes': 712, 'errors': 0, 'error_events': [], 'flyer': {}}
+    Then the occurrence reports the neighbouring city                           # tests/bdd/steps/events_serving_projection_steps.py:892
+    And the projection makes the same choice on every subsequent cycle          # tests/bdd/steps/events_serving_projection_steps.py:898
+LOG_INFO:app.services.redis_projection_service: [EventsProjection] {'occurrences': 1, 'source_rows': 1, 'bytes': 712, 'errors': 0, 'error_events': [], 'flyer': {}}
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: Refuse a geo-fence city slug the serving vocabulary cannot match  # tests/bdd/persistence/events-serving-projection.feature:204
+    Given the events projection is enabled                                    # tests/bdd/steps/events_serving_projection_steps.py:154
+    And the projection horizon is 21 days                                     # tests/bdd/steps/events_serving_projection_steps.py:159
+    And "Casa Bacurau" is a servable venue in Recife                          # tests/bdd/steps/events_serving_projection_steps.py:164
+    And the current time is 2026-09-05 18:00 in Recife                        # tests/bdd/steps/events_serving_projection_steps.py:169
+    When an admin writes a geo-fence city with the slug "Sao_Paulo"           # tests/bdd/steps/events_serving_projection_steps.py:489
+LOG_INFO:httpx: HTTP Request: PUT http://testserver/admin/config/geofence "HTTP/1.1 400 Bad Request"
+    Then the write is rejected as non-canonical                               # tests/bdd/steps/events_serving_projection_steps.py:906
+    And the stored geo-fence cities are unchanged                             # tests/bdd/steps/events_serving_projection_steps.py:912
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: Empty a venue index once its last event stops qualifying       # tests/bdd/persistence/events-serving-projection.feature:209
+    Given the events projection is enabled                                 # tests/bdd/steps/events_serving_projection_steps.py:154
+    And the projection horizon is 21 days                                  # tests/bdd/steps/events_serving_projection_steps.py:159
+    And "Casa Bacurau" is a servable venue in Recife                       # tests/bdd/steps/events_serving_projection_steps.py:164
+    And the current time is 2026-09-05 18:00 in Recife                     # tests/bdd/steps/events_serving_projection_steps.py:169
+    Given "Casa Bacurau" has one accepted event and the projection has run # tests/bdd/steps/events_serving_projection_steps.py:428
+LOG_INFO:app.services.redis_projection_service: [EventsProjection] {'occurrences': 1, 'source_rows': 1, 'bytes': 706, 'errors': 0, 'error_events': [], 'flyer': {}}
+    When the event is rejected                                             # tests/bdd/steps/events_serving_projection_steps.py:479
+    And the events projection runs                                         # tests/bdd/steps/events_serving_projection_steps.py:463
+LOG_INFO:app.services.redis_projection_service: [EventsProjection] {'occurrences': 0, 'source_rows': 0, 'bytes': 0, 'errors': 0, 'error_events': [], 'flyer': {}}
+    Then the venue events index for "Casa Bacurau" is empty                # tests/bdd/steps/events_serving_projection_steps.py:918
+    And its payload keys are deleted                                       # tests/bdd/steps/events_serving_projection_steps.py:924
+    And the cycle issues no keyspace scan against Redis                    # tests/bdd/steps/events_serving_projection_steps.py:929
+LOG_INFO:app.services.redis_projection_service: [EventsProjection] {'occurrences': 0, 'source_rows': 0, 'bytes': 0, 'errors': 0, 'error_events': [], 'flyer': {}}
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: Empty a city index once the city has no events left  # tests/bdd/persistence/events-serving-projection.feature:217
+    Given the events projection is enabled                       # tests/bdd/steps/events_serving_projection_steps.py:154
+    And the projection horizon is 21 days                        # tests/bdd/steps/events_serving_projection_steps.py:159
+    And "Casa Bacurau" is a servable venue in Recife             # tests/bdd/steps/events_serving_projection_steps.py:164
+    And the current time is 2026-09-05 18:00 in Recife           # tests/bdd/steps/events_serving_projection_steps.py:169
+    Given the "recife" events index holds one occurrence         # tests/bdd/steps/events_serving_projection_steps.py:434
+LOG_INFO:app.services.redis_projection_service: [EventsProjection] {'occurrences': 1, 'source_rows': 1, 'bytes': 706, 'errors': 0, 'error_events': [], 'flyer': {}}
+    When that occurrence's event is rejected                     # tests/bdd/steps/events_serving_projection_steps.py:484
+    And the events projection runs                               # tests/bdd/steps/events_serving_projection_steps.py:463
+LOG_INFO:app.services.redis_projection_service: [EventsProjection] {'occurrences': 0, 'source_rows': 0, 'bytes': 0, 'errors': 0, 'error_events': [], 'flyer': {}}
+    Then the "recife" events index is empty                      # tests/bdd/steps/events_serving_projection_steps.py:942
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: Empty a city index after the city itself is removed from the geo-fence  # tests/bdd/persistence/events-serving-projection.feature:223
+    Given the events projection is enabled                                          # tests/bdd/steps/events_serving_projection_steps.py:154
+    And the projection horizon is 21 days                                           # tests/bdd/steps/events_serving_projection_steps.py:159
+    And "Casa Bacurau" is a servable venue in Recife                                # tests/bdd/steps/events_serving_projection_steps.py:164
+    And the current time is 2026-09-05 18:00 in Recife                              # tests/bdd/steps/events_serving_projection_steps.py:169
+    Given the "recife" events index holds one occurrence                            # tests/bdd/steps/events_serving_projection_steps.py:434
+LOG_INFO:app.services.redis_projection_service: [EventsProjection] {'occurrences': 1, 'source_rows': 1, 'bytes': 706, 'errors': 0, 'error_events': [], 'flyer': {}}
+    When the "recife" city is removed from the geo-fence                            # tests/bdd/steps/events_serving_projection_steps.py:498
+    And the events projection runs                                                  # tests/bdd/steps/events_serving_projection_steps.py:463
+LOG_INFO:app.services.redis_projection_service: [EventsProjection] {'occurrences': 0, 'source_rows': 0, 'bytes': 0, 'errors': 0, 'error_events': [], 'flyer': {}}
+    Then the "recife" events index is empty                                         # tests/bdd/steps/events_serving_projection_steps.py:942
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: Report the size of the projection every cycle         # tests/bdd/persistence/events-serving-projection.feature:231
+    Given the events projection is enabled                        # tests/bdd/steps/events_serving_projection_steps.py:154
+    And the projection horizon is 21 days                         # tests/bdd/steps/events_serving_projection_steps.py:159
+    And "Casa Bacurau" is a servable venue in Recife              # tests/bdd/steps/events_serving_projection_steps.py:164
+    And the current time is 2026-09-05 18:00 in Recife            # tests/bdd/steps/events_serving_projection_steps.py:169
+    Given four accepted events at "Casa Bacurau"                  # tests/bdd/steps/events_serving_projection_steps.py:335
+    When the events projection runs                               # tests/bdd/steps/events_serving_projection_steps.py:463
+LOG_INFO:app.services.redis_projection_service: [EventsProjection] {'occurrences': 4, 'source_rows': 4, 'bytes': 2824, 'errors': 0, 'error_events': [], 'flyer': {}}
+    Then the run summary reports the projected occurrence count   # tests/bdd/steps/events_serving_projection_steps.py:948
+    And the run summary reports the total projected payload bytes # tests/bdd/steps/events_serving_projection_steps.py:953
+
+1 feature passed, 0 failed, 0 skipped
+35 scenarios passed, 0 failed, 0 skipped
+295 steps passed, 0 failed, 0 skipped
+Took 0min 0.108s

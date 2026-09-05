@@ -171,6 +171,14 @@ class GooglePlacesDetailsResponse(BaseModel):
     # FALLBACK tier source for enum-less venues, and served as the structured range.
     price_range: Optional[PriceRange] = None
 
+    # Raw address component list (plans/260905_events-serving-projection.md
+    # Phase 2), verbatim from the API: each entry is
+    # {longText, shortText, types: [...], languageCode}. Mapped into
+    # venues.address's structured columns by
+    # app.services.venue_address_components.map_address_components — this
+    # model only carries the wire shape through.
+    address_components: Optional[list[dict]] = None
+
     def is_permanently_closed(self) -> bool:
         """Check if the place is permanently closed."""
         return self.business_status == "CLOSED_PERMANENTLY"

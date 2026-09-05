@@ -963,6 +963,33 @@ class Container:
                 "token + MEDIA_BUCKET + MEDIA_CDN_BASE_URL)"
             )
 
+        # Events serving projection — flyer copier (plans/260905_events-
+        # serving-projection.md, Phase 1). Reuses venue_media_store above
+        # (the servable app media bucket, event-flyers/* is a second prefix
+        # in the SAME bucket/distribution) and media_archive_store built
+        # earlier (the data-lake reader `retrieved/*` cover photos already
+        # live under — the SAME store the admin cover-presign route already
+        # depends on in production, GET /admin/events/{id}/cover). Both
+        # optional; construction only happens once both exist, matching
+        # every other optional-dependency wiring in this container.
+        self.event_flyer_service = None
+        if self.venue_media_store is not None and self.media_archive_store is not None:
+            from app.services.event_flyer_service import EventFlyerService
+
+            self.event_flyer_service = EventFlyerService(
+                archive_store=self.media_archive_store,
+                media_store=self.venue_media_store,
+                rds_store=self.rds_store,
+            )
+            self.redis_projection_service.event_flyer_service = self.event_flyer_service
+            logger.info("[Container] Event flyer service initialized")
+        else:
+            logger.info(
+                "[Container] Event flyer service disabled (needs the media "
+                "bucket + the media archive store); events project with "
+                "flyer_url always null until both are configured"
+            )
+
         # The serve handler resolves the live-busyness freshness window through the
         # admin-config mirror; wire it now that the service exists (venue_handler
         # was built above, before admin_config_service).

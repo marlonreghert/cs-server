@@ -13,3 +13,8 @@ bounding_box_map.html
 awscliv2.zip
 terraform.zip
 
+
+# Terraform working artifacts — providers and saved plans are large,
+# machine-specific, and must never be committed.
+.terraform/
+*.tfplan

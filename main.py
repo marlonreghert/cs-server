@@ -306,9 +306,30 @@ async def _project_redis_from_rds(c) -> dict:
     projector removes venues deprecated in RDS (B1) and counts the photo cache
     TTL down (B2). It is the sole Redis writer for pipeline data."""
     loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(
+    summary = await loop.run_in_executor(
         None, c.redis_projection_service.rebuild_redis_from_rds
     )
+    # Events serving projection (plans/260905_events-serving-projection.md):
+    # a SIBLING pass over its own key family, run in the SAME executor call
+    # AFTER the venue projection above has already fully committed. This
+    # try/except is the last line of defense for the isolation guarantee —
+    # project_events() already fails safe internally (an aborted cycle
+    # leaves Redis intact, a bad event is isolated) — but ANY exception
+    # escaping it regardless must still never fail this job or block the
+    # venue metrics/on_success path below from recording what already
+    # succeeded above.
+    try:
+        events_summary = await loop.run_in_executor(
+            None, c.redis_projection_service.project_events
+        )
+        summary["events"] = events_summary
+    except Exception as e:
+        logger.error(
+            f"[Scheduler] events projection failed, isolated from the venue "
+            f"projection above (which already committed): {e}"
+        )
+        summary["events"] = {"errors": 1, "error": str(e)}
+    return summary
 
 
 def _record_projection_metrics(summary: dict) -> None:
