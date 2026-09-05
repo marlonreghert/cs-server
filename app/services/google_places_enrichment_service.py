@@ -23,6 +23,7 @@ from app.services.price_signal import (
 from app.models.opening_hours import OpeningHours
 from app.models.instagram import VenueInstagram
 from app.models.venue_review import VenueReview, VenueReviews
+from app.services.venue_address_components import map_address_components
 from app.metrics import (
     VIBE_ATTRIBUTES_FETCH_RESULTS,
     VENUES_WITH_VIBE_ATTRIBUTES,
@@ -32,6 +33,7 @@ from app.metrics import (
     VENUES_DEPRECATED_TOTAL,
     VENUES_SOFT_DELETED_TOTAL,
     INSTAGRAM_ENRICHMENT_RESULTS,
+    VENUE_ADDRESS_COMPONENTS_TOTAL,
 )
 
 logger = logging.getLogger(__name__)
@@ -207,6 +209,34 @@ class GooglePlacesEnrichmentService:
             )
         else:
             vibe_attrs.google_primary_type = incoming_type
+
+    def _apply_address_components(self, venue_id: str, address_components) -> None:
+        """Map Google's raw `addressComponents` into the structured
+        `venues.address` columns and persist them with the never-clobber
+        write (plans/260905_events-serving-projection.md Phase 2).
+
+        Isolated deliberately: this call happens inside `enrich_venue`'s
+        broad try/except too, but a bare AttributeError from a test harness
+        wiring a plain (non-RDS-backed) dao must not read as an enrichment
+        failure for every OTHER field this same response already populated
+        — Google Places enrichment must degrade, never abort, when one
+        optional facet's write path is unavailable (CLAUDE.md: "keep
+        enrichment paths optional and dependency-aware").
+        """
+        mapped = map_address_components(address_components)
+        try:
+            update = getattr(self.venue_dao, "update_venue_address_components", None)
+            if update is None:
+                return
+            update(venue_id, **mapped)
+        except Exception as e:  # pragma: no cover - defensive
+            logger.warning(
+                f"[GooglePlacesEnrichment] {venue_id}: address-component "
+                f"write failed, leaving stored values untouched: {e}"
+            )
+            return
+        outcome = "written" if any(mapped.values()) else "unchanged"
+        VENUE_ADDRESS_COMPONENTS_TOTAL.labels(outcome=outcome).inc()
 
     def _apply_business_status(self, venue_id: str, details) -> bool:
         """Persist Google's business status and, on closure, run the same
@@ -397,6 +427,12 @@ class GooglePlacesEnrichmentService:
                 logger.debug(
                     f"[GooglePlacesEnrichment] Stored {len(venue_reviews.reviews)} reviews for {venue_id}"
                 )
+
+            # Structured address components (plans/260905_events-serving-
+            # projection.md Phase 2) — isolated: a failure here must never
+            # cost the venue the vibe attributes/reviews/opening-hours it
+            # already got from this SAME response.
+            self._apply_address_components(venue_id, details.address_components)
 
             # Backfill Venue.rating / Venue.reviews / Venue.price_level from
             # Google. The inventory-sync ingestion path (added in #18) creates

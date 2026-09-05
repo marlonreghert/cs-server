@@ -849,6 +849,28 @@ class Settings(BaseSettings):
     # this adds defense-in-depth for that one property, without requiring it.
     admin_api_key: str = ""
 
+    # Events Serving Projection (plans/260905_events-serving-projection.md).
+    # cs-server is the sole writer of the events Redis projection — a
+    # sibling pass to the venue projector, isolated so a bug here can never
+    # touch venue serving. Ships dark: False until the event-flyers/*
+    # terraform apply (infra/media/) is verified, the same ordering rule
+    # instagram_profile_photo_enabled follows and for the same reason (a
+    # write outside the IAM policy fails only after the archived bytes have
+    # already been read).
+    events_projection_enabled: bool = False
+    # How many days ahead of "today" a recurring announcement is
+    # materialised into concrete per-day occurrences (the window is
+    # inclusive of both endpoints — see app/services/event_occurrences.py) —
+    # long enough for a date picker to have content, short enough to bound
+    # the size of the Redis index.
+    events_projection_horizon_days: int = 21
+    # Per-cycle cap on how many events the flyer copier (Phase 1) attempts:
+    # bounds a first-enable backlog so it cannot monopolise one projection
+    # tick. An event whose flyer_url is already set is never re-attempted
+    # (no back-fill, no refresh window — see event_flyer_service.py), so this
+    # only ever throttles genuinely new work.
+    event_flyer_copy_max_per_cycle: int = 25
+
     # Dev Mode - overrides default locations for venue discovery
     dev_mode: bool = False
     dev_lat: float = -8.07834       # Default: Recife ZS/ZN

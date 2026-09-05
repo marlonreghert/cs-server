@@ -54,6 +54,13 @@ locals {
   # Every object this stack serves lives under this prefix, and the write grant
   # below is scoped to exactly it. Widening it is a terraform apply FIRST.
   profile_photo_prefix = "venue-profile-photos"
+  # Events serving projection (plans/260905_events-serving-projection.md,
+  # Phase 1): a second content-addressed prefix in this SAME bucket/
+  # distribution — an event flyer is on the identical servable side of the
+  # data-lake-vs-media-bucket boundary this stack exists to hold, so it is a
+  # Resource-list addition to the existing writer policy below, never a new
+  # bucket, policy or distribution.
+  event_flyer_prefix = "event-flyers"
 }
 
 # ----------------------------------------------------------------------------
@@ -278,6 +285,21 @@ resource "aws_iam_policy" "media_profile_photo_writer" {
         Effect   = "Allow"
         Action   = ["s3:PutObject"]
         Resource = "${aws_s3_bucket.media.arn}/${local.profile_photo_prefix}/*"
+      },
+      # plans/260905_events-serving-projection.md, Phase 1: a second
+      # statement rather than widening the Resource above into a list under
+      # "PutProfilePhotos" — same policy (its name/description stay
+      # untouched, since aws_iam_policy.description is immutable and a
+      # rename forces a destroy-and-recreate), a second, separately-named
+      # Sid for its own prefix. No GetObject/DeleteObject/ListBucket here
+      # either, for the identical reason PutProfilePhotos above has none:
+      # cs-server never reads a flyer back — the unchanged-copy check
+      # compares a hash held in events.post_item, not an S3 read.
+      {
+        Sid      = "PutEventFlyers"
+        Effect   = "Allow"
+        Action   = ["s3:PutObject"]
+        Resource = "${aws_s3_bucket.media.arn}/${local.event_flyer_prefix}/*"
       },
     ]
   })

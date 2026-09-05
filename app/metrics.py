@@ -1947,6 +1947,101 @@ VENUE_PROFILE_PHOTO_EDGE_COLOR_VENUES = Gauge(
 )
 
 # =============================================================================
+# EVENTS SERVING PROJECTION
+# plans/260905_events-serving-projection.md
+#
+# An `outcome`/`stage` label that never appears is itself the diagnostic —
+# same reasoning as the INSTAGRAM PROFILE PHOTO section above. Every
+# vocabulary below is zero-filled right here, at import, so an ABSENT label
+# proves that code path never ran rather than reading as "no data yet".
+# =============================================================================
+
+EVENTS_PROJECTED_OCCURRENCES = Gauge(
+    "events_projected_occurrences",
+    "Event occurrences currently held in the Redis serving projection",
+)
+
+EVENTS_PROJECTION_SOURCE_ROWS = Gauge(
+    "events_projection_source_rows",
+    "events.post_item rows selected by the events projection's last cycle, "
+    "before recurrence expansion",
+)
+
+EVENTS_PROJECTION_BYTES = Gauge(
+    "events_projection_bytes",
+    "Total bytes of occurrence JSON currently held in the Redis serving "
+    "projection",
+)
+
+EVENTS_PROJECTION_ERRORS_TOTAL = Counter(
+    "events_projection_errors_total",
+    "Events projection cycle errors, by stage",
+    ["stage"],
+    # stage: selection (the bulk selection query itself failed — the whole
+    #        cycle is aborted and Redis is left intact, never partially
+    #        rewritten) | event (one event's expansion/write raised — that
+    #        one event is isolated and named in the run summary; every
+    #        other event in the same cycle still projects)
+)
+
+EVENTS_PROJECTION_DURATION_SECONDS = Histogram(
+    "events_projection_duration_seconds",
+    "Events projection cycle duration in seconds",
+    buckets=(0.1, 0.5, 1.0, 5.0, 15.0, 30.0, 60.0, 120.0),
+)
+
+EVENT_FLYER_COPY_TOTAL = Counter(
+    "event_flyer_copy_total",
+    "Event flyer copy attempts (data lake -> app media bucket), by outcome",
+    ["outcome"],
+    # outcome: copied (freshly uploaded) | unchanged (the content hash
+    #          already matched a known key — no re-upload, no re-invalidation
+    #          of anything a client already cached) | no_key (the event has
+    #          no archived cover photo at all) | archive_missing
+    #          (cover_photo_key pointed at an object no longer in the data
+    #          lake) | access_denied (the media-bucket PUT was denied — the
+    #          event-flyers/* terraform apply has not landed yet; this must
+    #          read as loud and distinct, never an ordinary transient
+    #          failure) | failed (any other read/upload failure)
+)
+
+# Retention is deliberately unbounded for now (event-flyers/* has no
+# lifecycle expiry — see the plan's own Retention section) — these two make
+# that growth VISIBLE instead of silent, computed each projection cycle from
+# events.post_item (the system of record), never from an S3 listing: the
+# media-bucket IAM grant is PutObject-only, so cs-server cannot list its own
+# writes back (infra/media/main.tf) and never needed to before this feature.
+EVENT_FLYER_OBJECTS = Gauge(
+    "event_flyer_objects",
+    "Events currently holding a copied flyer "
+    "(events.post_item.flyer_url IS NOT NULL)",
+)
+
+EVENT_FLYER_BYTES = Gauge(
+    "event_flyer_bytes",
+    "Total bytes stored under event-flyers/* in the app media bucket",
+)
+
+VENUE_ADDRESS_COMPONENTS_TOTAL = Counter(
+    "venue_address_components_total",
+    "Google Places address-component enrichment attempts, by outcome",
+    ["outcome"],
+    # outcome: written (the response answered at least one of street/
+    #          neighborhood/city/postal_code — a never-clobber write was
+    #          attempted) | unchanged (the response answered NONE of them;
+    #          nothing was written, and any already-stored value is left
+    #          exactly as it was — see
+    #          app.services.venue_address_components.map_address_components)
+)
+
+for _stage in ("selection", "event"):
+    EVENTS_PROJECTION_ERRORS_TOTAL.labels(stage=_stage)
+for _outcome in ("copied", "unchanged", "no_key", "archive_missing", "access_denied", "failed"):
+    EVENT_FLYER_COPY_TOTAL.labels(outcome=_outcome)
+for _outcome in ("written", "unchanged"):
+    VENUE_ADDRESS_COMPONENTS_TOTAL.labels(outcome=_outcome)
+
+# =============================================================================
 # APPLICATION INFO
 # =============================================================================
 

@@ -18,6 +18,7 @@ from app.models.instagram import (
 from app.models.venue_review import VenueReviews, VenueReviewsDeep
 from app.models.menu import VenueMenuPhotos, VenueMenuData
 from app.models.vibe_profile import VenueVibeProfile
+from app.models.event_occurrence import EventOccurrence
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +67,29 @@ VENUE_IG_POSTS_KEY_FORMAT = "venue_ig_posts_v1:{}"
 # every Google-photo key in this module.
 VENUE_PROFILE_PHOTO_KEY_FORMAT = "venue_profile_photo_v1:{}"
 VENUE_VIBE_PROFILE_KEY_FORMAT = "venue_vibe_profile_v2:{}"
+
+# Events serving projection (plans/260905_events-serving-projection.md,
+# Phase 4) — cs-server is the SOLE writer of this whole family. Not
+# venue-keyed like everything above: the unit is an occurrence, so this
+# family gets its own setter/deleter/index-writer convention rather than a
+# _REBUILD_MODELS entry (see RedisProjectionService.project_events).
+#
+# `occurrence_id` is `<post_item_id>` for a one-off event and
+# `<post_item_id>_<YYYY-MM-DD>` for one materialised day of a recurring
+# announcement (app.services.event_occurrences). The separator is `_` and
+# MUST NEVER be `#` — this id is returned on every EventCard and is the path
+# segment of vibes_bot's `GET /events/{occurrence_id}`; `#` is the RFC 3986
+# fragment delimiter, so any spec-compliant client that builds that URL by
+# concatenation would silently drop everything after it.
+EVENT_OCCURRENCE_KEY_FORMAT = "event_occurrence_v1:{}"
+# ZSET, member = occurrence id, score = starts_at epoch seconds (UTC). One
+# key per city. Written/pruned by the SAME code path as the venue index
+# below, so one can never outlive the other.
+EVENTS_CITY_INDEX_KEY_FORMAT = "events_index_v1:{}"
+# ZSET, same members/scores as the city index, scoped to one venue — backs a
+# per-venue rail (the blueprint's "Casa Bacurau esta semana" shelf) without
+# pulling and filtering a whole city window client-side.
+EVENTS_VENUE_INDEX_KEY_FORMAT = "events_venue_v1:{}"
 
 
 class RedisVenueDAO:
@@ -1364,3 +1388,63 @@ class RedisVenueDAO:
             Number of venues with vibe profiles
         """
         return self._count_keys("venue_vibe_profile_v2:*")
+
+    # =========================================================================
+    # EVENTS SERVING PROJECTION (plans/260905_events-serving-projection.md)
+    # cs-server is the SOLE writer of this whole family. See the key-format
+    # constants above for the id/separator rules.
+    # =========================================================================
+
+    def set_event_occurrence(self, occurrence: EventOccurrence) -> None:
+        """Write one occurrence's full contract payload (no TTL — the
+        projection re-asserts every cycle, so the cycle IS the lifetime)."""
+        self._set_model(
+            EVENT_OCCURRENCE_KEY_FORMAT.format(occurrence.occurrence_id), occurrence
+        )
+
+    def get_event_occurrence(self, occurrence_id: str) -> Optional[EventOccurrence]:
+        return self._get_model(
+            EVENT_OCCURRENCE_KEY_FORMAT.format(occurrence_id), EventOccurrence, "event occurrence"
+        )
+
+    def delete_event_occurrence(self, occurrence_id: str) -> bool:
+        """Delete ONLY the payload key. Index membership is removed
+        separately (`remove_from_city_events_index`/
+        `remove_from_venue_events_index`) — the caller
+        (RedisProjectionService.project_events) always removes an
+        occurrence from both indexes BEFORE calling this, so a payload key
+        never outlives its last index membership."""
+        return bool(self.client.del_(EVENT_OCCURRENCE_KEY_FORMAT.format(occurrence_id)))
+
+    def index_event_occurrence(
+        self, *, city_slug: str, venue_id: str, occurrence_id: str, score: float,
+    ) -> None:
+        """Add/refresh this occurrence's membership in BOTH the city and
+        venue indexes, with the IDENTICAL score in each — written together
+        so one index can never hold a member the other lacks."""
+        self.client.zadd(EVENTS_CITY_INDEX_KEY_FORMAT.format(city_slug), {occurrence_id: score})
+        self.client.zadd(EVENTS_VENUE_INDEX_KEY_FORMAT.format(venue_id), {occurrence_id: score})
+
+    def remove_from_city_events_index(self, city_slug: str, occurrence_id: str) -> bool:
+        key = EVENTS_CITY_INDEX_KEY_FORMAT.format(city_slug)
+        return bool(self.client.zrem(key, occurrence_id))
+
+    def remove_from_venue_events_index(self, venue_id: str, occurrence_id: str) -> bool:
+        key = EVENTS_VENUE_INDEX_KEY_FORMAT.format(venue_id)
+        return bool(self.client.zrem(key, occurrence_id))
+
+    def get_city_events_index(self, city_slug: str) -> list[str]:
+        """Every occurrence id currently in one city's index, ascending by
+        `starts_at` (ZRANGE's natural ascending-score order) — small by
+        construction (one city's occurrences within the horizon), never a
+        keyspace-scale read."""
+        return self.client.zrange(EVENTS_CITY_INDEX_KEY_FORMAT.format(city_slug), 0, -1)
+
+    def get_venue_events_index(self, venue_id: str) -> list[str]:
+        return self.client.zrange(EVENTS_VENUE_INDEX_KEY_FORMAT.format(venue_id), 0, -1)
+
+    def city_events_index_score(self, city_slug: str, occurrence_id: str) -> Optional[float]:
+        return self.client.zscore(EVENTS_CITY_INDEX_KEY_FORMAT.format(city_slug), occurrence_id)
+
+    def venue_events_index_score(self, venue_id: str, occurrence_id: str) -> Optional[float]:
+        return self.client.zscore(EVENTS_VENUE_INDEX_KEY_FORMAT.format(venue_id), occurrence_id)

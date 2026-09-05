@@ -1,4 +1,3 @@
-@wip
 Feature: Events serving projection
   As the VibeSense app
   I want extracted events to reach the shared Redis serving projection

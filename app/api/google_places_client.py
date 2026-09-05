@@ -33,6 +33,14 @@ VIBE_FIELDS_MASK = ",".join(
         "id",
         "displayName",
         "primaryType",
+        # Structured address components (route/sublocality/locality/postal_code
+        # etc. — plans/260905_events-serving-projection.md Phase 2). This call
+        # is ALREADY billed at the top Enterprise + Atmosphere tier by the
+        # fields below (reviews, priceLevel, priceRange, generativeSummary,
+        # the whole atmosphere block), so one more field cannot push it to a
+        # higher SKU — see that plan's Evidence section for the reasoning
+        # this conclusion rests on.
+        "addressComponents",
         # Business status (OPERATIONAL, CLOSED_TEMPORARILY, CLOSED_PERMANENTLY)
         "businessStatus",
         # Website (used to detect Instagram URLs)
@@ -520,6 +528,10 @@ class GooglePlacesAPIClient:
             user_rating_count=data.get("userRatingCount"),
             price_level=data.get("priceLevel"),
             price_range=_parse_price_range(data.get("priceRange")),
+            # Raw component list, verbatim — app.services.venue_address_
+            # components.map_address_components does the fallback-rung
+            # mapping; this layer only parses the wire shape.
+            address_components=data.get("addressComponents"),
         )
 
     def details_to_vibe_attributes(

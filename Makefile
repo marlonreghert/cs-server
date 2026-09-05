@@ -152,6 +152,13 @@ test-unit:
 		tests/test_admin_jobs_run_record.py \
 		tests/test_venue_profile_photo.py \
 		tests/test_image_edge_color.py \
+		tests/test_event_occurrences.py \
+		tests/test_venue_address_components.py \
+		tests/test_venue_media_store.py \
+		tests/test_event_flyer_service.py \
+		tests/test_event_city_slug.py \
+		tests/test_event_projection_selection.py \
+		tests/test_events_redis_dao.py \
 		-v
 
 test-integration:

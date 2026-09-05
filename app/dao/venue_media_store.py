@@ -47,6 +47,13 @@ logger = logging.getLogger(__name__)
 # fails after the Apify scrape has already been paid for.
 PROFILE_PHOTO_ROOT = "venue-profile-photos"
 
+# Second content-addressed prefix, same bucket/distribution — event flyers
+# (plans/260905_events-serving-projection.md, Phase 1). infra/media/main.tf's
+# writer policy grants PutObject on this prefix as a SEPARATE statement from
+# PROFILE_PHOTO_ROOT's; apply and verify it BEFORE `events_projection_enabled`
+# ships true, for the identical reason PROFILE_PHOTO_ROOT's own comment names.
+EVENT_FLYER_ROOT = "event-flyers"
+
 # The number of leading sha256 hex characters that appear in the key. 16 hex
 # chars is 64 bits: at catalog scale (thousands of objects) a collision is not
 # a practical concern, and the full digest is kept in the RDS row anyway, which
@@ -73,6 +80,18 @@ def profile_photo_key(venue_id: str, content_hash: str) -> str:
     """
     return (
         f"{PROFILE_PHOTO_ROOT}/{venue_id}/"
+        f"{content_hash[:CONTENT_HASH_KEY_LENGTH]}.jpg"
+    )
+
+
+def event_flyer_key(post_item_id: str, content_hash: str) -> str:
+    """The content-addressed key for one event's flyer — mirrors
+    `profile_photo_key` exactly (same truncated-hash idempotence, same fixed
+    `.jpg` extension; the object's real media type travels in its
+    `Content-Type` header), keyed by `post_item_id` instead of `venue_id`.
+    """
+    return (
+        f"{EVENT_FLYER_ROOT}/{post_item_id}/"
         f"{content_hash[:CONTENT_HASH_KEY_LENGTH]}.jpg"
     )
 
@@ -110,6 +129,9 @@ class VenueMediaStore:
     def profile_photo_key(self, venue_id: str, content_hash: str) -> str:
         return profile_photo_key(venue_id, content_hash)
 
+    def event_flyer_key(self, post_item_id: str, content_hash: str) -> str:
+        return event_flyer_key(post_item_id, content_hash)
+
     async def put_profile_photo(
         self,
         *,
@@ -125,6 +147,33 @@ class VenueMediaStore:
         gap must not abort a run that is paying for every other venue in it.
         """
         key = profile_photo_key(venue_id, content_hash)
+        await asyncio.to_thread(
+            self._s3.put_object,
+            Bucket=self.bucket,
+            Key=key,
+            Body=data,
+            ContentType=content_type or "image/jpeg",
+            CacheControl=PROFILE_PHOTO_CACHE_CONTROL,
+        )
+        logger.debug(
+            f"[VenueMediaStore] stored {key} ({len(data)} bytes, {content_type})"
+        )
+        return key, self.cdn_url(key)
+
+    async def put_event_flyer(
+        self,
+        *,
+        post_item_id: str,
+        content_hash: str,
+        data: bytes,
+        content_type: str = "image/jpeg",
+    ) -> tuple[str, str]:
+        """Store one event's flyer and return `(key, cdn_url)`. Mirrors
+        `put_profile_photo` exactly — see its own docstring for the caller
+        contract (raises whatever boto3 raises; the caller treats that as an
+        isolated per-event failure, never a reason to abort the whole
+        projection cycle)."""
+        key = event_flyer_key(post_item_id, content_hash)
         await asyncio.to_thread(
             self._s3.put_object,
             Bucket=self.bucket,

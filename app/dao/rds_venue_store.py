@@ -199,6 +199,42 @@ class RdsVenueStore:
             ), {"venue_id": venue.venue_id, "raw_text": venue.venue_address,
                 "lat": venue.venue_lat, "lng": venue.venue_lng})
 
+    def update_venue_address_components(
+        self, venue_id: str, *,
+        street: Optional[str] = None, neighborhood: Optional[str] = None,
+        city: Optional[str] = None, postal_code: Optional[str] = None,
+    ) -> None:
+        """Never-clobber write of the four structured `venues.address`
+        columns (plans/260905_events-serving-projection.md Phase 2).
+        `COALESCE(:new, existing)` per column is the never-overwrite
+        guarantee enforced AT THE SQL LEVEL: a None argument (Google's
+        response did not answer this field) leaves the stored value
+        exactly as it was; a non-empty string always wins, even over an
+        already-non-null value, because Google's own answer can legitimately
+        change and every OTHER vibe attribute is already overwritten
+        wholesale on re-enrichment. An empty-string argument is treated
+        identically to None by the caller
+        (app.services.venue_address_components.map_address_components never
+        produces one) — this method still guards it explicitly with
+        `NULLIF(:x, '')` so the guarantee does not rest solely on the
+        caller's good behaviour. Never touches raw_text/lat/lng — those
+        belong to upsert_venue's own dual-write. A venue with no address row
+        (should not occur — every venue gets one at upsert time) matches
+        zero rows and is a silent no-op."""
+        with self.engine.begin() as conn:
+            conn.execute(text(
+                "UPDATE venues.address SET "
+                "street=COALESCE(NULLIF(:street, ''), street), "
+                "neighborhood=COALESCE(NULLIF(:neighborhood, ''), neighborhood), "
+                "city=COALESCE(NULLIF(:city, ''), city), "
+                "postal_code=COALESCE(NULLIF(:postal_code, ''), postal_code), "
+                "updated_at=now() "
+                "WHERE venue_id=:venue_id"
+            ), {
+                "venue_id": venue_id, "street": street, "neighborhood": neighborhood,
+                "city": city, "postal_code": postal_code,
+            })
+
     def soft_delete_venue(self, venue_id, reason, source, google_business_status=None) -> None:
         with self.engine.begin() as conn:
             conn.execute(text(
@@ -261,6 +297,21 @@ class RdsVenueStore:
             return [r[0] for r in conn.execute(text(
                 "SELECT venue_id FROM serving.eligible_venue"
             ))]
+
+    def count_event_flyers(self) -> tuple[int, int]:
+        """`(count, total_bytes)` of events currently holding a copied flyer
+        — backs the `event_flyer_objects`/`event_flyer_bytes` gauges
+        (plans/260905_events-serving-projection.md, migration 0044).
+        Computed fresh from `events.post_item` (the system of record) every
+        projection cycle, never from an S3 listing: the media-bucket IAM
+        grant is PutObject-only (infra/media/main.tf), so cs-server cannot
+        list/read its own writes back."""
+        with self.engine.connect() as conn:
+            row = conn.execute(text(
+                "SELECT count(*), COALESCE(sum(flyer_byte_size), 0) "
+                "FROM events.post_item WHERE flyer_url IS NOT NULL"
+            )).first()
+        return (int(row[0]), int(row[1])) if row else (0, 0)
 
     def is_venue_servable(self, venue_id: str) -> bool:
         """Single-venue counterpart of `list_servable_venue_ids()`, for a
@@ -509,6 +560,17 @@ class RdsVenueStore:
         # the row is simply gone) and for every row that has never been
         # absorbed at all.
         "superseded_by",
+        # plans/260905_events-serving-projection.md Phase 1 (migration
+        # 0044) — filled ONLY by app.services.event_flyer_service, never by
+        # extraction/reconciliation. Listed here (not just present in the
+        # migration) because update_event's `event_cols` allowlist is what
+        # actually lets a plain `update_event(event_id, {"flyer_url": ...})`
+        # reach the column at all — omitting a new column here makes the SQL
+        # store silently no-op the write while the fake store (which has no
+        # such allowlist) accepts it, which is exactly the kind of drift
+        # that passes every BDD/pytest scenario and fails only in prod.
+        "flyer_url", "flyer_s3_key", "flyer_content_hash", "flyer_copied_at",
+        "flyer_byte_size",
     )
     _EVENT_JSONB_COLUMNS = ("lineup", "operator_edited_fields", "attractions")
     # Python dict key -> real SQL column name, for the one column whose
@@ -573,6 +635,8 @@ class RdsVenueStore:
         "e.location_resolution, e.location_confidence, e.linked_by, e.linked_at, "
         "e.operator_edited_fields, e.ticket_info, e.attractions, "
         "e.post_type, e.category, e.time_known, e.superseded_by, "
+        "e.flyer_url, e.flyer_s3_key, e.flyer_content_hash, e.flyer_copied_at, "
+        "e.flyer_byte_size, "
         "e.updated_at, v.venue_name, "
         "ps.source_kind, ps.source_handle, ps.source_shortcode, ps.source_permalink, "
         "ps.source_event_key, ps.source_event_index, ps.cover_photo_key, ps.raw_extraction, "
@@ -606,6 +670,8 @@ class RdsVenueStore:
         "e.location_resolution, e.location_confidence, e.linked_by, e.linked_at, "
         "e.operator_edited_fields, e.ticket_info, e.attractions, "
         "e.post_type, e.category, e.time_known, e.superseded_by, "
+        "e.flyer_url, e.flyer_s3_key, e.flyer_content_hash, e.flyer_copied_at, "
+        "e.flyer_byte_size, "
         "e.updated_at, v.venue_name, "
         "es.source_kind, es.source_handle, es.source_shortcode, es.source_permalink, "
         "es.source_event_key, es.source_event_index, es.cover_photo_key, "
@@ -969,6 +1035,67 @@ class RdsVenueStore:
         sql += " ORDER BY e.starts_at NULLS LAST, e.post_item_id"
         with self.engine.connect() as conn:
             return [dict(r) for r in conn.execute(text(sql), params).mappings()]
+
+    def list_events_for_projection(self, *, now) -> list[dict]:
+        """The events serving projection's selection query (plans/260905_
+        events-serving-projection.md, Phase 4 §3) — one bulk query, a
+        SIBLING of `list_events` (never a caller of it: the predicates
+        genuinely differ). This is a hand-kept SQL transliteration of
+        `app.services.event_projection_selection.is_selectable` (the
+        row-local rule) PLUS venue servability via a subquery against
+        `serving.eligible_venue` — both stay in lockstep by hand, the same
+        way `venue_eligibility.evaluate()` and the real view are kept in
+        lockstep elsewhere in this module.
+
+        Deliberately does NOT filter promoter-sourced items: that needs a
+        GROUPED read of every selected event's sources
+        (`list_all_event_sources`, filtered in Python), which
+        RedisProjectionService.project_events does itself in ONE further
+        query over exactly this result set — never per-row, and never
+        duplicated here.
+
+        `is_selectable`'s temporal rule — recurring OR null starts_at is
+        ALWAYS selectable; a non-recurring row needs
+        `starts_at >= now - 1 day` — is expressed directly as SQL so the two
+        never drift silently; a pytest test pins the Python predicate's own
+        behaviour, and this query's shape is reviewed against it by hand.
+        """
+        from app.services.event_projection_selection import PAST_GRACE
+
+        cutoff = now - PAST_GRACE
+        sql = (
+            f"{self._EVENT_SELECT} "
+            "WHERE e.post_type = 'event' "
+            "AND e.status IN ('accepted', 'confirmed') "
+            "AND e.venue_id IS NOT NULL "
+            "AND e.superseded_by IS NULL "
+            "AND (e.is_recurring OR e.starts_at IS NULL OR e.starts_at >= :cutoff) "
+            "AND e.venue_id IN (SELECT venue_id FROM serving.eligible_venue) "
+            "ORDER BY e.starts_at NULLS LAST, e.post_item_id"
+        )
+        with self.engine.connect() as conn:
+            return [dict(r) for r in conn.execute(text(sql), {"cutoff": cutoff}).mappings()]
+
+    def get_address_bulk(self, venue_ids: list[str]) -> dict[str, dict]:
+        """One `venues.address` row per requested venue_id, keyed by
+        venue_id — the bulk venue-address join Phase 4 §4 needs.
+        `_EVENT_SELECT` cannot supply lat/lng/neighborhood (those columns
+        were dropped from venues.venue by migration 0007 and live solely on
+        venues.address, which no events query has ever joined); this is
+        modelled on `_VENUE_SELECT`'s own `LEFT JOIN venues.address`,
+        narrowed to exactly the columns the projection needs, and follows
+        `get_venues_by_ids`'s own expanding-IN bulk-fetch convention. Empty
+        input short-circuits without a query; an id with no address row is
+        silently omitted rather than raising."""
+        if not venue_ids:
+            return {}
+        stmt = text(
+            "SELECT venue_id, lat, lng, neighborhood "
+            "FROM venues.address WHERE venue_id IN :ids"
+        ).bindparams(bindparam("ids", expanding=True))
+        with self.engine.connect() as conn:
+            rows = conn.execute(stmt, {"ids": list(venue_ids)}).mappings()
+            return {row["venue_id"]: dict(row) for row in rows}
 
     def list_events_awaiting_decision(self) -> list[dict]:
         """Every event still awaiting a human decision — the review queue's

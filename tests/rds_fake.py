@@ -200,6 +200,33 @@ class InMemoryRdsVenueStore:
     def get_address(self, venue_id) -> Optional[dict]:
         return self.addresses.get(venue_id)
 
+    def update_venue_address_components(
+        self, venue_id: str, *,
+        street: Optional[str] = None, neighborhood: Optional[str] = None,
+        city: Optional[str] = None, postal_code: Optional[str] = None,
+    ) -> None:
+        """Never-clobber structured-component write (plans/260905_events-
+        serving-projection.md Phase 2): mirrors the real store's
+        `COALESCE(:new, existing)` UPDATE — a None (or, defensively, an
+        empty string) argument leaves the stored value untouched; a
+        non-empty string always wins, even over an already-non-null value
+        (Google's own answer can legitimately change). Never touches
+        raw_text/lat/lng — those are upsert_venue's own column set. A venue
+        with no address row (should not occur — every venue gets a 1:1 row
+        at upsert time) is a silent no-op, mirroring a real UPDATE ... WHERE
+        that matches zero rows."""
+        self._guard()
+        addr = self.addresses.get(venue_id)
+        if addr is None:
+            return
+        for field, value in (
+            ("street", street), ("neighborhood", neighborhood),
+            ("city", city), ("postal_code", postal_code),
+        ):
+            if value:
+                addr[field] = value
+        addr["updated_at"] = _now()
+
     def soft_delete_venue(self, venue_id, reason, source, google_business_status=None) -> None:
         self._guard()
         row = self.venues.get(venue_id)
@@ -306,6 +333,13 @@ class InMemoryRdsVenueStore:
                 continue
             out.append(vid)
         return out
+
+    def count_event_flyers(self) -> tuple[int, int]:
+        """Mirrors RdsVenueStore.count_event_flyers: `(count, total_bytes)`
+        of events currently holding a copied flyer."""
+        rows = [r for r in self.events.values() if r.get("flyer_url")]
+        total_bytes = sum(r.get("flyer_byte_size") or 0 for r in rows)
+        return (len(rows), total_bytes)
 
     def is_venue_servable(self, venue_id: str) -> bool:
         """Single-venue counterpart of `list_servable_venue_ids()`. Reuses it
@@ -709,6 +743,17 @@ class InMemoryRdsVenueStore:
         # False, never a missing key that happens to only work because
         # EventOut's own field default papers over it).
         event_row.setdefault("time_known", False)
+        # plans/260905_events-serving-projection.md Phase 1 (migration
+        # 0044): nullable, no NOT-NULL default in Postgres, but a real
+        # SELECT always returns the column with NULL when unset — mirrored
+        # here (rather than leaving the key absent) so `row.get("flyer_url")
+        # is None` and `row["flyer_url"] is None` agree, exactly like every
+        # other selected column on a real Postgres row.
+        for flyer_col in (
+            "flyer_url", "flyer_s3_key", "flyer_content_hash",
+            "flyer_copied_at", "flyer_byte_size",
+        ):
+            event_row.setdefault(flyer_col, None)
         self.events[event_id] = event_row
 
         source_fields = {k: v for k, v in fields.items() if k in self._EVENT_SOURCE_FIELDS}
@@ -820,6 +865,38 @@ class InMemoryRdsVenueStore:
             out.append(self._merged_view(row))
         out.sort(key=lambda r: (r.get("starts_at") is None, r.get("starts_at"), r["event_id"]))
         return out
+
+    def list_events_for_projection(self, *, now) -> list[dict]:
+        """The events serving projection's selection query (plans/260905_
+        events-serving-projection.md, Phase 4 §3) — a sibling of
+        `list_events`, never a caller of it (the two have genuinely
+        different predicates). Applies `event_projection_selection.
+        is_selectable` (the row-local rule) AND venue servability (external
+        — reuses `list_servable_venue_ids`, never a second definition).
+        Deliberately does NOT apply promoter-visibility filtering: that
+        needs a GROUPED read of every event's sources, which
+        RedisProjectionService.project_events does itself in one pass over
+        the selected set, exactly as the plan specifies (never one query
+        per row)."""
+        from app.services.event_projection_selection import is_selectable
+
+        self._guard()
+        servable = set(self.list_servable_venue_ids())
+        out = [
+            self._merged_view(row) for row in self.events.values()
+            if is_selectable(row, now=now) and row.get("venue_id") in servable
+        ]
+        out.sort(key=lambda r: (r.get("starts_at") is None, r.get("starts_at"), r["event_id"]))
+        return out
+
+    def get_address_bulk(self, venue_ids: list[str]) -> dict[str, dict]:
+        """One address row per requested venue_id, keyed by venue_id — the
+        bulk venue-address join Phase 4 §4 needs (lat/lng/neighborhood are
+        never in `_EVENT_SELECT`'s own join; they live solely on
+        venues.address). Silently omits an id with no address row rather
+        than raising — every venue gets a 1:1 row at upsert_venue time, so
+        this should not occur in practice."""
+        return {vid: dict(self.addresses[vid]) for vid in venue_ids if vid in self.addresses}
 
     def list_events_awaiting_decision(self) -> list[dict]:
         """Every event still awaiting a human decision — mirrors

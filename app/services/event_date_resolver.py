@@ -404,6 +404,34 @@ def _is_no_computable_day_recurrence(
     return False
 
 
+# plans/260905_events-serving-projection.md, Phase 3: the ONLY public export
+# from this module's recurrence machinery, for a caller that has just the
+# STORED `events.post_item` row (`recurrence_text`), never the ephemeral
+# extraction-time `date_text` a fresh caption carries. `_detect_recurrence`
+# cannot be reused as-is here: its branch 1 (the classic toda/todo + bare
+# weekday marker) reads `date_text` unconditionally, which the projection
+# never has. Branch 2 — the `is_recurring`-gated cadence/range/list finder —
+# is exactly what a STORED, already-`is_recurring=True` row needs, so this
+# wraps it verbatim rather than re-parsing recurrence prose a second time
+# (app/models/event_kind.py's docstring: two definitions of one thing is
+# exactly the drift that has already cost this repo real time).
+def weekdays_from_recurrence_text(recurrence_text: Optional[str]) -> Optional[frozenset]:
+    """The target weekday set (0=Monday..6=Sunday) for a recurring
+    announcement's STORED `recurrence_text`, or None when no computable day
+    is present — "toda semana"/"sempre" (`_is_no_computable_day_recurrence`)
+    and any recurrence prose this module simply does not recognise both
+    return None here, and both mean the SAME thing to a caller: invent no
+    days, fall back to the single resolved `starts_at` exactly as before.
+    The caller is responsible for knowing the row is `is_recurring=True` in
+    the first place — this function does not re-check that flag, matching
+    `_detect_recurrence`'s own is_recurring-gated branch, which only ever
+    reaches these two finders once that is already established."""
+    if not recurrence_text:
+        return None
+    normalized = recurrence_text.strip().lower()
+    return _weekdays_from_cadence_forms(normalized) or _weekdays_from_recurrence_forms(normalized)
+
+
 # Sentinel distinguishing "this pattern did not fire at all" (try the next
 # one) from "it fired and resolved to an invalid combination, like 31/02"
 # (stop looking — that numeral is CONSUMED, never fall through to a weekday
@@ -1202,5 +1230,5 @@ __all__ = [
     "INTERPRETATION_KIND_DAY_MONTH_YEAR", "INTERPRETATION_KIND_WEEKDAY",
     "INTERPRETATION_KIND_WEEKDAY_DAY", "INTERPRETATION_KIND_RANGE",
     "ResolvedDate", "resolve_event_datetime", "vote_on_sibling_years",
-    "select_date_interpretation_for_reuse",
+    "select_date_interpretation_for_reuse", "weekdays_from_recurrence_text",
 ]

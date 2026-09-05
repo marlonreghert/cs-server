@@ -1,4 +1,3 @@
-@wip
 Feature: Venue address components from Google Places
   As the events and venue serving layers
   I want the structured address components Google already returns to be stored
