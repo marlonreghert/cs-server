@@ -21,6 +21,7 @@ Feature: Events serving projection
     Then the occurrence payload contains the title, description, category, price text and ticket info
     And the occurrence payload contains the attractions list with the act name, type, stage and styles
     And the occurrence payload contains the venue id, venue name, latitude and longitude
+    And the coordinates come from the venue address record, not from the venue row
     And the occurrence payload contains the source permalink and source handle
     And the occurrence carries the local occurrence date "2026-09-06"
     And the occurrence carries "starts_at" as a UTC timestamp
@@ -79,6 +80,8 @@ Feature: Events serving projection
     When the events projection runs
     Then an occurrence is projected for every Thursday within the horizon
     And each occurrence carries its own occurrence id ending in its own date
+    And no occurrence id contains a URI-reserved character
+    And each occurrence id survives being placed in a URL path unchanged
     And each occurrence starts at 21:00 Recife time on its own date
     And no occurrence is projected beyond the horizon
 
@@ -167,23 +170,8 @@ Feature: Events serving projection
     When the events projection runs
     Then no occurrence payload contains a data-lake key or a presigned url
 
-  # ── neighbourhood ─────────────────────────────────────────────────────────
-
-  Scenario: Store the bairro from the Places address components
-    Given Google Places returns address components with sublocality level 1 "Santo Amaro"
-    When "Casa Bacurau" is enriched
-    Then the stored address neighborhood is "Santo Amaro"
-
-  Scenario: Fall back to sublocality when no sublocality level 1 is returned
-    Given Google Places returns address components with sublocality "Boa Vista" and no sublocality level 1
-    When "Casa Bacurau" is enriched
-    Then the stored address neighborhood is "Boa Vista"
-
-  Scenario: Keep a stored bairro when the response carries no component for it
-    Given the stored address neighborhood is "Santo Amaro"
-    And Google Places returns address components with no sublocality of any kind
-    When "Casa Bacurau" is enriched
-    Then the stored address neighborhood is still "Santo Amaro"
+  # ── neighbourhood (projection side only; the Places parsing lives in
+  #    tests/bdd/enrichment/venue-address-components.feature) ────────────────
 
   Scenario: Carry the bairro onto every occurrence at that venue
     Given the stored address neighborhood for "Casa Bacurau" is "Santo Amaro"
@@ -197,6 +185,41 @@ Feature: Events serving projection
     When the events projection runs
     Then the occurrence payload reports a null venue neighborhood
     And the occurrence is still projected
+
+  # ── city and venue partitioning ───────────────────────────────────────────
+
+  Scenario: Derive the city from the geo-fence circle that already gates serving
+    Given "Casa Bacurau" lies inside the "recife" geo-fence circle
+    And an accepted event at "Casa Bacurau" starting 2026-09-06 20:00
+    When the events projection runs
+    Then the occurrence reports the city "recife"
+    And the occurrence is a member of the "recife" events index
+
+  Scenario: Pick the nearest centre when two city circles overlap
+    Given a venue lying inside both the "recife" and a neighbouring city circle
+    And the neighbouring circle's centre is closer to the venue
+    When the events projection runs
+    Then the occurrence reports the neighbouring city
+    And the projection makes the same choice on every subsequent cycle
+
+  Scenario: Refuse a geo-fence city slug the serving vocabulary cannot match
+    When an admin writes a geo-fence city with the slug "Sao_Paulo"
+    Then the write is rejected as non-canonical
+    And the stored geo-fence cities are unchanged
+
+  Scenario: Empty a venue index once its last event stops qualifying
+    Given "Casa Bacurau" has one accepted event and the projection has run
+    When the event is rejected
+    And the events projection runs
+    Then the venue events index for "Casa Bacurau" is empty
+    And its payload keys are deleted
+    And the cycle issues no keyspace scan against Redis
+
+  Scenario: Empty a city index once the city has no events left
+    Given the "recife" events index holds one occurrence
+    When that occurrence's event is rejected
+    And the events projection runs
+    Then the "recife" events index is empty
 
   # ── observability ─────────────────────────────────────────────────────────
 
