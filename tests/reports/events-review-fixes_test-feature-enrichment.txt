@@ -1,0 +1,79 @@
+.venv/bin/python -m behave "tests/bdd/enrichment/venue-address-components.feature"
+USING RUNNER: behave.runner:Runner
+Feature: Venue address components from Google Places # tests/bdd/enrichment/venue-address-components.feature:1
+  As the events and venue serving layers
+  I want the structured address components Google already returns to be stored
+  So that a venue carries its bairro instead of only a raw address string
+  Feature: Venue address components from Google Places  # tests/bdd/enrichment/venue-address-components.feature:1
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: Store the bairro from the Places address components                           # tests/bdd/enrichment/venue-address-components.feature:9
+    Given "Casa Bacurau" is a venue with a Google place id                                # tests/bdd/steps/venue_address_components_steps.py:38
+    Given Google Places returns address components with sublocality level 1 "Santo Amaro" # tests/bdd/steps/venue_address_components_steps.py:51
+    When "Casa Bacurau" is enriched                                                       # tests/bdd/steps/venue_address_components_steps.py:100
+LOG_INFO:app.services.google_places_enrichment_service: [GooglePlacesEnrichment] Enriched vac_casa_bacurau: labels=[]
+    Then the stored address neighborhood is "Santo Amaro"                                 # tests/bdd/steps/venue_address_components_steps.py:122
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: Fall back to sublocality when no sublocality level 1 is returned                               # tests/bdd/enrichment/venue-address-components.feature:14
+    Given "Casa Bacurau" is a venue with a Google place id                                                 # tests/bdd/steps/venue_address_components_steps.py:38
+    Given Google Places returns address components with sublocality "Boa Vista" and no sublocality level 1 # tests/bdd/steps/venue_address_components_steps.py:58
+    When "Casa Bacurau" is enriched                                                                        # tests/bdd/steps/venue_address_components_steps.py:100
+LOG_INFO:app.services.google_places_enrichment_service: [GooglePlacesEnrichment] Enriched vac_casa_bacurau: labels=[]
+    Then the stored address neighborhood is "Boa Vista"                                                    # tests/bdd/steps/venue_address_components_steps.py:122
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: Fall back again for a municipality that publishes no sublocality                # tests/bdd/enrichment/venue-address-components.feature:19
+    Given "Casa Bacurau" is a venue with a Google place id                                  # tests/bdd/steps/venue_address_components_steps.py:38
+    Given Google Places returns address components with only an administrative area level 2 # tests/bdd/steps/venue_address_components_steps.py:65
+    When "Casa Bacurau" is enriched                                                         # tests/bdd/steps/venue_address_components_steps.py:100
+LOG_INFO:app.services.google_places_enrichment_service: [GooglePlacesEnrichment] Enriched vac_casa_bacurau: labels=[]
+    Then the stored address neighborhood is the administrative area level 2                 # tests/bdd/steps/venue_address_components_steps.py:129
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: Keep a stored bairro when the response carries no component for it   # tests/bdd/enrichment/venue-address-components.feature:24
+    Given "Casa Bacurau" is a venue with a Google place id                       # tests/bdd/steps/venue_address_components_steps.py:38
+    Given the stored address neighborhood is "Santo Amaro"                       # tests/bdd/steps/venue_address_components_steps.py:94
+    And Google Places returns address components with no sublocality of any kind # tests/bdd/steps/venue_address_components_steps.py:75
+    When "Casa Bacurau" is enriched                                              # tests/bdd/steps/venue_address_components_steps.py:100
+LOG_INFO:app.services.google_places_enrichment_service: [GooglePlacesEnrichment] Enriched vac_casa_bacurau: labels=[]
+    Then the stored address neighborhood is still "Santo Amaro"                  # tests/bdd/steps/venue_address_components_steps.py:136
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: Store the remaining components alongside the bairro                         # tests/bdd/enrichment/venue-address-components.feature:30
+    Given "Casa Bacurau" is a venue with a Google place id                              # tests/bdd/steps/venue_address_components_steps.py:38
+    Given Google Places returns route, sublocality, locality and postal code components # tests/bdd/steps/venue_address_components_steps.py:82
+    When "Casa Bacurau" is enriched                                                     # tests/bdd/steps/venue_address_components_steps.py:100
+LOG_INFO:app.services.google_places_enrichment_service: [GooglePlacesEnrichment] Enriched vac_casa_bacurau: labels=[]
+    Then the stored address street, city and postal code are populated                  # tests/bdd/steps/venue_address_components_steps.py:141
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: Request the address components without widening the billed field set  # tests/bdd/enrichment/venue-address-components.feature:35
+    Given "Casa Bacurau" is a venue with a Google place id                        # tests/bdd/steps/venue_address_components_steps.py:38
+    When the Places details request for "Casa Bacurau" is built                   # tests/bdd/steps/venue_address_components_steps.py:107
+LOG_INFO:httpx: HTTP Request: GET https://places.googleapis.com/v1/places/ChIJvacCasaBacurau?languageCode=pt-BR "HTTP/1.1 200 OK"
+    Then the field mask includes the address components                           # tests/bdd/steps/venue_address_components_steps.py:150
+    And the field mask requests no tier above the one it already requested        # tests/bdd/steps/venue_address_components_steps.py:159
+
+1 feature passed, 0 failed, 0 skipped
+6 scenarios passed, 0 failed, 0 skipped
+25 steps passed, 0 failed, 0 skipped
+Took 0min 0.010s

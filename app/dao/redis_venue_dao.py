@@ -90,6 +90,16 @@ EVENTS_CITY_INDEX_KEY_FORMAT = "events_index_v1:{}"
 # per-venue rail (the blueprint's "Casa Bacurau esta semana" shelf) without
 # pulling and filtering a whole city window client-side.
 EVENTS_VENUE_INDEX_KEY_FORMAT = "events_venue_v1:{}"
+# Durable SET: every city slug `index_event_occurrence` has EVER indexed a
+# member under, surviving an `admin.geo_fence_city` row's own hard DELETE
+# (RdsVenueStore.set_geo_fence has no history). Without this, a city removed
+# from the fence would drop out of BOTH the live config AND the prune's
+# visited set on the very next cycle, orphaning its events_index_v1:<slug>
+# ZSET forever — see `remember_city_slug`'s docstring. Small and bounded by
+# the real number of cities ever configured, nothing like the unbounded
+# events.post_item_source table the sibling promoter-source-fetch fix
+# guards against.
+EVENTS_KNOWN_CITIES_KEY = "events_known_cities_v1"
 
 
 class RedisVenueDAO:
@@ -1421,9 +1431,39 @@ class RedisVenueDAO:
     ) -> None:
         """Add/refresh this occurrence's membership in BOTH the city and
         venue indexes, with the IDENTICAL score in each — written together
-        so one index can never hold a member the other lacks."""
+        so one index can never hold a member the other lacks. Also
+        remembers `city_slug` in the durable known-cities set
+        (`remember_city_slug`) in the SAME call, so that durability write
+        can never lag behind the index write it exists to protect — see
+        `remember_city_slug`'s own docstring for why a Redis-side durable
+        set is needed at all."""
         self.client.zadd(EVENTS_CITY_INDEX_KEY_FORMAT.format(city_slug), {occurrence_id: score})
         self.client.zadd(EVENTS_VENUE_INDEX_KEY_FORMAT.format(venue_id), {occurrence_id: score})
+        self.remember_city_slug(city_slug)
+
+    def remember_city_slug(self, city_slug: str) -> None:
+        """SADD `city_slug` into the durable `events_known_cities_v1` set —
+        the city-side counterpart of `rds_known`
+        (`list_active_venue_ids() | list_deprecated_venue_ids()`), which
+        `project_events`'s venue-index prune reads so a deprecated venue is
+        never forgotten. A city slug has no equivalent durable RDS-side
+        record: `RdsVenueStore.set_geo_fence` does a literal `DELETE FROM
+        admin.geo_fence_city` with no history, so that table alone can only
+        ever answer "which cities are configured NOW", never "which cities
+        were EVER configured" — a fresh read after a removal looks
+        identical to that slug never having existed. This SET is the
+        durable substitute: once a slug is written here, `project_events`
+        keeps visiting (and, once its occurrences are gone, emptying) its
+        `events_index_v1:<slug>` even after an admin removes the city from
+        `admin.geo_fence_city` entirely."""
+        self.client.sadd(EVENTS_KNOWN_CITIES_KEY, city_slug)
+
+    def list_known_city_slugs(self) -> list[str]:
+        """Every city slug ever written via `remember_city_slug` — a plain
+        SMEMBERS. Small and bounded by the real number of cities ever
+        configured over the product's lifetime, never a keyspace-scale
+        read."""
+        return list(self.client.smembers(EVENTS_KNOWN_CITIES_KEY))
 
     def remove_from_city_events_index(self, city_slug: str, occurrence_id: str) -> bool:
         key = EVENTS_CITY_INDEX_KEY_FORMAT.format(city_slug)

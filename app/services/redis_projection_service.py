@@ -357,7 +357,10 @@ class RedisProjectionService:
             hide_promoter, _ = load_hide_promoter_events(self.redis_only_dao.client)
             sources_by_event: dict[str, list[dict]] = {}
             if hide_promoter:
-                for source in self.rds_store.list_all_event_sources():
+                selected_event_ids = sorted({
+                    r["event_id"] for r in rows if r.get("event_id")
+                })
+                for source in self.rds_store.list_event_sources_bulk(selected_event_ids):
                     sources_by_event.setdefault(source["event_id"], []).append(source)
         except Exception as e:
             logger.error(
@@ -496,8 +499,27 @@ class RedisProjectionService:
             for occ_id in current - fresh:
                 self.redis_only_dao.remove_from_venue_events_index(venue_id, occ_id)
                 removed_ids.add(occ_id)
-        for city in cities:
-            slug = city["slug"]
+        # City slugs to visit: the currently-configured set UNION every slug
+        # ever written (the durable `events_known_cities_v1` set —
+        # `remember_city_slug`'s docstring). `admin.geo_fence_city` alone is
+        # NOT durable: `set_geo_fence` does a literal DELETE with no
+        # history, so a city removed from the fence would otherwise vanish
+        # from `cities` on this very cycle and never be visited (or
+        # emptied) again — the city-side analogue of `rds_known` above. A
+        # failed known-slugs read degrades to pruning only the currently
+        # configured cities this cycle (never risking a bad delete, and
+        # `cities` itself is already known-good from the preparation step
+        # above), rather than skipping the whole city prune.
+        try:
+            known_slugs = set(self.redis_only_dao.list_known_city_slugs())
+        except Exception as e:
+            logger.warning(
+                f"[EventsProjection] known-city-slug read failed; pruning "
+                f"only currently configured cities this cycle: {e}"
+            )
+            known_slugs = set()
+        configured_slugs = {city["slug"] for city in cities}
+        for slug in configured_slugs | known_slugs:
             current = set(self.redis_only_dao.get_city_events_index(slug))
             fresh = set(fresh_by_city.get(slug, {}).keys())
             for occ_id in current - fresh:

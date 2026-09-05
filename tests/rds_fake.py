@@ -604,6 +604,24 @@ class InMemoryRdsVenueStore:
         rows.sort(key=lambda s: (self._sort_dt(s.get("first_seen_at")), s["id"]))
         return rows
 
+    def list_event_sources_bulk(self, event_ids: list[str]) -> list[dict]:
+        """Mirrors RdsVenueStore.list_event_sources_bulk: every source row
+        for EXACTLY the given event ids — scoped, never the whole table
+        `list_all_event_sources` reads (see that method's own docstring for
+        why `project_events` must never call it). An event id with no
+        source rows contributes nothing; empty input returns an empty list
+        without touching `event_sources` at all — this must NOT fall back
+        to whole-table behaviour for this path."""
+        if not event_ids:
+            return []
+        wanted = set(event_ids)
+        rows = [
+            copy.deepcopy(s) for s in self.event_sources.values()
+            if s["event_id"] in wanted
+        ]
+        rows.sort(key=lambda s: (self._sort_dt(s.get("first_seen_at")), s["id"]))
+        return rows
+
     def list_all_event_sources_with_context(self) -> list[dict]:
         """Mirrors RdsVenueStore.list_all_event_sources_with_context: every
         source row's `_view_for_source` (post_item content + this source's

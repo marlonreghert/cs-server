@@ -155,6 +155,24 @@ class GeoRedisClient:
         """A single member's score, or None if the member/key is absent."""
         return self.client.zscore(name, member)
 
+    def sadd(self, name: str, *values: str) -> int:
+        """Add members to a Redis SET (plans/260905_events-serving-
+        projection.md — the durable "every city slug ever written" set the
+        events city-index prune reads so a removed geo-fence city is never
+        forgotten; `RedisVenueDAO.remember_city_slug` is its only caller).
+
+        Returns:
+            Number of NEW members added (an already-present member does not
+            count, matching the underlying SADD return value).
+        """
+        return self.client.sadd(name, *values)
+
+    def smembers(self, name: str) -> set:
+        """Every member of a Redis SET — small by construction here (the
+        events-known-cities set, bounded by the real number of cities ever
+        configured), never a keyspace-scale read."""
+        return self.client.smembers(name)
+
     def add_location_with_json(
         self,
         geo_key: str,

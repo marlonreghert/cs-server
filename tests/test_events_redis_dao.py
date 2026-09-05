@@ -13,6 +13,7 @@ import fakeredis
 from app.dao.redis_venue_dao import (
     EVENT_OCCURRENCE_KEY_FORMAT,
     EVENTS_CITY_INDEX_KEY_FORMAT,
+    EVENTS_KNOWN_CITIES_KEY,
     EVENTS_VENUE_INDEX_KEY_FORMAT,
     RedisVenueDAO,
 )
@@ -128,3 +129,39 @@ def test_venue_index_and_city_index_are_independent_venues_and_cities():
     assert dao.get_venue_events_index("venue_a") == ["ev_a"]
     assert dao.get_venue_events_index("venue_b") == ["ev_b"]
     assert sorted(dao.get_city_events_index("recife")) == ["ev_a", "ev_b"]
+
+
+# ── durable known-city-slugs set (Finding 2: the city index prune must
+#    survive a city being removed from admin.geo_fence_city, which keeps no
+#    history of its own) ─────────────────────────────────────────────────────
+def test_indexing_an_occurrence_remembers_its_city_slug():
+    dao = _dao()
+    dao.index_event_occurrence(city_slug="recife", venue_id="v1", occurrence_id="ev1", score=1.0)
+    assert dao.list_known_city_slugs() == ["recife"]
+
+
+def test_known_city_slugs_accumulate_across_distinct_cities_without_duplicates():
+    dao = _dao()
+    dao.index_event_occurrence(city_slug="recife", venue_id="v1", occurrence_id="ev1", score=1.0)
+    dao.index_event_occurrence(city_slug="joao-pessoa", venue_id="v2", occurrence_id="ev2", score=2.0)
+    # Re-asserting the SAME slug on a later cycle must not duplicate it.
+    dao.index_event_occurrence(city_slug="recife", venue_id="v1", occurrence_id="ev1", score=3.0)
+    assert sorted(dao.list_known_city_slugs()) == ["joao-pessoa", "recife"]
+
+
+def test_known_city_slug_survives_the_slug_being_emptied_from_its_own_index():
+    """The whole point of Finding 2: emptying a city's ZSET (every occurrence
+    pruned) must NOT forget that the slug was ever written -- otherwise the
+    very next cycle would stop visiting it, and a re-added city would silently
+    re-inherit whatever the durable set had already forgotten."""
+    dao = _dao()
+    dao.index_event_occurrence(city_slug="recife", venue_id="v1", occurrence_id="ev1", score=1.0)
+    dao.remove_from_city_events_index("recife", "ev1")
+    assert dao.get_city_events_index("recife") == []
+    assert dao.list_known_city_slugs() == ["recife"]
+
+
+def test_no_known_city_slugs_before_anything_is_ever_indexed():
+    dao = _dao()
+    assert dao.list_known_city_slugs() == []
+    assert dao.client.client.exists(EVENTS_KNOWN_CITIES_KEY) == 0

@@ -759,6 +759,42 @@ class RdsVenueStore:
             ).mappings()
             return [dict(r) for r in rows]
 
+    def list_event_sources_bulk(self, event_ids: list[str]) -> list[dict]:
+        """Every `events.post_item_source` row for EXACTLY the given event
+        ids — the scoped fetch `RedisProjectionService.project_events`
+        needs for its promoter-visibility unanimity check
+        (plans/260905_events-serving-projection.md, Phase 4 §3).
+
+        `list_all_event_sources` has NO WHERE clause at all: it reads the
+        WHOLE table every call, which is correct for `scripts.
+        backfill_source_provenance`'s one-off whole-catalog pass and would
+        be a full-table scan every `redis_projection_minutes` (default 2)
+        against a continuously growing, append-only table if reused here —
+        exactly the regression this method exists to avoid. This selects
+        the SAME lean column set `list_all_event_sources` already does (no
+        `raw_extraction`/`source_events_truncated`/`date_interpretation` —
+        `is_promoter_only_item` only ever reads `source_kind`, so there is
+        no reason to pull a JSONB blob per source every cycle), narrowed to
+        the requested ids with `get_address_bulk`'s own expanding-IN
+        bulk-fetch convention. Returns a flat list — the caller groups by
+        `event_id` itself, exactly as it already did over
+        `list_all_event_sources`'s result — so this is a scoped narrowing
+        of that call, not a new response shape. Empty input short-circuits
+        without a query."""
+        if not event_ids:
+            return []
+        stmt = text(
+            "SELECT id, post_item_id AS event_id, source_kind, source_handle, "
+            "source_shortcode, source_permalink, source_event_key, source_event_index, "
+            "cover_photo_key, first_seen_at, last_seen_at, "
+            "source_media_type, source_uploaded_at "
+            "FROM events.post_item_source WHERE post_item_id IN :ids "
+            "ORDER BY first_seen_at, id"
+        ).bindparams(bindparam("ids", expanding=True))
+        with self.engine.connect() as conn:
+            rows = conn.execute(stmt, {"ids": list(event_ids)}).mappings()
+            return [dict(r) for r in rows]
+
     def list_all_event_sources_with_context(self) -> list[dict]:
         """Every `events.post_item_source` row across the WHOLE table, each
         joined with its OWN post_item's content/protection fields — the same
@@ -1049,10 +1085,14 @@ class RdsVenueStore:
 
         Deliberately does NOT filter promoter-sourced items: that needs a
         GROUPED read of every selected event's sources
-        (`list_all_event_sources`, filtered in Python), which
+        (`list_event_sources_bulk`, filtered in Python), which
         RedisProjectionService.project_events does itself in ONE further
-        query over exactly this result set — never per-row, and never
-        duplicated here.
+        query scoped to exactly this result set's event ids — never
+        per-row, and never duplicated here. (`list_event_sources_bulk` is
+        the id-scoped sibling of `list_all_event_sources` — the latter has
+        no WHERE clause at all and exists only for the one-off
+        `scripts.backfill_source_provenance` pass; project_events must
+        never call it, since it runs every `redis_projection_minutes`.)
 
         `is_selectable`'s temporal rule — recurring OR null starts_at is
         ALWAYS selectable; a non-recurring row needs

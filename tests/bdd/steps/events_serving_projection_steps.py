@@ -495,6 +495,33 @@ def step_when_admin_writes_bad_slug(context, slug):
     )
 
 
+@when('the "{slug}" city is removed from the geo-fence')
+def step_when_city_removed_from_fence(context, slug):
+    """Drops `slug` from `admin.geo_fence_city` the same way the real admin
+    write path does — `RdsVenueStore.set_geo_fence` is a literal `DELETE
+    FROM admin.geo_fence_city` + re-insert, with NO history of the removed
+    row (the exact gap Finding 2 closes). A still-configured, small-radius,
+    geographically distant second city is left behind rather than emptying
+    the fence outright: an EMPTY city list fails OPEN (`geo_excluded`
+    excludes nobody when there is nothing to compare against), which would
+    keep every venue servable and prove nothing about the removed SLUG
+    specifically. With one distant circle still configured, the venue that
+    used to resolve to `slug` is genuinely outside every remaining circle
+    and drops out of servability — the same way an admin narrowing
+    coverage to a different city would behave in production."""
+    from app.services.venue_eligibility import CAPITALS_BY_SLUG
+
+    fence = context.rds_store.get_geo_fence()
+    remaining = [c for c in fence.get("cities", []) if c["slug"] != slug]
+    if not remaining:
+        jp = CAPITALS_BY_SLUG["joao-pessoa"]
+        remaining = [{
+            "slug": "joao-pessoa", "name": "João Pessoa",
+            "lat": jp["lat"], "lng": jp["lng"], "radius_km": 10.0,
+        }]
+    context.rds_store.set_geo_fence({"enabled": True, "cities": remaining})
+
+
 # ── Then: general projection outcome ──────────────────────────────────────
 def _last_occurrence(context):
     """The (only) occurrence produced for evs_last_event_id — most scenarios

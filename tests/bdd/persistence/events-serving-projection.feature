@@ -220,6 +220,12 @@ Feature: Events serving projection
     And the events projection runs
     Then the "recife" events index is empty
 
+  Scenario: Empty a city index after the city itself is removed from the geo-fence
+    Given the "recife" events index holds one occurrence
+    When the "recife" city is removed from the geo-fence
+    And the events projection runs
+    Then the "recife" events index is empty
+
   # ── observability ─────────────────────────────────────────────────────────
 
   Scenario: Report the size of the projection every cycle
