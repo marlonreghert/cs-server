@@ -390,10 +390,21 @@ finally get a writer.
   which, per Phase 3, a recurring event is NEVER projected under. That is a
   404 on every night of every recurring event, i.e. on the flagship feature,
   and it would ship green because no scenario builds a real URL.
-  `post_item_id` is 32 lowercase hex characters
-  (`app/services/event_identity.py:65`), so `_` can collide with neither the
-  id nor the date, and the whole id stays in RFC 3986's unreserved set —
-  no encoding needed anywhere. The internal `<venue_id>#<day_int>` convention
+  `post_item_id` is `evt_<ULID>` (`app/services/event_reconciliation.py:184`),
+  so `_` and the whole composed id stay inside RFC 3986's unreserved set and
+  need no encoding anywhere — verified in production against a real recurring
+  occurrence (`GET /events/evt_01M1R2GBKH7TB4NB6WF0X4W6QB_2026-09-05` → 200).
+
+  **Correction to an earlier draft of this plan:** it claimed `post_item_id`
+  was "32 lowercase hex characters" and that `_` therefore "cannot collide
+  with the id". That cited `event_identity.py:65`, which computes
+  `source_event_key` — a dedupe hash, not the row id. The real id already
+  contains an underscore. The separator choice is unaffected (`_` is still
+  unreserved and still not `#`, which is the whole point), and nothing parses
+  the id — `occurrence_date` travels as its own payload field, and a repo-wide
+  grep finds no split of `occurrence_id` in either repo. But do NOT assume a
+  two-way split: `"evt_01M1R2..._2026-09-05".split("_")` yields three parts.
+  Use `rsplit("_", 1)` if a suffix ever genuinely needs recovering. The internal `<venue_id>#<day_int>` convention
   (`app/dao/venue_repository.py:103`) is not a precedent: those ids never
   leave Redis.
 - `events_index_v1:<city_slug>` → ZSET, member = occurrence id, score =
