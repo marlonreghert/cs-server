@@ -47,9 +47,18 @@ reads.
   `status`, `venue_id`. The blueprint's card and detail screens need no new
   extraction column.
 - `app/dao/rds_venue_store.py:557` (`_EVENT_SELECT`) and `:935`
-  (`list_events`) — the read shape and its `venue_id`/`status`/`since`/`until`
-  filters already exist for the admin console, ordered `starts_at NULLS LAST`.
-  The projection query is a sibling of these, not a new access pattern.
+  (`list_events`) — the **selection filters** (`venue_id`/`status`/`since`/
+  `until`, ordered `starts_at NULLS LAST`) already exist for the admin
+  console, and the projection's predicate is a sibling of those. The
+  similarity stops at the filters: `_EVENT_SELECT` joins `venues.venue` for
+  `v.venue_name` ONLY, and `venue_lat`/`venue_lng` were physically dropped
+  from `venues.venue` by
+  `migrations/versions/0007_drop_legacy_venue_columns.py:35-36`. Coordinates
+  and the new `neighborhood` live solely on `venues.address`, which only
+  `_VENUE_SELECT` joins (`rds_venue_store.py:67-73`). **An
+  events ⋈ venues.address join has never existed in this codebase** — see
+  Phase 4 §4 for the mechanism; do not assume extending `_EVENT_SELECT` can
+  produce these fields.
 - `app/routers/admin_events_router.py:603` (`GET /{event_id}/cover`) — the
   ONLY way a flyer is readable today is an admin-authenticated presign of a
   **data-lake** object.
@@ -59,21 +68,35 @@ reads.
   `PROFILE_PHOTO_ROOT = "venue-profile-photos"` is the only prefix the media
   IAM policy grants `PutObject` on (`infra/media/main.tf`), so a new prefix is
   a terraform apply BEFORE any code that writes it.
-- `docs/venue-retrieval-storage.md` §8 — the data lake blocks public access
-  and its writer role is denied `s3:GetObject` by design. That is why the
-  flyer is *copied* into the media bucket rather than served from where it
-  already sits.
+- `infra/datalake/iam.tf:41-51` (Sid `ReadArchivedMedia`) — cs-server's
+  production role **can** read `retrieved/*`, the prefix `cover_photo_key`
+  lives under. This is a deliberate carve-out (menu extraction already
+  presigns archived photos), and `app/routers/admin_events_router.py:602`
+  exercises it in production today. **No new data-lake IAM grant is needed
+  for the flyer copy.** Note that `docs/venue-retrieval-storage.md` §5/§8 and
+  `app/dao/venue_media_store.py:6-8` both say flatly that the writer role is
+  "denied `s3:GetObject`" — true for `raw/*` and the superseded `media/*`
+  root, but NOT for `retrieved/*`, and reading it as absolute would wrongly
+  condemn this whole design. The lake still blocks public access, so the flyer
+  must be *copied* to the media bucket to be servable; it just does not need a
+  new read permission to do so.
 - `migrations/versions/0004_address_table.py:30` — `venues.address.
   neighborhood` exists. `rds_venue_store.py:192` — "Structured components
   (street/neighborhood/city/postal_code) are left as-is — null until Google
   Places enrichment fills them". A repo-wide grep finds **no writer at all**:
   the column has been null since it was created.
-- `app/api/google_places_client.py:31` (`VIBE_FIELDS_MASK`) — the mask omits
-  `addressComponents` but already requests `id`, `displayName`,
-  `primaryType`, `businessStatus`, so the Places **Essentials** SKU is
-  already being billed on every one of these calls. `addressComponents` is an
-  Essentials-tier field: adding it to this existing mask requests no new SKU
-  tier and adds no incremental per-call charge.
+- `app/api/google_places_client.py:31-79` (`VIBE_FIELDS_MASK`) — the mask
+  omits `addressComponents`, but already requests `reviews`, `priceLevel`,
+  `priceRange`, `generativeSummary` and the whole atmosphere block
+  (`liveMusic`, `allowsDogs`, `goodForGroups`, every `servesX`…), so these
+  calls are **already billed at the top Enterprise + Atmosphere tier** — not,
+  as an earlier draft of this plan claimed, at the cheap Essentials tier.
+  Adding `addressComponents` is free because a call already billed at the
+  ceiling cannot be pushed higher by one more field, NOT because the call is
+  cheap. The conclusion survives; the reasoning that justified it did not.
+  **Confirm against Google's current SKU table before merging** — nothing on
+  disk independently pins `addressComponents`' own tier, and this repo has a
+  hard rule against an unapproved >$10/mo increase.
 - Production venue addresses carry the bairro inconsistently —
   `"R. Abdon Batista, 300 - Santo Amaro Recife - PE 50100-460 Brazil"` has it,
   `"R. Barão Rodrigues Mendes 59 - Recife PE 50030-180 Brazil"` does not — so
@@ -167,8 +190,16 @@ reads.
    back-fill — the copier fills them. Storing the hash is what makes the copy
    idempotent across cycles (unchanged bytes → identical key → no re-upload),
    the same property `_has_current_photo` relies on.
-5. Run it from the same scheduler tick that already runs event work, bounded by
-   a per-cycle cap so a first run over the backlog cannot monopolise a cycle.
+5. **Scheduling — note the phase dependency.** There is no existing shared
+   "event tick" to attach this to: `main.py:184-356` registers only
+   fixed-interval venue/enrichment jobs (none event-related), and event
+   extraction runs inline inside the per-venue crawl jobs `CrawlScheduleSync`
+   registers dynamically (`main.py:451-482`). The flyer copier therefore runs
+   **inside the `project_events()` sibling pass Phase 4 creates**, on the
+   existing `redis_projection` tick — so Phase 4's hook must land before this
+   step can be wired. Build Phase 1's store, service and migration first, but
+   wire the schedule with Phase 4. Bound it with a per-cycle cap so a first run
+   over the backlog cannot monopolise a cycle.
 
 ### Phase 2 — neighbourhood from Google Places
 1. Add `addressComponents` to `VIBE_FIELDS_MASK`. No new SKU tier (Evidence).
@@ -193,7 +224,8 @@ reads.
    - Non-recurring, `starts_at` present: exactly one occurrence, id
      `<post_item_id>`, `starts_at` unchanged.
    - Recurring, with a resolvable weekday set: one occurrence per matching
-     local day in `[today, today + horizon]`, id `<post_item_id>#<YYYY-MM-DD>`,
+     local day in `[today, today + horizon]`, id `<post_item_id>_<YYYY-MM-DD>`
+     (see the separator rule in the Data section — it must never be `#`),
      each `starts_at` = that local date at the announcement's own clock time
      (the resolved `starts_at`'s time-of-day, in Recife local time, converted
      back to UTC — so a DST-free zone stays exact and the stored instant is
@@ -229,20 +261,79 @@ reads.
    still tonight's event to a user at 01:00) AND `superseded_by IS NULL`.
    Promoter-sourced items are excluded while
    `admin_config:hide_promoter_events` is true, reusing
-   `promoter_event_visibility`'s existing unanimity rule rather than a second
-   definition.
-4. Expansion, then write: for each selected row, expand to occurrences, join
-   the venue's name/lat/lng/neighborhood, and write one JSON key per
-   occurrence plus its index membership.
-5. **Re-assert and prune, like the venue projection.** Each cycle computes the
-   full occurrence-id set; members outside it are removed from BOTH indexes and
-   their JSON keys deleted. This is what makes a rejected, superseded, re-dated or
-   expired event actually disappear, and what makes a Redis flush self-heal.
+   `promoter_event_visibility.is_promoter_only_item`'s unanimity rule rather
+   than a second definition — but **not** its existing call pattern. That rule
+   needs each item's `post_item_source` rows, and its only current caller
+   (`admin_events_router._visible_rows`, lines 294-310) fetches them with
+   `dao.list_event_sources(event_id)` inside a per-row loop: an N+1 that is
+   fine for one admin page load and not fine once per projection cycle over
+   the whole catalog. Fetch the sources for the selected event-id set in ONE
+   grouped query (`list_all_event_sources` already reads the table in a single
+   query and can be filtered/grouped), then apply the unanimity rule in
+   Python. "One bulk query" must be true, not aspirational.
+4. **Venue join — a genuinely new access pattern.** `_EVENT_SELECT` cannot
+   supply `venue_lat`/`venue_lng`/`venue_neighborhood`: those columns were
+   dropped from `venues.venue` (migration 0007) and live only on
+   `venues.address`, which no events query has ever joined. Bulk-fetch one
+   address row per selected `venue_id` with a query modelled on
+   `_VENUE_SELECT`'s existing `LEFT JOIN venues.address a` — adding
+   `a.neighborhood` to its column list — and join it to the event rows in
+   Python by `venue_id`. Do NOT extend `_EVENT_SELECT`'s join to
+   `venues.venue`: that yields null coordinates and a permanently null bairro,
+   which is exactly the feature this plan exists to add.
+
+5. **`city_slug` — derive it from the circles that already gate servability.**
+   `city_slug` partitions the only index the app's primary list route reads,
+   so it cannot be left to chance, and there is no per-venue city column to
+   read: `venues.address.city` is null catalog-wide and Phase 2 fills it only
+   opportunistically. Derive it instead from `admin.geo_fence_city`
+   (`migrations/versions/0015_geofence_city_circles.py:63-71`) — a table
+   cs-server already owns, whose `slug` is its primary key, and whose circles
+   already decide whether a venue is servable at all via
+   `serving.eligible_venue`. Every servable venue sits inside some circle **by
+   construction**, so the derivation is total over exactly the population being
+   projected: take the containing circle's slug, and on overlap pick the
+   nearest centre so the result is deterministic.
+
+   **Cross-repo invariant:** the slugs in `admin.geo_fence_city` ARE the
+   serving city vocabulary. vibes_bot canonicalises an incoming `city` through
+   its own `canonical_city_slug` (lowercase, `_`→`-`, then an alias table:
+   `sao-paulo`→`sp`, `joao-pessoa`→`jp`), so a geo-fence slug that is not
+   already canonical would key an index nothing ever reads. Add a validation to
+   the admin geo-fence write path (`rds_venue_store.replace_geo_fence_cities`,
+   `:1728`) rejecting a non-canonical slug, and record the invariant in the
+   coordination plan. Copying the alias table into this repo is NOT the fix —
+   that is exactly the two-definitions drift `app/models/event_kind.py`'s
+   docstring warns about.
+
+6. Expansion, then write: for each selected row, expand to occurrences, attach
+   the joined venue fields and the derived `city_slug`, and write one JSON key
+   per occurrence plus its two index memberships.
+7. **Re-assert and prune — over an enumerable id space, never a keyspace walk.**
+   The venue projection prunes by diffing two RDS-derived id sets
+   (`redis_projection_service.py:256-266`: `rds_known` minus `servable_set`),
+   which works because every venue id RDS can produce is enumerable. No such
+   property holds for Redis KEYS, and the naive reading of "prune the stale
+   ones" — revisit only the indexes appearing in this cycle's fresh selection —
+   orphans a venue's ZSET and its payload keys **forever** the moment that
+   venue drops to zero occurrences, which is the
+   `Remove an occurrence once its event stops qualifying` scenario in
+   miniature. Reaching instead for `_scan_venue_ids`' `client.keys(pattern)`
+   (`redis_venue_dao.py:132-140` — a blocking full-keyspace walk, despite its
+   misleading "SCAN via client.keys" comment) would walk production Redis every
+   cycle. Do neither: iterate the **enumerable id spaces** — `rds_known`,
+   already computed earlier in the same cycle, for every
+   `events_venue_v1:<venue_id>`, and the small bounded `admin.geo_fence_city`
+   slug set for every `events_index_v1:<city_slug>` — re-asserting each against
+   this cycle's occurrence subset for that id. A venue or city that drops to
+   zero gets visited and emptied like any other. No KEYS, no SCAN, no new
+   registry. This is what makes a rejected, superseded, re-dated or expired
+   event actually disappear, and what makes a Redis flush self-heal.
    A failed selection query aborts the cycle and leaves Redis intact — the
    same fail-safe posture `rebuild_redis_from_rds` takes on a serving-view
    read failure, and for the same reason: an empty read must never be
    mistaken for "there are no events".
-6. Sizing: production Redis runs `maxmemory 0` / `noeviction` on a 3.9 GB box
+8. Sizing: production Redis runs `maxmemory 0` / `noeviction` on a 3.9 GB box
    currently holding ~20 MB, so the ceiling that matters is the box, not a
    policy. Budget the new family explicitly and assert the measured per-cycle
    key count and byte total in the run summary, so growth is visible before it
@@ -260,6 +351,25 @@ finally get a writer.
 
 **New Redis keys (cs-server is the sole writer):**
 - `event_occurrence_v1:<occurrence_id>` → the occurrence JSON payload.
+  `occurrence_id` is `<post_item_id>` for a one-off and
+  `<post_item_id>_<YYYY-MM-DD>` for one materialised day of a recurring
+  announcement.
+
+  **The separator is `_` and must never be `#`.** This id is not internal: it
+  is returned on every `EventCard` and is the path segment of vibes_bot's
+  `GET /events/{occurrence_id}`. `#` is the RFC 3986 fragment delimiter, so
+  any spec-compliant client (WHATWG `fetch`/`URL`, `NSURLSession`, OkHttp,
+  `requests`, `httpx`) that builds that URL by concatenation silently drops
+  everything from the `#` onward and requests the bare `<post_item_id>` —
+  which, per Phase 3, a recurring event is NEVER projected under. That is a
+  404 on every night of every recurring event, i.e. on the flagship feature,
+  and it would ship green because no scenario builds a real URL.
+  `post_item_id` is 32 lowercase hex characters
+  (`app/services/event_identity.py:65`), so `_` can collide with neither the
+  id nor the date, and the whole id stays in RFC 3986's unreserved set —
+  no encoding needed anywhere. The internal `<venue_id>#<day_int>` convention
+  (`app/dao/venue_repository.py:103`) is not a precedent: those ids never
+  leave Redis.
 - `events_index_v1:<city_slug>` → ZSET, member = occurrence id, score =
   `starts_at` epoch seconds (UTC). One key per city. A date range is one
   `ZRANGEBYSCORE`; day grouping is derived by the reader from each payload's
@@ -301,8 +411,25 @@ would destroy a distinction this repo already stores.
 on after the terraform apply is verified), `events_projection_horizon_days`
 (21), `event_flyer_copy_max_per_cycle`.
 
-**Infra:** `infra/media/main.tf` writer policy widened to `event-flyers/*`.
-Apply before enabling the flag.
+**Infra:** `infra/media/main.tf` writer policy widened to `event-flyers/*`
+(a Resource-list addition to the existing `media_profile_photo_writer` policy;
+its name/description stay untouched, since `aws_iam_policy.description` is
+immutable and a rename forces a destroy-and-recreate). Apply before enabling
+the flag. The bucket policy, OAC and CloudFront behaviour are all
+bucket-wide/distribution-wide already and need no change.
+
+**Retention — an explicit decision, not an oversight.** Events are inherently
+time-bound (a weekly night gets a fresh post, and so a fresh `post_item_id`,
+every week), and the media bucket's lifecycle config
+(`infra/media/main.tf:96-122`) deliberately expires nothing — correct for
+permanent venue profile photos, not obviously correct for `event-flyers/*`.
+This plan **accepts unbounded growth for now** and makes it visible rather
+than silent: emit `event_flyer_objects` and `event_flyer_bytes` gauges from
+the copy path so the curve is observable from day one. Deleting a flyer when
+its event stops qualifying is deliberately NOT done here — the object is
+content-addressed and immutable, a superseded event can be un-rejected, and a
+delete path against the media bucket is a new permission this feature does not
+otherwise need. Revisit with a real number on the gauge.
 
 ## Error Handling And Observability
 - A per-event failure is isolated and counted; the cycle continues and the run
@@ -326,6 +453,16 @@ Apply before enabling the flag.
 
 ## Test Plan
 Feature file: `tests/bdd/persistence/events-serving-projection.feature`
+Second feature file: `tests/bdd/enrichment/venue-address-components.feature`
+
+Two files, because `tests/README.md` assigns Google Places behavior to the
+**enrichment** domain and Redis/DAO/migration behavior to **persistence**, and
+this plan spans both. The Places address-component parsing, its fallback rungs
+and the never-clobber rule are enrichment behavior and belong beside the
+existing `tests/bdd/enrichment/venue-google-enrichment.feature`; everything
+that merely *projects a stored value* stays in the persistence file. Splitting
+along the repo's own classification line, rather than filing everything under
+one convenient domain.
 
 Scenarios:
 - Project an accepted, venue-linked event and read back every contract field
@@ -359,16 +496,29 @@ Scenarios:
   indexed.
 - An `AccessDenied` on the flyer put leaves `flyer_url` null, records the
   `access_denied` outcome, and still projects the occurrence.
-- Write `neighborhood` from a Places response carrying `sublocality_level_1`;
-  fall back to `sublocality`; leave a stored value untouched when the response
-  carries no component; project it as `venue_neighborhood`, and project null
-  for an unenriched venue.
+- (persistence) Project the stored bairro as `venue_neighborhood`, and project
+  null for an unenriched venue, without dropping the occurrence.
+- (enrichment) Write `neighborhood` from a Places response carrying
+  `sublocality_level_1`; fall back to `sublocality`; leave a stored value
+  untouched when the response carries no component at all.
+- Derive `city_slug` from the containing `admin.geo_fence_city` circle; pick
+  the nearest centre when circles overlap; reject a non-canonical slug at the
+  admin geo-fence write path.
+- Prune a venue that had occurrences last cycle and has none this cycle: its
+  venue index is emptied and its payload keys deleted, with no keyspace scan.
+- Build a recurring occurrence's id and confirm it round-trips through a real
+  URL — no `#`, nothing dropped, no encoding required.
 
 Pytest unit tests:
 - `app/services/event_occurrences.py`: the expansion matrix — one-off,
   weekly, daily, weekend, no-computable-day, null `starts_at`, horizon
   boundary (inclusive first day, exclusive past the horizon), clock time
-  preserved across every generated day, occurrence-id format.
+  preserved across every generated day, and the occurrence-id format. Assert
+  the id contains no RFC 3986 reserved character — exhaustively over the
+  character set, not by enumerating a few examples, since "no `#` anywhere" is
+  precisely the claim a handful of passing cases cannot establish.
+- `city_slug` derivation: inside one circle, inside two overlapping circles
+  (nearest centre wins), and the canonical-slug validation.
 - `app/dao/venue_media_store.py`: `event_flyer_key` shape, idempotence of the
   hash slice, cache header.
 - Address-component mapping: each fallback rung, and the never-clobber rule.
@@ -394,6 +544,13 @@ Manual or integration checks:
   from both indexes and its payload key within one cycle.
 - Every occurrence is reachable by city window and by venue, with identical
   scores in both indexes.
+- Every projected occurrence carries a non-null `city_slug` drawn from
+  `admin.geo_fence_city`, and every slug in that table is canonical.
+- Every projected occurrence carries its venue's coordinates, and its bairro
+  whenever the venue has been enriched.
+- A venue or city that drops to zero occurrences is emptied, and no projection
+  cycle issues a `KEYS`/`SCAN` against production Redis.
+- No occurrence id contains a URI-reserved character.
 - A weekly recurring announcement occupies every one of its nights inside the
   horizon; a "toda semana" one occupies exactly one.
 - A copied flyer is reachable at a stable CDN url with the immutable cache
