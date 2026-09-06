@@ -21,8 +21,14 @@ Algorithm (see the plan's own worked traces for why each step exists):
    `blob`. No dash found -> `street` stays None and `blob` is the whole
    fixed-up tail (some real rows have no street/bairro separator at all).
 6. Format B (comma-delimited): split `blob` on its LAST comma -> bairro,
-   city — guarded against a street-fragment comma masquerading as the real
-   one (a digit or more than 4 words in the city half rejects the split).
+   city. The city half is first RECOVERED — a leading sem-numero/bare-number
+   address marker ("S/N", "SN", "S/Nº", a bare number, ...) is stripped, so
+   "S/N Paripueira" becomes "Paripueira" rather than being judged with the
+   marker still attached — then VALIDATED: a vocabulary hit trusts it
+   outright; otherwise it is rejected (falling through to Format A) when
+   empty, containing a digit or a slash, exceeding 4 words, containing a
+   street-type token (R., Rua, Av., Rod., Estr., Praça, Alameda, ...), or
+   hitting the same stoplist step 8 uses below.
 7. Format A (space-joined), or Format B rejected: try the trailing 3, then
    2, then 1 words of `blob` against the vocabulary (longest match wins).
    No match at any length -> left for Google or a future vocabulary update,
@@ -68,6 +74,23 @@ _DASH_CHARS = "-‐‑‒–—"
 # commonly captures, not real bairros. Fold-compared (accent/case-insensitive).
 STOPLIST_BAIRRO_WORDS = frozenset({
     "loja", "quiosque", "piso", "sala", "shopping", "cohab", "conjunto",
+})
+
+# Step 6's recovery pass: a Format-B city candidate that STARTS with one of
+# these sem-numero/bare-number address markers has it stripped before being
+# judged ("S/N Paripueira" -> "Paripueira"). Matched per leading token,
+# case-insensitively; a bare number (with an optional trailing ordinal mark)
+# counts too — it is as much an address-mechanics artifact as "S/N" is.
+_ADDRESS_MARKER_TOKEN_RE = re.compile(r"^(s/n[º°]?\.?|sn|\d+[º°]?\.?)$", re.IGNORECASE)
+
+# Step 6's validation: a RECOVERED Format-B city candidate containing one of
+# these (fold-compared, whole-word) is a street/road fragment, not a city
+# name. Not merged into STOPLIST_BAIRRO_WORDS: that stoplist flags
+# mall/housing-complex BAIRRO fragments, a different failure mode from a
+# street name leaking into the CITY half.
+STREET_TYPE_TOKENS = frozenset({
+    "r", "rua", "av", "avenida", "trav", "travessa", "rod", "rodovia",
+    "estr", "estrada", "praca", "alameda",
 })
 
 ADDRESS_PARSER_FIELDS = ("street", "neighborhood", "city", "postal_code")
@@ -178,6 +201,43 @@ def _plausible_bairro(candidate: str) -> bool:
     return True
 
 
+def _strip_leading_address_markers(candidate: str) -> str:
+    """Step 6's recovery pass: strip leading sem-numero/bare-number address
+    marker tokens off a Format-B city candidate before judging it, so
+    "S/N Paripueira" recovers to "Paripueira" — the correct city — rather
+    than being judged (or rejected) with the marker still attached. Loops
+    so more than one leading marker token is stripped if present; a
+    candidate that is nothing BUT marker tokens recovers to "" (handled by
+    `_plausible_format_b_city`'s empty check)."""
+    words = candidate.split()
+    while words and _ADDRESS_MARKER_TOKEN_RE.match(words[0]):
+        words.pop(0)
+    return " ".join(words)
+
+
+def _plausible_format_b_city(candidate: str) -> bool:
+    """Step 6's validation of an already-RECOVERED Format-B city candidate.
+    False when it is empty, contains a digit or a slash, exceeds 4 words, or
+    contains a street-type token or a step-8 stoplist word — the concrete,
+    mechanically-identifiable signs of a street/address fragment rather
+    than a city name. Called only when the candidate did NOT already
+    fold-match the vocabulary (see `parse_address`) — a vocabulary hit is
+    trusted outright and never reaches this check."""
+    if not candidate:
+        return False
+    if any(ch.isdigit() for ch in candidate) or "/" in candidate:
+        return False
+    words = candidate.split()
+    if len(words) > 4:
+        return False
+    folded_words = {fold_text(word) for word in words}
+    if folded_words & STREET_TYPE_TOKENS:
+        return False
+    if folded_words & STOPLIST_BAIRRO_WORDS:
+        return False
+    return True
+
+
 def parse_address(
     raw_text: str,
     vocabulary,
@@ -212,11 +272,8 @@ def parse_address(
     if "," in blob:
         idx = blob.rfind(",")
         b_cand = blob[:idx].strip(" ,")
-        c_cand = blob[idx + 1 :].strip(" ,")
-        street_fragment = bool(c_cand) and (
-            any(ch.isdigit() for ch in c_cand) or len(c_cand.split()) > 4
-        )
-        if c_cand and not street_fragment:
+        c_cand = _strip_leading_address_markers(blob[idx + 1 :].strip(" ,"))
+        if fold_text(c_cand) in vocab_index or _plausible_format_b_city(c_cand):
             city_candidate = c_cand
             bairro_candidate = b_cand or None
 
@@ -264,6 +321,7 @@ __all__ = [
     "ADDRESS_PARSER_FIELDS",
     "BRAZILIAN_UF_CODES",
     "STOPLIST_BAIRRO_WORDS",
+    "STREET_TYPE_TOKENS",
     "clean_tail",
     "extract_blob",
     "extract_postal_code",

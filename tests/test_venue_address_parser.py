@@ -279,6 +279,76 @@ class TestFormatBStreetCommaGuard:
         result = parse_address(raw, [_RECIFE], venue_lat=-8.05, venue_lng=-34.88)
         assert result["city"] == "Recife"
 
+    def test_paripueira_production_string_recovers_sem_numero_marker(self):
+        """The confirmed production defect: a comma-format city half that is
+        JUST the sem-numero marker ("S/N" — no street number) plus the real
+        city name must have the marker stripped before being judged, not
+        accepted as if "S/N" were part of the city name. Real verbatim
+        production `raw_text`; "Paripueira" is deliberately absent from the
+        vocabulary passed here — recovery-then-heuristic-accept must not
+        require a vocabulary hit, exactly like every other Format-B result."""
+        raw = (
+            "Praia de Costabrava R. Projetada Sv Vinte e Três, S/N Paripueira"
+            " - AL 57935-000, Brazil"
+        )
+        result = parse_address(raw, [_RECIFE], venue_lat=-9.55, venue_lng=-35.45)
+        assert result["city"] == "Paripueira"
+        assert result["postal_code"] == "57935-000"
+
+    def test_sem_numero_marker_alone_recovers_to_empty_and_falls_through(self):
+        """A nonsense short fragment: the marker recovers to an EMPTY string
+        when no real city name follows it. That must reject the split
+        (never accept "S/N" itself as a city) and fall through to Format A
+        — which also finds no match here, so the row is correctly left
+        unresolved rather than given a wrong answer."""
+        raw = "R. Teste, 45 - Vila Nova, S/N - AL 57935-000 Brazil"
+        result = parse_address(raw, [_RECIFE, _OLINDA], venue_lat=-9.55, venue_lng=-35.45)
+        assert result["city"] is None
+        assert result["neighborhood"] is None
+
+    def test_street_type_token_after_comma_falls_through_to_format_a(self):
+        """A street/road word ("Rua") landing in the city half is a street
+        fragment, not a city name, even though it has no digit and is only
+        2 words (so the pre-fix guard would have accepted it)."""
+        raw = "R. Teste, 45 - Bairro Y, Rua Grande - AL 57935-000 Brazil"
+        result = parse_address(raw, [_RECIFE, _OLINDA], venue_lat=-9.55, venue_lng=-35.45)
+        assert result["city"] is None
+
+    def test_stoplist_word_after_comma_falls_through_to_format_a(self):
+        """Step 8's mall/housing-complex stoplist, reused (not duplicated)
+        for the city half: a bare stoplist word has no digit and is only
+        1 word, so the pre-fix guard would have accepted it too."""
+        raw = "R. Teste, 45 - Bairro Z, Shopping - AL 57935-000 Brazil"
+        result = parse_address(raw, [_RECIFE, _OLINDA], venue_lat=-9.55, venue_lng=-35.45)
+        assert result["city"] is None
+
+    def test_bare_number_marker_recovers_then_vocabulary_hit_accepts(self):
+        """The OTHER marker shape step 6 recovers, alongside "S/N": a bare
+        street number leaking in front of the real city strips the same
+        way, and a vocabulary hit then trusts the recovered name outright
+        (step 3), independent of the heuristics in step 2."""
+        raw = "R. Teste, 45 - Bairro W, 225 Niterói - AL 57935-000 Brazil"
+        result = parse_address(raw, [_NITEROI], venue_lat=-22.88, venue_lng=-43.10)
+        assert result["city"] == "Niterói"
+        assert result["neighborhood"] == "Bairro W"
+
+    def test_regression_casa_caiada_olinda_still_correct(self):
+        """This guard must never re-reject a well-formed comma split just
+        because its validation is new — "Olinda" has no marker to recover
+        and hits no rejection heuristic, so it must resolve exactly as it
+        did before this fix (and Olinda is still absent from the
+        vocabulary passed here, proving no vocabulary hit is involved)."""
+        raw = "R. Carmelita Muniz de Araújo, 225 - Casa Caiada, Olinda - PE, 53130-645, Brazil"
+        result = parse_address(raw, [_RECIFE], venue_lat=-7.99, venue_lng=-34.84)
+        assert result["neighborhood"] == "Casa Caiada"
+        assert result["city"] == "Olinda"
+
+    def test_regression_jardim_sao_paulo_recife_still_correct(self):
+        raw = "R. Claudino José de Lima, 138 - Jardim São Paulo, Recife - PE, 50920-280"
+        result = parse_address(raw, [_RECIFE, _OLINDA], venue_lat=-8.05, venue_lng=-34.88)
+        assert result["neighborhood"] == "Jardim São Paulo"
+        assert result["city"] == "Recife"
+
 
 # ── postal code / UF extraction as independent primitives ────────────────
 class TestPrimitives:
