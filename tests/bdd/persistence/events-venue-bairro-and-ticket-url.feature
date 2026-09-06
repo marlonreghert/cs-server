@@ -84,6 +84,25 @@ Feature: Events venue bairro, ticket URL and nightlife-day projection
     Then the occurrence payload carries the ticket url "https://evenyx.com"
     And no event row was written during either cycle
 
+  # The counter is bumped once per SOURCE ROW, never once per occurrence: one
+  # badly-extracted recurring row must not read as 22 rejections (review
+  # finding R15).
+  Scenario: Count a recurring event's ticket url once, not once per occurrence
+    Given an accepted recurring event whose recurrence text is "todo dia" and whose stored ticket url is "ingressos na portaria"
+    When the events projection runs
+    Then more than one occurrence is projected for that event
+    And every one of those occurrence payloads carries no ticket url
+    And the ticket url normalisation outcome "rejected" is counted once
+
+  # ...and it is re-counted every cycle, because the projector rebuilds every
+  # payload every cycle. This pins the per-cycle-census reading the plan's
+  # Observability section documents (R15).
+  Scenario: Count the ticket url again on the next projection cycle
+    Given an accepted event whose stored ticket url is "evenyx.com"
+    And the events projection has already run once
+    When the events projection runs again
+    Then the ticket url normalisation outcome "scheme_added" is counted twice in total
+
   # ── venue_neighborhood: make the authoritative rung reachable ────────────
 
   Scenario: Select a fully populated parsed address row in upgrade mode
@@ -151,6 +170,36 @@ Feature: Events venue bairro, ticket URL and nightlife-day projection
     Then that venue has the neighborhood "Espinheiro"
     And that neighborhood is sourced "parsed"
 
+  # A bairro named after its city is not always wrong — Bairro do Recife is a
+  # real neighbourhood of Recife. The guard is a heuristic over machine-written
+  # values; a human write is trusted verbatim and is the repair path when the
+  # heuristic drops a correct value (review finding R08).
+  Scenario: Trust an operator's bairro that is named after its city
+    Given a servable venue whose stored city is "Recife"
+    When an operator writes the neighborhood "Recife" for that venue
+    Then that venue has the neighborhood "Recife"
+    And that neighborhood is sourced "operator"
+
+  # The write boundary guards every column independently, so a write's own city
+  # can lose its precedence check while its neighborhood still lands. The
+  # comparison must therefore be against the city the row will actually HOLD
+  # after the write, not only against the city the write carries (R11).
+  Scenario: Drop a bairro that equals the city the row will keep, even when the write's own city is different
+    Given a servable venue whose stored city is "Recife" sourced "google"
+    When the address text parser writes the city "Igarassu" and the neighborhood "Recife" for that venue
+    Then that venue has no neighborhood stored
+    And that venue still has the city "Recife" stored
+    And that city is sourced "google"
+
+  # The mirror case: when the incoming city WINS, the row does not end up with
+  # neighborhood == city, so a bairro that merely matched the OLD city must be
+  # kept. This is the false positive a plain "incoming or stored" rule causes.
+  Scenario: Keep a bairro when the write's own city wins and differs from it
+    Given a servable venue whose stored city is "Recife" sourced "parsed"
+    When Google writes the city "Igarassu" and the neighborhood "Recife" for that venue
+    Then that venue has the city "Igarassu" stored
+    And that venue has the neighborhood "Recife"
+
   Scenario: Write the other address fields even when the bairro is dropped
     Given a servable venue whose stored city is "Igarassu"
     When the address text parser writes the neighborhood "Igarassu" and the street "Rua do Sol" for that venue
@@ -182,6 +231,19 @@ Feature: Events venue bairro, ticket URL and nightlife-day projection
     Given the catalog holds two address rows whose stored neighborhood equals its stored city
     When the address components backfill runs one batch in upgrade mode
     Then the neighborhood-equals-city gauge reports 2
+
+  # Both address gauges only ever move at the end of an operator-triggered
+  # backfill batch — the job has no scheduler entry — so the reading needs its
+  # own age, or a months-old snapshot is indistinguishable from a live one
+  # (review finding R10).
+  Scenario: Report no refresh timestamp before any batch has ever run
+    Given no address components backfill batch has ever run
+    Then the address gauges refresh timestamp reports 0
+
+  Scenario: Stamp when the address gauges were last refreshed
+    Given no address components backfill batch has ever run
+    When the address components backfill runs one batch in upgrade mode
+    Then the address gauges refresh timestamp reports that batch's time
 
   # ── nightlife day: last night's recurring party is still indexed ─────────
 

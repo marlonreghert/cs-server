@@ -7,6 +7,18 @@
 > [Review findings — disposition](#review-findings--disposition); F01 EXPANDS
 > this plan's scope with a third defect (C3), and F02 hardens the city
 > vocabulary vibes_bot is about to validate against.
+>
+> **Revision 3 (2026-09-06)** — a third review round, plus a **production
+> correction measured directly** through this repo's own
+> `RdsVenueStore.get_geo_fence()` over SSM (read-only). Findings assigned to
+> this repo: **R08, R10, R11, R15**, every one dispositioned in the same table.
+> The correction RETRACTS revision 2's attribution of the truncated city slugs
+> and the mispointed `rio`/`porto` centres to `admin.geo_fence_city`: that table
+> holds exactly ONE row, `recife`. The coordinate defect is real, but it lives
+> in another table and the follow-up below is re-pointed rather than deleted.
+> Everywhere this plan reasons about `city_slug`, the measured one-circle state
+> is now stated outright — including what it means for this repo's own contract
+> out and for anyone adding a second city.
 
 ## Branch
 fix/events-venue-bairro-and-ticket-url
@@ -60,11 +72,17 @@ index changes (C3).
 - Removing the confirmed-dead `geocode_by_place_id` / `GoogleGeocodingError` /
   `GOOGLE_GEOCODING_API_BASE` (kept deliberately by
   `plans/260906_address-components-via-place-details.md` correction (B)).
-- **Repairing the production `admin.geo_fence_city` circles** (the mispointed
-  `rio` / `porto` centres and the five truncated slugs). Explicitly deferred to
-  a named follow-up — see
-  [Follow-up: geo-fence circle correction](#follow-up-geo-fence-circle-correction-not-this-plan).
-  Nothing in this plan writes, validates or renames a fence row.
+- **Adding, removing or re-pointing an `admin.geo_fence_city` circle.**
+  Production holds exactly ONE circle (`recife`, 40 km) — measured, see
+  Evidence — and this plan neither adds a second nor touches the one that
+  exists. Nothing here writes, validates or renames a fence row. The mispointed
+  `rio` / `porto` coordinates are a real defect **in a different table** and are
+  deferred to a named follow-up — see
+  [Follow-up: the mispointed rio/porto centres](#follow-up-the-mispointed-rioporto-centres-not-this-plan).
+- **Adding a second events city.** Out of scope, and sequenced explicitly in
+  Contract out so that nobody adds a non-Recife crawl target first: with one
+  circle and no distance cap, every venue on Earth resolves to `recife` today,
+  so a São Paulo venue's events would be served inside Recife's feed.
 - **Adding a distance limit to `nearest_city_slug`.** Recorded as a residual
   risk with its real blast radius below, not changed here: today a limit could
   only turn a mislabelled occurrence into a DROPPED one (the projector's
@@ -294,22 +312,83 @@ Verified against this worktree, not taken on the reviewer's word:
   tonight" into a hard 422 instead of a 200-empty. This plan closes that: the
   projector remembers **every configured geo-fence slug** on every cycle,
   whether or not it has events.
-- **Sub-claim of F02 that does not survive checking, and why it does not change
-  the fix.** F02's evidence says cs-server indexes under the `STATE_CAPITALS`
-  slugs (`belo-horizonte`, `sao-paulo`, `joao-pessoa`). That is what the WRITE
-  PATH allows — `validate_geo_fence` (`venue_eligibility.py:527-590`) rejects
-  any slug outside `CAPITALS_BY_SLUG` and re-resolves coordinates from the
-  server-owned catalog, and migration `0015_geofence_city_circles` seeds only
-  `recife`. But the operator's own production enumeration of
-  `admin.geo_fence_city` shows TRUNCATED slugs (`belo`, `boa`, `campo`, `sao`,
-  `rio`, `porto`) with coordinates that are not the capitals' — rows that
-  cannot have come through the admin API and must have been inserted directly.
-  Both statements cannot be true of the same table, and the plan does not need
-  to resolve it to be correct: the index key is whatever the column holds, and
-  the ONE enumerable, authoritative answer to "which slugs does the events index
-  actually use" is `events_known_cities_v1`. That is exactly why hardening it,
-  rather than asserting a slug list, is the fix. The pre-merge check below
-  records the real mapping.
+### What production actually holds — measured, not inferred (revision 3)
+
+Read-only, 2026-09-06, over SSM, through this repo's own
+`RdsVenueStore.get_geo_fence()` and a `SCAN` of the events key families:
+
+```
+admin.geo_fence        enabled = False
+admin.geo_fence_city   1 row:  recife | Recife | -8.0476 | -34.8770 | 40.0 km
+
+events_index_v1:recife          61 occurrences   (the ONLY events_index_v1 key)
+events_known_cities_v1 (SET)    {recife}
+events_venue_v1:*               8 keys
+event_occurrence_v1:*           61 payloads
+```
+
+`DEFAULT_GEO_FENCE` (`venue_eligibility.py:132-134`) is recife-only as well, so
+the seeded fallback and the real table agree; the reading is the same whichever
+path `get_geo_fence` takes.
+
+**1. `city_slug` is a CONSTANT today, not a derivation.** `nearest_city_slug`
+takes `min` over the circle list with no distance cap and no containment
+requirement, and `min` over a one-element list is that element. **Every venue on
+Earth therefore resolves to `city_slug = "recife"`.** A São Paulo venue's events
+would be indexed into `events_index_v1:recife` and served inside Recife's feed —
+wrong data in the wrong city's feed, which looks like a crawl success and which
+nothing downstream can detect. That is the real prerequisite for expanding past
+Recife, and it is why Contract out below carries an explicit second-city
+sequence.
+
+**2. The fence is not self-limiting today, because it is disabled.**
+`serving.eligible_venue`'s geo term — migration `0019_venue_closure_signal`
+(`:124-131`), the LATEST definition of the view, byte-identical to `0015`'s — is
+explicitly fail-open:
+
+```sql
+AND ( fence.enabled IS NOT TRUE
+      OR g.lat IS NULL OR g.lng IS NULL
+      OR NOT EXISTS (SELECT 1 FROM admin.geo_fence_city)
+      OR EXISTS (SELECT 1 FROM admin.geo_fence_city c WHERE <haversine> <= c.radius_km) )
+```
+
+With `admin.geo_fence.enabled = False` the first disjunct is true for every row,
+so the fence imposes **no serving restriction at all** and the 40 km Recife
+radius currently bounds nothing. This settles the question the correction
+document left open, and it refutes revision 2's residual-risk wording ("with the
+fence ENABLED this is mostly self-limiting") — corrected in Residual risks.
+
+**3. Revision 2's attribution of truncated slugs to this table is WITHDRAWN.**
+Revision 2 recorded an operator enumeration showing `belo`, `boa`, `campo`,
+`sao`, `rio`, `porto` in `admin.geo_fence_city`, with `rio` and `porto` centred
+~1,300 km away in Mato Grosso, and concluded that `validate_geo_fence` must
+therefore have been bypassed. **That attribution was wrong.** Those rows came
+from vibes_bot's **discovery points** (`GET /cities`, `POST /venues`), whose
+slugs are derived as `point_id.split("-", 1)[0]` — a different table, in a
+different repo, that this plan never reads. `admin.geo_fence_city` is exactly
+consistent with migration `0015_geofence_city_circles`'s single seeded `recife`
+row and with `validate_geo_fence` (`venue_eligibility.py:527-590`, which rejects
+any slug outside `CAPITALS_BY_SLUG` and re-resolves coordinates from the
+server-owned `STATE_CAPITALS` catalog). There is no evidence of a bypass, and
+the bypass claim is retracted. The coordinate defect itself is real and stays a
+follow-up — re-pointed, not deleted, below.
+
+**4. So F02's dashed-capital mismatch does not exist in production today.** The
+only fence slug is `recife`, which has no dash, so nothing can currently
+mismatch vibes_bot's `list_cities()` vocabulary. The two vocabularies genuinely
+ARE separate code paths, and the mismatch becomes real the moment a dashed
+capital (`sao-paulo`, `belo-horizonte`) is added to the fence — which is exactly
+what expanding past Recife requires. Validating against `events_known_cities_v1`
+remains the right fix; it is a **pre-second-city requirement, not a v1
+blocker**, and §5 below is what makes it safe.
+
+**5. What that means for §5's honesty.** With one configured circle, "remember
+every configured fence slug on every cycle" writes a slug that is already in the
+set: **§5 is a no-op in production right now.** It is not wasted — it is the
+prerequisite that puts a newly-configured city into the vocabulary *before* its
+first occurrence is indexed — but this plan does not claim it changes a served
+byte today.
 
 ## Current Behavior
 
@@ -419,14 +498,22 @@ writer already passes through — `google` (`write_mapped_components`), `parsed`
 
 Inside that method, before the UPDATE is built:
 
-- Resolve the city this write compares against: the incoming `city` when
-  non-empty, otherwise the row's stored `city` (one `SELECT city FROM
-  venues.address WHERE venue_id=:venue_id` inside the same
-  `engine.begin()` transaction — the method already opens one).
-- If `fold_text(neighborhood) == fold_text(comparison_city)` and both are
-  non-empty, set the outgoing `neighborhood` to `None`. `NULLIF(:x,'')`/the
-  existing per-field guard then makes it a no-op for that column; every other
-  column writes normally.
+- **`source="operator"` is exempt** — return immediately without touching the
+  incoming `neighborhood` (R08, rationale below).
+- Read the row's current city AND its provenance: one
+  `SELECT city, city_source FROM venues.address WHERE venue_id=:venue_id`
+  inside the same `engine.begin()` transaction the method already opens.
+- Compute the **effective post-write city** — the city the row will actually
+  hold once the statement commits. That is the incoming `city` when it is
+  non-empty *and* it wins its own per-column precedence guard
+  (`city_source IS NULL` or `rank(source) >= rank(city_source)`); otherwise the
+  stored `city`. It is the same predicate `_field_clause("city")` already emits,
+  evaluated in Python over the two values just read.
+- Drop the incoming `neighborhood` (set it to `None`) when it is non-empty and
+  `fold_text`-equals **either** the incoming `city` (when that is non-empty)
+  **or** the effective post-write city. Two comparisons, not one.
+  `NULLIF(:x,'')`/the existing per-field guard then makes it a no-op for that
+  column; every other column writes normally.
 - `app.utils.text_norm.fold_text` (`:18-25`) is the repo's existing
   accent-fold + casefold + punctuation-strip comparator, so "SÃO PAULO" and
   "sao paulo" compare equal.
@@ -437,15 +524,79 @@ ever prevent a bad write — it can never erase a good stored value, and it
 deliberately does NOT repair rows already stored (see the contract's honest
 wording and F29).
 
+**Why two comparisons and not revision 2's one (R11).**
+`update_venue_address_components` guards EVERY column independently
+(`rds_venue_store.py:249-262`): the incoming `city` is written only when it wins
+its OWN precedence check. Revision 2 compared the bairro against "the incoming
+city when non-empty, else the stored city", so a write whose city LOSES could
+still leave `neighborhood == the city the row keeps` — satisfying the letter of
+revision 2's contract clause while being counted by the new
+`venue_address_neighborhood_equals_city` gauge. **The gauge and the contract
+clause must measure the same property**, and today they do not.
+
+The reachable shape is created by this very plan. After the `upgrade` sweep a
+row can hold `city_source = 'google'` while its `neighborhood_source` is still
+`parsed` or NULL — precisely the rows §2 itself produces (Google answered a city
+but its neighborhood was suppressed as equal-to-city, or the municipality
+publishes no `sublocality*` at all). `apply_parser_fallback` then runs against
+such a row — it is called from `enrich_venue` as well as from the backfill
+(`venue_address_backfill_service.py:106`, "shared by the bulk job AND
+enrich_venue") — carrying, say, `city="Igarassu"` and `neighborhood="Recife"`
+against a stored `city="Recife"` sourced `google`. The neighborhood column
+writes (`parsed` beats NULL, and ties with `parsed`); the city column does not
+(`parsed` 1 < `google` 2). Result: `neighborhood == stored city`, exactly the
+state the contract promises does not happen.
+
+**Deliberate deviation from R11's literal prescription, recorded here.** R11
+prescribed dropping when the bairro equals the incoming city **or the STORED
+city**. That over-drops the mirror case, where the incoming city legitimately
+WINS: a `google` write carrying `city="Igarassu"`, `neighborhood="Recife"`
+against a stored `parsed` `city="Recife"` would lose a correct bairro even
+though the row commits with `city="Igarassu"` and no equality at all. Comparing
+against the EFFECTIVE post-write city is a strict refinement — it catches every
+case R11 named and introduces no new false positive. Both directions get a
+scenario.
+
+**Why `operator` is exempt (R08).** A bairro whose name equals its city is not
+always wrong. **Bairro do Recife** (Recife Antigo) is a real, central
+neighbourhood *of the city of Recife*; the same shape exists elsewhere in
+Brazil. This guard is a heuristic over machine-produced values, and the one
+writer that can legitimately assert "yes, this bairro really is called Recife"
+is a human. `operator` is also the top precedence rung (`_PROVENANCE_RANK`
+operator 3) and the rung this plan's own **F37 contingency writes through** — a
+guard that silently swallowed that write would break the named fallback the
+Acceptance Criteria depend on. So `google` and `parsed` writes are guarded and
+an `operator` write is trusted verbatim; the operator write is the documented
+escape hatch.
+
+**Named, accepted cost of the guard (R08).** For `google` and `parsed` writes, a
+bairro that is legitimately named after its city IS dropped — the venue then
+shows no bairro rather than a wrong one, which is the strictly safer failure of
+the two, and it is repaired by one operator write. The affected population is
+bounded and small: over the 488-address production sample measured for this plan
+(Recife metro), **zero** parsed rows produce `neighborhood == city`, so the guard
+drops nothing that exists today; the exposure is future `google` writes for
+venues in Bairro do Recife and its analogues. Recorded in Residual risks with
+that measurement, per R08's second option, in addition to the operator exemption.
+
 `map_address_components` stays pure and unchanged.
 
 ### 3. `ticket_url` normalisation at projection (the C2 fix)
 
 New pure module `app/services/event_ticket_url.py` exposing
 `normalize_ticket_url(value: Optional[str]) -> Optional[str]`. No I/O, no
-config, fully unit-testable. Applied in `RedisProjectionService.project_events`
-where the payload is built (`redis_projection_service.py:443`), in the same
-place and the same spirit as the existing `flyer_url` substitution.
+config, fully unit-testable. Applied in `RedisProjectionService.project_events`,
+in the same spirit as the existing `flyer_url` substitution.
+
+**Called once per SOURCE ROW, not once per occurrence (R15).** It goes in the
+per-event `try` block next to the existing `flyer_url = flyer_urls.get(...)`
+resolution (`redis_projection_service.py:420-421`), *before* the
+`for occ in expand_occurrences(...)` loop, and the single normalised value is
+reused for every occurrence that row expands into. It is a pure function of the
+row, so calling it inside the loop would recompute an identical answer up to 22
+times (23 while the nightlife day is rolled back) — and, worse, would scale its
+counter by recurrence multiplicity. The metric consequence is spelled out in
+Observability.
 
 The rules, in order (this is the contract vibes_bot and mobile plan against, so
 it is pinned here):
@@ -577,19 +728,23 @@ only the cities that happen to have live events.
   `count_address_neighborhood_equals_city` wrappers. **This is the hop the
   service actually calls; missing it is F17.**
 - `app/services/venue_address_backfill_service.py` — `mode` on
-  `backfill_batch`, passed to the REPOSITORY; the two new gauges set at
-  batch end alongside `VENUE_ADDRESS_BACKFILL_REMAINING`.
+  `backfill_batch`; the two new gauges plus their freshness timestamp set at
+  batch end alongside `VENUE_ADDRESS_BACKFILL_REMAINING` (`:208-210`), read
+  through the REPOSITORY.
 - `app/routers/admin_trigger_router.py` — `_run_address_components_backfill`
   (`:105-115`) reads `cfg.get("mode")`; the `JOB_REGISTRY` entry (`:200-214`)
   widens its `default_config` and description.
 - `app/services/event_occurrences.py` — `NIGHTLIFE_CUTOFF_HOUR`,
   `nightlife_date`, the two-bound expansion, `__all__`.
-- `app/services/redis_projection_service.py` — apply
-  `normalize_ticket_url` at the payload build; remember every configured
+- `app/services/redis_projection_service.py` — apply `normalize_ticket_url`
+  ONCE PER SOURCE ROW in the per-event `try` block, before the occurrence loop
+  (R15), and reuse the result for every occurrence; remember every configured
   fence slug each cycle; bump the two new counters.
 - `app/dao/redis_venue_dao.py` — `remember_city_slug`'s docstring only (the
   set's meaning widens; its key, type and lifecycle do not).
-- `app/metrics.py` — the four new series, every label value pre-initialised.
+- `app/metrics.py` — the five new series (the two address gauges, their
+  shared freshness-timestamp gauge, the ticket-url counter and the nightlife
+  rollback counter), every label value pre-initialised.
 - `tests/rds_fake.py` — `mode` and both new counting methods on
   `InMemoryRdsVenueStore`, mirroring the real store's semantics.
 
@@ -689,15 +844,66 @@ coordinated, three-repo release.
   distance limit, no containment requirement). It is therefore NOT guaranteed to
   be the slug of the city the venue is administratively in — see Residual risks.
 
+**`city_slug` as measured in production today (revision 3) — read this before
+depending on the bullet above.**
+- `admin.geo_fence_city` holds exactly ONE circle (`recife`), so
+  `nearest_city_slug` returns `"recife"` for **every venue on Earth**, and
+  `admin.geo_fence.enabled = False` means `serving.eligible_venue`'s geo term is
+  fail-open and bounds nothing. `city_slug` is a constant, not a derivation.
+- What vibes_bot and mobile may rely on for the Events UI v1 release train:
+  `events_index_v1:recife` is the ONLY index key, `events_known_cities_v1` is
+  the one-element set `{recife}`, and B5's validation vocabulary therefore
+  accepts exactly one slug. A `city` param that is not `recife` is genuinely
+  unserved today — that is correct behaviour, not a vocabulary bug, and B5's
+  422 is the right answer for it.
+- F02's dashed-capital vocabulary mismatch is **latent, not live**: the single
+  fence slug has no dash. It becomes real the moment a dashed capital is
+  configured. Treat vibes_bot's slug-vocabulary fix as a **pre-second-city**
+  requirement rather than a v1 blocker.
+- §5 ("remember every configured fence slug every cycle") is consequently a
+  **no-op in production right now** — it re-writes a slug already in the set. It
+  is the prerequisite for step 3 below, not a change to any served byte today.
+
+**What this repo owes anyone adding a second city — the sequence, so nobody
+adds a crawl target first.**
+1. Add the geo-fence circle using the CANONICAL, non-truncated slug from the
+   `STATE_CAPITALS` catalog (`sao-paulo`, never `sao`). `validate_geo_fence`
+   (`venue_eligibility.py:527-590`) already enforces this for any write through
+   the admin API and re-resolves the coordinates server-side.
+2. Understand that the moment a second circle exists, **every** venue's
+   `city_slug` is re-derived by nearest centre — no containment check, no
+   distance cap. Venues silently move between city feeds, and a venue far from
+   both centres still lands in one. Recompute `nearest_city_slug` over the whole
+   catalog offline and record the flip list BEFORE the circle is written.
+3. §5 guarantees the new slug reaches `events_known_cities_v1` within one
+   2-minute cycle — before any occurrence is indexed under it — so vibes_bot's
+   validation cannot 422 a freshly-configured, still-empty city.
+4. Land vibes_bot's slug-vocabulary fix BEFORE step 1, not after: step 1 is what
+   turns F02's latent mismatch into a live one.
+5. Only then add non-Recife crawl targets. Adding them earlier produces events
+   that are extracted, projected and served under `recife` — wrong data in the
+   wrong city's feed, indistinguishable from a crawl success.
+   Adding Recife crawl targets has none of these prerequisites.
+
 **`venue_neighborhood` (honest wording — replaces revision 1's absolute
 guarantee; F09/F29).**
 - It is never the empty string (`NULLIF(:x,'')` at the write boundary).
-- For every value **written after this change lands**, by any writer
-  (`google`, `parsed`, future `operator`): it is never equal, accent- and
-  case-insensitively, to that write's city.
+- For every value **written after this change lands** by a `google` or `parsed`
+  writer: it is never equal, accent- and case-insensitively, to the city that
+  write asserts, **nor to the city the row holds after the write** (R11 —
+  revision 2 promised only the first half, which the per-column precedence guard
+  can violate).
+- **`operator` writes are exempt (R08).** A human may deliberately store a
+  bairro that is named after its city — Bairro do Recife is a real neighbourhood
+  of Recife. So the guarantee downstream may state is "no MACHINE-written bairro
+  equals its city", not "no bairro equals its city". The operator write is also
+  the documented repair path when the guard drops a legitimate value.
 - It is NOT retro-repaired: rows written before this change are untouched until
   something rewrites them. The `venue_address_neighborhood_equals_city` gauge
-  below reports how many such rows exist, so the claim is measured, not assumed.
+  below reports how many such rows exist **as of the last address backfill
+  batch** (it is a batch-scoped snapshot with its own freshness stamp — R10), so
+  the claim is measured rather than assumed, but it is not a live reading and it
+  counts intentional operator exemptions too.
 - For `google`-sourced values it is Google's `sublocality_level_1` (the
   Brazilian bairro) with `sublocality` and `administrative_area_level_2` as
   fallback rungs.
@@ -719,16 +925,30 @@ serving concern and re-asserts every cycle.
 - `normalize_ticket_url` never raises: every non-conforming input returns None.
   It is called inside `project_events`' existing per-event try/except, so even a
   pathological value cannot cost the cycle.
-- New counter **`events_projection_ticket_url_total{outcome}`**, bumped once per
-  projected occurrence:
+- New counter **`events_projection_ticket_url_total{outcome}`**, bumped **once
+  per projected SOURCE ROW — not once per occurrence (R15)**:
   `absent` (nothing stored) | `passthrough` (already absolute http/https) |
   `scheme_added` (a scheme-less host was qualified) | `rejected` (stored, but
   not a usable URL — the operator's signal that extraction is emitting prose).
   All four outcomes pre-initialised at import, so a zero is a measured zero.
+  `expand_occurrences` emits one occurrence per matching local day across the
+  closed horizon (up to 22, 23 while the nightlife day is rolled back), so a
+  per-occurrence bump would scale the counter by recurrence multiplicity and
+  make ONE badly-extracted recurring row read as 22 rejections.
+  **How to read it, stated so it is not oversold.** `project_events` rebuilds
+  every payload on every cycle (`redis_projection_minutes = 2`), so each
+  selected source row contributes one increment per cycle — ≈720/day per row at
+  steady state. This counter is a **per-cycle census of the projected corpus**,
+  not a count of distinct bad extractions. Use a rate or a ratio:
+  `increase(events_projection_ticket_url_total{outcome="rejected"}[10m]) > 0`
+  means "at least one currently-selected row is emitting prose", and `rejected`
+  divided by the per-cycle total across all four outcomes is the share of the
+  corpus affected. A raw counter value divided by nothing is meaningless.
 - New gauge **`venue_address_source_rows{field,source}`** — the count of
   `venues.address` rows per structured field per provenance
   (`operator`/`google`/`parsed`/`none`), refreshed alongside
-  `VENUE_ADDRESS_BACKFILL_REMAINING` at the end of every backfill batch. This
+  `VENUE_ADDRESS_BACKFILL_REMAINING` at the end of every backfill batch.
+  **BATCH-SCOPED, not continuous — see the staleness note below (R10).** This
   closes a real blind spot: `venue_address_backfill_remaining` reads 0 whether
   the stored data is right or wrong, which is precisely why this defect was
   invisible. It is also the only way an operator can watch a `parsed → google`
@@ -742,13 +962,44 @@ serving concern and re-asserts every cycle.
   stored `city` under `lower(btrim(...))`. Read through the same two layers
   (`RdsVenueStore.count_address_neighborhood_equals_city` →
   `VenueRepository.count_address_neighborhood_equals_city` → the fake) and
-  refreshed by the same batch-end call.
-  This is what makes the contract's neighborhood-vs-city claim MEASURED rather
-  than asserted, and it is how the operator sees the residual (pre-change) rows
-  drain as the sweep rewrites them. Documented limitation: SQL-side comparison
-  is case-insensitive but not accent-folding (no `unaccent` extension in this
-  database), so it can undercount a purely accent-differing pair; the write-time
-  guard itself DOES fold accents via `fold_text`.
+  refreshed by the same batch-end call. **BATCH-SCOPED (R10).**
+  This is what makes the contract's neighborhood-vs-city claim measured rather
+  than asserted **as of the last backfill batch**, and it is how the operator
+  sees the residual (pre-change) rows drain as the sweep rewrites them.
+  Documented limitations: (a) the SQL-side comparison is case-insensitive but
+  not accent-folding (no `unaccent` extension in this database), so it can
+  undercount a purely accent-differing pair — the write-time guard itself DOES
+  fold accents via `fold_text`; and (b) it counts intentional `operator`
+  exemptions (R08) as well as defects, so its floor is the number of
+  deliberately city-named bairros, and it should be read as "rows to inspect",
+  never as "rows that are wrong".
+- **Both address gauges above are BATCH-SCOPED snapshots, and that is now said
+  out loud (R10).** They are recomputed only at the end of an
+  `address_components_backfill` batch, and that job has **no scheduler entry at
+  all**: `grep -rn address_components_backfill app/` finds it only in
+  `app/services/job_lock.py:34` and `app/routers/admin_trigger_router.py`
+  (`:105`, `:200`, `:214`) — a `JOB_REGISTRY` trigger runner with no
+  `scheduler.add_job` registration (`grep -n address main.py` returns nothing,
+  while every scheduled job in this repo is registered there). It runs ONLY when
+  an operator POSTs `/admin/trigger/address_components_backfill/run`. Outside a
+  sweep the series is a frozen snapshot, and a Prometheus gauge carries no
+  staleness marker of its own — months after a sweep the operator would read a
+  value that has not been recomputed since, indistinguishable from a live one.
+  So a third series is added: **`venue_address_gauges_refreshed_timestamp_seconds`**
+  (no labels), set to the Unix timestamp at the same moment the other two are
+  refreshed. That is the standard Prometheus idiom for a snapshot gauge: the
+  operator can see and alert on the reading's age
+  (`time() - venue_address_gauges_refreshed_timestamp_seconds`), and a deploy
+  where no batch has ever run reads `0` instead of looking like a measurement.
+  Contract out is worded to match: the neighborhood claim is measured **as of
+  the last backfill batch**, not continuously.
+  **Why not refresh them from the 2-minute projection cycle instead** (R10's
+  other option): that couples an address-quality metric to the serving
+  projector's hot path and adds an RDS `GROUP BY` to the job whose preparation
+  read is deliberately all-or-nothing and aborts the whole cycle on failure. The
+  operational use of both gauges is watching the upgrade sweep drain — which is
+  exactly when batches ARE running — and the freshness stamp covers the rest of
+  the time at the cost of one series.
 - New counter **`events_projection_nightlife_rollback_total`** — bumped once per
   projection cycle that ran with the nightlife day rolled back (local hour < 6).
   One cheap, unambiguous production signal that C3's code path is actually live
@@ -788,6 +1039,13 @@ Scenarios (ticket URL) — 9:
 - **Project no ticket url when the extraction found none** — counted `absent`.
 - **Leave the stored ticket url verbatim in the system of record.**
 - **Re-assert the normalised ticket url on the next projection cycle.**
+- **Count a recurring event's ticket url once, not once per occurrence**
+  (R15) — a "todo dia" event expanding to many occurrences bumps the outcome
+  exactly once per cycle, which is the assertion the existing non-recurring
+  fixtures cannot make.
+- **Count the ticket url again on the next projection cycle** (R15) — pins the
+  per-cycle-census semantics the Observability section documents, so nobody
+  later reads the raw counter as a count of distinct bad extractions.
 
 Scenarios (bairro):
 - **Select a fully populated parsed address row in upgrade mode.**
@@ -805,6 +1063,21 @@ Scenarios (bairro):
   write itself carries no city.
 - **Store a bairro that genuinely differs from the city** — the guard can only
   ever suppress the equal case; it must not become a blanket drop.
+- **Trust an operator's bairro that is named after its city** (R08) — an
+  `operator` write of `neighborhood="Recife"` against a row whose city is
+  "Recife" IS stored, sourced `operator`. This is the equal-and-CORRECT case,
+  which revision 2 had no scenario for at all.
+- **Drop a bairro that equals the city the row will keep, even when the write's
+  own city is different** (R11) — a `parsed` write carrying `city="Igarassu"`
+  and `neighborhood="Recife"` against a row whose `city` is "Recife" sourced
+  `google`: the neighborhood is dropped and the row still holds
+  `city="Recife"` sourced `google`.
+- **Keep a bairro when the write's own city wins and differs from it** (R11,
+  the deviation guard) — a `google` write carrying `city="Igarassu"` and
+  `neighborhood="Recife"` against a row whose `city` is "Recife" sourced
+  `parsed`: the city becomes "Igarassu" and the bairro "Recife" is STORED,
+  because the row does not end up with `neighborhood == city`. This is the
+  false positive R11's literal "incoming OR stored" rule would have caused.
 - **Write the other address fields even when the bairro is dropped** — street
   still lands; the suppression is per-column, not per-write.
 - **Make no address lookup at all while the free-tier switch is off.**
@@ -813,6 +1086,11 @@ Scenarios (bairro):
 - **Report how many stored bairros are still just the city name** — the
   `venue_address_neighborhood_equals_city` gauge, which is what makes the
   contract's wording measured rather than asserted.
+- **Report no refresh timestamp before any batch has ever run** and **Stamp
+  when the address gauges were last refreshed** (R10) — before any batch,
+  `venue_address_gauges_refreshed_timestamp_seconds` is 0; after one it carries
+  that batch's time, so a never-refreshed snapshot can never be mistaken for a
+  live reading.
 
 Scenarios (nightlife day — C3/F01):
 - **Keep last night's recurring occurrence in the index at 00:30 local** — a
@@ -879,7 +1157,18 @@ Pytest unit tests:
   the neighborhood-equals-city suppression at the write boundary: incoming
   city, stored-city fallback, accent/case folding, and proof that a genuinely
   different neighborhood still writes and that the other three fields are
-  unaffected when the neighborhood is dropped.
+  unaffected when the neighborhood is dropped. Plus the revision-3 cases:
+  the `operator` exemption (R08); the effective-post-write-city comparison in
+  both directions (R11) — dropped when the incoming city LOSES and the kept
+  city equals the bairro, stored when the incoming city WINS and differs from
+  it; and a `parsed` write against a row with `city_source='google'` and
+  `neighborhood_source` NULL, which is the exact shape this plan's own upgrade
+  sweep creates.
+- `tests/test_redis_projection_events.py` (or the existing projection test
+  module) — `normalize_ticket_url` is called once per source row, not once per
+  occurrence (R15): a recurring row expanding to N occurrences bumps
+  `events_projection_ticket_url_total` by exactly 1, and every one of its N
+  payloads carries the same normalised value.
 - A DAO-level test of the `upgrade` predicate against the in-memory store,
   asserting default-mode selection is unchanged and an unknown mode raises, plus
   `count_address_source_rows` and `count_address_neighborhood_equals_city` at
@@ -920,9 +1209,17 @@ Manual or integration checks:
   after one cycle, including a city with zero events.
 - `venue_address_source_rows{field,source}`,
   `venue_address_neighborhood_equals_city`,
+  `venue_address_gauges_refreshed_timestamp_seconds`,
   `events_projection_ticket_url_total{outcome}` and
   `events_projection_nightlife_rollback_total` are exported with every label
   value pre-initialised.
+- A recurring event expanding to N occurrences bumps
+  `events_projection_ticket_url_total` by exactly **1** per cycle, not N (R15).
+- An `operator` write of a bairro equal to its city is STORED; the same write
+  from `google` or `parsed` is dropped (R08).
+- A write whose incoming city loses its precedence check cannot leave the row
+  with `neighborhood == city`, and a write whose incoming city wins keeps a
+  bairro that only matched the OLD city (R11).
 - **F37 — the two-part read-only probe, BEFORE merge, not before the sweep:**
   (a) confirm `ven_3870…496843` (Downtown Beer Garden) has a NON-NULL
   `google_places.vibe_attributes.google_place_id` — without one,
@@ -938,12 +1235,16 @@ Manual or integration checks:
   rule already protects from being overwritten). Merging the rest of this PR is
   still correct — C2, C3 and the guard stand alone — but the C1 rollout gate
   below must then be re-pointed at the operator write.
-- **F02 — record the real mapping before merge:** enumerate
-  `admin.geo_fence_city` (slug, name, lat, lng, radius_km) and
-  vibes_bot's `GET /cities`, and paste both lists into the PR description
-  alongside `SMEMBERS events_known_cities_v1` from a real cycle. This is the
-  evidence vibes_bot's B5 validation is built on, and it is what settles the
-  contradiction recorded in the Evidence section. Read-only; no write.
+- **F02 — re-record the real mapping at merge time:** enumerate
+  `admin.geo_fence_city` (slug, name, lat, lng, radius_km) and vibes_bot's
+  `GET /cities`, and paste both lists into the PR description alongside
+  `SMEMBERS events_known_cities_v1` from a real cycle. The measured answer as of
+  2026-09-06 is already in Evidence — one circle, `recife`; one known city,
+  `recife` — so this is a re-confirmation that nothing changed under the plan
+  between writing and merging, not an open question. Read-only; no write. If the
+  enumeration comes back with more than one circle, STOP and re-read the
+  second-city sequence in Contract out before merging: vibes_bot's
+  slug-vocabulary fix has to precede that circle, not follow it.
 
 ### Post-merge rollout — an OPERATOR-GATED, NAMED RELEASE GATE (F10)
 Not part of the PR, and **explicitly a gate on the mobile 1.4.0 release
@@ -966,60 +1267,101 @@ This gate must also appear as a checklist item in the wrapper coordination plan
 and in the mobile plan's pre-release device-validation list; this repo cannot
 enforce it alone, and F10's whole point is that no plan sequenced it.
 
-## Follow-up: geo-fence circle correction (NOT this plan)
+## Follow-up: the mispointed rio/porto centres (NOT this plan)
 
-**Recorded so it cannot be lost. Operator has approved the correction; this
-plan deliberately does not take it.**
+**Recorded so it cannot be lost. The defect is real and evidence-backed; what
+changed in revision 3 is its ATTRIBUTION, which was wrong.**
 
-The evidence handed to this revision: production `admin.geo_fence_city` holds
-circles whose slugs are truncated labels (`belo`, `boa`, `campo`, `sao`, and
-`porto`/`rio`), and two of them are centred ~1,300 km from the cities they are
-named after — `rio` at `-16.4409, -55.4986` and `porto` at `-19.3983, -57.5608`,
-both in Mato Grosso. Neither slug nor coordinate pair can have been written
-through the admin API: `validate_geo_fence` (`venue_eligibility.py:527-590`)
-rejects any slug outside `CAPITALS_BY_SLUG` and re-resolves coordinates from
-the server-owned `STATE_CAPITALS` catalog, where `rio-de-janeiro` is
-`-22.9068, -43.1729` and `porto-alegre` is `-30.0346, -51.2177`. So these rows
-were inserted out-of-band, and the correction is a DATA repair (plus possibly a
-slug rename), not a code change this plan could carry.
+### The correction (revision 3)
 
-**Why it is a separate plan, not this one:**
+Revision 2 recorded this follow-up as a repair to production
+`admin.geo_fence_city` — truncated slugs (`belo`, `boa`, `campo`, `sao`, `rio`,
+`porto`) and two circles centred ~1,300 km away in Mato Grosso (`rio` at
+`-16.4409, -55.4986`, `porto` at `-19.3983, -57.5608`) — and concluded that,
+since `validate_geo_fence` (`venue_eligibility.py:527-590`) rejects any slug
+outside `CAPITALS_BY_SLUG` and re-resolves coordinates from the server-owned
+`STATE_CAPITALS` catalog, those rows must have been inserted out-of-band,
+bypassing validation.
 
-1. **Different blast radius.** `admin.geo_fence_city` is read by
-   `serving.eligible_venue` — the SQL view that decides whether a venue is
-   served AT ALL. Re-pointing a circle re-partitions serving, not just labels:
-   venues currently inside the bogus Mato Grosso circles LOSE servability, and
-   venues near the real Rio/Porto Alegre gain it. That is a catalog-wide
-   serving change; this plan changes two field values and one date bound.
-2. **It is cross-repo in a way this round cannot absorb.** Correcting the slugs
-   (`rio` → `rio-de-janeiro`) renames the `events_index_v1:<slug>` keys and
-   changes the vocabulary vibes_bot's B5 validates against — in the same release
-   train that is introducing that validation. Sequencing a vocabulary change
-   into that is how a 422-on-every-city outage happens.
-3. **The projection re-asserts, so nothing is lost by waiting.** A corrected
-   fence takes effect on the next 2-minute cycle whenever it lands.
+**That attribution is wrong, and the bypass conclusion is WITHDRAWN.** Measured
+directly on 2026-09-06 over SSM through this repo's own
+`RdsVenueStore.get_geo_fence()`: production `admin.geo_fence_city` holds
+**exactly one row — `recife` (-8.0476, -34.8770, 40 km)** — exactly what
+migration `0015_geofence_city_circles` seeds, and exactly what
+`validate_geo_fence` would allow. There is no truncated slug in that table, no
+Mato Grosso centre in it, and no evidence that anything bypassed validation.
 
-**What the follow-up plan must show (do not let it skip these):**
+The truncated slugs and the Mato Grosso coordinates came from **vibes_bot's
+discovery points** — the rows behind `GET /cities` and `POST /venues`, whose
+slugs are derived as `point_id.split("-", 1)[0]`, which is what produces `sao`
+from `sao-paulo` and `rio` from a `rio-…` point id. That is a **different table,
+in a different repo**, which this plan neither reads nor writes.
 
-- A read-only enumeration of `admin.geo_fence_city` BEFORE the change, and a
-  per-venue `nearest_city_slug` computation over the whole catalog under both
-  the current and the corrected circle sets — i.e. the exact list of venues
-  whose `city_slug` would FLIP, produced before anything is written.
-- The servability delta from `serving.eligible_venue` under both fences (count
-  and venue ids gained and lost), because a re-pointed circle can remove venues
-  from serving entirely. Zero unexplained losses, or an explicit operator
-  decision per lost venue.
-- What happens to the orphaned `events_index_v1:<old-slug>` ZSETs: they are
-  pruned by the projector's own city prune only because `events_known_cities_v1`
-  keeps remembering the old slug (this plan's §5 makes that stronger, not
-  weaker) — the follow-up must confirm the old key drains to empty rather than
-  being left with stale members, and must NOT delete the known-cities member.
+### What survives, and is still a real defect
+
+Two discovery points named after Rio de Janeiro and Porto Alegre carry
+coordinates roughly 1,300 km from those cities, in Mato Grosso. Nothing in
+revision 3 refutes the coordinates themselves — only where they live. So the
+follow-up stands, with one step added at the front:
+
+**Step 0 (new, and mandatory): identify the table that actually holds these
+rows.** It is not `admin.geo_fence_city`. The measurement that produced the
+numbers was `GET /cities` + `POST /venues` against vibes_bot, so the owning
+store is on the vibes_bot side (or a shared store vibes_bot reads); the
+follow-up must name the table, the repo, the writer that created the rows and
+the validation — if any — that writer passes through, and must re-verify the two
+coordinate pairs against that store directly before proposing any change.
+
+**The operator's approval to fix `rio`/`porto` was given on the mis-attributed
+premise** (that these were geo-fence circles re-partitioning cs-server's serving
+set). It must be re-confirmed once step 0 identifies the real owner, because the
+blast radius of the change depends entirely on which table it is.
+
+### Why it stays a separate plan
+
+1. **Unknown blast radius until step 0 lands.** If the rows are discovery
+   points, re-pointing them changes where the crawl/add pipelines look, not
+   which venues `serving.eligible_venue` returns. If they turn out to live
+   somewhere this repo reads, the radius is larger. Either way it is not
+   knowable from here, and this plan changes two field values and one date
+   bound.
+2. **Any slug change is cross-repo in a release train that is introducing city
+   validation.** Renaming a slug anything downstream keys on, in the same train
+   that adds vibes_bot's B5 vocabulary check, is how a 422-on-every-city outage
+   happens.
+3. **Nothing is lost by waiting.** cs-server's projection re-asserts every 2
+   minutes, so a correction takes effect on the next cycle whenever it lands.
+
+### What the follow-up plan must show (do not let it skip these)
+
+- Step 0's answer: the table, the repo, the writer, and a direct read of the two
+  coordinate pairs from that store.
+- A read-only enumeration of whatever table it is, BEFORE the change.
+- If (and only if) the change touches `admin.geo_fence_city`: a per-venue
+  `nearest_city_slug` computation over the whole catalog under both the current
+  and the corrected circle sets — the exact list of venues whose `city_slug`
+  would FLIP, produced before anything is written — plus the servability delta
+  from `serving.eligible_venue` under both fences (counts and venue ids gained
+  and lost), with zero unexplained losses or an explicit operator decision per
+  lost venue. Note that with `admin.geo_fence.enabled = False` today the geo
+  term is fail-open, so a fence change alters servability only if the flag is
+  also flipped — and flipping it is its own decision with its own delta.
+- What happens to any orphaned `events_index_v1:<old-slug>` ZSET: it is pruned
+  by the projector's own city prune only because `events_known_cities_v1` keeps
+  remembering the old slug (this plan's §5 makes that stronger, not weaker) —
+  the follow-up must confirm the old key drains to empty rather than being left
+  with stale members, and must NOT delete the known-cities member.
 - Coordination with vibes_bot: any slug rename is announced before it lands, and
   the mapping is re-recorded in both plans.
 - Whether `nearest_city_slug` should gain a distance limit at the same time —
-  and if so, what happens to a venue beyond the limit (today it would raise,
-  be counted as a per-event error, and DROP the event from serving; a follow-up
+  and if so, what happens to a venue beyond the limit (today it would raise, be
+  counted as a per-event error, and DROP the event from serving; a follow-up
   wanting a limit must add a "no city" disposition rather than an exception).
+- Whether `admin.geo_fence.enabled` should be `True` at all. It reads `False` in
+  production; `nearest_city_slug` ignores the flag by design, but
+  `serving.eligible_venue`'s geo term is fail-open on it, so today the fence
+  restricts nothing. That is a separate, deliberate decision — not something to
+  flip as a side effect of a coordinate repair.
 
 ## Residual risks
 
@@ -1030,13 +1372,32 @@ slug rename), not a code change this plan could carry.
 - **Rows already stored with `neighborhood == city` are not repaired** by the
   write-time guard. `venue_address_neighborhood_equals_city` measures how many
   exist; the upgrade sweep rewrites them only where Google answers.
-- **`nearest_city_slug` has no distance limit**, so `city_slug` is "nearest
-  configured circle centre", not "the city this venue is in". With the fence
-  ENABLED this is mostly self-limiting — `serving.eligible_venue` only serves a
-  venue inside SOME circle's radius (max 200 km), so a venue 342 km from every
-  centre is not served at all and contributes no occurrences. The exposure is
-  the fail-open states: fence disabled, or a mispointed circle (above). Not
-  changed here; owned by the follow-up.
+- **`nearest_city_slug` has no distance limit, and in production it has nothing
+  to choose between** (corrected in revision 3). `city_slug` is "nearest
+  configured circle centre", not "the city this venue is in" — and with exactly
+  one circle configured, it is the constant `"recife"` for every venue. Revision
+  2 called this "mostly self-limiting with the fence ENABLED"; **the fence is
+  DISABLED in production** (`admin.geo_fence.enabled = False`), and
+  `serving.eligible_venue`'s geo term is fail-open on that flag (migration
+  `0019`, `:124-131`), so the 40 km radius bounds nothing and no distance
+  self-limits anything. Today the risk is latent because there is only one city
+  to be wrong about; it becomes live the moment a second circle is added, which
+  is why Contract out carries the second-city sequence. Not changed here; owned
+  by the follow-up.
+- **A bairro legitimately named after its city is dropped for `google` and
+  `parsed` writes** (R08, accepted). Bairro do Recife is the named real-world
+  case. Measured exposure today: **zero** of the 488 production addresses in
+  this plan's sample parse to `neighborhood == city`, so the guard drops nothing
+  that currently exists; the exposure is future `google` writes for venues in
+  such a bairro. The failure is safe (no bairro shown rather than a wrong one),
+  it is visible in `venue_address_neighborhood_equals_city` only after an
+  operator repairs it, and the repair is one `operator` write, which the guard
+  exempts.
+- **Both address gauges are batch-scoped snapshots** (R10). Outside an
+  operator-triggered `address_components_backfill` sweep they do not move;
+  `venue_address_gauges_refreshed_timestamp_seconds` is what makes that visible.
+  An operator who reads either gauge without checking the stamp can mistake a
+  months-old snapshot for a live measurement.
 - **The six-hour near-edge widening** (§4) adds at most one expanded day per
   recurring event between 00:00 and 06:00 local. Bounded, measured by
   `EVENTS_PROJECTED_OCCURRENCES` / `EVENTS_PROJECTION_BYTES`, and negligible
@@ -1054,10 +1415,12 @@ slug rename), not a code change this plan could carry.
 Every finding assigned to cs-server, verified against this worktree's real code
 before acting.
 
+### Revisions 1–2 (F-series)
+
 | id | verdict | what changed |
 |---|---|---|
 | **F01** | **FIXED** (with one recorded deviation) | Verified: `event_occurrences.py:126` uses the calendar date; `redis_projection_service.py:496-529` prunes and deletes anything not regenerated. §4 expands from the nightlife day (`NIGHTLIFE_CUTOFF_HOUR = 6`, frozen and named in the contract) while anchoring the forward edge to the calendar date — the deviation from F01's literal `range(0, horizon_days+1)`, with its reason (horizon-edge flapping) recorded in §4. Three new projector-driven scenarios plus the explicit "no hand-seeded index" rule in the Test Plan. |
-| **F02** | **FIXED** (my half), with one sub-claim corrected | Verified: `remember_city_slug` IS called on every occurrence write via `index_event_occurrence` (`redis_venue_dao.py:1442`), the key has no TTL and no delete path, so it is durable. Verified GAP: a configured city with zero occurrences is never remembered, which would make vibes_bot's B5 422 a quiet city. §5 remembers every configured fence slug every cycle; the contract states the key, type and lifecycle. F02's parenthetical that the index uses `STATE_CAPITALS` slugs is contradicted by the operator's own production enumeration (truncated slugs) — recorded in Evidence, and the pre-merge check records the real mapping. |
+| **F02** | **FIXED** (my half), with one sub-claim corrected | Verified: `remember_city_slug` IS called on every occurrence write via `index_event_occurrence` (`redis_venue_dao.py:1442`), the key has no TTL and no delete path, so it is durable. Verified GAP: a configured city with zero occurrences is never remembered, which would make vibes_bot's B5 422 a quiet city. §5 remembers every configured fence slug every cycle; the contract states the key, type and lifecycle. F02's parenthetical that the index uses `STATE_CAPITALS` slugs is neither confirmed nor contradicted by production: **revision 3 measured `admin.geo_fence_city` directly and it holds exactly ONE row, `recife`** — the truncated slugs revision 2 cited were vibes_bot discovery points, not fence rows (see Evidence and the follow-up). So the dashed-capital mismatch is LATENT, not live, and §5 is a no-op today that becomes load-bearing at the second city. |
 | **F09** | **FIXED** | Verified: the parser writes through `venue_address_backfill_service.py:128` → `venue_repository` → `RdsVenueStore.update_venue_address_components`, which has the `NULLIF` non-empty guard but no city comparison, and `venue_address_parser.py:290` builds the bairro with no city check (the `:294` plausibility guard is gated on `street is None`). The suppression MOVES from `map_address_components` to the shared write boundary, covering `google`, `parsed` and any future `operator` writer, with `fold_text` folding. Two new scenarios and store-level unit tests. |
 | **F10** | **FIXED** (my half) | The sweep is restated as a named, numbered release gate that blocks the mobile 1.4.0 EAS dispatch, with the metric to watch and the per-venue regression check — and an explicit statement that it must ALSO appear in the wrapper coordination plan and the mobile pre-release list, since this repo cannot enforce it alone. |
 | **F17** | **FIXED** | Verified: `venue_address_backfill_service.py:183` calls `self.venue_repository.list_address_backfill_candidates(after_id, effective_limit)` and `venue_repository.py:75-79` forwards positionally; the remaining-count read takes the same hop at `:208`/`:82-86`. §1 adds the repository hop for `mode`, and Observability adds `count_address_source_rows` at BOTH layers plus `tests/rds_fake.py`. |
@@ -1066,12 +1429,32 @@ before acting.
 | **F30** | **FIXED** (and extended) | Verified by inspection: `^[A-Za-z][A-Za-z0-9+.-]*:` matches `evenyx.com:` because `.` is inside the class, so rule 6 dropped a legitimate `host:port` link. Rule 6 now requires the pre-colon token to contain no `.`. **Additionally**, rule 8 as written would ALSO have rejected `evenyx.com:8080` (its last dot-separated label would be `com:8080`, not alphabetic) — so rule 8 now strips and validates a numeric port. Both the BDD scenario and the unit table carry `evenyx.com:8080/lote2`. |
 | **F37** | **FIXED** | Verified: `_maybe_fetch_google_address` (`venue_address_backfill_service.py:82-87`) returns `no_place_id` and writes nothing when `vibe_attributes.google_place_id` is absent, so the whole C1 path is a no-op for such a venue. The probe moves into PRE-MERGE acceptance as a two-part read-only check (place_id present, then Place Details answers `Espinheiro`), with the named fallback (the deferred `operator` writer) decided in advance. |
 
+### Revision 3 (R08, R10, R11, R15 + the production correction)
+
+| id | verdict | what changed |
+|---|---|---|
+| **PROD CORRECTION** | **APPLIED** | Measured over SSM through `RdsVenueStore.get_geo_fence()`: `admin.geo_fence_city` holds exactly ONE row (`recife`, -8.0476/-34.8770, 40 km) and `admin.geo_fence.enabled = False`. Revision 2's attribution of truncated slugs and the Mato Grosso `rio`/`porto` centres to that table is **withdrawn**, along with its "`validate_geo_fence` must have been bypassed" conclusion — those rows are vibes_bot **discovery points** (`GET /cities`, `POST /venues`, slugs derived as `point_id.split("-",1)[0]`). The coordinate defect is kept as a real follow-up with a new mandatory step 0: identify the table that actually holds it. Everywhere the plan reasons about `city_slug`, the one-circle state is now stated: `min` over one element means **every venue resolves to `recife`**, so `city_slug` is a constant, `events_index_v1:recife` is the only index key, F02's dashed-slug mismatch is latent rather than live, and §5 is a no-op today. Contract out gains an explicit second-city sequence. Independently verified and added: `serving.eligible_venue`'s geo term is fail-open on `fence.enabled` (migration `0019:124-131`), so the disabled fence restricts **nothing** — which refutes revision 2's "with the fence ENABLED this is mostly self-limiting" residual risk and closes the question the correction document left open. |
+| **R08** | **FIXED** (both options taken) | Verified: `_PROVENANCE_RANK` puts `operator` at 3, `update_venue_address_components` has no source exemption today, and the plan's own F37 contingency writes through `source="operator"`, so an unconditional guard would swallow the named fallback. Bairro do Recife is a real neighbourhood named after its city. §2 now exempts `source="operator"` outright, AND the `google`/`parsed` false positive is recorded in Residual risks with its measured size (**zero** of the 488 sampled production addresses parse to `neighborhood == city`, so nothing that exists today is dropped). Two scenarios added, including the equal-and-CORRECT case revision 2 had no coverage for. Contract out and the gauge's wording both say "no MACHINE-written bairro", not "no bairro". |
+| **R10** | **FIXED** (option b, plus a staleness stamp) | Verified: `grep -rn address_components_backfill app/` finds it only in `job_lock.py:34` and `admin_trigger_router.py:105,200,214` — a `JOB_REGISTRY` runner with **no** `scheduler.add_job` registration (`grep -n address main.py` returns nothing, and every scheduled job in this repo is registered in `main.py`). Both gauges are therefore operator-trigger-scoped. Observability and Contract out now say BATCH-SCOPED plainly, name the trigger, and stop calling the neighborhood claim continuously measured; a third series `venue_address_gauges_refreshed_timestamp_seconds` makes the snapshot's age visible and alertable, which is the actual defect ("a Prometheus gauge carries no staleness marker"). Refreshing from the 2-minute projection cycle was considered and rejected in writing: it would couple an address-quality metric to the serving projector's all-or-nothing preparation read for no gain during the sweep, which is when the gauges are actually used. |
+| **R11** | **FIXED** (with a recorded refinement) | Verified: `update_venue_address_components` (`rds_venue_store.py:249-262`) guards every column independently, so the incoming `city` can lose while the `neighborhood` writes. Verified the reachable shape is created BY THIS PLAN: after the upgrade sweep a row can hold `city_source='google'` with `neighborhood_source` NULL/`parsed`, and `apply_parser_fallback` runs against it from `enrich_venue` as well as from the backfill (`venue_address_backfill_service.py:106`). §2 now compares the bairro against the incoming city AND the **effective post-write city** (the city the row will actually hold). **Refinement of R11's literal prescription, recorded in §2:** R11 said "incoming OR stored", which over-drops the mirror case where the incoming city legitimately WINS — comparing against the effective city catches everything R11 named and invents no new false positive. Both directions get a scenario, plus store-level unit tests. |
+| **R15** | **FIXED** (bump per source row, and the semantics documented) | Verified: the payload build sits inside `for occ in expand_occurrences(...)` (`redis_projection_service.py:~423-450`), so a bump there is per occurrence; `expand_occurrences` emits up to 22 (23 while rolled back) per source row and `project_events` rebuilds every payload every `redis_projection_minutes = 2`. §3 moves the call — and the bump — into the per-event `try` block before the loop, reusing one normalised value for every occurrence (it is a pure function of the row, so the per-occurrence call was also redundant work). Observability additionally states the residual honestly: even per row, the counter is a **per-cycle census**, ≈720 increments/day per row, to be read as a rate or a ratio and never as a count of distinct bad extractions. Two scenarios pin both halves. |
+
 **Rejected: none.** Every finding assigned to this repo reproduced against the
-real code. Two sub-claims inside otherwise-correct findings did not survive
+real code. Three sub-claims inside otherwise-correct findings did not survive
 checking and are corrected in place rather than silently inherited: F02's
-`STATE_CAPITALS`-slug parenthetical (contradicted by the production
-enumeration, above) and revision 1's own stale line references for the parser
-(`:302`/`:305` → `:290`/`:294`), which the reviewer had right.
+`STATE_CAPITALS`-slug parenthetical (neither half of the revision-2
+contradiction was true of `admin.geo_fence_city`, which holds one `recife` row —
+see the production correction above); revision 1's own stale line references for
+the parser (`:302`/`:305` → `:290`/`:294`), which the reviewer had right; and
+R11's literal "incoming OR stored city" rule, refined to "incoming OR effective
+post-write city" in §2 because the literal form drops a correct bairro whenever
+the incoming city legitimately wins.
+
+**One claim this plan itself made and now retracts:** revision 2's assertion
+that production `admin.geo_fence_city` contains truncated slugs and mispointed
+`rio`/`porto` circles, and that `validate_geo_fence` must therefore have been
+bypassed. Measured false. The rows are vibes_bot discovery points; the follow-up
+is re-pointed, not deleted.
 
 ## Open Questions
 - None.
