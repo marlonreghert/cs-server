@@ -826,6 +826,14 @@ Manual or integration checks:
   shape, or `city_slug`'s derivation.
 
 ## Open Questions
+
+**None block implementation.** Every item below is a PRODUCTION ROLLOUT gate,
+not a design question, and each is already contained by a default-off switch:
+`address_backfill_geocoding_enabled` ships false, so Phases 1, 2, 4 (and 5 if
+built) are implementable, testable and mergeable end-to-end without any of
+these being answered. `/execute-feature` should build and verify everything,
+leave the geocoding switch off, and stop at "verification pending" rather than
+enabling it. What follows is the operator's checklist for that later step.
 - The Geocoding API's 10,000-free-requests/month figure is from Google's
   public docs, not verifiable from this repo. Phase 3 defines a cheap
   in-band verification (tiny sample + a Prometheus counter as a
