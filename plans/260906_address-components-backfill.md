@@ -99,6 +99,25 @@ and a parsed guess must never be able to block Google's later, better answer.
   Fluminense — **not** just the Recife metro); 163 have no parseable shape at
   all (missing bairro-separator dash, or a space/comma substituting for it
   before the UF). Only 302/487 failures are in the 2,661-venue servable set.
+- **Measured `place_id` coverage in production (2026-09-06), read-only against RDS:**
+  `google_places.vibe_attributes` carries `google_place_id` as a first-class
+  column (not buried in `payload`), and **3,377 of 3,600 venues have one**.
+  Critically, **`servable_without_place_id` = 0** — every venue in
+  `serving.eligible_venue` has a Google place id. The 223 without one are
+  entirely outside the served set, and `venue_source` splits `besttime` 3,281 /
+  `google_only` 319. So the Google path can reach **100% of user-visible
+  venues**; the place-id-less remainder is invisible to users and is precisely
+  the early BestTime-only cohort. An earlier draft of this plan speculated that
+  Google might broadly return nothing for many venues — that was wrong and is
+  corrected here: the *mechanism* is universal for servable venues.
+
+  What this measurement does NOT establish is the *data* question: holding a
+  `place_id` guarantees we can ASK Google, not that Google publishes a
+  `sublocality`-family component for that place. Brazilian coverage is good but
+  not universal, and that residual is unmeasurable without calling the API —
+  which is why Phase 3's verification sample below is required to measure it
+  rather than assume it.
+
 - **`place_id` is already persisted, so the Google half of the backfill is one
   call per venue.** `google_places_enrichment_service.py:361-366` sets
   `vibe_attrs.google_place_id` on every enrichment (Redis,
@@ -471,11 +490,21 @@ one):
    the backfill job with a small explicit `{"limit": 10}` (same override
    mechanism `google_places_backfill`'s `cfg.get("limit")` already
    establishes) — a tiny, cheap, reversible sample.
-4. The operator checks the Google Cloud Console Billing page for the
+4. **The same sample measures Google's real bairro YIELD, not just its cost.**
+   Holding a `place_id` proves we can ask Google; it does not prove Google
+   publishes a `sublocality`-family component for that place. The sample run
+   therefore records, for its N venues, how many produced a non-null
+   `neighborhood` — a measured yield rate, reported in the run summary
+   alongside the outcome counts. This is the single number that decides
+   whether the conditional Phase 5 below is built at all, and it costs
+   nothing extra because the run has to happen anyway. Use a sample large
+   enough to be informative (~50, still trivially inside any free tier)
+   rather than the bare minimum needed for the billing check.
+5. The operator checks the Google Cloud Console Billing page for the
    Geocoding API SKU for that project and confirms $0 charged. This step
    cannot be performed or confirmed by this codebase — it needs a human with
    Console access; see Open Questions.
-5. **If verification fails** (a charge appears, or the call errors as
+6. **If verification fails** (a charge appears, or the call errors as
    API-not-enabled-for-this-key): flip `address_backfill_geocoding_enabled`
    back to false immediately (one admin-config write, no deploy, no restart)
    and cancel any in-flight run via the existing
@@ -485,6 +514,47 @@ one):
    posture elsewhere ("design to the free tier, probe free before paying").
    Buying the minimal-mask route afterward stays a separate, explicit
    spend-approval decision (Non-goals).
+
+### Phase 5 (CONDITIONAL — do not build until Phase 3's sample says it is needed)
+
+An LLM pass over whatever is STILL unresolved after Google and the parser have
+both run. Deliberately last, deliberately conditional, and deliberately scoped
+to the residual: it is a one-time cost per venue, so it is economically
+sensible, but it is inference rather than fact and must not displace either
+source above it.
+
+**The gate.** Phase 3's sample yields a measured Google bairro-yield rate.
+Combined with the parser's own measured coverage, that gives the real size of
+the residual. If the residual is negligible, **do not build this phase** — it
+would be machinery earning nothing, and the operator's own bar is that a rare
+residual miss is acceptable. Build it only if the residual is materially large,
+and record the measured number that justified the decision.
+
+**Shape, if built.**
+- Runs ONLY on rows where Google returned no usable component AND the parser
+  declined. Never re-derives a value either source already produced.
+- Uses the existing OpenAI client surface (`app/api/openai_compat.py` and the
+  established `openai_*_client.py` pattern) — no new vendor, no new key.
+- **Structured output with an explicit refusal path**: returns
+  `{neighborhood, city, confidence}` or an explicit null. The failure to avoid
+  is a confident split of a mall/POI string such as
+  "Shopping Riomar Pina Recife" into a plausible-looking wrong bairro. A model
+  that declines on those is behaving correctly, and declining must be as cheap
+  and normal an outcome as answering.
+- **Its own provenance value, `llm`, ranked BELOW `google` and `parsed`** in
+  the Phase 2 precedence order (operator > google > parsed > llm). Ranking it
+  last is what keeps a later authoritative pass able to correct it, and what
+  lets an operator query how much of the catalog rests on inference rather than
+  on a stated component. An `llm` value must never overwrite anything.
+- **Validated against a held-out sample before it is trusted.** The parser
+  already produces a known-good answer for ~86% of Brazilian rows; that is a
+  free labelled set. Measure the model's agreement on rows where the parser
+  succeeded (but feed it only the raw text, not the parser's answer) before
+  running it on the residual where nothing can check it. Report the agreement
+  rate; a low rate means this phase should not ship.
+- Bounded, resumable and metered exactly like Phase 4's job, with its own
+  zero-filled outcome labels (`resolved`|`declined`|`error`) and a spend
+  estimate in the run summary.
 
 ### Phase 4 — the backfill job, and going forward
 
@@ -727,6 +797,13 @@ Manual or integration checks:
   of real venues whose bairro the backfill filled.
 
 ## Acceptance Criteria
+
+- **Coverage is stated as a measured number, not as "improved".** After the
+  backfill completes, report what fraction of servable venues carry a non-null
+  `neighborhood`, broken down by source (`google` / `parsed` / `llm`), and what
+  fraction remain null with the logged reason. The starting point is 0 of
+  3,600. A residual of genuinely unresolvable rows is acceptable; an unmeasured
+  outcome is not.
 - `venues.address.{street,neighborhood,city,postal_code}` are no longer
   0/3,600 — every venue has either a non-null value with a recorded source,
   or an observable, logged reason it stayed null (no place_id and no
@@ -749,6 +826,14 @@ Manual or integration checks:
   shape, or `city_slug`'s derivation.
 
 ## Open Questions
+
+**None block implementation.** Every item below is a PRODUCTION ROLLOUT gate,
+not a design question, and each is already contained by a default-off switch:
+`address_backfill_geocoding_enabled` ships false, so Phases 1, 2, 4 (and 5 if
+built) are implementable, testable and mergeable end-to-end without any of
+these being answered. `/execute-feature` should build and verify everything,
+leave the geocoding switch off, and stop at "verification pending" rather than
+enabling it. What follows is the operator's checklist for that later step.
 - The Geocoding API's 10,000-free-requests/month figure is from Google's
   public docs, not verifiable from this repo. Phase 3 defines a cheap
   in-band verification (tiny sample + a Prometheus counter as a
