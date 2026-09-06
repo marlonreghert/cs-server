@@ -55,6 +55,14 @@ Feature: Address components backfill — Google authoritative, parser fallback
     Then the stored address city is "Recife" with source "parsed"
     And the stored address neighborhood is still unset
 
+  Scenario: The parser accepts a plausible multi-word bairro with no street before it
+    Given "Casa do Jardim" is a venue with no Google place id
+    And its raw address text is "Jardim Santa Maria São Paulo - SP 04120-000 Brazil"
+    And "São Paulo" is in the approved city vocabulary
+    When the address backfill processes "Casa do Jardim"
+    Then the stored address neighborhood is "Jardim Santa Maria" with source "parsed"
+    And the stored address city is "São Paulo" with source "parsed"
+
   Scenario: The parser picks the true trailing city over a look-alike name inside the bairro
     Given "Empório Boa Vista" is a venue with no Google place id
     And its raw address text is "Av. Norte, 900 - Boa Vista Recife - PE 50070-100 Brazil"
@@ -86,11 +94,11 @@ Feature: Address components backfill — Google authoritative, parser fallback
     And no manual backfill trigger was required
 
   Scenario: The backfill processes a bounded batch and resumes from where it left off
-    Given 5 venues are waiting to be backfilled
+    Given 5 venues are waiting to be backfilled, a mix of servable and non-servable
     When the address backfill runs with a batch limit of 2
     Then exactly 2 venues are processed and the backfill cursor is saved
-    When the address backfill runs again with a batch limit of 2
-    Then the next 2 venues are processed, continuing after the saved cursor
+    When the address backfill runs repeatedly with a batch limit of 2 until none remain
+    Then all 5 venues have been processed exactly once, servable and non-servable alike
 
   Scenario: Re-running the backfill over already-filled venues writes nothing new
     Given "Casa Bacurau" has a stored address neighborhood of "Santo Amaro" with source "google"
