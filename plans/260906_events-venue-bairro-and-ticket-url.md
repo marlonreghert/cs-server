@@ -773,57 +773,78 @@ payload keys the projector itself wrote. **No scenario may hand-seed
 `events_index_v1:*` or `event_occurrence_v1:*`**; F01's whole point is that a
 hand-seeded index would go green while production stayed broken.
 
-Scenarios (ticket URL):
-- **Qualify a scheme-less ticket host** — a stored `"evenyx.com"` is projected
-  as `"https://evenyx.com"` and counted `scheme_added`.
-- **Preserve path, query and fragment when adding the scheme.**
-- **Qualify a scheme-less host that carries a port** (F30) —
+Scenarios (ticket URL) — 9:
+- **Qualify a scheme-less ticket host with a scheme** — a stored
+  `"evenyx.com"` is projected as `"https://evenyx.com"`, counted `scheme_added`.
+- **Preserve the path, query and fragment when adding the scheme.**
+- **Qualify a scheme-less ticket host that carries a port** (F30) —
   `"evenyx.com:8080/lote2"` → `"https://evenyx.com:8080/lote2"`.
-- **Leave an already-absolute ticket URL untouched** — `passthrough`; an
-  `http://` value is not upgraded.
-- **Project no ticket URL for caption prose** — counted `rejected`.
-- **Project no ticket URL for a non-web scheme** — `mailto:`/`javascript:`.
-- **Project no ticket URL when none was extracted** — counted `absent`.
-- **Leave the stored ticket URL verbatim in RDS.**
-- **Re-assert the normalised ticket URL on the next cycle.**
+- **Project no ticket url for a host whose pseudo-port is not numeric** (F30) —
+  `"evenyx.com:lote2"` → null, so rule 8's port branch cannot become a hole.
+- **Leave an already absolute ticket url exactly as stored** — `passthrough`.
+- **Do not upgrade a stored plaintext ticket url to https.**
+- **Project no ticket url for caption prose** — counted `rejected`.
+- **Project no ticket url for a non-web scheme** — `mailto:`.
+- **Project no ticket url when the extraction found none** — counted `absent`.
+- **Leave the stored ticket url verbatim in the system of record.**
+- **Re-assert the normalised ticket url on the next projection cycle.**
 
 Scenarios (bairro):
-- **Select a fully-populated parsed row in upgrade mode.**
-- **Do not select a fully-populated parsed row in the default mode.**
+- **Select a fully populated parsed address row in upgrade mode.**
+- **Do not select a fully populated parsed address row in the default mode.**
 - **Reject an unknown selection mode instead of falling back.**
-- **Replace a parsed bairro with Google's answer** — `neighborhood_source`
-  becomes `google`.
-- **Never replace an operator bairro.**
+- **Replace a parsed venue-complex name with Google's bairro** —
+  `neighborhood_source` becomes `google`.
+- **Never replace an operator-set bairro.**
 - **Never null a stored bairro when Google answers nothing.**
 - **Suppress a Google neighbourhood that is only the city name.**
-- **Drop a parsed bairro that is only the city name** (F09) — the parser path,
-  through the same shared write boundary.
-- **Drop a bairro that differs from the stored city only by case or accent**
-  (F09) — proves the guard folds, and proves it compares against the STORED
-  city when the write carries no city.
-- **Make zero Place Details calls while the free-tier switch is off.**
+- **Drop a parsed bairro that is only the city name** (F09) — the PARSER path,
+  through the same shared write boundary, which is the half revision 1 missed.
+- **Fold case and accents when comparing a bairro to the stored city** (F09) —
+  proves the guard folds AND that it compares against the STORED city when the
+  write itself carries no city.
+- **Store a bairro that genuinely differs from the city** — the guard can only
+  ever suppress the equal case; it must not become a blanket drop.
+- **Write the other address fields even when the bairro is dropped** — street
+  still lands; the suppression is per-column, not per-write.
+- **Make no address lookup at all while the free-tier switch is off.**
 - **Serve the corrected bairro on the next projection cycle.**
-- **Report the address provenance distribution after a batch** — including the
-  neighborhood-equals-city count.
+- **Report the address provenance distribution after a batch.**
+- **Report how many stored bairros are still just the city name** — the
+  `venue_address_neighborhood_equals_city` gauge, which is what makes the
+  contract's wording measured rather than asserted.
 
 Scenarios (nightlife day — C3/F01):
 - **Keep last night's recurring occurrence in the index at 00:30 local** — a
   "toda quarta" 22:00 announcement; at 2026-09-10 00:30 the projector still
   writes `…_2026-09-09`, its payload key exists, and it is scored by its own
-  `starts_at`.
+  `starts_at` (2026-09-09 22:00 Recife).
+- **Keep last night's recurring occurrence in the venue index too** — both
+  indexes are written together, so both must be asserted.
 - **Prune last night's recurring occurrence after 06:00 local** — the same
   event, projected again at 06:30; the 09-09 member is gone from the city AND
   venue indexes and its payload key is deleted.
+- **Roll the near edge back only while the local hour is below the cutoff** —
+  05:59 still includes 09-09, pinning the strict `<` boundary vibes_bot uses.
 - **Keep the forward horizon unchanged during the small hours** — a "todo dia"
-  announcement at 00:30 still reaches exactly 21 days past the CALENDAR date
-  and no further (the deviation recorded in §4).
-- **Keep last night's non-recurring occurrence too** — the shipped behaviour
-  (PAST_GRACE) still holds after the change, so C3 is additive.
+  announcement at 00:30 reaches 2026-10-01 (= calendar 09-10 + 21) and not
+  2026-10-02 (the deviation recorded in §4).
+- **Keep the same forward horizon after the cutoff has passed** — 06:30 gives
+  the identical forward edge, which is what "the forward edge does not move"
+  means.
+- **Keep last night's non-recurring occurrence in the index as well** — the
+  shipped `PAST_GRACE` behaviour still holds, so C3 is additive.
+- **Count the cycles that ran with the nightlife day rolled back** /
+  **Do not count a rollback for a cycle that ran after the cutoff** — the
+  production signal that the code path is live.
 
 Scenarios (city vocabulary — F02):
 - **Remember a configured geo-fence city that holds no events.**
-- **Keep remembering a city after its last occurrence is gone.**
+- **Keep remembering a city after its last occurrence is gone** — the fence is
+  reduced and the slug survives, because the prune depends on it.
 - **Rebuild the whole vocabulary on the next cycle after the set is erased.**
+- **Keep projecting when the known-cities write fails** — the §5 write is
+  best-effort and must never cost a cycle.
 
 Existing coverage that must stay green unchanged:
 `tests/test_events_redis_dao.py::test_no_known_city_slugs_before_anything_is_ever_indexed`
