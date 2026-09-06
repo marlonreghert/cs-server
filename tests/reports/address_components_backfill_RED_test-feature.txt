@@ -1,0 +1,80 @@
+$ .venv/bin/python -m behave tests/bdd/enrichment/address-components-backfill.feature
+
+Context: FIRST attempt to run the feature after Phases 1-4's production code
+(parser, vocabulary, migration, precedence-aware DAO, geocode_by_place_id
+client method, VenueAddressBackfillService, JOB_REGISTRY/job_lock wiring)
+was already implemented and unit-tested (108+ pytest cases green beforehand:
+39 parser + 29 vocabulary + 13 geocode-client + 13 backfill-service tests,
+plus the updated test_venue_address_components.py precedence matrix), and
+the feature's own step-definitions file
+(tests/bdd/steps/address_components_backfill_steps.py) had just been
+written for the first time, with the `@wip` tag freshly removed from the
+feature file.
+
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/media/mario/ssd/projects/vibesense_wrapper/cs-server/.venv/lib/python3.12/site-packages/behave/__main__.py", line 304, in <module>
+    sys.exit(main())
+             ^^^^^^
+  File "/media/mario/ssd/projects/vibesense_wrapper/cs-server/.venv/lib/python3.12/site-packages/behave/__main__.py", line 294, in main
+    return run_behave(config)
+           ^^^^^^^^^^^^^^^^^^
+  File "/media/mario/ssd/projects/vibesense_wrapper/cs-server/.venv/lib/python3.12/site-packages/behave/__main__.py", line 116, in run_behave
+    failed = runner.run()
+             ^^^^^^^^^^^^
+  File "/media/mario/ssd/projects/vibesense_wrapper/cs-server/.venv/lib/python3.12/site-packages/behave/runner.py", line 1139, in run
+    return self.run_with_paths()
+           ^^^^^^^^^^^^^^^^^^^^^
+  File "/media/mario/ssd/projects/vibesense_wrapper/cs-server/.venv/lib/python3.12/site-packages/behave/runner.py", line 1144, in run_with_paths
+    self.load_step_definitions()
+  File "/media/mario/ssd/projects/vibesense_wrapper/cs-server/.venv/lib/python3.12/site-packages/behave/runner.py", line 1131, in load_step_definitions
+    load_step_modules(step_paths)
+  File "/media/mario/ssd/projects/vibesense_wrapper/cs-server/.venv/lib/python3.12/site-packages/behave/runner_util.py", line 596, in load_step_modules
+    exec_file(os.path.join(path, name), step_module_globals)
+  File "/media/mario/ssd/projects/vibesense_wrapper/cs-server/.venv/lib/python3.12/site-packages/behave/runner_util.py", line 567, in exec_file
+    exec(code, globals_, locals_)
+  File "tests/bdd/steps/venue_address_components_steps.py", line 38, in <module>
+    @given('"Casa Bacurau" is a venue with a Google place id')
+     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/media/mario/ssd/projects/vibesense_wrapper/cs-server/.venv/lib/python3.12/site-packages/behave/step_registry.py", line 206, in wrapper
+    self.add_step_definition(step_type, step_text, func)
+  File "/media/mario/ssd/projects/vibesense_wrapper/cs-server/.venv/lib/python3.12/site-packages/behave/step_registry.py", line 164, in add_step_definition
+    raise AmbiguousStep(message % (new_step, existing_step))
+behave.step_registry.AmbiguousStep: @given('"Casa Bacurau" is a venue with a Google place id') has already been defined in
+  existing step @given('"{name}" is a venue with a Google place id') at tests/bdd/steps/address_components_backfill_steps.py:92
+USING RUNNER: behave.runner:Runner
+Exception AmbiguousStep: @given('"Casa Bacurau" is a venue with a Google place id') has already been defined in
+  existing step @given('"{name}" is a venue with a Google place id') at tests/bdd/steps/address_components_backfill_steps.py:92
+
+DIAGNOSIS: a genuine defect, not an environment/setup artifact. Behave loads
+every step-definitions file across the WHOLE repo globally (not scoped per
+feature), so a step text pattern registered in this feature's new step file
+collided with an EXISTING, already-merged step in the sibling
+venue-address-components.feature's own step file
+(tests/bdd/steps/venue_address_components_steps.py), which hardcodes the
+literal string '"Casa Bacurau" is a venue with a Google place id' for its
+own (unrelated) Google Places Details scenario. A second, identical
+collision existed on 'Google Places returns address components with
+sublocality level 1 "{value}"' — an EXACT duplicate of the sibling file's
+own parametrized pattern for the SAME reason.
+
+FIX APPLIED: renamed this feature's own step wording (both the .feature
+file's Gherkin text and the corresponding step-definition decorators) to
+disambiguate from the sibling without changing any assertion or behavior:
+  - "X is a venue with a Google place id" -> "X has a Google place id"
+    (only the two occurrences that lacked the "and no stored address
+    components" suffix already making them unique)
+  - "Google Places returns address components with sublocality level 1 X"
+    -> "Geocoding returns address components with sublocality level 1 X"
+    (this feature's Given programs geocode_by_place_id, a DIFFERENT client
+    method from the sibling's get_place_details, so the rename also makes
+    the step text honestly describe which Google API family answers it)
+
+After the rename, the very next run went green on all 15 scenarios — see
+address_components_backfill_GREEN_test-feature.txt. The underlying parser/
+precedence/backfill-service LOGIC itself was never the source of this
+failure (it was independently proven correct beforehand by the pytest
+suites cited above); this failure was a Behave step-registration collision,
+caught and fixed exactly as Phase 6 ("diagnose before editing again")
+prescribes.

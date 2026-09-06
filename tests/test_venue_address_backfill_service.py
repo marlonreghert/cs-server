@@ -223,6 +223,51 @@ class TestBackfillBatch:
         client.geocode_by_place_id.assert_not_called()
         assert rds_store.get_address("vc")["city"] == "Recife"
 
+    def test_a_cancelled_batch_leaves_no_partial_cursor_and_resumes_cleanly(self):
+        """Proves the batch cannot run away: it yields control
+        (`await asyncio.sleep(0)`) once per venue, so the existing generic
+        `POST /admin/trigger/address_components_backfill/stop` (an
+        asyncio task.cancel()) can interrupt it BETWEEN venues even in the
+        default parser-only mode, where no Geocoding call would otherwise
+        ever await. A cancellation mid-batch writes no cursor at all (it
+        is persisted once, at the very end) — the next run resumes from
+        the SAME starting point, safely re-processing (idempotent,
+        precedence-guarded) rather than skipping or duplicating work."""
+        service, repository, rds_store, admin_config = _make()
+        for i in range(1, 6):
+            repository.upsert_venue(_venue(f"vcancel{i}", _RECIFE_RAW.format(n=i)))
+
+        processed: list[str] = []
+        real_process_one = service.process_one
+
+        async def _counting_process_one(venue_id):
+            result = await real_process_one(venue_id)
+            processed.append(venue_id)
+            if len(processed) == 2:
+                asyncio.current_task().cancel()
+            return result
+
+        async def _run():
+            service.process_one = _counting_process_one
+            await service.backfill_batch(limit=5)
+
+        with pytest.raises(asyncio.CancelledError):
+            asyncio.run(_run())
+
+        assert len(processed) == 2
+        assert admin_config.get(ADMIN_CONFIG_CURSOR_KEY) is None
+        for vid in processed:
+            assert rds_store.get_address(vid)["city"] == "Recife"
+
+        # A later, uncancelled run starts fresh (no cursor was ever saved)
+        # and correctly reaches every venue — the 2 already filled are a
+        # safe no-op, the 3 cancellation never reached are newly filled.
+        service.process_one = real_process_one
+        result = asyncio.run(service.backfill_batch(limit=10))
+        assert result["processed"] == 5
+        for i in range(1, 6):
+            assert rds_store.get_address(f"vcancel{i}")["city"] == "Recife"
+
     def test_updates_the_remaining_gauge_backing_data(self):
         """Not asserting on the Prometheus registry directly (shared
         global state across the test process); asserts the underlying
