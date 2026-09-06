@@ -1,4 +1,3 @@
-@wip
 Feature: Address components backfill sources Google's answer from Place Details
   As the events UI and the venue catalog
   I want the address-components backfill's Google rung to use the Place

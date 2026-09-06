@@ -146,6 +146,21 @@ def _build_test_app(context) -> None:
         from app.api.google_places_client import GooglePlacesAPIClient
 
         context.google_places_client = GooglePlacesAPIClient(api_key="test")
+        # geocode_by_place_id (app.api.google_places_client) is confirmed
+        # DEAD — non-functional against this project's real GCP key — and
+        # kept only for clean rollback (plans/260906_address-components-
+        # via-place-details.md). Nothing should call it in production
+        # anymore (the address backfill was rewired to
+        # fetch_address_components); wrapped here with a spy (not a bare
+        # AsyncMock — `wraps=` preserves the real, harmless-if-ever-reached
+        # behavior) so ANY scenario can assert
+        # `context.google_places_client.geocode_by_place_id.assert_not_called()`
+        # as a regression guard against this dead path silently coming back.
+        from unittest.mock import AsyncMock as _AsyncMock
+
+        context.google_places_client.geocode_by_place_id = _AsyncMock(
+            wraps=context.google_places_client.geocode_by_place_id
+        )
         # behave's context does not reset plain attributes between scenarios
         # (only its fixture layers do); this flag is a per-scenario override
         # marker (see besttime_add_response_parse_steps._wire_inline_enrichment)

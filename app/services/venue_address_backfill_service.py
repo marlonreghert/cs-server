@@ -1,12 +1,14 @@
 """The address-components backfill: Google-authoritative, parser fallback,
-provenance-guarded (plans/260906_address-components-backfill.md, Phase 4).
+provenance-guarded (plans/260906_address-components-backfill.md, Phase 4;
+Google rung swapped to Place Details by
+plans/260906_address-components-via-place-details.md).
 
 Fills `venues.address.{street,neighborhood,city,postal_code}` for the
 existing catalog and for every new venue going forward. Per venue:
-1. If the Geocoding free-tier switch is on and the venue has a stored
+1. If the free-tier switch is on and the venue has a stored
    `google_place_id`: resolve address components via
-   `GooglePlacesAPIClient.geocode_by_place_id` and write them with
-   `source="google"` (Phase 3).
+   `GooglePlacesAPIClient.fetch_address_components` (Place Details, minimal
+   `id,addressComponents` mask) and write them with `source="google"`.
 2. Unconditionally afterward, run the Phase 1 text parser against the
    venue's `raw_text` and write whatever it resolves with `source="parsed"`
    — safe regardless of step 1's outcome, because the precedence-aware
@@ -36,9 +38,12 @@ from app.services.venue_city_vocabulary import load_city_vocabulary
 
 logger = logging.getLogger(__name__)
 
-# The free-tier kill switch (Phase 3): default OFF. Every Geocoding call
-# site checks this before calling geocode_by_place_id — when false, the
-# backfill runs the parser only and makes zero Geocoding calls.
+# The free-tier kill switch (Phase 3): default OFF. Checked before every
+# call to fetch_address_components (Place Details) — when false, the
+# backfill runs the parser only and makes zero Place Details address
+# lookups. Key name unchanged from the original Geocoding-era design —
+# renaming risks a silent default-off on any code path that still reads the
+# old key name.
 ADMIN_CONFIG_GEOCODING_ENABLED_KEY = "address_backfill_geocoding_enabled"
 
 # Small JSON progress state: {"last_venue_id", "processed_total",
@@ -55,8 +60,8 @@ class VenueAddressBackfillService:
         self.google_places_client = google_places_client
         self.admin_config_service = admin_config_service
 
-    # ── Phase 3: the Geocoding-by-place_id attempt ────────────────────────
-    async def _maybe_geocode(self, venue_id: str) -> str:
+    # ── the Place Details address-components attempt ─────────────────────
+    async def _maybe_fetch_google_address(self, venue_id: str) -> str:
         """Returns the `VENUE_GEOCODING_REQUESTS_TOTAL` outcome label:
         `success` (the call itself succeeded, including a genuine
         zero-result), `no_place_id` (no stored place_id, or Google Places
@@ -81,10 +86,10 @@ class VenueAddressBackfillService:
             return "no_place_id"
 
         try:
-            components = await self.google_places_client.geocode_by_place_id(place_id)
+            components = await self.google_places_client.fetch_address_components(place_id)
         except Exception as e:
             logger.warning(
-                f"[VenueAddressBackfill] geocode failed for {venue_id}: "
+                f"[VenueAddressBackfill] address lookup failed for {venue_id}: "
                 f"{type(e).__name__}: {e}"
             )
             VENUE_GEOCODING_REQUESTS_TOTAL.labels(outcome="api_error").inc()
@@ -128,17 +133,19 @@ class VenueAddressBackfillService:
 
     # ── per-venue orchestration: Google (if eligible), then parser ────────
     async def process_one(self, venue_id: str) -> dict:
-        """The full per-venue backfill pipeline: an optional Geocoding
-        attempt followed UNCONDITIONALLY by the parser fallback for
-        whatever remains unresolved — safe regardless of the Google step's
-        outcome, since a parsed value can never outrank a later google one.
-        Returns `{"geocoding_outcome", "parsed_outcome"}`.
+        """The full per-venue backfill pipeline: an optional Google Place
+        Details address-lookup attempt followed UNCONDITIONALLY by the
+        parser fallback for whatever remains unresolved — safe regardless
+        of the Google step's outcome, since a parsed value can never
+        outrank a later google one. Returns `{"geocoding_outcome",
+        "parsed_outcome"}` (key name kept — several call sites read it, and
+        renaming it buys no behavior change).
         """
         venue = self.venue_repository.get_venue(venue_id)
         if venue is None:
             logger.warning(f"[VenueAddressBackfill] venue not found: {venue_id}")
             return {"geocoding_outcome": "no_place_id", "parsed_outcome": "unchanged"}
-        geocoding_outcome = await self._maybe_geocode(venue_id)
+        geocoding_outcome = await self._maybe_fetch_google_address(venue_id)
         parsed_outcome = self.apply_parser_fallback(venue_id, venue.venue_address)
         return {"geocoding_outcome": geocoding_outcome, "parsed_outcome": parsed_outcome}
 

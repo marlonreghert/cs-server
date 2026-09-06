@@ -36,6 +36,16 @@ GOOGLE_GEOCODING_API_BASE = "https://maps.googleapis.com/maps/api/geocode/json"
 PHOTOS_FIELDS_MASK = (
     "photos.name,photos.authorAttributions,photos.widthPx,photos.heightPx"
 )
+
+# Minimal field mask for the address-components backfill's Google rung
+# (plans/260906_address-components-via-place-details.md). Billed at the
+# Place Details Essentials SKU ($5/1000, 10,000 free/month) when requested
+# alone like this — a structurally cheaper, different request from
+# VIBE_FIELDS_MASK below, which is already pushed to the top
+# Enterprise+Atmosphere tier by its reviews/priceLevel/priceRange/
+# generativeSummary fields regardless of addressComponents being present.
+ADDRESS_COMPONENTS_FIELDS_MASK = "id,addressComponents"
+
 # Field mask for vibe-related attributes
 # See: https://developers.google.com/maps/documentation/places/web-service/place-details
 VIBE_FIELDS_MASK = ",".join(
@@ -118,6 +128,19 @@ class GoogleGeocodingError(Exception):
     no match", or the address backfill (plans/260906_address-components-
     backfill.md Phase 4) would poison a row's nulls with silence instead of
     retrying it on the next run."""
+
+
+class GoogleAddressLookupError(Exception):
+    """Raised by `fetch_address_components` for a transport/quota/API
+    failure (any `httpx.HTTPStatusError` other than 404, a timeout, or a
+    connection error) — as opposed to a genuine 404 ("Google has nothing
+    for this place_id"), which still returns None. Mirrors
+    `GoogleGeocodingError`'s own contract, carried over to the Place
+    Details (New) route this method uses instead
+    (plans/260906_address-components-via-place-details.md): a transient
+    outage or a permission/quota problem must never be treated the same as
+    "Google confirmed no match", or the address backfill would poison a
+    row's nulls with silence instead of retrying it on the next run."""
 
 
 class GooglePlacesAPIClient:
@@ -418,7 +441,24 @@ class GooglePlacesAPIClient:
             return None
 
     async def geocode_by_place_id(self, place_id: str) -> Optional[list[dict]]:
-        """Resolve `place_id`'s `address_components` via the legacy
+        """DEAD — DO NOT WIRE THIS TO ANYTHING. Confirmed non-functional
+        against this project's real GCP API key: probed against 12/12 real
+        production place_ids on 2026-09-06, every single call returned
+        `REQUEST_DENIED — "This API is not activated on your API
+        project"`. The legacy Geocoding API SKU has never been enabled in
+        the GCP Console for this project, and nothing in this repo can
+        enable it — that is a manual, external, one-time Console action
+        nobody has taken. `VenueAddressBackfillService` was rewired to call
+        `fetch_address_components` (Place Details, a working route) instead
+        — see plans/260906_address-components-via-place-details.md. This
+        method, `GoogleGeocodingError`, and `GOOGLE_GEOCODING_API_BASE` are
+        kept ONLY for clean rollback (their tests still exercise the
+        contract below); removal is a deliberate, separate follow-up, not
+        an oversight. If the Geocoding API SKU is ever enabled for this
+        project, re-verify against real place_ids before wiring this back
+        into any caller.
+
+        Resolve `place_id`'s `address_components` via the legacy
         Geocoding API (plans/260906_address-components-backfill.md Phase
         3) — the free (`$0`, pending the plan's own free-tier verification)
         route to structured address data for a venue whose `place_id` is
@@ -480,6 +520,82 @@ class GooglePlacesAPIClient:
                 "types": component.get("types") or [],
             })
         return normalized
+
+    async def fetch_address_components(self, place_id: str) -> Optional[list[dict]]:
+        """Resolve `place_id`'s `addressComponents` via Places API (New)
+        Details with the minimal `id,addressComponents` field mask
+        (plans/260906_address-components-via-place-details.md) — the
+        working replacement for the dead `geocode_by_place_id` rung of the
+        address backfill. Same base URL, auth header, and endpoint
+        (`GET /v1/places/{id}`) every other method on this client already
+        uses; a structurally cheaper, Essentials-tier request than
+        `get_place_details`'s own full `VIBE_FIELDS_MASK` call.
+
+        This is a bespoke implementation, not a call into
+        `get_place_details` with a custom mask: that method's own
+        exception handling swallows every failure mode — 403
+        (permission/quota), any other HTTP error, timeout, and connection
+        error — into a plain `return None`, identical to how it treats a
+        genuine 404. That is exactly the poisoning risk this method exists
+        to avoid: a transient outage must never look like a real "Google
+        answered: nothing here."
+
+        Returns `data.get("addressComponents")` verbatim on a clean 200 —
+        `None` when the field was absent from the response (a real place
+        with nothing to map, not an error) or a list of raw components,
+        both already exactly what
+        `app.services.venue_address_components.map_address_components`
+        expects, no normalization (the Place Details wire shape is already
+        `longText`/`types` per component). Also returns `None` for a
+        genuine 404 ("Google has nothing for this place_id") — mirrors
+        `get_place_details`'s own 404 handling. Raises
+        `GoogleAddressLookupError` on any other transport/quota/API
+        failure (HTTP error, timeout, connection error) so a caller can
+        distinguish that from a genuine miss and never poison a row's
+        nulls with silence instead of retrying it on the next run.
+        """
+        # Defensive, mirrors get_place_details: accepts either the bare id
+        # or the full "places/ChIJ..." resource name.
+        if place_id.startswith("places/"):
+            endpoint = f"/{place_id}"
+        else:
+            endpoint = f"/places/{place_id}"
+        url = f"{GOOGLE_PLACES_API_BASE}{endpoint}"
+
+        headers = {
+            "Content-Type": "application/json",
+            "X-Goog-Api-Key": self.api_key,
+            "X-Goog-FieldMask": ADDRESS_COMPONENTS_FIELDS_MASK,
+        }
+
+        try:
+            # Distinct "place_details_address" endpoint label — NOT
+            # "place_details" — because this call sits in the Place Details
+            # Essentials SKU (10,000 free calls/month) while the full-mask
+            # `get_place_details` call (and `_recheck_business_status`'s
+            # own minimal-mask reuse of that same label) is billed at
+            # Enterprise+Atmosphere, a different, paid SKU. Sharing one
+            # label would make free-tier consumption unobservable and a
+            # cost regression invisible.
+            async with self._instrumented("place_details_address"):
+                response = await self.client.get(url, headers=headers)
+                response.raise_for_status()
+                data = response.json()
+            return data.get("addressComponents")
+
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 404:
+                logger.info(f"[GooglePlacesAPIClient] address lookup: no place for {place_id}")
+                return None
+            raise GoogleAddressLookupError(
+                f"address lookup HTTP error for {place_id}: {e}"
+            ) from e
+        except httpx.TimeoutException as e:
+            raise GoogleAddressLookupError(f"address lookup timeout for {place_id}: {e}") from e
+        except httpx.RequestError as e:
+            raise GoogleAddressLookupError(
+                f"address lookup request error for {place_id}: {e}"
+            ) from e
 
     def _parse_place_details(
         self, place_id: str, data: dict

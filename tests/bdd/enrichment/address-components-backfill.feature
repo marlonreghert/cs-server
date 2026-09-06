@@ -112,4 +112,5 @@ Feature: Address components backfill — Google authoritative, parser fallback
     And "Niterói" is in the approved city vocabulary
     When the address backfill processes "Boteco da Maré"
     Then no Geocoding request was made
+    And the backfill never calls the legacy geocode_by_place_id method
     And the stored address neighborhood is "Santa Rosa" with source "parsed"

@@ -96,7 +96,7 @@ class TestProcessOne:
         result = asyncio.run(service.process_one("v4"))
 
         assert result["geocoding_outcome"] == "disabled"
-        client.geocode_by_place_id.assert_not_called()
+        client.fetch_address_components.assert_not_called()
         addr = rds_store.get_address("v4")
         assert addr["city"] == "Recife"
         assert addr["city_source"] == "parsed"
@@ -111,12 +111,12 @@ class TestProcessOne:
         result = asyncio.run(service.process_one("v5"))
 
         assert result["geocoding_outcome"] == "no_place_id"
-        client.geocode_by_place_id.assert_not_called()
+        client.fetch_address_components.assert_not_called()
         assert rds_store.get_address("v5")["city"] == "Recife"
 
     def test_geocoding_success_writes_source_google_and_still_runs_parser(self):
         client = AsyncMock()
-        client.geocode_by_place_id.return_value = [
+        client.fetch_address_components.return_value = [
             {"longText": "Santo Amaro", "types": ["sublocality_level_1", "political"]},
         ]
         service, repository, rds_store, admin_config = _make(google_places_client=client)
@@ -127,7 +127,7 @@ class TestProcessOne:
         result = asyncio.run(service.process_one("v6"))
 
         assert result["geocoding_outcome"] == "success"
-        client.geocode_by_place_id.assert_called_once_with("ChIJ6")
+        client.fetch_address_components.assert_called_once_with("ChIJ6")
         addr = rds_store.get_address("v6")
         assert addr["neighborhood"] == "Santo Amaro"
         assert addr["neighborhood_source"] == "google"
@@ -137,7 +137,7 @@ class TestProcessOne:
 
     def test_api_error_leaves_nulls_untouched_but_parser_still_fills(self):
         client = AsyncMock()
-        client.geocode_by_place_id.side_effect = RuntimeError("quota exceeded")
+        client.fetch_address_components.side_effect = RuntimeError("quota exceeded")
         service, repository, rds_store, admin_config = _make(google_places_client=client)
         admin_config.set(ADMIN_CONFIG_GEOCODING_ENABLED_KEY, True)
         repository.upsert_venue(_venue("v7", _RECIFE_RAW.format(n=7)))
@@ -220,7 +220,7 @@ class TestBackfillBatch:
 
         asyncio.run(service.backfill_batch(limit=10))
 
-        client.geocode_by_place_id.assert_not_called()
+        client.fetch_address_components.assert_not_called()
         assert rds_store.get_address("vc")["city"] == "Recife"
 
     def test_a_cancelled_batch_leaves_no_partial_cursor_and_resumes_cleanly(self):
