@@ -93,7 +93,7 @@ def step_given_full_component_set(context):
 
 @given('the stored address neighborhood is "{value}"')
 def step_given_stored_neighborhood(context, value):
-    context.repository.update_venue_address_components(_VENUE_ID, neighborhood=value)
+    context.repository.update_venue_address_components(_VENUE_ID, source="google", neighborhood=value)
 
 
 # ── When ─────────────────────────────────────────────────────────────────

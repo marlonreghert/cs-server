@@ -284,6 +284,29 @@ class Settings(BaseSettings):
     business_status_recheck_enabled: bool = False
     business_status_recheck_limit: int = 0
 
+    # Address components backfill (plans/260906_address-components-
+    # backfill.md): deploy-time, not spend-sensitive settings. The one
+    # spend-sensitive switch, address_backfill_geocoding_enabled, is an
+    # admin-config key instead (default false), not a setting here — it
+    # needs to flip off instantly, with no deploy, if the Geocoding
+    # free-tier verification ever fails.
+    address_backfill_batch_size: int = 200
+    # Step 9's ambiguity guard: an ambiguous city match is trusted only
+    # when the venue's own coordinates fall within this radius of the
+    # vocabulary entry's own coordinates.
+    address_backfill_ambiguous_radius_km: float = 50.0
+    # The vocabulary miner's geo-tightness gate: a candidate's contributing
+    # rows must cluster within this radius of their own centroid.
+    address_backfill_geo_tightness_km: float = 30.0
+    # The vocabulary miner's frequency gate: a candidate must recur across
+    # at least this many DISTINCT leading (bairro) prefixes to be proposed
+    # (an unambiguous Format-B comma split is trustworthy even at count 1).
+    address_backfill_min_distinct_remainders: int = 3
+    # The vocabulary miner's ambiguity-flag threshold: a name recurring as a
+    # substring collision (not the row's own actual match) more than this
+    # many times gets flagged ambiguous.
+    address_backfill_ambiguous_ngram_min_occurrences: int = 2
+
     # Photo enrichment configuration (uses Google Places API)
     photo_enrichment_enabled: bool = False  # Disabled by default, set PHOTO_ENRICHMENT_ENABLED=true to enable
     photo_enrichment_on_startup: bool = False  # If True, fetch photos on startup

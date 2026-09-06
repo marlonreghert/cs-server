@@ -20,6 +20,16 @@ logger = logging.getLogger(__name__)
 # Google Places API (New) base URL
 GOOGLE_PLACES_API_BASE = "https://places.googleapis.com/v1"
 
+# The legacy Geocoding API — a DIFFERENT REST family from Places API (New)
+# above: query-string `key=` auth (not the `X-Goog-Api-Key` header every
+# other method here uses), and its own response shape
+# (`long_name`/`short_name`/`types` per component, not `longText`/
+# `shortText`). Used by `geocode_by_place_id` only
+# (plans/260906_address-components-backfill.md Phase 3), gated end to end
+# behind the `address_backfill_geocoding_enabled` admin-config switch
+# (default off).
+GOOGLE_GEOCODING_API_BASE = "https://maps.googleapis.com/maps/api/geocode/json"
+
 # Field mask for fetching photos (include author attributions for copyright compliance)
 # Dimensions come free in the same billed call, and a photo's aspect ratio is
 # not recoverable later without re-fetching it.
@@ -95,6 +105,19 @@ class GooglePlacesSearchError(Exception):
     failure (HTTP error status, timeout, connection error) — as opposed to a
     genuine zero-result, which still returns None. A mid-run Places outage
     must never be treated the same as "Google confirmed no match"."""
+
+
+class GoogleGeocodingError(Exception):
+    """Raised by `geocode_by_place_id` for a transport/quota/API failure
+    (HTTP error status, timeout, connection error, or a Google `status`
+    other than OK/ZERO_RESULTS/NOT_FOUND — e.g. REQUEST_DENIED because the
+    Geocoding API SKU isn't enabled for this key, or OVER_QUERY_LIMIT) — as
+    opposed to a genuine zero-result, which still returns None. Mirrors
+    `GooglePlacesSearchError`'s contract: a transient outage or a
+    permission problem must never be treated the same as "Google confirmed
+    no match", or the address backfill (plans/260906_address-components-
+    backfill.md Phase 4) would poison a row's nulls with silence instead of
+    retrying it on the next run."""
 
 
 class GooglePlacesAPIClient:
@@ -393,6 +416,70 @@ class GooglePlacesAPIClient:
         except httpx.RequestError as e:
             logger.error(f"[GooglePlacesAPIClient] Request error for {place_id}: {e}")
             return None
+
+    async def geocode_by_place_id(self, place_id: str) -> Optional[list[dict]]:
+        """Resolve `place_id`'s `address_components` via the legacy
+        Geocoding API (plans/260906_address-components-backfill.md Phase
+        3) — the free (`$0`, pending the plan's own free-tier verification)
+        route to structured address data for a venue whose `place_id` is
+        already persisted, so the address backfill needs no new Text
+        Search. A genuinely different REST family from every other method
+        on this client: query-string `key=` auth, not the
+        `X-Goog-Api-Key` header, and its own component shape
+        (`long_name`/`types`, not `longText`/`types`) — normalized here to
+        `{"longText": ..., "types": [...]}` so
+        `app.services.venue_address_components.map_address_components`
+        (Phase 1, already merged) is reused UNCHANGED rather than
+        duplicating its fallback-rung logic for a second response shape.
+
+        Returns the normalized `address_components` list of the FIRST
+        result (possibly empty if Google answered but published no
+        components) on success, or None for a genuine "Google has nothing
+        for this place_id" (`ZERO_RESULTS`/`NOT_FOUND`) — mirrors
+        `search_place_id`'s own "genuine zero-result stays a normal, non-
+        error outcome" contract. Raises `GoogleGeocodingError` on a
+        transport/quota/API failure (HTTP error, timeout, connection error,
+        or any other non-OK `status`) so a caller can distinguish that from
+        a genuine no-match and never poison a row with a false answer.
+        """
+        # Defensive, mirrors get_place_details: accepts either the bare id
+        # or the full "places/ChIJ..." resource name.
+        bare_place_id = place_id[len("places/") :] if place_id.startswith("places/") else place_id
+        params = {"place_id": bare_place_id, "key": self.api_key}
+        try:
+            async with self._instrumented("geocode"):
+                response = await self.client.get(GOOGLE_GEOCODING_API_BASE, params=params)
+                response.raise_for_status()
+                data = response.json()
+        except httpx.HTTPStatusError as e:
+            raise GoogleGeocodingError(f"geocode HTTP error for {place_id}: {e}") from e
+        except httpx.TimeoutException as e:
+            raise GoogleGeocodingError(f"geocode timeout for {place_id}: {e}") from e
+        except httpx.RequestError as e:
+            raise GoogleGeocodingError(f"geocode request error for {place_id}: {e}") from e
+
+        status = data.get("status")
+        if status in ("ZERO_RESULTS", "NOT_FOUND"):
+            logger.info(f"[GooglePlacesAPIClient] geocode: no result for {place_id} ({status})")
+            return None
+        if status != "OK":
+            raise GoogleGeocodingError(
+                f"geocode API status {status!r} for {place_id}: {data.get('error_message')}"
+            )
+
+        results = data.get("results") or []
+        if not results:
+            return None
+        raw_components = results[0].get("address_components") or []
+        normalized: list[dict] = []
+        for component in raw_components:
+            if not isinstance(component, dict):
+                continue
+            normalized.append({
+                "longText": component.get("long_name"),
+                "types": component.get("types") or [],
+            })
+        return normalized
 
     def _parse_place_details(
         self, place_id: str, data: dict

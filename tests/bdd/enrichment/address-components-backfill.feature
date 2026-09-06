@@ -1,4 +1,3 @@
-@wip
 Feature: Address components backfill — Google authoritative, parser fallback
   As the events UI and the venue catalog
   I want every venue's bairro filled by Google when possible and by a data-derived
@@ -8,7 +7,7 @@ Feature: Address components backfill — Google authoritative, parser fallback
 
   Scenario: Google's answer fills the bairro when nothing is stored yet
     Given "Casa Bacurau" is a venue with a Google place id and no stored address components
-    And Google Places returns address components with sublocality level 1 "Santo Amaro"
+    And Geocoding returns address components with sublocality level 1 "Santo Amaro"
     When the address backfill processes "Casa Bacurau"
     Then the stored address neighborhood is "Santo Amaro" with source "google"
 
@@ -29,8 +28,8 @@ Feature: Address components backfill — Google authoritative, parser fallback
 
   Scenario: Google's answer overwrites a previously parsed bairro
     Given "Boteco da Maré" has a stored address neighborhood of "Santa Rosa" with source "parsed"
-    And "Boteco da Maré" is a venue with a Google place id
-    And Google Places returns address components with sublocality level 1 "Santa Rosa Baixa"
+    And "Boteco da Maré" has a Google place id
+    And Geocoding returns address components with sublocality level 1 "Santa Rosa Baixa"
     When the address backfill processes "Boteco da Maré"
     Then the stored address neighborhood is "Santa Rosa Baixa" with source "google"
 
@@ -43,8 +42,8 @@ Feature: Address components backfill — Google authoritative, parser fallback
 
   Scenario: An operator-entered bairro is never overwritten by Google or the parser
     Given "Restaurante do Porto" has a stored address neighborhood of "Recife Antigo" with source "operator"
-    And "Restaurante do Porto" is a venue with a Google place id
-    And Google Places returns address components with sublocality level 1 "Bairro do Recife"
+    And "Restaurante do Porto" has a Google place id
+    And Geocoding returns address components with sublocality level 1 "Bairro do Recife"
     When the address backfill processes "Restaurante do Porto"
     Then the stored address neighborhood is still "Recife Antigo" with source "operator"
 

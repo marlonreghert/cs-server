@@ -2041,6 +2041,54 @@ for _outcome in ("copied", "unchanged", "no_key", "archive_missing", "access_den
 for _outcome in ("written", "unchanged"):
     VENUE_ADDRESS_COMPONENTS_TOTAL.labels(outcome=_outcome)
 
+# plans/260906_address-components-backfill.md, Phase 4.
+VENUE_ADDRESS_PARSED_TOTAL = Counter(
+    "venue_address_parsed_total",
+    "Text-parser address-backfill attempts, by outcome",
+    ["outcome"],
+    # outcome: written (the parser answered at least one of street/
+    #          neighborhood/city/postal_code — a precedence-guarded write
+    #          was attempted) | unchanged (the parser answered NONE of
+    #          them; no shape matched, or every match was rejected by a
+    #          guard — a normal, expected, logged outcome, not a failure)
+)
+
+# plans/260906_address-components-backfill.md, Phase 3. Both an operational
+# metric AND the in-repo corroborating signal for the Geocoding free-tier
+# claim: an operator watches `success` stay comfortably under the
+# documented 10,000-free-requests/month ceiling.
+VENUE_GEOCODING_REQUESTS_TOTAL = Counter(
+    "venue_geocoding_requests_total",
+    "Geocoding-by-place_id attempts during the address backfill, by outcome",
+    ["outcome"],
+    # outcome: success (the Geocoding API call itself succeeded — including
+    #          a genuine zero-result; Google answering "nothing here" is
+    #          not an error) | no_place_id (the venue has no stored
+    #          google_place_id, or Google Places is not configured at all —
+    #          expected and common, goes straight to the parser) |
+    #          api_error (a transport/quota/API failure — the row's nulls
+    #          are left untouched, retried on the next run, never poisoned
+    #          with a false answer) | disabled (the free-tier kill switch,
+    #          address_backfill_geocoding_enabled, is off — the parser runs
+    #          alone)
+)
+
+# plans/260906_address-components-backfill.md, Phase 4. Refreshed at the
+# end of each backfill batch — trending down per field is the operator's
+# own signal that the backfill is making progress.
+VENUE_ADDRESS_BACKFILL_REMAINING = Gauge(
+    "venue_address_backfill_remaining",
+    "venues.address rows still missing this structured field",
+    ["field"],
+)
+
+for _outcome in ("written", "unchanged"):
+    VENUE_ADDRESS_PARSED_TOTAL.labels(outcome=_outcome)
+for _outcome in ("success", "no_place_id", "api_error", "disabled"):
+    VENUE_GEOCODING_REQUESTS_TOTAL.labels(outcome=_outcome)
+for _field in ("street", "neighborhood", "city", "postal_code"):
+    VENUE_ADDRESS_BACKFILL_REMAINING.labels(field=_field)
+
 # =============================================================================
 # APPLICATION INFO
 # =============================================================================

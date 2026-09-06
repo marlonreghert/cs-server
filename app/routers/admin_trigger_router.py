@@ -9,6 +9,7 @@ from typing import Optional, Union
 from fastapi import APIRouter, HTTPException, Body, Query, Response
 from pydantic import BaseModel, Field
 
+from app.config import settings
 from app.handlers.add_venue_handler import (
     AddVenueHandler,
     AddVenueByAddressRequest,
@@ -101,6 +102,58 @@ async def _run_google_places_backfill(c, cfg: dict) -> None:
     logger.info(f"[AdminTrigger] google_places_backfill summary: {summary}")
 
 
+async def _run_address_components_backfill(c, cfg: dict) -> None:
+    """address_components_backfill runner (plans/260906_address-components-
+    backfill.md Phase 4): ONE bounded batch per trigger — the same shape as
+    every other batch job here (an operator, the admin panel, or a repeated
+    trigger call drives the next batch; there is no auto-repeat loop inside
+    a single call). `cfg.get("limit")` overrides
+    `settings.address_backfill_batch_size` for exactly this run, mirroring
+    `google_places_backfill`'s own override mechanism — e.g. the Phase 3
+    free-tier verification's tiny `{"limit": 10}` sample."""
+    summary = await c.venue_address_backfill_service.backfill_batch(limit=cfg.get("limit"))
+    logger.info(f"[AdminTrigger] address_components_backfill summary: {summary}")
+
+
+async def _run_address_vocabulary_mining(c, cfg: dict) -> None:
+    """address_vocabulary_mining runner (plans/260906_address-components-
+    backfill.md Phase 1): read-only, no external calls — two mechanical
+    passes over every `venues.address` row, writing candidates + ambiguity
+    flags to the read-only `address_city_vocabulary_candidates` admin-config
+    key for an operator to review. NEVER applied automatically — see
+    app.services.venue_city_vocabulary's own module docstring. Cheap enough
+    to re-run any time new venues arrive; not in job_lock.LOCKED_JOB_NAMES
+    (no paid call, nothing it could race)."""
+    from app.services.venue_city_vocabulary import (
+        ADMIN_CONFIG_CITY_VOCABULARY_CANDIDATES_KEY,
+        load_city_vocabulary,
+        mine_city_vocabulary_candidates,
+    )
+
+    rows = [
+        {"raw_text": row.get("venue_address"), "lat": row.get("venue_lat"), "lng": row.get("venue_lng")}
+        for row in c.pipeline_repository.rds_store.list_all_venue_rows()
+    ]
+    current_vocabulary = load_city_vocabulary(c.admin_config_service)
+    result = mine_city_vocabulary_candidates(
+        rows,
+        current_vocabulary,
+        min_distinct_remainders=cfg.get(
+            "min_distinct_remainders", settings.address_backfill_min_distinct_remainders
+        ),
+        geo_tightness_km=cfg.get("geo_tightness_km", settings.address_backfill_geo_tightness_km),
+        ambiguous_ngram_min_occurrences=cfg.get(
+            "ambiguous_ngram_min_occurrences",
+            settings.address_backfill_ambiguous_ngram_min_occurrences,
+        ),
+    )
+    c.admin_config_service.set(ADMIN_CONFIG_CITY_VOCABULARY_CANDIDATES_KEY, result)
+    logger.info(
+        f"[AdminTrigger] address_vocabulary_mining: {len(result['candidates'])} "
+        f"candidate(s), {len(result['ambiguous'])} ambiguous flag(s)"
+    )
+
+
 def _rebuild_redis_offloop(c, cfg: dict):
     """rebuild_redis runner. Off-loop (B0): the projection body is synchronous +
     blocking; running it inline would stall /v1/venues/nearby and /health for the
@@ -143,6 +196,28 @@ JOB_REGISTRY = {
         "service_attr": "google_places_enrichment_service",
         "unavailable_detail": "Google Places API not configured",
         "runner": _run_google_places_backfill,
+    },
+    "address_components_backfill": {
+        "label": "Address Components Backfill",
+        "description": "Fill venues.address.{street,neighborhood,city,postal_code} "
+        "for the existing catalog: Google (Geocoding by the venue's already-stored "
+        "place_id) when the address_backfill_geocoding_enabled admin-config switch "
+        "is on, a data-derived text parser otherwise. Bounded, resumable, "
+        "idempotent — one batch per trigger; call again (or set a limit) to "
+        "continue from where it left off. Never overwrites an operator- or a "
+        "higher-precedence value.",
+        "default_config": {"limit": ""},
+        "runner": _run_address_components_backfill,
+    },
+    "address_vocabulary_mining": {
+        "label": "Address City Vocabulary Mining",
+        "description": "Read-only, zero external calls: proposes new city names "
+        "(beyond the 27 state capitals) for the address parser's vocabulary, and "
+        "flags names that collide with a different city in the data (e.g. "
+        "\"Boa Vista\"). Writes to address_city_vocabulary_candidates for review — "
+        "NEVER applied automatically. An operator approves a name by copying it "
+        "into address_city_vocabulary by hand.",
+        "runner": _run_address_vocabulary_mining,
     },
     "instagram": {
         "label": "Instagram Discovery",

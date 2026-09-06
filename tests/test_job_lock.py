@@ -57,9 +57,15 @@ def test_locks_are_independent_per_job_name():
     assert job_lock.is_running("weekly_forecast") is True
 
 
-def test_locked_job_names_covers_the_four_paid_refresh_jobs():
+def test_locked_job_names_covers_the_paid_refresh_jobs_and_the_address_backfill():
+    """plans/260906_address-components-backfill.md Phase 4 added
+    address_components_backfill to this frozenset alongside the four
+    original paid-refresh jobs — a separate, easy-to-miss edit from the new
+    JOB_REGISTRY entry itself (see job_lock.py's own module docstring for
+    why the frozenset is hand-built rather than derived)."""
     assert job_lock.LOCKED_JOB_NAMES == {
         "live_forecast", "weekly_forecast", "google_places", "rebuild_redis",
+        "address_components_backfill",
     }
 
 

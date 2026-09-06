@@ -61,12 +61,27 @@ class VenueRepository(RedisVenueDAO):
         return venue_from_row(row) if row else None
 
     def update_venue_address_components(self, venue_id, **components) -> None:
-        """Forwards to the RDS store's never-clobber structured-address
-        write (plans/260905_events-serving-projection.md Phase 2) — no
-        Redis counterpart, exactly like every other RDS-only pipeline
-        write here; the projector re-asserts venues.address.neighborhood
-        into the events projection on its own schedule."""
+        """Forwards to the RDS store's precedence-aware structured-address
+        write (plans/260906_address-components-backfill.md Phase 2 —
+        supersedes the blind never-clobber write plans/260905_events-
+        serving-projection.md Phase 2 originally added here) — no Redis
+        counterpart, exactly like every other RDS-only pipeline write here;
+        the projector re-asserts venues.address.neighborhood into the
+        events projection on its own schedule. `**components` already
+        forwards a required `source=` kwarg unchanged — no signature change
+        needed on this wrapper."""
         self.rds_store.update_venue_address_components(venue_id, **components)
+
+    def list_address_backfill_candidates(self, after_venue_id, limit: int) -> list[dict]:
+        """Forwards to the RDS store's bounded, cursor-paged selection of
+        `venues.address` rows still missing at least one structured field
+        (plans/260906_address-components-backfill.md Phase 4)."""
+        return self.rds_store.list_address_backfill_candidates(after_venue_id, limit)
+
+    def count_address_backfill_remaining(self) -> dict:
+        """Forwards to the RDS store's per-field null-count — backs the
+        `VENUE_ADDRESS_BACKFILL_REMAINING{field}` gauge."""
+        return self.rds_store.count_address_backfill_remaining()
 
     def get_vibe_attributes(self, venue_id):
         return self._rds_enrichment("google_places.vibe_attributes", VibeAttributes, venue_id)
