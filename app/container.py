@@ -1029,9 +1029,11 @@ class Container:
         )
 
         # Address-components backfill (plans/260906_address-components-
-        # backfill.md): Google-authoritative (Geocoding by the venue's
-        # already-stored place_id, gated by the address_backfill_
-        # geocoding_enabled admin-config switch, default OFF) with a
+        # backfill.md): Google-authoritative (Place Details address-
+        # components lookup by the venue's already-stored place_id, gated
+        # by the address_backfill_geocoding_enabled admin-config switch,
+        # default OFF — plans/260906_address-components-via-place-details.md
+        # swapped this rung from the dead legacy Geocoding API) with a
         # data-derived text-parser fallback. Always constructed — parser-only
         # mode works with no Google Places key at all (CLAUDE.md: "keep
         # enrichment paths optional and dependency-aware"). Built here

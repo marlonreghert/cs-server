@@ -285,11 +285,13 @@ class Settings(BaseSettings):
     business_status_recheck_limit: int = 0
 
     # Address components backfill (plans/260906_address-components-
-    # backfill.md): deploy-time, not spend-sensitive settings. The one
-    # spend-sensitive switch, address_backfill_geocoding_enabled, is an
-    # admin-config key instead (default false), not a setting here — it
-    # needs to flip off instantly, with no deploy, if the Geocoding
-    # free-tier verification ever fails.
+    # backfill.md; Google rung is Place Details' address-components lookup
+    # per plans/260906_address-components-via-place-details.md): deploy-time,
+    # not spend-sensitive settings. The one spend-sensitive switch,
+    # address_backfill_geocoding_enabled, is an admin-config key instead
+    # (default false), not a setting here — it needs to flip off instantly,
+    # with no deploy, if the Place Details Essentials free-tier verification
+    # ever fails.
     address_backfill_batch_size: int = 200
     # Step 9's ambiguity guard: an ambiguous city match is trusted only
     # when the venue's own coordinates fall within this radius of the

@@ -2053,17 +2053,20 @@ VENUE_ADDRESS_PARSED_TOTAL = Counter(
     #          guard — a normal, expected, logged outcome, not a failure)
 )
 
-# plans/260906_address-components-backfill.md, Phase 3. Both an operational
-# metric AND the in-repo corroborating signal for the Geocoding free-tier
-# claim: an operator watches `success` stay comfortably under the
+# plans/260906_address-components-backfill.md, Phase 3 (Google rung swapped
+# from the legacy Geocoding API to Place Details' address-components lookup
+# by plans/260906_address-components-via-place-details.md — name/labels
+# unchanged so no dashboard reference breaks). Both an operational metric
+# AND the in-repo corroborating signal for the Place Details Essentials
+# free-tier claim: an operator watches `success` stay comfortably under the
 # documented 10,000-free-requests/month ceiling.
 VENUE_GEOCODING_REQUESTS_TOTAL = Counter(
     "venue_geocoding_requests_total",
-    "Geocoding-by-place_id attempts during the address backfill, by outcome",
+    "Address-components Place Details lookup attempts during the address backfill, by outcome",
     ["outcome"],
-    # outcome: success (the Geocoding API call itself succeeded — including
-    #          a genuine zero-result; Google answering "nothing here" is
-    #          not an error) | no_place_id (the venue has no stored
+    # outcome: success (the Place Details address lookup itself succeeded —
+    #          including a genuine "nothing here" answer; that is not an
+    #          error) | no_place_id (the venue has no stored
     #          google_place_id, or Google Places is not configured at all —
     #          expected and common, goes straight to the parser) |
     #          api_error (a transport/quota/API failure — the row's nulls

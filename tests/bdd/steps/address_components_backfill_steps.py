@@ -7,11 +7,20 @@ context.google_places_client) — the same harness
 venue_address_components_steps.py exercises, so every scenario runs through
 the REAL parser/vocabulary/precedence code, never a bespoke shortcut.
 
-Google's answer travels through `geocode_by_place_id` here (Phase 3's
+Google's answer travels through `fetch_address_components` here
+(plans/260906_address-components-via-place-details.md's Place Details
+address-components route, which replaced Phase 3's now-dead
 Geocoding-by-place_id route), NOT `get_place_details` (the sibling
-venue-address-components.feature's Place Details route) — a DIFFERENT
-client method with its own already-normalized `{"longText", "types"}`
-component shape (no `shortText`).
+venue-address-components.feature's own, full-mask Place Details route) —
+both return the SAME wire shape (`{"longText", "types"}` per component,
+`shortText` present but unused by `map_address_components`); they differ
+in field mask and billing tier, not in response shape. The legacy
+`geocode_by_place_id` method still exists in
+app.api.google_places_client (kept for clean rollback, confirmed
+non-functional against this project's GCP key — see its own docstring)
+but production code no longer calls it anywhere; see
+`step_then_legacy_geocode_by_place_id_never_called` below, which asserts
+exactly that.
 """
 from __future__ import annotations
 
@@ -74,9 +83,12 @@ def _ensure_venue(context, name: str, *, lat=_DEFAULT_LAT, lng=_DEFAULT_LNG) -> 
 
 
 def _geocode_component(text: str, *types: str) -> dict:
-    """geocode_by_place_id's OWN normalized shape — no shortText, unlike
-    the Places (New) Details shape venue_address_components_steps.py's
-    sibling `_component` helper builds."""
+    """`fetch_address_components`'s wire shape — the same
+    `{"longText", "types"}` per-component shape
+    venue_address_components_steps.py's sibling `_component` helper builds
+    for `get_place_details` (both are Places (New) Details responses, just
+    different field masks); name kept for continuity with this file's own
+    step text ("Geocoding returns...")."""
     return {"longText": text, "types": list(types)}
 
 
@@ -154,20 +166,23 @@ def step_given_stored_neighborhood_with_source(context, name, value, source):
     context.repository.update_venue_address_components(venue_id, source=source, neighborhood=value)
 
 
-# ── Given: programmed Geocoding responses ──────────────────────────────────
+# ── Given: programmed Google Place Details address-lookup responses ───────
 # Deliberately worded "Geocoding returns..." (not "Google Places returns...")
 # to avoid an AmbiguousStep collision with venue_address_components_steps.py's
 # identically-parametrized sibling, which programs a DIFFERENT client method
-# (get_place_details, not geocode_by_place_id) — Behave loads every step file
-# globally, so two features cannot share a literal step-text pattern even
-# when each lives in its own .feature file.
+# (get_place_details, not fetch_address_components) — Behave loads every step
+# file globally, so two features cannot share a literal step-text pattern
+# even when each lives in its own .feature file. The step TEXT is kept as
+# "Geocoding returns..." (this feature file predates the Place Details swap
+# and is unmodified by this plan, per its own non-goals) even though the
+# underlying client call is now fetch_address_components.
 @given('Geocoding returns address components with sublocality level 1 "{value}"')
 def step_given_geocode_sublocality_level_1(context, value):
     # Google being asked implies the free-tier switch is on for this run —
     # the ONE scenario that keeps it off says so explicitly (see below) and
     # never uses this step.
     context.admin_config_service.set(ADMIN_CONFIG_GEOCODING_ENABLED_KEY, True)
-    context.google_places_client.geocode_by_place_id = AsyncMock(
+    context.google_places_client.fetch_address_components = AsyncMock(
         return_value=[_geocode_component(value, "sublocality_level_1", "political")]
     )
 
@@ -175,8 +190,8 @@ def step_given_geocode_sublocality_level_1(context, value):
 @given("the address backfill geocoding switch is off")
 def step_given_geocoding_switch_off(context):
     context.admin_config_service.set(ADMIN_CONFIG_GEOCODING_ENABLED_KEY, False)
-    context.google_places_client.geocode_by_place_id = AsyncMock(
-        side_effect=AssertionError("geocode_by_place_id must not be called while the switch is off")
+    context.google_places_client.fetch_address_components = AsyncMock(
+        side_effect=AssertionError("fetch_address_components must not be called while the switch is off")
     )
 
 
@@ -266,7 +281,7 @@ def step_when_reruns_unchanged(context, name):
     # nothing NEW to contribute (an empty component list) — the exact,
     # pre-existing "unchanged" outcome VENUE_ADDRESS_COMPONENTS_TOTAL
     # already tracks (the response answered none of the four fields).
-    context.google_places_client.geocode_by_place_id = AsyncMock(return_value=[])
+    context.google_places_client.fetch_address_components = AsyncMock(return_value=[])
     context.acb_components_unchanged_before = (
         VENUE_ADDRESS_COMPONENTS_TOTAL.labels(outcome="unchanged")._value.get()
     )
@@ -360,4 +375,15 @@ def step_then_outcome_recorded(context, outcome):
 
 @then("no Geocoding request was made")
 def step_then_no_geocoding_request(context):
+    context.google_places_client.fetch_address_components.assert_not_called()
+
+
+@then("the backfill never calls the legacy geocode_by_place_id method")
+def step_then_legacy_geocode_by_place_id_never_called(context):
+    """Regression guard for correction (C): once `_maybe_fetch_google_address`
+    stopped calling `geocode_by_place_id`, a mock assigned directly onto
+    that attribute would go vacuously unused. This asserts against the spy
+    environment.py wraps onto EVERY scenario's fresh client (not a mock this
+    file assigns), so it stays meaningful even if a scenario never touches
+    `fetch_address_components` at all."""
     context.google_places_client.geocode_by_place_id.assert_not_called()

@@ -200,12 +200,16 @@ JOB_REGISTRY = {
     "address_components_backfill": {
         "label": "Address Components Backfill",
         "description": "Fill venues.address.{street,neighborhood,city,postal_code} "
-        "for the existing catalog: Google (Geocoding by the venue's already-stored "
-        "place_id) when the address_backfill_geocoding_enabled admin-config switch "
-        "is on, a data-derived text parser otherwise. Bounded, resumable, "
+        "for the existing catalog: Google (Place Details address-components lookup "
+        "by the venue's already-stored place_id, minimal id,addressComponents mask "
+        "— Essentials SKU) when the address_backfill_geocoding_enabled admin-config "
+        "switch is on, a data-derived text parser otherwise. Bounded, resumable, "
         "idempotent — one batch per trigger; call again (or set a limit) to "
         "continue from where it left off. Never overwrites an operator- or a "
-        "higher-precedence value.",
+        "higher-precedence value. To re-sweep the whole catalog from the start "
+        "(e.g. after enabling the switch or correcting the city vocabulary): "
+        "PUT /admin/config/address_backfill_cursor with body "
+        '{"last_venue_id": null}.',
         "default_config": {"limit": ""},
         "runner": _run_address_components_backfill,
     },
