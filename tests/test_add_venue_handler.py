@@ -9,7 +9,7 @@ pin the branching contract.
 """
 import json
 from datetime import datetime, timedelta, timezone
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import fakeredis
 import httpx
@@ -765,6 +765,13 @@ async def test_add_time_no_place_id_and_no_client_skips_enrichment(
     besttime.add_venue_to_account.return_value = _ok_response("ven_skip")
     besttime.get_live_forecast.return_value = _live_unavailable("ven_skip")
     enrichment = AsyncMock()
+    # A bare AsyncMock auto-specs EVERY attribute (including one the real
+    # class defaults to None, like address_backfill_service) as another
+    # AsyncMock — matching the real class's actual default here avoids a
+    # spurious "coroutine was never awaited" warning from the "no place_id"
+    # parser-fallback hook (plans/260906_address-components-backfill.md
+    # Phase 4) this test's own no-place_id branch now reaches.
+    enrichment.address_backfill_service = None
     handler = _enrich_handler(venue_dao, besttime, budget, fake, enrichment)
     handler.google_places_client = None  # cannot resolve a place_id
 
@@ -772,6 +779,54 @@ async def test_add_time_no_place_id_and_no_client_skips_enrichment(
 
     assert outcome.status_code == 201
     enrichment.enrich_venue.assert_not_awaited()  # nothing to enrich, add still ok
+
+
+@pytest.mark.asyncio
+async def test_no_google_match_at_all_still_invokes_the_parser_fallback(
+    venue_dao, besttime, budget, fake
+):
+    """plans/260906_address-components-backfill.md Phase 4, "going forward,
+    no manual step": enrich_venue is NEVER called when Google has no match
+    at all, so its own parser-fallback hook never runs — the fallback must
+    be invoked directly from THIS branch instead, via the enrichment
+    service's own address_backfill_service reference."""
+    besttime.add_venue_to_account.return_value = _ok_response("ven_nomatch")
+    besttime.get_live_forecast.return_value = _live_unavailable("ven_nomatch")
+    enrichment = AsyncMock()
+    # apply_parser_fallback is a SYNC method on the real service — MagicMock,
+    # not AsyncMock, or calling it (correctly, with no `await`) leaves an
+    # unawaited coroutine behind.
+    backfill = MagicMock()
+    enrichment.address_backfill_service = backfill
+    handler = _enrich_handler(venue_dao, besttime, budget, fake, enrichment)
+    handler.google_places_client = AsyncMock()
+    handler.google_places_client.search_place_id = AsyncMock(return_value=None)  # genuine no-match
+
+    outcome = await handler.add(_req())  # no place_id in the request either
+
+    assert outcome.status_code == 201
+    enrichment.enrich_venue.assert_not_awaited()  # confirms this is the no-match branch
+    backfill.apply_parser_fallback.assert_called_once()
+    called_venue_id, called_raw_text = backfill.apply_parser_fallback.call_args[0]
+    assert called_venue_id == "ven_nomatch"
+    assert called_raw_text  # the venue's own raw address text, not empty
+
+
+@pytest.mark.asyncio
+async def test_a_failed_parser_fallback_never_fails_the_add(venue_dao, besttime, budget, fake):
+    besttime.add_venue_to_account.return_value = _ok_response("ven_fallbackerr")
+    besttime.get_live_forecast.return_value = _live_unavailable("ven_fallbackerr")
+    enrichment = AsyncMock()
+    backfill = MagicMock()
+    backfill.apply_parser_fallback.side_effect = RuntimeError("boom")
+    enrichment.address_backfill_service = backfill
+    handler = _enrich_handler(venue_dao, besttime, budget, fake, enrichment)
+    handler.google_places_client = AsyncMock()
+    handler.google_places_client.search_place_id = AsyncMock(return_value=None)
+
+    outcome = await handler.add(_req())
+
+    assert outcome.status_code == 201  # the add itself never fails
 
 
 @pytest.mark.asyncio

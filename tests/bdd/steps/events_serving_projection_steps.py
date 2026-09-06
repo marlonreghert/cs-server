@@ -393,7 +393,7 @@ def step_given_media_bucket_denies(context):
 @given('the stored address neighborhood for "{venue}" is "{neighborhood}"')
 def step_given_stored_neighborhood(context, venue, neighborhood):
     venue_id = _venue_id_for(context, venue)
-    context.rds_store.update_venue_address_components(venue_id, neighborhood=neighborhood)
+    context.rds_store.update_venue_address_components(venue_id, source="google", neighborhood=neighborhood)
 
 
 @given('"{venue}" has no stored address neighborhood')

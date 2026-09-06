@@ -1,0 +1,184 @@
+USING RUNNER: behave.runner:Runner
+Feature: Address components backfill — Google authoritative, parser fallback # tests/bdd/enrichment/address-components-backfill.feature:1
+  As the events UI and the venue catalog
+  I want every venue's bairro filled by Google when possible and by a data-derived
+  text parser otherwise, with a recorded source per field
+  So that the card shows a real neighborhood, a later authoritative answer can
+  still correct an earlier guess, and a guess can never block or undo a better oneLOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: Google's answer fills the bairro when nothing is stored yet                     # tests/bdd/enrichment/address-components-backfill.feature:8
+    Given "Casa Bacurau" is a venue with a Google place id and no stored address components # tests/bdd/steps/address_components_backfill_steps.py:84
+    And Geocoding returns address components with sublocality level 1 "Santo Amaro"         # tests/bdd/steps/address_components_backfill_steps.py:164
+    When the address backfill processes "Casa Bacurau"                                      # tests/bdd/steps/address_components_backfill_steps.py:224
+    Then the stored address neighborhood is "Santo Amaro" with source "google"              # tests/bdd/steps/address_components_backfill_steps.py:284
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: The parser fills the bairro from a space-joined address with no Google match            # tests/bdd/enrichment/address-components-backfill.feature:14
+    Given "Boteco da Maré" is a venue with no Google place id                                       # tests/bdd/steps/address_components_backfill_steps.py:97
+    And its raw address text is "R. Dr. Paulo César 225 - Santa Rosa Niterói - RJ 24220-400 Brazil" # tests/bdd/steps/address_components_backfill_steps.py:119
+    And "Niterói" is in the approved city vocabulary                                                # tests/bdd/steps/address_components_backfill_steps.py:140
+    When the address backfill processes "Boteco da Maré"                                            # tests/bdd/steps/address_components_backfill_steps.py:224
+    Then the stored address neighborhood is "Santa Rosa" with source "parsed"                       # tests/bdd/steps/address_components_backfill_steps.py:284
+    And the stored address city is "Niterói" with source "parsed"                                   # tests/bdd/steps/address_components_backfill_steps.py:297
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: The parser splits a comma-delimited address for a city not yet in the vocabulary                      # tests/bdd/enrichment/address-components-backfill.feature:22
+    Given "Padaria Casa Caiada" is a venue with no Google place id                                                # tests/bdd/steps/address_components_backfill_steps.py:97
+    And its raw address text is "R. Carmelita Muniz de Araújo, 225 - Casa Caiada, Olinda - PE, 53130-645, Brazil" # tests/bdd/steps/address_components_backfill_steps.py:119
+    When the address backfill processes "Padaria Casa Caiada"                                                     # tests/bdd/steps/address_components_backfill_steps.py:224
+    Then the stored address neighborhood is "Casa Caiada" with source "parsed"                                    # tests/bdd/steps/address_components_backfill_steps.py:284
+    And the stored address city is "Olinda" with source "parsed"                                                  # tests/bdd/steps/address_components_backfill_steps.py:297
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: Google's answer overwrites a previously parsed bairro                                 # tests/bdd/enrichment/address-components-backfill.feature:29
+    Given "Boteco da Maré" has a stored address neighborhood of "Santa Rosa" with source "parsed" # tests/bdd/steps/address_components_backfill_steps.py:151
+    And "Boteco da Maré" has a Google place id                                                    # tests/bdd/steps/address_components_backfill_steps.py:92
+    And Geocoding returns address components with sublocality level 1 "Santa Rosa Baixa"          # tests/bdd/steps/address_components_backfill_steps.py:164
+    When the address backfill processes "Boteco da Maré"                                          # tests/bdd/steps/address_components_backfill_steps.py:224
+    Then the stored address neighborhood is "Santa Rosa Baixa" with source "google"               # tests/bdd/steps/address_components_backfill_steps.py:284
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: A parsed answer is refused over an already Google-sourced bairro                       # tests/bdd/enrichment/address-components-backfill.feature:36
+    Given "Casa Bacurau" has a stored address neighborhood of "Santo Amaro" with source "google"   # tests/bdd/steps/address_components_backfill_steps.py:151
+    And "Casa Bacurau" has no Google place id this run                                             # tests/bdd/steps/address_components_backfill_steps.py:114
+    And its raw address text is "R. Abdon Batista, 300 - Santo Amaro Recife - PE 50100-460 Brazil" # tests/bdd/steps/address_components_backfill_steps.py:119
+    When the address backfill processes "Casa Bacurau"                                             # tests/bdd/steps/address_components_backfill_steps.py:224
+    Then the stored address neighborhood is still "Santo Amaro" with source "google"               # tests/bdd/steps/address_components_backfill_steps.py:292
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: An operator-entered bairro is never overwritten by Google or the parser                          # tests/bdd/enrichment/address-components-backfill.feature:43
+    Given "Restaurante do Porto" has a stored address neighborhood of "Recife Antigo" with source "operator" # tests/bdd/steps/address_components_backfill_steps.py:151
+    And "Restaurante do Porto" has a Google place id                                                         # tests/bdd/steps/address_components_backfill_steps.py:92
+    And Geocoding returns address components with sublocality level 1 "Bairro do Recife"                     # tests/bdd/steps/address_components_backfill_steps.py:164
+    When the address backfill processes "Restaurante do Porto"                                               # tests/bdd/steps/address_components_backfill_steps.py:224
+    Then the stored address neighborhood is still "Recife Antigo" with source "operator"                     # tests/bdd/steps/address_components_backfill_steps.py:292
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: The parser leaves the bairro unset rather than guess at no recognizable city  # tests/bdd/enrichment/address-components-backfill.feature:50
+    Given "Quiosque da Praia" is a venue with no Google place id                          # tests/bdd/steps/address_components_backfill_steps.py:97
+    And its raw address text is "COHAB Recife - PE 51340-670 Brazil"                      # tests/bdd/steps/address_components_backfill_steps.py:119
+    When the address backfill processes "Quiosque da Praia"                               # tests/bdd/steps/address_components_backfill_steps.py:224
+    Then the stored address city is "Recife" with source "parsed"                         # tests/bdd/steps/address_components_backfill_steps.py:297
+    And the stored address neighborhood is still unset                                    # tests/bdd/steps/address_components_backfill_steps.py:305
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: The parser accepts a plausible multi-word bairro with no street before it  # tests/bdd/enrichment/address-components-backfill.feature:57
+    Given "Casa do Jardim" is a venue with no Google place id                          # tests/bdd/steps/address_components_backfill_steps.py:97
+    And its raw address text is "Jardim Santa Maria São Paulo - SP 04120-000 Brazil"   # tests/bdd/steps/address_components_backfill_steps.py:119
+    And "São Paulo" is in the approved city vocabulary                                 # tests/bdd/steps/address_components_backfill_steps.py:140
+    When the address backfill processes "Casa do Jardim"                               # tests/bdd/steps/address_components_backfill_steps.py:224
+    Then the stored address neighborhood is "Jardim Santa Maria" with source "parsed"  # tests/bdd/steps/address_components_backfill_steps.py:284
+    And the stored address city is "São Paulo" with source "parsed"                    # tests/bdd/steps/address_components_backfill_steps.py:297
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: The parser picks the true trailing city over a look-alike name inside the bairro  # tests/bdd/enrichment/address-components-backfill.feature:65
+    Given "Empório Boa Vista" is a venue with no Google place id                              # tests/bdd/steps/address_components_backfill_steps.py:97
+    And its raw address text is "Av. Norte, 900 - Boa Vista Recife - PE 50070-100 Brazil"     # tests/bdd/steps/address_components_backfill_steps.py:119
+    And "Recife" is in the approved city vocabulary                                           # tests/bdd/steps/address_components_backfill_steps.py:140
+    When the address backfill processes "Empório Boa Vista"                                   # tests/bdd/steps/address_components_backfill_steps.py:224
+    Then the stored address neighborhood is "Boa Vista" with source "parsed"                  # tests/bdd/steps/address_components_backfill_steps.py:284
+    And the stored address city is "Recife" with source "parsed"                              # tests/bdd/steps/address_components_backfill_steps.py:297
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: An ambiguous city match is accepted only when the venue's coordinates corroborate it  # tests/bdd/enrichment/address-components-backfill.feature:73
+    Given "Sítio Boa Vista" is a venue with no Google place id, located near Boa Vista, Roraima   # tests/bdd/steps/address_components_backfill_steps.py:102
+    And its raw address text is "Estr. do Sítio, s/n - Boa Vista - RR 69300-000 Brazil"           # tests/bdd/steps/address_components_backfill_steps.py:119
+    And "Boa Vista" is in the approved city vocabulary and flagged ambiguous                      # tests/bdd/steps/address_components_backfill_steps.py:145
+    When the address backfill processes "Sítio Boa Vista"                                         # tests/bdd/steps/address_components_backfill_steps.py:224
+    Then the stored address city is "Boa Vista" with source "parsed"                              # tests/bdd/steps/address_components_backfill_steps.py:297
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: An ambiguous city match is rejected when the venue's coordinates do not corroborate it  # tests/bdd/enrichment/address-components-backfill.feature:80
+    Given "Empório Boa Vista" is a venue with no Google place id, located in metropolitan Recife    # tests/bdd/steps/address_components_backfill_steps.py:108
+    And its raw address text is "Av. Norte, 900 - Boa Vista - PE 50070-100 Brazil"                  # tests/bdd/steps/address_components_backfill_steps.py:119
+    And "Boa Vista" is in the approved city vocabulary and flagged ambiguous                        # tests/bdd/steps/address_components_backfill_steps.py:145
+    When the address backfill processes "Empório Boa Vista"                                         # tests/bdd/steps/address_components_backfill_steps.py:224
+    Then the stored address city is still unset                                                     # tests/bdd/steps/address_components_backfill_steps.py:313
+    And the stored address neighborhood is still unset                                              # tests/bdd/steps/address_components_backfill_steps.py:305
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: A newly added venue with no Google match still gets a bairro automatically                                   # tests/bdd/enrichment/address-components-backfill.feature:88
+    Given a new venue "Café Novo" is added with raw address text "R. Nova, 10 - Boa Viagem Recife - PE 51020-000 Brazil" # tests/bdd/steps/address_components_backfill_steps.py:202
+    And Google Places finds no match for "Café Novo"                                                                     # tests/bdd/steps/address_components_backfill_steps.py:218
+    When "Café Novo" finishes its add-time enrichment                                                                    # tests/bdd/steps/address_components_backfill_steps.py:230
+LOG_INFO:app.handlers.add_venue_handler: [AddVenueHandler] no Google place_id for acb_60131fe2e49f; skipping inline enrichment (Google fields stay empty)
+    Then the stored address neighborhood is "Boa Viagem" with source "parsed"                                            # tests/bdd/steps/address_components_backfill_steps.py:284
+    And no manual backfill trigger was required                                                                          # tests/bdd/steps/address_components_backfill_steps.py:321
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: The backfill processes a bounded batch and resumes from where it left off   # tests/bdd/enrichment/address-components-backfill.feature:95
+    Given 5 venues are waiting to be backfilled, a mix of servable and non-servable     # tests/bdd/steps/address_components_backfill_steps.py:184
+    When the address backfill runs with a batch limit of 2                              # tests/bdd/steps/address_components_backfill_steps.py:237
+LOG_INFO:app.services.venue_address_backfill_service: [VenueAddressBackfill] batch complete: processed=2 written=2 cursor=acb_batch_v2 remaining={'street': 3, 'neighborhood': 5, 'city': 3, 'postal_code': 3}
+    Then exactly 2 venues are processed and the backfill cursor is saved                # tests/bdd/steps/address_components_backfill_steps.py:335
+    When the address backfill runs repeatedly with a batch limit of 2 until none remain # tests/bdd/steps/address_components_backfill_steps.py:246
+LOG_INFO:app.services.venue_address_backfill_service: [VenueAddressBackfill] batch complete: processed=2 written=2 cursor=acb_batch_v4 remaining={'street': 1, 'neighborhood': 5, 'city': 1, 'postal_code': 1}
+LOG_INFO:app.services.venue_address_backfill_service: [VenueAddressBackfill] batch complete: processed=1 written=1 cursor=acb_batch_v5 remaining={'street': 0, 'neighborhood': 5, 'city': 0, 'postal_code': 0}
+    Then all 5 venues have been processed exactly once, servable and non-servable alike # tests/bdd/steps/address_components_backfill_steps.py:344
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: Re-running the backfill over already-filled venues writes nothing new                      # tests/bdd/enrichment/address-components-backfill.feature:102
+    Given "Casa Bacurau" has a stored address neighborhood of "Santo Amaro" with source "google"       # tests/bdd/steps/address_components_backfill_steps.py:151
+    When the address backfill runs over "Casa Bacurau" a second time with an unchanged Google response # tests/bdd/steps/address_components_backfill_steps.py:258
+    Then the address components outcome "unchanged" is recorded                                        # tests/bdd/steps/address_components_backfill_steps.py:353
+    And the stored address neighborhood is still "Santo Amaro" with source "google"                    # tests/bdd/steps/address_components_backfill_steps.py:292
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: The backfill makes no Geocoding calls while the free-tier switch is off                 # tests/bdd/enrichment/address-components-backfill.feature:108
+    Given the address backfill geocoding switch is off                                              # tests/bdd/steps/address_components_backfill_steps.py:175
+    And "Boteco da Maré" is a venue with a Google place id and no stored address components         # tests/bdd/steps/address_components_backfill_steps.py:84
+    And its raw address text is "R. Dr. Paulo César 225 - Santa Rosa Niterói - RJ 24220-400 Brazil" # tests/bdd/steps/address_components_backfill_steps.py:119
+    And "Niterói" is in the approved city vocabulary                                                # tests/bdd/steps/address_components_backfill_steps.py:140
+    When the address backfill processes "Boteco da Maré"                                            # tests/bdd/steps/address_components_backfill_steps.py:224
+    Then no Geocoding request was made                                                              # tests/bdd/steps/address_components_backfill_steps.py:361
+    And the stored address neighborhood is "Santa Rosa" with source "parsed"                        # tests/bdd/steps/address_components_backfill_steps.py:284
+
+1 feature passed, 0 failed, 0 skipped
+15 scenarios passed, 0 failed, 0 skipped
+79 steps passed, 0 failed, 0 skipped
+Took 0min 0.145s

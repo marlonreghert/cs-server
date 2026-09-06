@@ -623,6 +623,9 @@ class Container:
             validate_stopwords_config,
             validate_undated_window_days_config,
         )
+        from app.services.venue_city_vocabulary import (
+            validate_address_city_vocabulary_config,
+        )
 
         def _validate_eligibility_config(value):
             EligibilityConfig.from_dict(value, from_admin_override=True)  # raises on invalid
@@ -691,6 +694,13 @@ class Container:
                 "event_dedup_candidate_window_hours": validate_candidate_window_hours_config,
                 "event_dedup_undated_window_days": validate_undated_window_days_config,
                 "event_dedup_auto_merge_enabled": validate_auto_merge_enabled_config,
+                # plans/260906_address-components-backfill.md Phase 1: the
+                # operator-approved city-name additions beyond the 27 state
+                # capitals — shape only (numeric lat/lng in a plausible
+                # Brazil range), never correctness of the name itself. The
+                # SAME generic admin-config CRUD route every key here uses;
+                # no dedicated endpoint.
+                "address_city_vocabulary": validate_address_city_vocabulary_config,
             },
         )
 
@@ -1017,6 +1027,33 @@ class Container:
             admin_config_service=self.admin_config_service,
             enabled=lambda: settings.closure_detection_enabled,
         )
+
+        # Address-components backfill (plans/260906_address-components-
+        # backfill.md): Google-authoritative (Geocoding by the venue's
+        # already-stored place_id, gated by the address_backfill_
+        # geocoding_enabled admin-config switch, default OFF) with a
+        # data-derived text-parser fallback. Always constructed — parser-only
+        # mode works with no Google Places key at all (CLAUDE.md: "keep
+        # enrichment paths optional and dependency-aware"). Built here
+        # (after admin_config_service) rather than passed into
+        # google_places_enrichment_service's constructor above (which needs
+        # it too, for the add-time parser-fallback hook) because that
+        # service is constructed earlier in this file, before
+        # admin_config_service exists — resolved by wiring it onto the
+        # already-built enrichment service as a plain attribute instead of a
+        # constructor arg.
+        from app.services.venue_address_backfill_service import VenueAddressBackfillService
+
+        self.venue_address_backfill_service = VenueAddressBackfillService(
+            venue_repository=self.pipeline_repository,
+            google_places_client=self.google_places_api,
+            admin_config_service=self.admin_config_service,
+        )
+        if self.google_places_enrichment_service is not None:
+            self.google_places_enrichment_service.address_backfill_service = (
+                self.venue_address_backfill_service
+            )
+        logger.info("[Container] Venue address backfill service initialized")
 
         # Monthly budget DAO + service (used by add-by-address + discovery).
         self.venue_budget_dao = VenueBudgetDao(redis_internal_client)

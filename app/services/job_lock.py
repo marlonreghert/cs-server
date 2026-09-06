@@ -18,14 +18,24 @@ is no race window within this process.
 """
 from __future__ import annotations
 
-# The 4 jobs the plan names as requiring the shared guard (paid BestTime/Google
-# calls): the admin_trigger_router.JOB_REGISTRY key strings are canonical — the
-# scheduler side (main.py) passes the SAME strings as `lock_name` to make_job.
+# The jobs requiring the shared guard (paid BestTime/Google calls, or —
+# address_components_backfill — a bounded RDS-mutating sweep that must
+# never race a second copy of itself): the admin_trigger_router.JOB_REGISTRY
+# key strings are canonical — the scheduler side (main.py) passes the SAME
+# strings as `lock_name` to make_job.
 LIVE_FORECAST = "live_forecast"
 WEEKLY_FORECAST = "weekly_forecast"
 GOOGLE_PLACES = "google_places"
 REBUILD_REDIS = "rebuild_redis"
-LOCKED_JOB_NAMES = frozenset({LIVE_FORECAST, WEEKLY_FORECAST, GOOGLE_PLACES, REBUILD_REDIS})
+# plans/260906_address-components-backfill.md Phase 4 — NOT derived from
+# JOB_REGISTRY's keys (this frozenset is hand-built, on purpose: see the
+# module docstring), so adding the registry entry alone does not enrol a job
+# in the shared lock. Both edits are required.
+ADDRESS_COMPONENTS_BACKFILL = "address_components_backfill"
+LOCKED_JOB_NAMES = frozenset({
+    LIVE_FORECAST, WEEKLY_FORECAST, GOOGLE_PLACES, REBUILD_REDIS,
+    ADDRESS_COMPONENTS_BACKFILL,
+})
 
 _running: set[str] = set()
 

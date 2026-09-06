@@ -23,7 +23,7 @@ from app.services.price_signal import (
 from app.models.opening_hours import OpeningHours
 from app.models.instagram import VenueInstagram
 from app.models.venue_review import VenueReview, VenueReviews
-from app.services.venue_address_components import map_address_components
+from app.services.venue_address_components import write_mapped_components
 from app.metrics import (
     VIBE_ATTRIBUTES_FETCH_RESULTS,
     VENUES_WITH_VIBE_ATTRIBUTES,
@@ -92,15 +92,32 @@ class GooglePlacesEnrichmentService:
         self,
         google_places_client: GooglePlacesAPIClient,
         venue_dao: RedisVenueDAO,
+        address_backfill_service: Optional[object] = None,
     ):
         """Initialize GooglePlacesEnrichmentService.
 
         Args:
             google_places_client: Google Places API client
             venue_dao: Redis venue DAO for caching
+            address_backfill_service: optional
+                `VenueAddressBackfillService` (plans/260906_address-
+                components-backfill.md Phase 4) — when set, `enrich_venue`
+                runs its parser fallback right after Google's own
+                addressComponents attempt, so a brand-new venue with no
+                Google bairro still gets one with no manual step. Typed as
+                `object` (not the concrete class) to avoid importing that
+                module here purely for a type hint; every real caller
+                passes the real service. Optional and defaulted to None so
+                every existing 2-arg construction (this whole test suite's
+                worth of call sites) is unaffected, and so a construction-
+                order cycle in app.container (that service needs
+                AdminConfigService, built later in that file) can be
+                resolved by setting this attribute post-construction
+                instead.
         """
         self.google_places_client = google_places_client
         self.venue_dao = venue_dao
+        self.address_backfill_service = address_backfill_service
         # Counters for tracking closures during enrichment runs
         self._permanently_closed_in_run = 0
         self._temporarily_closed_in_run = 0
@@ -212,8 +229,11 @@ class GooglePlacesEnrichmentService:
 
     def _apply_address_components(self, venue_id: str, address_components) -> None:
         """Map Google's raw `addressComponents` into the structured
-        `venues.address` columns and persist them with the never-clobber
-        write (plans/260905_events-serving-projection.md Phase 2).
+        `venues.address` columns and persist them with source="google"
+        through the precedence-aware write
+        (plans/260906_address-components-backfill.md Phase 2 — supersedes
+        the blind never-clobber write plans/260905_events-serving-
+        projection.md Phase 2 originally added here).
 
         Isolated deliberately: this call happens inside `enrich_venue`'s
         broad try/except too, but a bare AttributeError from a test harness
@@ -223,20 +243,48 @@ class GooglePlacesEnrichmentService:
         optional facet's write path is unavailable (CLAUDE.md: "keep
         enrichment paths optional and dependency-aware").
         """
-        mapped = map_address_components(address_components)
         try:
             update = getattr(self.venue_dao, "update_venue_address_components", None)
             if update is None:
                 return
-            update(venue_id, **mapped)
+            outcome = write_mapped_components(
+                self.venue_dao, venue_id, address_components, source="google"
+            )
         except Exception as e:  # pragma: no cover - defensive
             logger.warning(
                 f"[GooglePlacesEnrichment] {venue_id}: address-component "
                 f"write failed, leaving stored values untouched: {e}"
             )
             return
-        outcome = "written" if any(mapped.values()) else "unchanged"
         VENUE_ADDRESS_COMPONENTS_TOTAL.labels(outcome=outcome).inc()
+
+    def _apply_parser_fallback(self, venue_id: str) -> None:
+        """Phase 4's "going forward, no manual step" guarantee: right after
+        Google's own addressComponents attempt above, run the Phase 1 text
+        parser against this venue's raw_text for whatever field is STILL
+        null — covering both "Google had no match/no place_id for this
+        venue at all" and "Google's response didn't answer this particular
+        field." Runs the SAME `VenueAddressBackfillService.
+        apply_parser_fallback` the bulk backfill job uses per-venue — one
+        code path, two callers.
+
+        Isolated exactly like `_apply_address_components` above: a fallback
+        failure (or simply no backfill service wired, e.g. most of this
+        test suite) must never cost the venue anything else this same
+        response already populated.
+        """
+        if self.address_backfill_service is None:
+            return
+        try:
+            venue = self.venue_dao.get_venue(venue_id)
+            if venue is None or not venue.venue_address:
+                return
+            self.address_backfill_service.apply_parser_fallback(venue_id, venue.venue_address)
+        except Exception as e:  # pragma: no cover - defensive
+            logger.warning(
+                f"[GooglePlacesEnrichment] {venue_id}: parser fallback failed, "
+                f"leaving stored values untouched: {e}"
+            )
 
     def _apply_business_status(self, venue_id: str, details) -> bool:
         """Persist Google's business status and, on closure, run the same
@@ -433,6 +481,10 @@ class GooglePlacesEnrichmentService:
             # cost the venue the vibe attributes/reviews/opening-hours it
             # already got from this SAME response.
             self._apply_address_components(venue_id, details.address_components)
+            # Parser fallback for whatever field Google's own response above
+            # still left null (plans/260906_address-components-backfill.md
+            # Phase 4, "going forward") — isolated the same way.
+            self._apply_parser_fallback(venue_id)
 
             # Backfill Venue.rating / Venue.reviews / Venue.price_level from
             # Google. The inventory-sync ingestion path (added in #18) creates

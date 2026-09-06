@@ -1,7 +1,7 @@
 """Unit coverage for app.services.venue_address_components (mapping) and the
-never-clobber write path (RdsVenueStore.update_venue_address_components via
-the InMemoryRdsVenueStore fake — the real store's SQL is COALESCE-guarded
-identically, verified against real Postgres separately).
+precedence-aware write path (RdsVenueStore.update_venue_address_components via
+the InMemoryRdsVenueStore fake — the real store's SQL uses the identical
+CASE-guarded precedence logic, verified against real Postgres separately).
 
 plans/260905_events-serving-projection.md, Phase 2 pytest list: "each
 fallback rung, and the never-clobber rule." The hard constraint this repo's
@@ -9,8 +9,17 @@ execution brief calls out explicitly: "A stored non-null value must NEVER be
 overwritten with null or with an empty string, and raw_text/lat/lng must
 never be touched by this path" — every one of those clauses gets its own
 assertion below, not just the headline case.
+
+plans/260906_address-components-backfill.md, Phase 2 superseded the blind
+COALESCE with a per-field provenance precedence (operator > google > parsed):
+the original tests below now pass `source="google"` explicitly (their
+original intent — "Google's own re-enrichment" — is unchanged), and
+`TestCrossSourcePrecedence` below exercises every ordered pair the new
+precedence rule must enforce, not just the happy path.
 """
 from __future__ import annotations
+
+import pytest
 
 from app.models.venue import Venue
 from app.services.venue_address_components import map_address_components
@@ -121,12 +130,12 @@ def _seeded_store(venue_id="addr_venue_1") -> InMemoryRdsVenueStore:
 
 def test_a_null_response_component_never_overwrites_a_stored_value():
     store = _seeded_store()
-    store.update_venue_address_components("addr_venue_1", neighborhood="Santo Amaro")
+    store.update_venue_address_components("addr_venue_1", source="google", neighborhood="Santo Amaro")
     assert store.get_address("addr_venue_1")["neighborhood"] == "Santo Amaro"
 
     # A later enrichment response with NO neighborhood answer (None, the
     # mapper's own "not answered" value) must leave the stored value intact.
-    store.update_venue_address_components("addr_venue_1", neighborhood=None)
+    store.update_venue_address_components("addr_venue_1", source="google", neighborhood=None)
     assert store.get_address("addr_venue_1")["neighborhood"] == "Santo Amaro"
 
 
@@ -137,8 +146,8 @@ def test_an_empty_string_component_never_overwrites_a_stored_value():
     but the write path is tested directly against "" too so the guarantee
     does not rest solely on the mapper's own good behaviour."""
     store = _seeded_store()
-    store.update_venue_address_components("addr_venue_1", neighborhood="Santo Amaro")
-    store.update_venue_address_components("addr_venue_1", neighborhood="")
+    store.update_venue_address_components("addr_venue_1", source="google", neighborhood="Santo Amaro")
+    store.update_venue_address_components("addr_venue_1", source="google", neighborhood="")
     assert store.get_address("addr_venue_1")["neighborhood"] == "Santo Amaro"
 
 
@@ -146,21 +155,23 @@ def test_a_fresh_non_null_answer_does_update_a_previously_stored_value():
     """Never-clobber protects against a NULL response erasing knowledge; it
     does not freeze the first answer forever — Google's own answer can
     legitimately change (e.g. a corrected sublocality), and re-enrichment
-    already overwrites every other vibe attribute wholesale."""
+    already overwrites every other vibe attribute wholesale. Same-source
+    (`google` -> `google`) always refreshes: `>=`, not `>`."""
     store = _seeded_store()
-    store.update_venue_address_components("addr_venue_1", neighborhood="Santo Amaro")
-    store.update_venue_address_components("addr_venue_1", neighborhood="Boa Viagem")
+    store.update_venue_address_components("addr_venue_1", source="google", neighborhood="Santo Amaro")
+    store.update_venue_address_components("addr_venue_1", source="google", neighborhood="Boa Viagem")
     assert store.get_address("addr_venue_1")["neighborhood"] == "Boa Viagem"
 
 
 def test_every_structured_field_is_independently_never_clobbered():
     store = _seeded_store()
     store.update_venue_address_components(
-        "addr_venue_1", street="Rua X", neighborhood="Santo Amaro",
+        "addr_venue_1", source="google", street="Rua X", neighborhood="Santo Amaro",
         city="Recife", postal_code="50100-460",
     )
     store.update_venue_address_components(
-        "addr_venue_1", street=None, neighborhood=None, city=None, postal_code=None,
+        "addr_venue_1", source="google",
+        street=None, neighborhood=None, city=None, postal_code=None,
     )
     addr = store.get_address("addr_venue_1")
     assert addr["street"] == "Rua X"
@@ -173,7 +184,7 @@ def test_raw_text_lat_lng_are_never_touched_by_this_write_path():
     store = _seeded_store()
     before = dict(store.get_address("addr_venue_1"))
     store.update_venue_address_components(
-        "addr_venue_1", street="Rua X", neighborhood="Santo Amaro",
+        "addr_venue_1", source="google", street="Rua X", neighborhood="Santo Amaro",
         city="Recife", postal_code="50100-460",
     )
     after = store.get_address("addr_venue_1")
@@ -187,5 +198,113 @@ def test_a_missing_address_row_is_a_silent_no_op():
     upsert_venue time) but must never raise — mirrors the real UPDATE ...
     WHERE's zero-rows-affected behaviour."""
     store = InMemoryRdsVenueStore()
-    store.update_venue_address_components("no_such_venue", neighborhood="X")  # must not raise
+    store.update_venue_address_components("no_such_venue", source="google", neighborhood="X")  # must not raise
     assert store.get_address("no_such_venue") is None
+
+
+def test_an_invalid_source_raises_value_error():
+    """A future caller cannot forget to state its provenance silently —
+    both the real store and this fake require `source` and reject anything
+    outside the three known tiers."""
+    store = _seeded_store()
+    with pytest.raises(ValueError):
+        store.update_venue_address_components("addr_venue_1", source="bestguess", neighborhood="X")
+
+
+# ── cross-source precedence: every ordered pair, not just the happy path ──
+class TestCrossSourcePrecedence:
+    """plans/260906_address-components-backfill.md Phase 2's whole point:
+    operator > google > parsed, `>=` within the same source. A parsed value
+    must never block a later google answer; nothing may overwrite an
+    operator value; a source may still refresh its own prior answer."""
+
+    def test_parsed_then_google_upgrades(self):
+        store = _seeded_store()
+        store.update_venue_address_components("addr_venue_1", source="parsed", neighborhood="Santa Rosa")
+        store.update_venue_address_components("addr_venue_1", source="google", neighborhood="Santa Rosa Baixa")
+        addr = store.get_address("addr_venue_1")
+        assert addr["neighborhood"] == "Santa Rosa Baixa"
+        assert addr["neighborhood_source"] == "google"
+
+    def test_google_then_parsed_is_refused(self):
+        store = _seeded_store()
+        store.update_venue_address_components("addr_venue_1", source="google", neighborhood="Santo Amaro")
+        store.update_venue_address_components("addr_venue_1", source="parsed", neighborhood="Wrong Guess")
+        addr = store.get_address("addr_venue_1")
+        assert addr["neighborhood"] == "Santo Amaro"
+        assert addr["neighborhood_source"] == "google"
+
+    def test_operator_then_google_is_refused(self):
+        store = _seeded_store()
+        store.update_venue_address_components("addr_venue_1", source="operator", neighborhood="Recife Antigo")
+        store.update_venue_address_components("addr_venue_1", source="google", neighborhood="Bairro do Recife")
+        addr = store.get_address("addr_venue_1")
+        assert addr["neighborhood"] == "Recife Antigo"
+        assert addr["neighborhood_source"] == "operator"
+
+    def test_operator_then_parsed_is_refused(self):
+        store = _seeded_store()
+        store.update_venue_address_components("addr_venue_1", source="operator", neighborhood="Recife Antigo")
+        store.update_venue_address_components("addr_venue_1", source="parsed", neighborhood="Wrong Guess")
+        addr = store.get_address("addr_venue_1")
+        assert addr["neighborhood"] == "Recife Antigo"
+        assert addr["neighborhood_source"] == "operator"
+
+    def test_parsed_then_operator_upgrades(self):
+        store = _seeded_store()
+        store.update_venue_address_components("addr_venue_1", source="parsed", neighborhood="Santa Rosa")
+        store.update_venue_address_components("addr_venue_1", source="operator", neighborhood="Santa Rosa Baixa")
+        addr = store.get_address("addr_venue_1")
+        assert addr["neighborhood"] == "Santa Rosa Baixa"
+        assert addr["neighborhood_source"] == "operator"
+
+    def test_google_then_operator_upgrades(self):
+        store = _seeded_store()
+        store.update_venue_address_components("addr_venue_1", source="google", neighborhood="Santo Amaro")
+        store.update_venue_address_components("addr_venue_1", source="operator", neighborhood="Corrected")
+        addr = store.get_address("addr_venue_1")
+        assert addr["neighborhood"] == "Corrected"
+        assert addr["neighborhood_source"] == "operator"
+
+    def test_same_source_always_refreshes_google(self):
+        store = _seeded_store()
+        store.update_venue_address_components("addr_venue_1", source="google", neighborhood="First")
+        store.update_venue_address_components("addr_venue_1", source="google", neighborhood="Second")
+        assert store.get_address("addr_venue_1")["neighborhood"] == "Second"
+
+    def test_same_source_always_refreshes_parsed(self):
+        store = _seeded_store()
+        store.update_venue_address_components("addr_venue_1", source="parsed", neighborhood="First")
+        store.update_venue_address_components("addr_venue_1", source="parsed", neighborhood="Second")
+        assert store.get_address("addr_venue_1")["neighborhood"] == "Second"
+
+    def test_same_source_always_refreshes_operator(self):
+        store = _seeded_store()
+        store.update_venue_address_components("addr_venue_1", source="operator", neighborhood="First")
+        store.update_venue_address_components("addr_venue_1", source="operator", neighborhood="Second")
+        assert store.get_address("addr_venue_1")["neighborhood"] == "Second"
+
+    def test_parsed_onto_a_never_before_written_field_writes(self):
+        """No stored source yet (NULL) always loses to a real source,
+        regardless of how low that source ranks."""
+        store = _seeded_store()
+        store.update_venue_address_components("addr_venue_1", source="parsed", city="Recife")
+        addr = store.get_address("addr_venue_1")
+        assert addr["city"] == "Recife"
+        assert addr["city_source"] == "parsed"
+
+    def test_precedence_is_independent_per_field(self):
+        """One field can be operator-locked while a SIBLING field on the
+        SAME venue is still open to a google upgrade — precedence is
+        evaluated per column, not per row."""
+        store = _seeded_store()
+        store.update_venue_address_components(
+            "addr_venue_1", source="operator", neighborhood="Recife Antigo",
+        )
+        store.update_venue_address_components(
+            "addr_venue_1", source="google", neighborhood="Bairro do Recife", city="Recife",
+        )
+        addr = store.get_address("addr_venue_1")
+        assert addr["neighborhood"] == "Recife Antigo"  # untouched
+        assert addr["city"] == "Recife"  # sibling field DID write
+        assert addr["city_source"] == "google"

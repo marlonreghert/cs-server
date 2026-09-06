@@ -346,6 +346,7 @@ def _build_rds_layer(context) -> None:
         validate_stopwords_config,
         validate_undated_window_days_config,
     )
+    from app.services.venue_city_vocabulary import validate_address_city_vocabulary_config
 
     def _validate_eligibility(value):
         # Validate (raise on invalid) but persist the RAW body, byte-compatible
@@ -373,6 +374,11 @@ def _build_rds_layer(context) -> None:
             "event_dedup_candidate_window_hours": validate_candidate_window_hours_config,
             "event_dedup_undated_window_days": validate_undated_window_days_config,
             "event_dedup_auto_merge_enabled": validate_auto_merge_enabled_config,
+            # plans/260906_address-components-backfill.md Phase 1: mirrors
+            # app.container's own registration — the SAME generic
+            # admin-config CRUD route every key here uses, no dedicated
+            # endpoint.
+            "address_city_vocabulary": validate_address_city_vocabulary_config,
         },
     )
     # The generic PUT/GET /admin/config/{key} routes read the service off the
@@ -395,6 +401,22 @@ def _build_rds_layer(context) -> None:
     context.redis_projection_service.eligibility_rule_service = (
         context.eligibility_rule_service
     )
+
+    # Address-components backfill (plans/260906_address-components-
+    # backfill.md): mirrors app.container's wiring exactly — built here
+    # (after admin_config_service exists), always constructed (parser-only
+    # mode works with no Google Places client at all), then wired onto the
+    # already-built enrichment service's add-time parser-fallback hook.
+    from app.services.venue_address_backfill_service import VenueAddressBackfillService
+
+    context.venue_address_backfill_service = VenueAddressBackfillService(
+        venue_repository=context.repository,
+        google_places_client=getattr(context, "google_places_client", None),
+        admin_config_service=context.admin_config_service,
+    )
+    context.enrichment_service.address_backfill_service = context.venue_address_backfill_service
+    if getattr(context, "container", None) is not None:
+        context.container.venue_address_backfill_service = context.venue_address_backfill_service
 
 
 def after_scenario(context, scenario):

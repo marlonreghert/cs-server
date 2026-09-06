@@ -64,4 +64,24 @@ def map_address_components(components: Optional[list[dict]]) -> dict:
     }
 
 
-__all__ = ["map_address_components", "ADDRESS_COMPONENT_FIELDS"]
+def write_mapped_components(venue_dao, venue_id: str, components, source: str) -> str:
+    """Map `components` and write them via `venue_dao.
+    update_venue_address_components` with the given provenance `source`,
+    returning the outcome label ("written" if the response answered at
+    least one field, else "unchanged") for the caller's own
+    `VENUE_ADDRESS_COMPONENTS_TOTAL` bump.
+
+    Shared glue between the opportunistic `enrich_venue` path (Place
+    Details' own `addressComponents`) and the address-components backfill's
+    Geocoding-by-`place_id` path
+    (plans/260906_address-components-backfill.md Phase 3) — both are
+    fundamentally the SAME event ("a Google address-components response was
+    mapped and written"), so the map -> write -> outcome glue exists in
+    exactly one place rather than two independently-maintained copies.
+    """
+    mapped = map_address_components(components)
+    venue_dao.update_venue_address_components(venue_id, source=source, **mapped)
+    return "written" if any(mapped.values()) else "unchanged"
+
+
+__all__ = ["map_address_components", "write_mapped_components", "ADDRESS_COMPONENT_FIELDS"]

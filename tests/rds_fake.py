@@ -168,8 +168,10 @@ class InMemoryRdsVenueStore:
         row["created_at"] = existing.get("created_at", _now())
         row["updated_at"] = _now()
         self.venues[venue.venue_id] = row
-        # venues.address is the sole address source; structured components stay
-        # null until Google Places enrichment fills them.
+        # venues.address is the sole address source; structured components
+        # (and their provenance) stay exactly as they were — mirrors the
+        # real store's upsert, whose SET clause never touches
+        # street/neighborhood/city/postal_code/*_source at all.
         existing_addr = self.addresses.get(venue.venue_id, {})
         self.addresses[venue.venue_id] = {
             "venue_id": venue.venue_id,
@@ -178,6 +180,10 @@ class InMemoryRdsVenueStore:
             "neighborhood": existing_addr.get("neighborhood"),
             "city": existing_addr.get("city"),
             "postal_code": existing_addr.get("postal_code"),
+            "street_source": existing_addr.get("street_source"),
+            "neighborhood_source": existing_addr.get("neighborhood_source"),
+            "city_source": existing_addr.get("city_source"),
+            "postal_code_source": existing_addr.get("postal_code_source"),
             "lat": venue.venue_lat,
             "lng": venue.venue_lng,
             "updated_at": _now(),
@@ -200,32 +206,79 @@ class InMemoryRdsVenueStore:
     def get_address(self, venue_id) -> Optional[dict]:
         return self.addresses.get(venue_id)
 
+    # Mirrors RdsVenueStore._PROVENANCE_RANK — this docstring's own promise
+    # (see the class-level note above `self.addresses`) that this fake's SQL
+    # behaviour must change in lockstep with the real store's.
+    _PROVENANCE_RANK = {"operator": 3, "google": 2, "parsed": 1}
+
     def update_venue_address_components(
-        self, venue_id: str, *,
+        self, venue_id: str, *, source: str,
         street: Optional[str] = None, neighborhood: Optional[str] = None,
         city: Optional[str] = None, postal_code: Optional[str] = None,
     ) -> None:
-        """Never-clobber structured-component write (plans/260905_events-
-        serving-projection.md Phase 2): mirrors the real store's
-        `COALESCE(:new, existing)` UPDATE — a None (or, defensively, an
-        empty string) argument leaves the stored value untouched; a
-        non-empty string always wins, even over an already-non-null value
-        (Google's own answer can legitimately change). Never touches
-        raw_text/lat/lng — those are upsert_venue's own column set. A venue
-        with no address row (should not occur — every venue gets a 1:1 row
-        at upsert time) is a silent no-op, mirroring a real UPDATE ... WHERE
-        that matches zero rows."""
+        """Precedence-aware structured-component write (plans/260906_
+        address-components-backfill.md Phase 2 — supersedes the blind
+        COALESCE this method used before that plan): mirrors the real
+        store's CASE-guarded UPDATE exactly. Per field, a non-empty
+        incoming value is written ONLY when the column's stored `_source`
+        is NULL or `source`'s precedence is `>=` the stored source's
+        precedence (operator > google > parsed) — `>=` so a source can
+        still refresh its own prior answer. A None/empty incoming value
+        never writes. Never touches raw_text/lat/lng — those are
+        upsert_venue's own column set. A venue with no address row is a
+        silent no-op, mirroring a real UPDATE ... WHERE matching zero rows.
+        Raises ValueError on a `source` outside
+        {"operator","google","parsed"}, exactly like the real store."""
+        if source not in self._PROVENANCE_RANK:
+            raise ValueError(
+                "update_venue_address_components: source must be one of "
+                f"{sorted(self._PROVENANCE_RANK)}, got {source!r}"
+            )
         self._guard()
         addr = self.addresses.get(venue_id)
         if addr is None:
             return
+        incoming_rank = self._PROVENANCE_RANK[source]
         for field, value in (
             ("street", street), ("neighborhood", neighborhood),
             ("city", city), ("postal_code", postal_code),
         ):
-            if value:
+            if not value:
+                continue
+            stored_source = addr.get(f"{field}_source")
+            stored_rank = self._PROVENANCE_RANK.get(stored_source, 0)
+            if stored_source is None or incoming_rank >= stored_rank:
                 addr[field] = value
+                addr[f"{field}_source"] = source
         addr["updated_at"] = _now()
+
+    def list_address_backfill_candidates(
+        self, after_venue_id: Optional[str], limit: int
+    ) -> list[dict]:
+        """Mirrors RdsVenueStore.list_address_backfill_candidates: rows
+        with `venue_id > after_venue_id` (None = from the start) where at
+        least one structured column is still null, ordered by `venue_id`
+        alone. A non-positive `limit` selects nothing."""
+        if limit <= 0:
+            return []
+        rows = [
+            dict(addr) for vid, addr in sorted(self.addresses.items())
+            if (after_venue_id is None or vid > after_venue_id)
+            and (
+                addr.get("street") is None or addr.get("neighborhood") is None
+                or addr.get("city") is None or addr.get("postal_code") is None
+            )
+        ]
+        return rows[:limit]
+
+    def count_address_backfill_remaining(self) -> dict:
+        """Mirrors RdsVenueStore.count_address_backfill_remaining."""
+        counts = {"street": 0, "neighborhood": 0, "city": 0, "postal_code": 0}
+        for addr in self.addresses.values():
+            for field in counts:
+                if addr.get(field) is None:
+                    counts[field] += 1
+        return counts
 
     def soft_delete_venue(self, venue_id, reason, source, google_business_status=None) -> None:
         self._guard()

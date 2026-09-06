@@ -1382,6 +1382,22 @@ class AddVenueHandler:
                     f"[AddVenueHandler] no Google place_id for {venue.venue_id}; "
                     "skipping inline enrichment (Google fields stay empty)"
                 )
+                # plans/260906_address-components-backfill.md Phase 4,
+                # "going forward, no manual step": enrich_venue's own
+                # parser-fallback hook never runs on THIS branch (it is
+                # never called at all with no place_id) — so the SAME
+                # shared helper is invoked directly here. Isolated exactly
+                # like enrich_venue's own hook: a fallback failure must
+                # never fail the add itself.
+                backfill = getattr(service, "address_backfill_service", None)
+                if backfill is not None:
+                    try:
+                        backfill.apply_parser_fallback(venue.venue_id, venue.venue_address)
+                    except Exception as e:
+                        logger.warning(
+                            f"[AddVenueHandler] parser fallback failed for "
+                            f"{venue.venue_id}: {type(e).__name__}: {e}"
+                        )
                 return
             # force_refresh=True: the venue was just created, so any stale/empty
             # vibe row must not short-circuit the fetch.

@@ -154,6 +154,11 @@ test-unit:
 		tests/test_image_edge_color.py \
 		tests/test_event_occurrences.py \
 		tests/test_venue_address_components.py \
+		tests/test_venue_address_parser.py \
+		tests/test_venue_city_vocabulary.py \
+		tests/test_venue_address_provenance_migration.py \
+		tests/test_venue_address_backfill_service.py \
+		tests/test_google_places_geocode_by_place_id.py \
 		tests/test_venue_media_store.py \
 		tests/test_event_flyer_service.py \
 		tests/test_event_city_slug.py \

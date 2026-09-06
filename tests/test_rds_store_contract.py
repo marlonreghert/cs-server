@@ -1041,3 +1041,97 @@ def test_crawl_target_reels_overlap_counts_round_trip(store):
     reread = store.get_crawl_target(handle)
     assert reread["last_run_reels_fetched"] == 16
     assert reread["last_run_reels_new"] == 3
+
+
+# ── migration 0045_venue_address_provenance: precedence-aware address writes ──
+# plans/260906_address-components-backfill.md Phase 2. Runs against BOTH the
+# fake and (when RDS_TEST_URL is set) the real CASE-guarded SQL — the fake's
+# own docstring already promises to mirror this SQL exactly, verified here
+# rather than trusted to prose. See tests/test_venue_address_components.py
+# for the exhaustive per-field precedence matrix over the fake alone; these
+# few pin the SAME behaviour against a REAL Postgres bind (constraint
+# collisions, the CASE expression's own operator precedence, etc. — the
+# class of defect only a real bind can catch).
+def test_address_precedence_parsed_then_google_upgrades_on_real_sql(store):
+    vid = _vid()
+    store.upsert_venue(_venue(vid))
+    store.update_venue_address_components(vid, source="parsed", neighborhood="Santa Rosa")
+    store.update_venue_address_components(vid, source="google", neighborhood="Santa Rosa Baixa")
+    addr = store.get_address(vid)
+    assert addr["neighborhood"] == "Santa Rosa Baixa"
+    assert addr["neighborhood_source"] == "google"
+
+
+def test_address_precedence_google_then_parsed_is_refused_on_real_sql(store):
+    vid = _vid()
+    store.upsert_venue(_venue(vid))
+    store.update_venue_address_components(vid, source="google", neighborhood="Santo Amaro")
+    store.update_venue_address_components(vid, source="parsed", neighborhood="Wrong Guess")
+    addr = store.get_address(vid)
+    assert addr["neighborhood"] == "Santo Amaro"
+    assert addr["neighborhood_source"] == "google"
+
+
+def test_address_precedence_operator_is_never_overwritten_on_real_sql(store):
+    vid = _vid()
+    store.upsert_venue(_venue(vid))
+    store.update_venue_address_components(vid, source="operator", neighborhood="Recife Antigo")
+    store.update_venue_address_components(vid, source="google", neighborhood="Bairro do Recife")
+    store.update_venue_address_components(vid, source="parsed", neighborhood="Another Guess")
+    addr = store.get_address(vid)
+    assert addr["neighborhood"] == "Recife Antigo"
+    assert addr["neighborhood_source"] == "operator"
+
+
+def test_address_precedence_same_source_always_refreshes_on_real_sql(store):
+    vid = _vid()
+    store.upsert_venue(_venue(vid))
+    store.update_venue_address_components(vid, source="google", neighborhood="First")
+    store.update_venue_address_components(vid, source="google", neighborhood="Second")
+    assert store.get_address(vid)["neighborhood"] == "Second"
+
+
+def test_address_invalid_source_raises_before_touching_sql(store):
+    vid = _vid()
+    store.upsert_venue(_venue(vid))
+    with pytest.raises(ValueError):
+        store.update_venue_address_components(vid, source="not_a_real_tier", neighborhood="X")
+
+
+def test_address_check_constraint_rejects_an_out_of_set_source_written_directly(store):
+    """The Python-level ValueError guard is not the only line of defence —
+    the migration's own CHECK constraint must independently reject a bad
+    value that bypasses the DAO method entirely. Only meaningful against
+    the real store (the fake has no constraint to bypass); a bare
+    `pytest.skip` keeps this test collectible either way rather than
+    hiding it from `-k` selection."""
+    if not os.environ.get("RDS_TEST_URL"):
+        pytest.skip("real-Postgres-only: exercises the CHECK constraint directly, bypassing the DAO")
+    from sqlalchemy import text as sqltext
+
+    vid = _vid()
+    store.upsert_venue(_venue(vid))
+    with pytest.raises(Exception):
+        with store.engine.begin() as conn:
+            conn.execute(
+                sqltext("UPDATE venues.address SET neighborhood_source='bogus' WHERE venue_id=:v"),
+                {"v": vid},
+            )
+
+
+def test_address_backfill_candidates_and_remaining_count_round_trip(store):
+    vid = _vid()
+    store.upsert_venue(_venue(vid))
+    remaining_before = store.count_address_backfill_remaining()
+    assert remaining_before["neighborhood"] >= 1
+
+    candidates = store.list_address_backfill_candidates(None, 10000)
+    assert vid in {r["venue_id"] for r in candidates}
+
+    store.update_venue_address_components(
+        vid, source="parsed", street="S", neighborhood="N", city="C", postal_code="50000-000",
+    )
+    candidates_after = store.list_address_backfill_candidates(None, 10000)
+    assert vid not in {r["venue_id"] for r in candidates_after}, (
+        "a fully-filled row must be excluded from future candidate pages"
+    )

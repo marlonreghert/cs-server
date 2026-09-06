@@ -199,41 +199,139 @@ class RdsVenueStore:
             ), {"venue_id": venue.venue_id, "raw_text": venue.venue_address,
                 "lat": venue.venue_lat, "lng": venue.venue_lng})
 
+    # Precedence order for `venues.address`'s four `*_source` provenance
+    # columns (plans/260906_address-components-backfill.md Phase 2):
+    # operator beats google beats parsed. Anything else (including a
+    # NULL/never-written stored source) ranks 0 and always loses to a real
+    # source.
+    _PROVENANCE_RANK = {"operator": 3, "google": 2, "parsed": 1}
+
     def update_venue_address_components(
-        self, venue_id: str, *,
+        self, venue_id: str, *, source: str,
         street: Optional[str] = None, neighborhood: Optional[str] = None,
         city: Optional[str] = None, postal_code: Optional[str] = None,
     ) -> None:
-        """Never-clobber write of the four structured `venues.address`
-        columns (plans/260905_events-serving-projection.md Phase 2).
-        `COALESCE(:new, existing)` per column is the never-overwrite
-        guarantee enforced AT THE SQL LEVEL: a None argument (Google's
-        response did not answer this field) leaves the stored value
-        exactly as it was; a non-empty string always wins, even over an
-        already-non-null value, because Google's own answer can legitimately
-        change and every OTHER vibe attribute is already overwritten
-        wholesale on re-enrichment. An empty-string argument is treated
-        identically to None by the caller
-        (app.services.venue_address_components.map_address_components never
-        produces one) — this method still guards it explicitly with
-        `NULLIF(:x, '')` so the guarantee does not rest solely on the
-        caller's good behaviour. Never touches raw_text/lat/lng — those
-        belong to upsert_venue's own dual-write. A venue with no address row
-        (should not occur — every venue gets one at upsert time) matches
-        zero rows and is a silent no-op."""
+        """Precedence-aware write of the four structured `venues.address`
+        columns (plans/260906_address-components-backfill.md Phase 2 —
+        supersedes the blind COALESCE this method used before that plan).
+        Per field, a non-empty incoming value is written ONLY when the
+        column's stored `_source` is NULL or `source`'s precedence is `>=`
+        the stored source's precedence (operator > google > parsed) — `>=`,
+        not `>`, so a source can still refresh its own prior answer
+        (preserves the original, still-tested "Google's second answer
+        overwrites Google's first" behaviour). A None/empty incoming value
+        never writes, exactly as before
+        (`app.services.venue_address_components.map_address_components`
+        never produces an empty string, but the guard is enforced here too
+        via `NULLIF(:x, '')` so the guarantee never rests solely on a
+        caller's good behaviour). A parsed value can therefore never block
+        a later google answer, and nothing can ever overwrite an operator
+        value. Never touches raw_text/lat/lng — those belong to
+        upsert_venue's own dual-write. A venue with no address row (should
+        not occur — every venue gets one at upsert time) matches zero rows
+        and is a silent no-op.
+
+        Raises ValueError when `source` is outside
+        {"operator","google","parsed"} so a future caller cannot forget it
+        silently — this is a required keyword specifically so a new writer
+        added later must make an explicit provenance choice."""
+        if source not in self._PROVENANCE_RANK:
+            raise ValueError(
+                "update_venue_address_components: source must be one of "
+                f"{sorted(self._PROVENANCE_RANK)}, got {source!r}"
+            )
+        # Postgres has no bare enum-ordering function for a plain text
+        # column here (matches this repo's no-custom-function style), so
+        # the rank is inlined as a CASE expression per reference, both for
+        # the incoming :source and for each column's own stored `_source`.
+        rank_case = "CASE {col} WHEN 'operator' THEN 3 WHEN 'google' THEN 2 WHEN 'parsed' THEN 1 ELSE 0 END"
+        incoming_rank = rank_case.format(col=":source")
+
+        def _field_clause(field: str) -> str:
+            stored_rank = rank_case.format(col=f"{field}_source")
+            guard = (
+                f"NULLIF(:{field}, '') IS NOT NULL AND "
+                f"({field}_source IS NULL OR {incoming_rank} >= {stored_rank})"
+            )
+            return (
+                f"{field}=CASE WHEN {guard} THEN :{field} ELSE {field} END, "
+                f"{field}_source=CASE WHEN {guard} THEN :source ELSE {field}_source END"
+            )
+
+        set_clause = ", ".join(
+            _field_clause(f) for f in ("street", "neighborhood", "city", "postal_code")
+        )
         with self.engine.begin() as conn:
             conn.execute(text(
-                "UPDATE venues.address SET "
-                "street=COALESCE(NULLIF(:street, ''), street), "
-                "neighborhood=COALESCE(NULLIF(:neighborhood, ''), neighborhood), "
-                "city=COALESCE(NULLIF(:city, ''), city), "
-                "postal_code=COALESCE(NULLIF(:postal_code, ''), postal_code), "
-                "updated_at=now() "
+                f"UPDATE venues.address SET {set_clause}, updated_at=now() "
                 "WHERE venue_id=:venue_id"
             ), {
-                "venue_id": venue_id, "street": street, "neighborhood": neighborhood,
-                "city": city, "postal_code": postal_code,
+                "venue_id": venue_id, "source": source, "street": street,
+                "neighborhood": neighborhood, "city": city, "postal_code": postal_code,
             })
+
+    def list_address_backfill_candidates(
+        self, after_venue_id: Optional[str], limit: int
+    ) -> list[dict]:
+        """`venues.address` rows with `venue_id > after_venue_id` (None =
+        from the very start) where at least one structured column is still
+        null, ordered by `venue_id` ALONE — never servable-first (see
+        `VenueAddressBackfillService`'s own docstring for why a two-tier
+        resume cursor is deliberately avoided: `venue_id` carries no
+        correlation to servability, so a compound ordering resumed by a
+        single `venue_id` cursor could permanently orphan a slice of the
+        non-servable backlog). Every venue — servable and non-servable
+        alike — is reachable this way. A non-positive `limit` selects
+        nothing."""
+        if limit <= 0:
+            return []
+        where = ["(street IS NULL OR neighborhood IS NULL OR city IS NULL OR postal_code IS NULL)"]
+        params: dict = {"limit": limit}
+        if after_venue_id is not None:
+            where.append("venue_id > :after")
+            params["after"] = after_venue_id
+        sql = (
+            "SELECT venue_id, raw_text, lat, lng, street, neighborhood, city, postal_code "
+            "FROM venues.address WHERE " + " AND ".join(where) + " "
+            "ORDER BY venue_id ASC LIMIT :limit"
+        )
+        with self.engine.connect() as conn:
+            return [dict(r) for r in conn.execute(text(sql), params).mappings()]
+
+    def get_address(self, venue_id: str) -> Optional[dict]:
+        """The full `venues.address` row for one venue — every column,
+        including the four provenance `*_source` fields (plans/260906_
+        address-components-backfill.md Phase 2). Mirrors
+        `tests.rds_fake.InMemoryRdsVenueStore.get_address`'s own return
+        shape exactly, which is the contract that method's docstring
+        already promises this store follows. Deliberately separate from
+        `get_address_bulk`, which is a NARROW, purpose-built projection
+        (lat/lng/neighborhood only) for the events projection's own bulk
+        read — widening that method's column list would change its query
+        shape for a caller outside this feature's scope."""
+        with self.engine.connect() as conn:
+            row = conn.execute(text(
+                "SELECT venue_id, raw_text, lat, lng, "
+                "street, neighborhood, city, postal_code, "
+                "street_source, neighborhood_source, city_source, postal_code_source, "
+                "updated_at "
+                "FROM venues.address WHERE venue_id=:v"
+            ), {"v": venue_id}).mappings().first()
+            return dict(row) if row else None
+
+    def count_address_backfill_remaining(self) -> dict:
+        """Count of still-null rows per structured `venues.address` column
+        — backs the `VENUE_ADDRESS_BACKFILL_REMAINING{field}` gauge."""
+        with self.engine.connect() as conn:
+            row = conn.execute(text(
+                "SELECT "
+                "count(*) FILTER (WHERE street IS NULL) AS street, "
+                "count(*) FILTER (WHERE neighborhood IS NULL) AS neighborhood, "
+                "count(*) FILTER (WHERE city IS NULL) AS city, "
+                "count(*) FILTER (WHERE postal_code IS NULL) AS postal_code "
+                "FROM venues.address"
+            )).mappings().first()
+        return dict(row) if row else {"street": 0, "neighborhood": 0, "city": 0, "postal_code": 0}
 
     def soft_delete_venue(self, venue_id, reason, source, google_business_status=None) -> None:
         with self.engine.begin() as conn:
