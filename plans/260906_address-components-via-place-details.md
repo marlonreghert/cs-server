@@ -3,6 +3,64 @@
 ## Branch
 feature/address-components-via-place-details
 
+## Execution corrections (post-approval, applied by `/execute-feature`)
+
+The operator reviewed this plan after approval and mandated three changes
+before implementation. All three were applied; this plan's body below is
+otherwise unchanged from what was approved, so the two corrected sections
+(marked **[CORRECTED]** inline below) reflect what was actually built, not
+what was originally proposed.
+
+**(A) Distinct metrics endpoint label — `place_details_address`, not a reuse
+of `"place_details"`.** This plan originally recommended reusing the
+`"place_details"` endpoint label in `fetch_address_components`'s
+`_instrumented(...)` call (mirroring `_recheck_business_status`'s own
+precedent). Overridden: `fetch_address_components` uses its own distinct
+label, `"place_details_address"`. Reason: this whole feature exists because
+the new call sits in the Place Details **Essentials** SKU (10,000 free
+calls/month), while the daily vibe-enrichment cron's full-mask call to the
+same URL is billed at **Enterprise + Atmosphere** — a different, paid SKU.
+Sharing one label would make free-tier consumption unobservable via
+`GOOGLE_PLACES_API_CALLS_TOTAL{endpoint=...}` and a cost regression
+invisible. `_recheck_business_status`'s own reuse of `"place_details"` is
+left untouched — it is an existing gap, not a pattern to repeat here.
+
+**(B) `geocode_by_place_id`, `GoogleGeocodingError`, `GOOGLE_GEOCODING_API_BASE`,
+and their dedicated test file are KEPT, not removed.** This plan originally
+recommended deleting all of them once `VenueAddressBackfillService` no
+longer called `geocode_by_place_id`. Overridden: all four stay in the
+codebase, unremoved. `geocode_by_place_id` gained a docstring marker
+recording that it is confirmed DEAD — the legacy Geocoding API returned
+`REQUEST_DENIED` ("This API is not activated on your API project") for
+12/12 production place_ids probed on 2026-09-06 — and must not be wired to
+anything without first enabling that API in the GCP Console. Reason: this
+PR changes production data-write behavior; the operator wants a small,
+easily revertable blast radius. Deleting a client method + exception +
+module constant + ~12 tests in the same PR that also flips a production
+data path widens that blast radius for zero functional gain. Removing the
+now-confirmed-dead code is left as a deliberate, separate follow-up.
+
+**(C) Non-vacuity of the already-merged BDD suite's spend-gate guard —
+mandatory, proven during execution.** The already-merged
+`tests/bdd/steps/address_components_backfill_steps.py` mocked
+`geocode_by_place_id` at 4 call sites, two of which are guard assertions
+(`side_effect=AssertionError(...)` for "switch is off", and
+`assert_not_called()` for "no Geocoding request was made"). Once
+`_maybe_fetch_google_address` stopped calling `geocode_by_place_id`, those
+two assertions would have gone vacuously true regardless of whether the
+spend gate actually worked. All 4 sites were rewired to
+`fetch_address_components`, and a fresh regression guard was added (an
+`AsyncMock(wraps=...)` spy wrapped onto `geocode_by_place_id` for every BDD
+scenario in `tests/bdd/environment.py`, backing a new
+`Then the backfill never calls the legacy geocode_by_place_id method` step)
+so the dead path staying in the codebase per correction (B) cannot silently
+come back into service. Non-vacuity was then proven by deliberately
+disabling the spend-gate's early return in
+`VenueAddressBackfillService._maybe_fetch_google_address`, confirming the
+guarded scenario failed for real (`ASSERT FAILED: Expected 'mock' to not
+have been called. Called 1 times.` against `fetch_address_components`),
+then restoring the gate and re-confirming green.
+
 ## Goal
 Replace the address backfill's Google rung: stop calling the legacy Geocoding
 API (`GooglePlacesAPIClient.geocode_by_place_id`), which is confirmed
@@ -204,8 +262,11 @@ identically to today, just fed by a working Google response instead of a
 guaranteed failure. The spend gate (`address_backfill_geocoding_enabled`,
 default off) still makes the new call categorically unreachable when off.
 `geocode_by_place_id` and its now-fully-unreachable Geocoding API integration
-are removed. The re-sweep mechanism (cursor reset) is documented in the one
-place an operator already looks for this job's operational notes.
+are **[CORRECTED — see "Execution corrections" above] kept, not removed** —
+`geocode_by_place_id`, `GoogleGeocodingError`, and `GOOGLE_GEOCODING_API_BASE`
+stay in the codebase (dead, unwired, docstring-marked), a deliberate,
+separate follow-up. The re-sweep mechanism (cursor reset) is documented in
+the one place an operator already looks for this job's operational notes.
 
 ## Implementation Approach
 
@@ -241,20 +302,26 @@ own docstring contract almost verbatim, updated for Place Details) instead of
 returning `None`. On a clean 200, the method returns `data.get("addressComponents")`
 directly — `None` or a list, both already exactly what
 `map_address_components` expects, no normalization. Endpoint label passed to
-`_instrumented(...)`: **reuse `"place_details"`**, not a new label. This
-matches the ALREADY-established precedent in this same file:
-`_recheck_business_status`'s minimal `fields_mask="businessStatus"` call
-(`google_places_enrichment_service.py:359-361`) also reuses the
-`"place_details"` label rather than getting its own — it is genuinely the
-same REST endpoint (`GET /v1/places/{id}`), just a different mask. The
-tradeoff: `GOOGLE_PLACES_API_CALL_DURATION_SECONDS`/`_ERRORS_TOTAL{endpoint="place_details"}`
-will mix this cheap Essentials-tier call's latency/error signal with the
-existing expensive Enterprise+Atmosphere-tier calls. This is acceptable
-because the dedicated, already-existing `VENUE_GEOCODING_REQUESTS_TOTAL{outcome}`
-counter (kept, see below) is the metric that specifically watches this
-rung's own volume against the Essentials free-tier ceiling — it counts
-backfill attempts, not raw HTTP calls, independent of whatever generic label
-the client-level instrumentation uses.
+`_instrumented(...)`: **[CORRECTED — see "Execution corrections" above] a
+DISTINCT label, `"place_details_address"`, NOT a reuse of `"place_details"`.**
+This plan originally proposed reusing `"place_details"`, matching the
+precedent `_recheck_business_status`'s minimal `fields_mask="businessStatus"`
+call (`google_places_enrichment_service.py:359-361`) already sets — it is
+genuinely the same REST endpoint (`GET /v1/places/{id}`), just a different
+mask. That precedent is left unchanged. But this NEW call is different from
+both of those in one way that matters for cost observability: it is billed
+at the Essentials SKU (10,000 free/month), while both `get_place_details`'s
+own full-mask call and `_recheck_business_status`'s reuse of its label are
+billed at Enterprise+Atmosphere — a different, paid SKU. Reusing the label
+would mix a free-tier call's volume into a paid-tier metric series,
+making free-tier consumption unobservable via
+`GOOGLE_PLACES_API_CALLS_TOTAL{endpoint=...}` and any cost regression
+invisible. The dedicated, already-existing `VENUE_GEOCODING_REQUESTS_TOTAL{outcome}`
+counter (kept, see below) remains the PRIMARY metric an operator watches
+against the Essentials free-tier ceiling — it counts backfill attempts, not
+raw HTTP calls — but the distinct `"place_details_address"` label is now
+also available as a secondary, client-level corroborating signal, at zero
+cost.
 
 **Rewire `VenueAddressBackfillService`.** `_maybe_geocode` is renamed to
 `_maybe_fetch_google_address` (confirmed by `grep` to have zero external
@@ -284,27 +351,35 @@ address-components Place Details lookup" instead of "Geocoding-by-place_id."
 UNCHANGED, per the task's own reasoning: renaming it risks a silent
 default-off on any code path that still reads the old key name.
 
-**Remove `geocode_by_place_id` and its dead integration surface.**
-Recommendation: **remove**, not keep-and-document. It is confirmed
-non-functional against this project's real GCP key (12/12 `REQUEST_DENIED`),
-its only caller is being rewired by this very plan (making it unreachable
-from 100% of the codebase the moment this ships), and nothing else calls it
-(confirmed by `grep`). Keeping an isolated, fully-tested, permanently-dead
-method around is exactly the "clever abstraction that doesn't clarify"
-this repo's own `CLAUDE.md` cautions against, and it is an attractive
-nuisance — a future maintainer could reach for it thinking it is a working
-option. Remove: `geocode_by_place_id` (`google_places_client.py:420-482`),
-`GoogleGeocodingError` (`:110-120`), `GOOGLE_GEOCODING_API_BASE` (`:31`), and
-the comment block introducing it (`:23-30`). Remove its dedicated test file,
-`tests/test_google_places_geocode_by_place_id.py` (12 tests, sole
-referencer of both the method and the constant/exception). If the Geocoding
-API SKU is ever enabled for this project later, the method is trivially
-recoverable from git history — cheaper than carrying dead, confirmed-broken
-code and its test file indefinitely. (Alternative considered: keep-but-document
-with a prominent "known dead, do not use" docstring — rejected because a
-reachable-looking method that always raises in production is worse than no
-method, and this repo's own precedent for a similarly dead path is to remove
-it, not annotate it.)
+**Keep `geocode_by_place_id` and its dead integration surface — do NOT
+remove it. [CORRECTED — see "Execution corrections" above; this whole
+section is superseded by that override.]** This plan originally recommended
+**removing** `geocode_by_place_id` (`google_places_client.py:420-482`),
+`GoogleGeocodingError` (`:110-120`), `GOOGLE_GEOCODING_API_BASE` (`:31`), the
+comment block introducing it (`:23-30`), and its dedicated test file,
+`tests/test_google_places_geocode_by_place_id.py` (12 tests) — reasoning
+that it is confirmed non-functional (12/12 `REQUEST_DENIED`), its only
+caller is being rewired by this very plan, and a reachable-looking,
+permanently-dead method is an attractive nuisance.
+
+Overridden by the operator post-approval: all four are **kept**, unremoved.
+`geocode_by_place_id` instead gained a docstring marker — "DEAD — DO NOT
+WIRE THIS TO ANYTHING", recording the 12/12 `REQUEST_DENIED` probe result
+and the date, and stating that re-enabling the Geocoding API SKU in the GCP
+Console is a prerequisite before ever wiring it back into a caller. Its
+dedicated test file is untouched (still exercises its own contract; it was
+never testing anything about `fetch_address_components`, so nothing about
+this feature's own correctness depends on that file either way). Reason for
+the override: this PR already changes production data-write behavior (the
+address backfill's Google rung), and the operator wants a small, easily
+revertable blast radius for that change — deleting a client method + an
+exception class + a module constant + ~12 tests in the SAME PR widens the
+blast radius for zero functional gain. If the Geocoding API SKU is ever
+enabled for this project later, `geocode_by_place_id` is already sitting
+there, tested, ready to re-verify against real place_ids — cheaper than
+recovering it from git history. Removing it now that it is confirmed dead
+remains a reasonable idea; it is just a separate, deliberate follow-up PR,
+not bundled with this one.
 
 **Fix the existing merged BDD suite in lockstep (not optional).**
 `tests/bdd/steps/address_components_backfill_steps.py`'s four
@@ -346,10 +421,11 @@ exact reset action: `PUT /admin/config/address_backfill_cursor` with body
   endpoints.** This plan reuses every piece of config/persistence/routing
   infrastructure the prior plan already built.
 - `GooglePlacesAPIClient` gains one public method (`fetch_address_components`)
-  and one new exception class (`GoogleAddressLookupError`); loses one public
-  method (`geocode_by_place_id`), one exception class
-  (`GoogleGeocodingError`), and one module constant
-  (`GOOGLE_GEOCODING_API_BASE`).
+  and one new exception class (`GoogleAddressLookupError`).
+  **[CORRECTED — see "Execution corrections" above]** does NOT lose
+  `geocode_by_place_id`, `GoogleGeocodingError`, or `GOOGLE_GEOCODING_API_BASE`
+  — all three are kept (dead, unwired, docstring-marked) per the operator's
+  override.
 - `VenueAddressBackfillService._maybe_geocode` renamed to
   `_maybe_fetch_google_address` (private, zero external callers). Its
   returned outcome-label contract and the public `process_one`/`backfill_batch`
@@ -371,9 +447,12 @@ exact reset action: `PUT /admin/config/address_backfill_cursor` with body
   set (`success`/`no_place_id`/`api_error`/`disabled`) — an operator watching
   Grafana sees the same series continue, now with real `success` counts
   instead of only `api_error`/`disabled`.
-- `GOOGLE_PLACES_API_CALLS_TOTAL`/`_DURATION_SECONDS`/`_ERRORS_TOTAL{endpoint="place_details"}`
-  will include this new call's volume alongside the existing full-mask calls
-  (accepted tradeoff, see Implementation Approach).
+- **[CORRECTED — see "Execution corrections" above]**
+  `GOOGLE_PLACES_API_CALLS_TOTAL`/`_DURATION_SECONDS`/`_ERRORS_TOTAL` use a
+  DISTINCT `endpoint="place_details_address"` label for this new call, kept
+  separate from `endpoint="place_details"` — so the cheap Essentials-tier
+  call's volume/latency/error signal never mixes into the existing
+  Enterprise+Atmosphere-tier series (see Implementation Approach).
 - The spend gate (`address_backfill_geocoding_enabled`, default off) makes
   the new call categorically unreachable while off, by construction (same
   early-return the current code already has) — no new runtime path exists
@@ -406,24 +485,33 @@ Scenarios:
   again from the start (the re-sweep mechanism).
 
 Pytest unit tests:
-- `tests/test_google_places_fetch_address_components.py` (new, replaces
-  `tests/test_google_places_geocode_by_place_id.py` which is deleted):
-  success with components; success with a 200 response carrying no
-  `addressComponents` key (returns `None`, not an error); 404 → `None`;
-  403/500/other HTTP status → raises `GoogleAddressLookupError`; timeout →
-  raises; connection error → raises; both bare and `"places/"`-prefixed place
-  ids accepted.
+- `tests/test_google_places_fetch_address_components.py` (new; **[CORRECTED]**
+  a SIBLING to `tests/test_google_places_geocode_by_place_id.py`, which is
+  KEPT, not deleted, per correction (B)): success with components; success
+  with a 200 response carrying no `addressComponents` key (returns `None`,
+  not an error); 404 → `None`; 403/429/500/503 → raises
+  `GoogleAddressLookupError`; timeout → raises; connection error → raises;
+  header/field-mask/URL shape assertions; both bare and `"places/"`-prefixed
+  place ids accepted.
 - `tests/test_venue_address_backfill_service.py` (updated): every
-  `client.geocode_by_place_id` reference (5 call sites) becomes
-  `client.fetch_address_components`; the existing `success`/`api_error`/
-  `disabled`/`no_place_id` scenarios keep their current assertions
-  unchanged — only the mocked method name changes, since the contract is
-  identical.
+  `client.geocode_by_place_id` reference becomes `client.fetch_address_components`
+  (6 call sites found during execution, not the 5 estimated here); the
+  existing `success`/`api_error`/`disabled`/`no_place_id` scenarios keep
+  their current assertions unchanged — only the mocked method name changes,
+  since the contract is identical.
 - `tests/bdd/steps/address_components_backfill_steps.py` (updated, backs the
   ALREADY-MERGED, non-`@wip` feature): all four
   `geocode_by_place_id`-mocking call sites become
   `fetch_address_components` — required so the existing suite keeps testing
   the real code path instead of a mock nothing calls anymore (see Evidence).
+  **[Added during execution, correction (C):]** `tests/bdd/environment.py`
+  now wraps every scenario's `context.google_places_client.geocode_by_place_id`
+  in an `AsyncMock(wraps=...)` spy (harmless if ever genuinely reached), and
+  a new `Then the backfill never calls the legacy geocode_by_place_id method`
+  step asserts against it — a regression guard proving the dead path stays
+  dead, verified non-vacuous by deliberately breaking the spend gate and
+  confirming the guarded scenario failed for real before restoring it (see
+  "Execution corrections" above).
 
 Manual or integration checks:
 - None required to merge this plan's code changes (the switch ships off).
@@ -437,9 +525,11 @@ Manual or integration checks:
   with the `id,addressComponents` mask, returns `None` only for a genuine
   404, and raises `GoogleAddressLookupError` on every other transport/quota/
   API failure.
-- `geocode_by_place_id`, `GoogleGeocodingError`, and `GOOGLE_GEOCODING_API_BASE`
-  no longer exist in the codebase; no test or production code references
-  them.
+- **[CORRECTED — see "Execution corrections" above]** `geocode_by_place_id`,
+  `GoogleGeocodingError`, and `GOOGLE_GEOCODING_API_BASE` are KEPT (not
+  removed), with `geocode_by_place_id` carrying a docstring marking it DEAD;
+  no PRODUCTION code calls it anywhere (confirmed by `grep`) — only its own
+  dedicated test file and the BDD regression-guard spy reference it.
 - `VenueAddressBackfillService`'s Google rung calls
   `fetch_address_components`; `map_address_components`,
   `write_mapped_components(..., source="google")`, the precedence rule, and
