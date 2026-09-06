@@ -1,9 +1,17 @@
 @wip
-Feature: Events venue bairro and ticket URL
+Feature: Events venue bairro, ticket URL and nightlife-day projection
   As the VibeSense app
-  I want every event card to show a real bairro and an openable ticket link
-  So that a served event neither names a venue complex as its neighbourhood nor
-  offers a link the phone refuses to open
+  I want every event card to show a real bairro and an openable ticket link,
+  and last night's party to still be in the index while the night is still on
+  So that a served event neither names a venue complex as its neighbourhood,
+  nor offers a link the phone refuses to open, nor vanishes at midnight while
+  it is still running
+
+  # Every scenario below that touches the index or an occurrence payload drives
+  # the REAL projector and asserts on what the projector itself wrote. No
+  # scenario may hand-seed `events_index_v1:*` or `event_occurrence_v1:*` — a
+  # hand-seeded index is exactly what would go green while production stayed
+  # broken (review finding F01).
 
   Background:
     Given the events projection is enabled
@@ -22,6 +30,18 @@ Feature: Events venue bairro and ticket URL
     Given an accepted event whose stored ticket url is "evenyx.com/e/42?ref=ig#lote2"
     When the events projection runs
     Then the occurrence payload carries the ticket url "https://evenyx.com/e/42?ref=ig#lote2"
+
+  Scenario: Qualify a scheme-less ticket host that carries a port
+    Given an accepted event whose stored ticket url is "evenyx.com:8080/lote2"
+    When the events projection runs
+    Then the occurrence payload carries the ticket url "https://evenyx.com:8080/lote2"
+    And the ticket url normalisation outcome "scheme_added" is counted once
+
+  Scenario: Project no ticket url for a host whose pseudo-port is not numeric
+    Given an accepted event whose stored ticket url is "evenyx.com:lote2"
+    When the events projection runs
+    Then the occurrence payload carries no ticket url
+    And the ticket url normalisation outcome "rejected" is counted once
 
   Scenario: Leave an already absolute ticket url exactly as stored
     Given an accepted event whose stored ticket url is "https://sympla.com.br/evento/123"
@@ -114,6 +134,29 @@ Feature: Events venue bairro and ticket URL
     Then that venue has no neighborhood stored
     And that venue has the city stored
 
+  Scenario: Drop a parsed bairro that is only the city name
+    Given a servable venue whose stored city is "Igarassu"
+    When the address text parser writes the neighborhood "Igarassu" for that venue
+    Then that venue has no neighborhood stored
+    And that venue still has the city "Igarassu" stored
+
+  Scenario: Fold case and accents when comparing a bairro to the stored city
+    Given a servable venue whose stored city is "São Paulo"
+    When the address text parser writes the neighborhood "SAO PAULO" for that venue
+    Then that venue has no neighborhood stored
+
+  Scenario: Store a bairro that genuinely differs from the city
+    Given a servable venue whose stored city is "Recife"
+    When the address text parser writes the neighborhood "Espinheiro" for that venue
+    Then that venue has the neighborhood "Espinheiro"
+    And that neighborhood is sourced "parsed"
+
+  Scenario: Write the other address fields even when the bairro is dropped
+    Given a servable venue whose stored city is "Igarassu"
+    When the address text parser writes the neighborhood "Igarassu" and the street "Rua do Sol" for that venue
+    Then that venue has no neighborhood stored
+    And that venue has the street "Rua do Sol" stored
+
   Scenario: Make no address lookup at all while the free-tier switch is off
     Given "Downtown Beer Garden" has the neighborhood "Quintal Espinheiro" sourced "parsed"
     And the free-tier address lookup switch is off
@@ -134,3 +177,100 @@ Feature: Events venue bairro and ticket URL
     When the address components backfill runs one batch in upgrade mode
     Then the address provenance gauge reports a row count per field and per source
     And the reported counts match the rows actually stored
+
+  Scenario: Report how many stored bairros are still just the city name
+    Given the catalog holds two address rows whose stored neighborhood equals its stored city
+    When the address components backfill runs one batch in upgrade mode
+    Then the neighborhood-equals-city gauge reports 2
+
+  # ── nightlife day: last night's recurring party is still indexed ─────────
+
+  Scenario: Keep last night's recurring occurrence in the index at 00:30 local
+    Given an accepted recurring event at "Downtown Beer Garden" whose recurrence text is "toda quarta" and whose resolved time is 22:00
+    And the current time is 2026-09-10 00:30 in Recife
+    When the events projection runs
+    Then the city index for "recife" contains the occurrence for 2026-09-09
+    And that occurrence has a payload key
+    And that occurrence is scored by its own start time of 2026-09-09 22:00 in Recife
+
+  Scenario: Keep last night's recurring occurrence in the venue index too
+    Given an accepted recurring event at "Downtown Beer Garden" whose recurrence text is "toda quarta" and whose resolved time is 22:00
+    And the current time is 2026-09-10 00:30 in Recife
+    When the events projection runs
+    Then the venue index for "Downtown Beer Garden" contains the occurrence for 2026-09-09
+
+  Scenario: Prune last night's recurring occurrence after 06:00 local
+    Given an accepted recurring event at "Downtown Beer Garden" whose recurrence text is "toda quarta" and whose resolved time is 22:00
+    And the events projection has already run at 2026-09-10 00:30 in Recife
+    And the current time is 2026-09-10 06:30 in Recife
+    When the events projection runs again
+    Then the city index for "recife" does not contain the occurrence for 2026-09-09
+    And the venue index for "Downtown Beer Garden" does not contain the occurrence for 2026-09-09
+    And the occurrence for 2026-09-09 has no payload key
+
+  Scenario: Roll the near edge back only while the local hour is below the cutoff
+    Given an accepted recurring event at "Downtown Beer Garden" whose recurrence text is "toda quarta" and whose resolved time is 22:00
+    And the current time is 2026-09-10 05:59 in Recife
+    When the events projection runs
+    Then the city index for "recife" contains the occurrence for 2026-09-09
+
+  Scenario: Keep the forward horizon unchanged during the small hours
+    Given an accepted recurring event at "Downtown Beer Garden" whose recurrence text is "todo dia" and whose resolved time is 22:00
+    And the current time is 2026-09-10 00:30 in Recife
+    When the events projection runs
+    Then the city index for "recife" contains the occurrence for 2026-10-01
+    And the city index for "recife" does not contain the occurrence for 2026-10-02
+
+  Scenario: Keep the same forward horizon after the cutoff has passed
+    Given an accepted recurring event at "Downtown Beer Garden" whose recurrence text is "todo dia" and whose resolved time is 22:00
+    And the current time is 2026-09-10 06:30 in Recife
+    When the events projection runs
+    Then the city index for "recife" contains the occurrence for 2026-10-01
+    And the city index for "recife" does not contain the occurrence for 2026-10-02
+
+  Scenario: Keep last night's non-recurring occurrence in the index as well
+    Given an accepted event at "Downtown Beer Garden" starting 2026-09-09 22:00
+    And the current time is 2026-09-10 00:30 in Recife
+    When the events projection runs
+    Then the city index for "recife" contains the occurrence for 2026-09-09
+
+  Scenario: Count the cycles that ran with the nightlife day rolled back
+    Given an accepted recurring event at "Downtown Beer Garden" whose recurrence text is "toda quarta" and whose resolved time is 22:00
+    And the current time is 2026-09-10 00:30 in Recife
+    When the events projection runs
+    Then the nightlife rollback counter is bumped once
+
+  Scenario: Do not count a rollback for a cycle that ran after the cutoff
+    Given an accepted recurring event at "Downtown Beer Garden" whose recurrence text is "toda quarta" and whose resolved time is 22:00
+    And the current time is 2026-09-10 06:30 in Recife
+    When the events projection runs
+    Then the nightlife rollback counter is not bumped
+
+  # ── city vocabulary: what vibes_bot validates an incoming city against ───
+
+  Scenario: Remember a configured geo-fence city that holds no events
+    Given the geo fence configures the cities "recife" and "joao-pessoa"
+    And every accepted event is in Recife
+    When the events projection runs
+    Then the known events cities are "joao-pessoa" and "recife"
+
+  Scenario: Keep remembering a city after its last occurrence is gone
+    Given the geo fence configures the cities "recife" and "joao-pessoa"
+    And the events projection has already run once
+    When the geo fence is reduced to the city "recife"
+    And the events projection runs again
+    Then the known events cities are "joao-pessoa" and "recife"
+
+  Scenario: Rebuild the whole vocabulary on the next cycle after the set is erased
+    Given the geo fence configures the cities "recife" and "joao-pessoa"
+    And the events projection has already run once
+    When the known events cities set is erased
+    And the events projection runs again
+    Then the known events cities are "joao-pessoa" and "recife"
+
+  Scenario: Keep projecting when the known-cities write fails
+    Given the geo fence configures the cities "recife" and "joao-pessoa"
+    And remembering a city slug fails
+    When the events projection runs
+    Then the projection still writes every accepted occurrence
+    And the projection cycle is not reported as failed
