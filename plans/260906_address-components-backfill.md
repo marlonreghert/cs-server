@@ -188,22 +188,37 @@ Algorithm, in the order it runs:
 
 3. tail := raw_text[:match_start(uf)]  (everything before the UF token)
 
-4. Find the LAST dash-like character in tail.
+4. Strip tail's OWN trailing UF-separator before splitting it, or the next
+   step finds the wrong dash: rstrip whitespace; if tail now ends in a
+   dash-like character, remove exactly that one dash and rstrip again; then
+   also strip a trailing comma the same way (the comma-format's "... - PE,"
+   leaves one in the identical position). Without this, in the DOMINANT
+   space-joined format the LAST dash in tail is the one directly before the
+   UF (e.g. "...Niterói - " immediately before "RJ"), not the street/bairro
+   dash before it — every row of this shape (3,311 of 3,575) would split on
+   the wrong dash and yield an empty blob. Traced:
+   "R. Dr. Paulo César 225 - Santa Rosa Niterói - RJ 24220-400 Brazil" ->
+   tail (raw, step 3) = "R. Dr. Paulo César 225 - Santa Rosa Niterói - " ->
+   rstrip -> ends in "-" -> remove it, rstrip again -> "R. Dr. Paulo César
+   225 - Santa Rosa Niterói" (no trailing comma either) — THIS fixed-up
+   tail is what step 5 below splits, not the raw one.
+
+5. Find the LAST dash-like character in the fixed-up tail.
    - found: street := tail[:last_dash], blob := tail[last_dash+1:]
    - not found: street := None, blob := tail (some real rows have no
-     street-bairro separator at all, e.g. "Jardim Santa Maria São Paulo -
-     SP ...")
+     street-bairro separator at all, e.g. "COHAB Recife - PE ..." — step 8
+     below exists exactly because this branch cannot trust blob outright)
    Trim whitespace/commas from blob.
 
-5. FORMAT B (comma-delimited): if blob contains a comma, split on the LAST
+6. FORMAT B (comma-delimited): if blob contains a comma, split on the LAST
    comma -> bairro_candidate, city_candidate. Guard against a street-address
    comma masquerading as the bairro/city comma (e.g. a store-number or
    floor/kiosk fragment before the real trailing city): reject the split
-   and fall through to step 6 if city_candidate contains a digit or exceeds
+   and fall through to step 7 if city_candidate contains a digit or exceeds
    4 words. A guarded split needs no vocabulary lookup — the comma makes it
-   unambiguous by construction; city_candidate is still checked in step 7.
+   unambiguous by construction; city_candidate is still checked in step 9.
 
-6. FORMAT A (space-joined), or Format B rejected: tokenize blob into words
+7. FORMAT A (space-joined), or Format B rejected: tokenize blob into words
    (a hyphenated compound like "Ceará-Mirim" is one token). For n = 3, 2, 1
    (longest first — vocabulary entries are already-resolved names; longest
    match wins so a 2-word approved city is preferred whole over accidentally
@@ -215,29 +230,49 @@ Algorithm, in the order it runs:
    None (this row is left for Google or a future vocabulary update — never
    guessed).
 
-7. AMBIGUITY GUARD (both formats): if the matched/split city_candidate's
+8. PLAUSIBILITY GUARD — only when step 5 found no dash (street is None):
+   the leading remainder that steps 6 (Format B) or 7 (Format A) resolve as
+   bairro_candidate carries no confirmation that it is a real bairro at
+   all, since there was no recognizable street/number before it to anchor
+   that reading. Reject it — keeping the already-matched city_candidate
+   untouched — when bairro_candidate contains a digit, has more than 3
+   words, or has any word (accent/case-folded) in the stoplist {LOJA,
+   QUIOSQUE, PISO, SALA, SHOPPING, COHAB, CONJUNTO} (mall/housing-complex
+   fragments this shape commonly captures, not real bairros). Rejected ->
+   bairro_candidate := None. ONE rule covers both known examples: "COHAB
+   Recife" (bairro_candidate "COHAB", 1 word, stoplist hit -> rejected,
+   city "Recife" kept) and "Jardim Santa Maria São Paulo" (bairro_candidate
+   "Jardim Santa Maria", 3 words, no stoplist hit -> accepted, city "São
+   Paulo") are the SAME check applied to two different remainders, not two
+   different rules. When step 5 DID find a dash (street is not None), this
+   guard does not run — a real street/number before the split is itself
+   the corroborating signal Format A's/B's match already relies on.
+
+9. AMBIGUITY GUARD (both formats): if the matched/split city_candidate's
    vocabulary entry (or, for an unvetted Format-B exact split, a
    vocabulary lookup that comes back "ambiguous") is flagged `ambiguous`,
    accept it only if the venue's own (lat, lng) is within
    `address_backfill_ambiguous_radius_km` (default 50km) of the entry's
-   (lat, lng); otherwise treat step 6/7 as a non-match (city, neighborhood
-   := None) rather than trust the text alone. Non-ambiguous entries skip
-   this check (fast path — most matches never need it).
+   (lat, lng); otherwise treat the steps 6/7 match as a non-match (city,
+   neighborhood := None) rather than trust the text alone. Non-ambiguous
+   entries skip this check (fast path — most matches never need it).
 
-8. neighborhood := bairro_candidate or None. city := city_candidate.
+10. neighborhood := bairro_candidate or None. city := city_candidate.
 ```
 
-Two worked edge cases from real production `raw_text` values, because this is
-where the design is either right or wrong:
+Three worked edge cases from real production `raw_text` values, because this
+is where the design is either right or wrong:
 - `"R. Dr. Paulo César 225 - Santa Rosa Niterói - RJ 24220-400 Brazil"`:
-  blob = "Santa Rosa Niterói". Vocabulary suffix check tries n=1 first:
-  "Niterói" ∈ vocabulary (once approved) → city="Niterói",
-  neighborhood="Santa Rosa". The over-merge discovery's own census script
-  produced (`19 Icarai Niteroi` as if it were one city name) cannot happen
-  here: the LIVE parser only ever matches against the frozen, already-approved
-  vocabulary — it never invents an n-gram at request time. Over-merge risk is
-  confined entirely to the offline mining step below, which is exactly why
-  that step is gated on operator approval.
+  blob = "Santa Rosa Niterói" (per steps 4-5 above: the dash directly before
+  "RJ" is stripped first, so the LAST dash found is the one after "225", not
+  the one after "Niterói" — see the traced example in step 4). Vocabulary
+  suffix check tries n=1 first: "Niterói" ∈ vocabulary (once approved) →
+  city="Niterói", neighborhood="Santa Rosa". The over-merge discovery's own
+  census script produced (`19 Icarai Niteroi` as if it were one city name)
+  cannot happen here: the LIVE parser only ever matches against the frozen,
+  already-approved vocabulary — it never invents an n-gram at request time.
+  Over-merge risk is confined entirely to the offline mining step below,
+  which is exactly why that step is gated on operator approval.
 - `"...Jardim São Paulo, Recife - PE ..."` (a bairro that itself contains a
   city name) vs. `"...Boa Vista Recife - PE ..."` (a bairro name that is also
   a state capital): longest-suffix-first, anchored strictly at blob's own
@@ -249,6 +284,17 @@ where the design is either right or wrong:
   neighborhood="Boa Vista" — correct, because matching always starts from
   the true end of the string, never a "contains" search that could seize
   "Boa Vista" out of the middle.
+- `"COHAB Recife - PE 51340-670 Brazil"` vs. `"Jardim Santa Maria São Paulo -
+  SP ..."`: both hit step 5's "not found" branch — no street/number at all
+  before the bairro+city run, so street=None and blob is the whole fixed-up
+  tail. FORMAT A resolves the city the same way either time (n=1 "Recife";
+  n=2 "São Paulo"), leaving bairro_candidate "COHAB" (1 word) vs. "Jardim
+  Santa Maria" (3 words). Step 8's plausibility guard is the ONE rule that
+  reconciles both: "COHAB" matches the stoplist exactly → rejected, city
+  "Recife" kept, neighborhood unset; "Jardim Santa Maria" is 3 words with no
+  digit and no stoplist hit → accepted, neighborhood="Jardim Santa Maria",
+  city="São Paulo". Neither is a special case carved out for its own sake —
+  the same check simply resolves differently on two different remainders.
 
 **City vocabulary** — `app/services/venue_city_vocabulary.py`, also pure.
 `STATE_CAPITALS` (`venue_eligibility.py:72-100`, 27 entries, already carrying
@@ -290,20 +336,45 @@ correctness guard the task requires, is two related, mechanical passes over
   Above `address_backfill_ambiguous_ngram_min_occurrences` (default 2), flag
   `ambiguous=True`. This is exactly how "Boa Vista" (Roraima capital, also a
   common bairro name including in Recife) gets flagged automatically from the
-  data, without a hand-maintained collision list, and is what step 7 of the
-  parser algorithm above checks against.
+  data, without a hand-maintained collision list, and is what step 9 (the
+  ambiguity guard) of the parser algorithm above checks against.
 
 Candidates and flags are **never applied automatically**. They are written to
 a new admin-config key, `address_city_vocabulary_candidates` (read-only
 output, no validator — see Phase 2), for an operator to inspect via the
 existing generic `GET /admin/config/address_city_vocabulary_candidates` — no
-new endpoint. The vocabulary the LIVE parser actually reads is a separate key,
-`address_city_vocabulary`, edited by the operator through the existing generic
-`PUT /admin/config/{key}` (a new validator, described in Phase 2, checks
-shape only — not correctness, which stays a human judgment call). Re-running
-the mining job any time (it makes no external calls, is cheap and read-only
-against RDS) re-surfaces fresh candidates as new venues arrive, satisfying
-"pick up new cities without a deploy."
+new endpoint.
+
+**The vocabulary the LIVE parser actually reads is `STATE_CAPITALS` UNIONED
+WITH a separate key, `address_city_vocabulary` (by name/slug, capitals
+winning any collision) — never the config value alone.** This is a
+deliberate departure from this repo's own established precedent:
+`AdminConfigService.get()`/`.set()` store and return the given JSON
+verbatim, with no merge semantics at all
+(`app/services/admin_config_service.py:41-69`), and the one existing config
+consumer built the same way, `venue_eligibility.load_geo_fence`
+(`venue_eligibility.py:622-649`), reads its admin-config Redis mirror
+directly and uses a present value AS-IS, fully replacing the default.
+Following that same precedent here would be wrong: `address_city_vocabulary`
+is designed, above, to hold only NEW cities beyond the 27 capitals — the
+candidates key by construction proposes only new cities — so an operator
+approving the first batch through a config value built the usual way would
+silently replace the vocabulary with just those, regressing the
+capitals-derived 86% baseline the very first time anyone approves anything.
+`venue_city_vocabulary.py`'s own `load_city_vocabulary(admin_config_service)`
+— analogous in shape to `venue_eligibility.load_eligibility_config`/
+`load_geo_fence`, but deliberately NOT in merge behavior — is the one
+function responsible for this union; every call site (the live parser and
+Phase 4's backfill service) goes through it rather than reading the
+admin-config key directly, so the union can never be bypassed by a new
+caller forgetting it. `address_city_vocabulary` (the config value) is edited
+by the operator through the existing generic `PUT /admin/config/{key}` (a
+new validator, described in Phase 2, checks shape only — not correctness,
+which stays a human judgment call) and need only ever carry additions, never
+a copy of the capitals. Re-running the mining job any time (it makes no
+external calls, is cheap and read-only against RDS) re-surfaces fresh
+candidates as new venues arrive, satisfying "pick up new cities without a
+deploy."
 
 ### Phase 2 — provenance (migration + write-path change)
 
@@ -423,11 +494,23 @@ constructed with the venue repository, `GooglePlacesAPIClient`, and
 
 `backfill_batch(limit)`: reads the persisted cursor (see below), selects up
 to `limit` `venues.address` rows with `venue_id > cursor` where at least one
-of the four structured columns is still null, ordered `(servable venues
-first, then venue_id)` — a `LEFT JOIN serving.eligible_venue`, so a bounded
-run makes progress on the venues actually visible in the app first, same
-spirit as this repo's existing eligibility-gated enrichment scans. For each
-row:
+of the four structured columns is still null, ordered by `venue_id` alone.
+**Not** servable-first: an earlier draft of this plan ordered `(servable
+venues first, then venue_id)` via a `LEFT JOIN serving.eligible_venue`,
+still resumed with the same single `venue_id > cursor` cursor — but
+`venue_id`s carry no correlation to servability, so once the cursor
+advanced past a servable row's id, every non-servable row whose id sorts
+below that cursor value would be permanently skipped without ever being
+processed, silently orphaning a slice of the non-servable Brazilian backlog
+and violating this plan's own acceptance criterion that every venue
+eventually gets a value or a logged reason. A correct two-tier resume needs
+a compound cursor `(servable, venue_id)` persisting both parts, not a
+single column — real, but not worth the extra persisted state and query
+complexity here: the whole 3,600-row catalog completes in 18 batches at the
+default batch size, so servable-first priority buys an operator nothing
+noticeable, and no acceptance criterion or other part of this plan depends
+on it. Plain `venue_id` ordering is simpler and cannot have this bug. For
+each row:
 1. If `address_backfill_geocoding_enabled` and the venue has a stored
    `google_place_id`: call `geocode_by_place_id`, map, write with
    `source="google"`. A transport/API error logs a warning and moves on —
@@ -459,10 +542,16 @@ two counters above and the existing `PIPELINE_RUN_INFO`/log-correlation
 machinery every `JOB_REGISTRY` entry already gets for free. **Cannot run
 away**: a new `JOB_REGISTRY["address_components_backfill"]` entry (runner ->
 `backfill_batch(limit=cfg.get("limit", settings.address_backfill_batch_size))`)
-is added to `job_lock.LOCKED_JOB_NAMES`, so an admin trigger cannot race a
-scheduled run of the same job, and `POST /admin/trigger/address_components_backfill/stop`
-(generic, already exists) cancels an in-flight run between venues — no new
-stop mechanism needed.
+is added in `app/routers/admin_trigger_router.py` — **and, a separate edit,
+easy to miss**: a new `ADDRESS_COMPONENTS_BACKFILL` constant is added to
+`app/services/job_lock.py`'s `LOCKED_JOB_NAMES` frozenset literal
+(`job_lock.py:26`, currently four named constants built by hand — NOT
+derived from `JOB_REGISTRY`'s keys, so adding the registry entry alone does
+not enroll the job in the shared lock). Both edits are required so an admin
+trigger cannot race a scheduled run of the same job, and
+`POST /admin/trigger/address_components_backfill/stop` (generic, already
+exists) cancels an in-flight run between venues — no new stop mechanism
+needed.
 
 **Going forward — no manual step.** Brand-new venues already get a full
 `enrich_venue(force_refresh=True)` call at creation
@@ -511,9 +600,12 @@ manual trigger.
   (zero-filled `success`/`no_place_id`/`api_error`/`disabled`),
   `VENUE_ADDRESS_BACKFILL_REMAINING{field}` gauge
   (`street`/`neighborhood`/`city`/`postal_code`).
-- **New job registry entries**: `address_components_backfill` (Phase 4) and
-  `address_vocabulary_mining` (Phase 1's candidate-generation job — read-only
-  against RDS, no external calls, not added to `LOCKED_JOB_NAMES`).
+- **New job registry entries**: `address_components_backfill` (Phase 4 — a
+  `JOB_REGISTRY` entry in `admin_trigger_router.py` AND a new constant in
+  `job_lock.py`'s `LOCKED_JOB_NAMES` frozenset, two separate edits, neither
+  optional) and `address_vocabulary_mining` (Phase 1's candidate-generation
+  job — read-only against RDS, no external calls, not added to
+  `LOCKED_JOB_NAMES`).
 - No change to the events serving projection payload, to `raw_text`/`lat`/`lng`,
   or to any cross-repo contract.
 
@@ -566,6 +658,10 @@ Scenarios:
   since no endpoint sets `source=operator` yet).
 - The parser leaves the bairro unset rather than guess when the address has
   no recognizable city (no shape match).
+- The parser accepts a plausible multi-word bairro found the same way (no
+  street/number before it) when it does not hit the digit/word-count/
+  stoplist guard — the same rule that rejects the no-recognizable-shape
+  case above, applied to a remainder it should not reject.
 - The parser picks the true trailing city over a look-alike city name
   written inside the bairro itself.
 - An ambiguous city match is accepted only when the venue's own coordinates
@@ -573,7 +669,8 @@ Scenarios:
 - A newly added venue with no Google match still gets a bairro from the
   parser automatically, with no manual trigger.
 - The backfill processes a bounded batch and resumes from exactly where it
-  left off on the next run.
+  left off on the next run, reaching every venue — servable and
+  non-servable alike — with none silently skipped.
 - Re-running the backfill over already-filled venues writes nothing new.
 - The backfill makes no Geocoding calls while the free-tier kill switch is
   off, and still fills what the parser can.
@@ -585,13 +682,30 @@ Pytest unit tests:
   both formats, the no-shape-at-all cases, the space-instead-of-dash and
   comma-instead-of-dash UF variants, the Format-B street-comma guard, and
   both worked ambiguity edge cases (Niterói/Icaraí, Boa Vista/Recife,
-  Jardim São Paulo/Recife).
+  Jardim São Paulo/Recife). Explicit cases for step 4's UF-separator strip
+  (the empty-blob defect the plan review found in the dominant format):
+  "R. Dr. Paulo César 225 - Santa Rosa Niterói - RJ 24220-400 Brazil",
+  "R. Abdon Batista, 300 - Santo Amaro Recife - PE 50100-460 Brazil",
+  "Av. Herculano Bandeira, 21 - Pina Recife - PE ...", and the comma-format
+  "R. Carmelita Muniz de Araújo, 225 - Casa Caiada, Olinda - PE, 53130-645,
+  Brazil" — each must produce a non-empty blob and the correct bairro/city
+  split, not the empty blob the unfixed steps 3-4 produced. Explicit cases
+  for step 8's plausibility guard, side by side so the single rule is
+  proven to resolve both directions rather than one regressing the other:
+  "Jardim São Paulo, Recife" (accepted, Format B), "Boa Vista Recife"
+  (accepted, Format A), "R. da Guia, 207 - Recife PE" (accepted with an
+  empty bairro — no leading words is not a guard rejection), "COHAB Recife"
+  (rejected — stoplist hit, city kept), and "Jardim Santa Maria São Paulo"
+  (accepted — 3 words, no stoplist hit, city kept).
 - `tests/test_venue_city_vocabulary.py` (new): candidate generation's
   frequency + geo-tightness gates (including a synthetic reproduction of the
   Icaraí over-merge, asserting the miner does NOT auto-promote it), the
   particle/prefix extension heuristic on the real multi-word municipality
   names from the census table, and the ambiguity flag against a synthetic
-  Boa-Vista-style collision.
+  Boa-Vista-style collision. A read-path test for `load_city_vocabulary`
+  proving an approval payload for `address_city_vocabulary` that omits the
+  27 capitals does not drop them from what the parser actually consumes —
+  the union happens at read time regardless of what the config value holds.
 - `tests/test_venue_address_components.py` (updated): existing tests pass
   `source="google"` explicitly; new tests cover every precedence pairing
   (parsed→google upgrades; google→parsed refused; operator→anything
@@ -663,3 +777,21 @@ Manual or integration checks:
 - No writer for `source="operator"` exists yet (Non-goals) — the precedence
   tier is designed for and protected, but nothing sets it. If an operator
   hand-edit path is wanted, it is a separate follow-up plan.
+- No remediation path exists for a value already written under a
+  since-corrected vocabulary entry. The backfill's own idempotency (Phase 4)
+  excludes any row where every structured column is already non-null, so a
+  bairro written from a mistaken (human-approved) vocabulary entry is
+  skipped by every future run; fixing the vocabulary and re-running does not
+  correct rows the backfill already touched. With no `source="operator"`
+  writer yet (above) and Geocoding default-off (Phase 3), a wrong value can
+  persist indefinitely once written. Two remediation shapes for a follow-up
+  plan, not designed or built here: (a) an operator tool that resets
+  `value`+`_source` to NULL for every row whose given field is
+  `source="parsed"` and whose stored value matches a specific
+  (now-corrected) vocabulary entry's name, so the next backfill run
+  re-evaluates it; or (b) a `re-parse` run mode that re-evaluates every row
+  with `source="parsed"` against the CURRENT vocabulary regardless of
+  null-ness, overwriting only when the new parse disagrees with the stored
+  value (same precedence rule — `parsed` can overwrite `parsed`). This plan
+  ships without a correction path and accepts that risk for the initial
+  rollout.
