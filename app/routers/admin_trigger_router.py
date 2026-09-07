@@ -110,8 +110,18 @@ async def _run_address_components_backfill(c, cfg: dict) -> None:
     a single call). `cfg.get("limit")` overrides
     `settings.address_backfill_batch_size` for exactly this run, mirroring
     `google_places_backfill`'s own override mechanism — e.g. the Phase 3
-    free-tier verification's tiny `{"limit": 10}` sample."""
-    summary = await c.venue_address_backfill_service.backfill_batch(limit=cfg.get("limit"))
+    free-tier verification's tiny `{"limit": 10}` sample.
+
+    `cfg.get("mode")` picks the population, defaulting to today's `fill`
+    (plans/260906_events-venue-bairro-and-ticket-url.md §1) — the same
+    per-run knob shape `instagram_profile_photos` already uses. An empty
+    string (what the trigger dialog sends for an untouched field) degrades
+    to `fill`; anything else unrecognised raises at the DAO boundary and
+    surfaces through the existing trigger error path, never a silent
+    fallback to the wrong population."""
+    summary = await c.venue_address_backfill_service.backfill_batch(
+        limit=cfg.get("limit"), mode=cfg.get("mode") or "fill",
+    )
     logger.info(f"[AdminTrigger] address_components_backfill summary: {summary}")
 
 
@@ -206,11 +216,17 @@ JOB_REGISTRY = {
         "switch is on, a data-derived text parser otherwise. Bounded, resumable, "
         "idempotent — one batch per trigger; call again (or set a limit) to "
         "continue from where it left off. Never overwrites an operator- or a "
-        "higher-precedence value. To re-sweep the whole catalog from the start "
+        "higher-precedence value. MODE picks the population: \"fill\" (default) "
+        "takes rows still missing a structured column; \"upgrade\" ALSO takes "
+        "rows that are filled but sourced \"parsed\", so Google can correct a "
+        "parser-written venue-complex name (\"Quintal Espinheiro\" -> "
+        "\"Espinheiro\"). Once the catalog is fully populated \"fill\" selects "
+        "nothing, so \"upgrade\" is the only mode that can still improve a row. "
+        "To re-sweep the whole catalog from the start "
         "(e.g. after enabling the switch or correcting the city vocabulary): "
         "PUT /admin/config/address_backfill_cursor with body "
         '{"last_venue_id": null}.',
-        "default_config": {"limit": ""},
+        "default_config": {"limit": "", "mode": "fill"},
         "runner": _run_address_components_backfill,
     },
     "address_vocabulary_mining": {

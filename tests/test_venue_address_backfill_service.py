@@ -282,3 +282,232 @@ class TestBackfillBatch:
         # "vd" resolves city+postal; "ve" resolves nothing at all.
         assert result["remaining"]["city"] == 1
         assert result["remaining"]["neighborhood"] == 2
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# selection modes and the address-quality gauges
+# (plans/260906_events-venue-bairro-and-ticket-url.md §1 + Observability)
+# ══════════════════════════════════════════════════════════════════════════
+class TestBackfillMode:
+    """`upgrade` is what makes the Google rung REACHABLE again. Production
+    measured `venue_address_backfill_remaining{field}` at 0 for all four
+    fields while 3,026 neighborhoods were parser-sourced, one of them a
+    venue-complex name: `fill` selects nothing, so nothing can improve."""
+
+    def _filled(self, repository, vid, source="parsed"):
+        repository.upsert_venue(_venue(vid, _RECIFE_RAW.format(n=1)))
+        repository.update_venue_address_components(
+            vid, source=source, street="Rua Quarenta e Oito, 490",
+            neighborhood="Quintal Espinheiro", city="Recife", postal_code="52020-060",
+        )
+
+    def test_the_default_mode_skips_a_fully_populated_parsed_row(self):
+        service, repository, _rds, _cfg = _make()
+        self._filled(repository, "vfull")
+        assert repository.list_address_backfill_candidates(None, 10) == []
+
+    def test_upgrade_mode_selects_a_fully_populated_parsed_row(self):
+        service, repository, _rds, _cfg = _make()
+        self._filled(repository, "vfull")
+        rows = repository.list_address_backfill_candidates(None, 10, mode="upgrade")
+        assert [r["venue_id"] for r in rows] == ["vfull"]
+
+    def test_upgrade_mode_skips_a_fully_populated_google_row(self):
+        """A row Google has already answered is not a candidate for
+        re-asking — the sweep must drain, not loop forever."""
+        service, repository, _rds, _cfg = _make()
+        self._filled(repository, "vgoogle", source="google")
+        assert repository.list_address_backfill_candidates(None, 10, mode="upgrade") == []
+
+    def test_upgrade_mode_skips_a_fully_populated_operator_row(self):
+        service, repository, _rds, _cfg = _make()
+        self._filled(repository, "voperator", source="operator")
+        assert repository.list_address_backfill_candidates(None, 10, mode="upgrade") == []
+
+    def test_upgrade_mode_still_selects_everything_the_default_mode_would(self):
+        """`upgrade` is a strict SUPERSET: a partially-filled row must not
+        be lost by choosing the wider population."""
+        service, repository, _rds, _cfg = _make()
+        repository.upsert_venue(_venue("vpartial", _RECIFE_RAW.format(n=2)))
+        default_ids = {r["venue_id"] for r in repository.list_address_backfill_candidates(None, 10)}
+        upgrade_ids = {
+            r["venue_id"]
+            for r in repository.list_address_backfill_candidates(None, 10, mode="upgrade")
+        }
+        assert default_ids == {"vpartial"}
+        assert default_ids <= upgrade_ids
+
+    def test_a_mixed_provenance_row_is_selected_when_any_column_is_parsed(self):
+        service, repository, _rds, _cfg = _make()
+        repository.upsert_venue(_venue("vmixed", _RECIFE_RAW.format(n=3)))
+        repository.update_venue_address_components(
+            "vmixed", source="google", street="R. A", city="Recife", postal_code="50000-000",
+        )
+        repository.update_venue_address_components("vmixed", source="parsed", neighborhood="Boa Vista")
+        rows = repository.list_address_backfill_candidates(None, 10, mode="upgrade")
+        assert [r["venue_id"] for r in rows] == ["vmixed"]
+
+    @pytest.mark.parametrize("mode", ["everything", "FILL", "upgrade ", "", None])
+    def test_an_unknown_mode_raises_rather_than_falling_back(self, mode):
+        """A typo in an operator's trigger config must never silently sweep
+        the wrong population — same posture as the `source` guard."""
+        service, repository, _rds, _cfg = _make()
+        with pytest.raises(ValueError) as excinfo:
+            repository.list_address_backfill_candidates(None, 10, mode=mode)
+        assert "fill" in str(excinfo.value) and "upgrade" in str(excinfo.value)
+
+    def test_the_service_forwards_mode_through_the_repository_wrapper(self):
+        """F17: the service calls the REPOSITORY, not the store. A `mode`
+        wired only into the store would never reach production, and this
+        spy sits on the method production code actually calls."""
+        service, repository, _rds, _cfg = _make()
+        self._filled(repository, "vfull")
+        seen = {}
+        real = repository.list_address_backfill_candidates
+
+        def _spy(after_venue_id, limit, *, mode="fill"):
+            seen["mode"] = mode
+            return real(after_venue_id, limit, mode=mode)
+
+        repository.list_address_backfill_candidates = _spy
+        result = asyncio.run(service.backfill_batch(limit=10, mode="upgrade"))
+        assert seen["mode"] == "upgrade"
+        assert result["processed"] == 1
+        assert result["mode"] == "upgrade"
+
+    def test_the_service_defaults_to_fill(self):
+        service, repository, _rds, _cfg = _make()
+        seen = {}
+        real = repository.list_address_backfill_candidates
+
+        def _spy(after_venue_id, limit, *, mode="fill"):
+            seen["mode"] = mode
+            return real(after_venue_id, limit, mode=mode)
+
+        repository.list_address_backfill_candidates = _spy
+        asyncio.run(service.backfill_batch(limit=10))
+        assert seen["mode"] == "fill"
+
+    def test_upgrade_mode_with_the_switch_off_makes_no_place_details_call(self):
+        """Cost containment is unchanged and load-bearing: `upgrade` widens
+        the POPULATION, never the spend gate. The spy is on
+        `fetch_address_components` — the method `_maybe_fetch_google_address`
+        actually calls — so the assertion cannot be vacuous."""
+        client = AsyncMock()
+        client.fetch_address_components = AsyncMock(
+            side_effect=AssertionError("must not be called while the switch is off")
+        )
+        service, repository, _rds, admin_config = _make(google_places_client=client)
+        admin_config.set(ADMIN_CONFIG_GEOCODING_ENABLED_KEY, False)
+        self._filled(repository, "vfull")
+        repository.set_vibe_attributes(
+            VibeAttributes(venue_id="vfull", google_place_id="ChIJ_vfull")
+        )
+
+        result = asyncio.run(service.backfill_batch(limit=10, mode="upgrade"))
+
+        assert result["processed"] == 1
+        client.fetch_address_components.assert_not_called()
+
+    def test_upgrade_mode_lets_google_replace_a_parsed_venue_complex_name(self):
+        """The end-to-end C1 fix, through the real service: a fully
+        populated `parsed` row is selected, Google answers with the real
+        bairro, and the precedence rule lets it win."""
+        client = AsyncMock()
+        client.fetch_address_components = AsyncMock(return_value=[
+            {"longText": "Espinheiro", "types": ["sublocality_level_1", "political"]},
+            {"longText": "Recife", "types": ["administrative_area_level_2", "political"]},
+        ])
+        service, repository, rds_store, admin_config = _make(google_places_client=client)
+        admin_config.set(ADMIN_CONFIG_GEOCODING_ENABLED_KEY, True)
+        self._filled(repository, "vfull")
+        repository.set_vibe_attributes(
+            VibeAttributes(venue_id="vfull", google_place_id="ChIJ_vfull")
+        )
+        assert rds_store.get_address("vfull")["neighborhood"] == "Quintal Espinheiro"
+
+        asyncio.run(service.backfill_batch(limit=10, mode="upgrade"))
+
+        addr = rds_store.get_address("vfull")
+        assert addr["neighborhood"] == "Espinheiro"
+        assert addr["neighborhood_source"] == "google"
+
+
+class TestAddressQualityGauges:
+    def test_the_provenance_census_counts_every_field_and_source(self):
+        service, repository, rds_store, _cfg = _make()
+        repository.upsert_venue(_venue("vg", _RECIFE_RAW.format(n=1)))
+        repository.upsert_venue(_venue("vp", _RECIFE_RAW.format(n=2)))
+        repository.update_venue_address_components(
+            "vg", source="google", street="R. A", neighborhood="Espinheiro",
+            city="Recife", postal_code="52020-060",
+        )
+        repository.update_venue_address_components("vp", source="parsed", city="Recife")
+
+        counts = repository.count_address_source_rows()
+
+        assert counts["neighborhood"] == {"google": 1, "parsed": 0, "operator": 0, "none": 1}
+        assert counts["city"] == {"google": 1, "parsed": 1, "operator": 0, "none": 0}
+        assert counts["street"] == {"google": 1, "parsed": 0, "operator": 0, "none": 1}
+        # Every field's buckets must total the row count, or the gauge would
+        # under-report a whole provenance.
+        for field, buckets in counts.items():
+            assert sum(buckets.values()) == 2, field
+
+    def test_the_neighborhood_equals_city_count_is_case_insensitive(self):
+        """It counts operator EXEMPTIONS too — the plan says so explicitly,
+        which is why it reads as "rows to inspect", not "rows that are
+        wrong". Operator is the only source that can create the shape at
+        all now that the write guard exists."""
+        service, repository, rds_store, _cfg = _make()
+        repository.upsert_venue(_venue("veq", _RECIFE_RAW.format(n=1)))
+        repository.update_venue_address_components("veq", source="operator", city="Recife")
+        repository.update_venue_address_components("veq", source="operator", neighborhood="  recife ")
+        assert repository.count_address_neighborhood_equals_city() == 1
+
+    def test_a_differing_bairro_is_not_counted(self):
+        service, repository, rds_store, _cfg = _make()
+        repository.upsert_venue(_venue("vne", _RECIFE_RAW.format(n=1)))
+        repository.update_venue_address_components(
+            "vne", source="google", city="Recife", neighborhood="Espinheiro",
+        )
+        assert repository.count_address_neighborhood_equals_city() == 0
+
+    def test_a_batch_refreshes_the_quality_gauges_and_stamps_the_time(self):
+        import time as _time
+
+        from app.metrics import (
+            VENUE_ADDRESS_GAUGES_REFRESHED_TIMESTAMP_SECONDS,
+            VENUE_ADDRESS_NEIGHBORHOOD_EQUALS_CITY,
+            VENUE_ADDRESS_SOURCE_ROWS,
+        )
+
+        service, repository, rds_store, _cfg = _make()
+        repository.upsert_venue(_venue("vstamp", _RECIFE_RAW.format(n=1)))
+        repository.update_venue_address_components("vstamp", source="operator", city="Olinda")
+        repository.update_venue_address_components("vstamp", source="operator", neighborhood="Olinda")
+
+        before = _time.time()
+        asyncio.run(service.backfill_batch(limit=10))
+        after = _time.time()
+
+        assert VENUE_ADDRESS_NEIGHBORHOOD_EQUALS_CITY._value.get() == 1
+        assert (
+            VENUE_ADDRESS_SOURCE_ROWS.labels(field="city", source="operator")._value.get() == 1
+        )
+        stamped = VENUE_ADDRESS_GAUGES_REFRESHED_TIMESTAMP_SECONDS._value.get()
+        assert before <= stamped <= after
+
+    def test_a_failing_quality_read_never_fails_the_batch(self):
+        """The batch's WRITES already landed by the time the gauges are
+        recomputed; a metrics read must never undo that."""
+        service, repository, rds_store, _cfg = _make()
+        repository.upsert_venue(_venue("vboom", _RECIFE_RAW.format(n=1)))
+
+        def _boom():
+            raise RuntimeError("group-by exploded")
+
+        repository.count_address_source_rows = _boom
+        result = asyncio.run(service.backfill_batch(limit=10))
+        assert result["processed"] == 1
+        assert rds_store.get_address("vboom")["city"] == "Recife"

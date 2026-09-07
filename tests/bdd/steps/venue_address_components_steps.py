@@ -126,11 +126,32 @@ def step_then_stored_neighborhood_is(context, value):
     assert addr["neighborhood"] == value, addr
 
 
-@then("the stored address neighborhood is the administrative area level 2")
-def step_then_stored_neighborhood_is_admin_area(context):
+@then("the mapped neighborhood is the administrative area level 2")
+def step_then_mapped_neighborhood_is_admin_area(context):
+    """The MAPPER is unchanged and still falls back to
+    `administrative_area_level_2` — proving the suppression below is a
+    write-boundary decision, not a silently removed fallback rung."""
+    from app.services.venue_address_components import map_address_components
+
+    mapped = map_address_components(
+        [_component(context.vac_admin_area_level_2, "administrative_area_level_2", "political")]
+    )
+    assert mapped["neighborhood"] == context.vac_admin_area_level_2, mapped
+    assert mapped["city"] == context.vac_admin_area_level_2, mapped
+
+
+@then("no address neighborhood is stored for that venue")
+def step_then_no_stored_neighborhood(context):
     addr = context.rds_store.get_address(_VENUE_ID)
     assert addr is not None
-    assert addr["neighborhood"] == context.vac_admin_area_level_2, addr
+    assert addr["neighborhood"] is None, addr
+
+
+@then("the stored address city is the administrative area level 2")
+def step_then_stored_city_is_admin_area(context):
+    addr = context.rds_store.get_address(_VENUE_ID)
+    assert addr is not None
+    assert addr["city"] == context.vac_admin_area_level_2, addr
 
 
 @then('the stored address neighborhood is still "{value}"')

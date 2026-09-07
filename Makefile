@@ -47,6 +47,7 @@ test-unit:
 		tests/test_vibe_modes_config.py \
 		tests/test_config_validation.py \
 		tests/test_redis_projection.py \
+		tests/test_redis_projection_events.py \
 		tests/test_eligibility_serving_view_parity.py \
 		tests/test_reactivation_migration.py \
 		tests/test_widen_alembic_version.py \
@@ -153,6 +154,7 @@ test-unit:
 		tests/test_venue_profile_photo.py \
 		tests/test_image_edge_color.py \
 		tests/test_event_occurrences.py \
+		tests/test_event_ticket_url.py \
 		tests/test_venue_address_components.py \
 		tests/test_venue_address_parser.py \
 		tests/test_venue_city_vocabulary.py \

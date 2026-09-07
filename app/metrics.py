@@ -2092,6 +2092,83 @@ for _outcome in ("success", "no_place_id", "api_error", "disabled"):
 for _field in ("street", "neighborhood", "city", "postal_code"):
     VENUE_ADDRESS_BACKFILL_REMAINING.labels(field=_field)
 
+# plans/260906_events-venue-bairro-and-ticket-url.md, Observability.
+# Address-quality provenance — the blind spot venue_address_backfill_remaining
+# leaves: that gauge reads 0 whether the stored data is right or wrong, which
+# is precisely why a venue-complex name sitting in `neighborhood` stayed
+# invisible. BATCH-SCOPED, not continuous: recomputed only at the end of an
+# `address_components_backfill` batch, and that job has NO scheduler entry
+# (it runs only on POST /admin/trigger/address_components_backfill/run), so
+# read it together with VENUE_ADDRESS_GAUGES_REFRESHED_TIMESTAMP_SECONDS
+# below or a months-old snapshot is indistinguishable from a live reading.
+VENUE_ADDRESS_SOURCE_ROWS = Gauge(
+    "venue_address_source_rows",
+    "venues.address rows holding this structured field at this provenance",
+    ["field", "source"],
+    # source: operator | google | parsed | none (the column is NULL, or was
+    #         written before the provenance columns existed)
+)
+
+VENUE_ADDRESS_NEIGHBORHOOD_EQUALS_CITY = Gauge(
+    "venue_address_neighborhood_equals_city",
+    "venues.address rows whose stored neighborhood equals its stored city "
+    "under lower(btrim(...)) — rows to INSPECT, never rows that are wrong: "
+    "the SQL comparison does not accent-fold (no unaccent extension in this "
+    "database) so it can undercount, and it counts deliberate operator "
+    "exemptions (Bairro do Recife and its analogues) alongside real defects. "
+    "BATCH-SCOPED, like venue_address_source_rows",
+)
+
+VENUE_ADDRESS_GAUGES_REFRESHED_TIMESTAMP_SECONDS = Gauge(
+    "venue_address_gauges_refreshed_timestamp_seconds",
+    "Unix time at which venue_address_source_rows and "
+    "venue_address_neighborhood_equals_city were last recomputed. 0 = no "
+    "address_components_backfill batch has run since this process started. "
+    "Alert on time() - <this> so a stale snapshot is never mistaken for a "
+    "live measurement",
+)
+
+for _field in ("street", "neighborhood", "city", "postal_code"):
+    for _source in ("operator", "google", "parsed", "none"):
+        VENUE_ADDRESS_SOURCE_ROWS.labels(field=_field, source=_source)
+
+# plans/260906_events-venue-bairro-and-ticket-url.md §3. Bumped once per
+# projected SOURCE ROW, never once per occurrence: expand_occurrences emits
+# up to 22 occurrences per row (23 while the nightlife day is rolled back),
+# so a per-occurrence bump would make ONE badly-extracted recurring row read
+# as 22 rejections.
+#
+# HOW TO READ IT: project_events rebuilds every payload on every cycle
+# (redis_projection_minutes = 2), so each selected row contributes one
+# increment per cycle — roughly 720/day per row at steady state. This is a
+# PER-CYCLE CENSUS of the projected corpus, not a count of distinct bad
+# extractions. Use a rate or a ratio:
+# `increase(events_projection_ticket_url_total{outcome="rejected"}[10m]) > 0`
+# means "at least one currently-selected row is emitting prose".
+EVENTS_PROJECTION_TICKET_URL_TOTAL = Counter(
+    "events_projection_ticket_url_total",
+    "Ticket-url normalisation results during the events projection, by outcome",
+    ["outcome"],
+    # outcome: absent (nothing stored) | passthrough (already an absolute
+    #          http/https url, returned untouched) | scheme_added (a
+    #          scheme-less host was qualified with https://) | rejected
+    #          (something was stored but it is not a usable web url — the
+    #          operator's signal that extraction is emitting prose)
+)
+
+# plans/260906_events-venue-bairro-and-ticket-url.md §4. One cheap,
+# unambiguous production signal that the nightlife-day rollback is live: an
+# absent or flat series after a night in production means the deploy did not
+# take.
+EVENTS_PROJECTION_NIGHTLIFE_ROLLBACK_TOTAL = Counter(
+    "events_projection_nightlife_rollback_total",
+    "Events projection cycles that ran with the nightlife day rolled back to "
+    "the previous calendar date (Recife local hour < NIGHTLIFE_CUTOFF_HOUR)",
+)
+
+for _outcome in ("absent", "passthrough", "scheme_added", "rejected"):
+    EVENTS_PROJECTION_TICKET_URL_TOTAL.labels(outcome=_outcome)
+
 # =============================================================================
 # APPLICATION INFO
 # =============================================================================

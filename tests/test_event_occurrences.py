@@ -13,7 +13,11 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from app.services.event_date_resolver import RECIFE_TZ
-from app.services.event_occurrences import expand_occurrences
+from app.services.event_occurrences import (
+    NIGHTLIFE_CUTOFF_HOUR,
+    expand_occurrences,
+    nightlife_date,
+)
 
 EVENT_ID = "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4"  # 32 lowercase hex, matching event_identity
 REFERENCE_TIME = datetime(2026, 9, 5, 18, 0, tzinfo=RECIFE_TZ)  # a Saturday
@@ -195,3 +199,122 @@ def test_occurrence_id_round_trips_through_a_real_url_unchanged():
         rebuilt_id = parsed.path.rsplit("/", 1)[-1]
         assert rebuilt_id == o.occurrence_id
         assert parsed.fragment == ""  # nothing was ever dropped after a "#"
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# the nightlife day (plans/260906_events-venue-bairro-and-ticket-url.md §4)
+# ══════════════════════════════════════════════════════════════════════════
+class TestNightlifeDate:
+    """`nightlife_date` alone, at the strict-`<` boundary vibes_bot uses.
+    The two repos must agree at 05:59:59 and at 06:00:00 or the projected
+    window and the served window disagree for one second every night."""
+
+    @pytest.mark.parametrize("hour,minute,expected", [
+        (0, 0, "2026-09-09"),
+        (3, 30, "2026-09-09"),
+        (5, 59, "2026-09-09"),
+        (6, 0, "2026-09-10"),
+        (6, 1, "2026-09-10"),
+        (12, 0, "2026-09-10"),
+        (23, 59, "2026-09-10"),
+    ])
+    def test_the_cutoff_boundary(self, hour, minute, expected):
+        reference = datetime(2026, 9, 10, hour, minute, tzinfo=RECIFE_TZ)
+        assert nightlife_date(reference).isoformat() == expected
+
+    def test_the_cutoff_is_six(self):
+        """Frozen cross-repo: vibes_bot's EVENTS_NIGHTLIFE_CUTOFF_HOUR and
+        mobile's RECIFE_NIGHTLIFE_CUTOFF_HOUR must equal this. Changing it
+        is a coordinated three-repo release, so it gets an explicit test
+        rather than only being asserted through behaviour."""
+        assert NIGHTLIFE_CUTOFF_HOUR == 6
+
+    def test_it_reads_the_recife_local_hour_not_utc(self):
+        """03:00 UTC is 00:00 in Recife (UTC-3), which is BEFORE the cutoff
+        — reading the UTC hour instead would roll back a day too late."""
+        reference = datetime(2026, 9, 10, 3, 0, tzinfo=timezone.utc)
+        assert nightlife_date(reference).isoformat() == "2026-09-09"
+
+    def test_a_naive_reference_time_is_treated_as_utc(self):
+        reference = datetime(2026, 9, 10, 3, 0)
+        assert nightlife_date(reference).isoformat() == "2026-09-09"
+
+
+class TestNightlifeExpansion:
+    """The two bounds move INDEPENDENTLY: the near edge follows the
+    nightlife day, the forward edge stays anchored to the calendar date."""
+
+    def _daily(self, reference):
+        row = _row(is_recurring=True, recurrence_text="todo dia",
+                   starts_at=datetime(2026, 7, 1, 22, 0, tzinfo=RECIFE_TZ))
+        return [o.occurrence_date for o in expand_occurrences(
+            row, horizon_days=21, reference_time=reference,
+        )]
+
+    def test_before_the_cutoff_the_expansion_starts_on_yesterday(self):
+        dates = self._daily(datetime(2026, 9, 10, 0, 30, tzinfo=RECIFE_TZ))
+        assert dates[0] == "2026-09-09"
+
+    def test_at_the_cutoff_the_expansion_starts_on_today(self):
+        dates = self._daily(datetime(2026, 9, 10, 6, 0, tzinfo=RECIFE_TZ))
+        assert dates[0] == "2026-09-10"
+
+    def test_the_last_second_before_the_cutoff_still_starts_on_yesterday(self):
+        dates = self._daily(datetime(2026, 9, 10, 5, 59, tzinfo=RECIFE_TZ))
+        assert dates[0] == "2026-09-09"
+
+    @pytest.mark.parametrize("hour,minute", [(0, 30), (5, 59), (6, 0), (18, 0)])
+    def test_the_forward_edge_is_the_calendar_date_plus_the_horizon(self, hour, minute):
+        """The deliberate deviation from F01's literal prescription: rolling
+        the FORWARD edge back too would delete and re-create every
+        horizon-edge occurrence once a night. Same last day at every hour."""
+        dates = self._daily(datetime(2026, 9, 10, hour, minute, tzinfo=RECIFE_TZ))
+        assert dates[-1] == "2026-10-01"  # calendar 2026-09-10 + 21 days
+
+    def test_the_rolled_back_window_is_exactly_one_day_wider(self):
+        before = self._daily(datetime(2026, 9, 10, 0, 30, tzinfo=RECIFE_TZ))
+        after = self._daily(datetime(2026, 9, 10, 6, 30, tzinfo=RECIFE_TZ))
+        assert len(before) == len(after) + 1
+        assert before[1:] == after
+
+    def test_a_weekday_recurrence_only_gains_the_extra_day_when_it_matches(self):
+        """2026-09-09 is a Wednesday. A "toda quarta" event gains it at
+        00:30; a "toda quinta" event does not, because the near edge only
+        WIDENS the interval — it never forces a non-matching day in."""
+        reference = datetime(2026, 9, 10, 0, 30, tzinfo=RECIFE_TZ)
+        wednesday = _row(is_recurring=True, recurrence_text="toda quarta",
+                         starts_at=datetime(2026, 7, 1, 22, 0, tzinfo=RECIFE_TZ))
+        thursday = _row(is_recurring=True, recurrence_text="toda quinta",
+                        starts_at=datetime(2026, 7, 1, 22, 0, tzinfo=RECIFE_TZ))
+        wed_dates = [o.occurrence_date for o in expand_occurrences(
+            wednesday, horizon_days=21, reference_time=reference)]
+        thu_dates = [o.occurrence_date for o in expand_occurrences(
+            thursday, horizon_days=21, reference_time=reference)]
+        assert wed_dates[0] == "2026-09-09"
+        assert thu_dates[0] == "2026-09-10"
+
+    def test_the_rolled_back_occurrence_keeps_its_own_start_time(self):
+        """Last night's 22:00 party is scored by 2026-09-09 22:00 Recife,
+        not by anything derived from `reference_time` — that score is what
+        vibes_bot's widened ZRANGEBYSCORE window matches on."""
+        reference = datetime(2026, 9, 10, 0, 30, tzinfo=RECIFE_TZ)
+        row = _row(is_recurring=True, recurrence_text="toda quarta",
+                   starts_at=datetime(2026, 7, 1, 22, 0, tzinfo=RECIFE_TZ))
+        first = expand_occurrences(row, horizon_days=21, reference_time=reference)[0]
+        assert first.occurrence_date == "2026-09-09"
+        assert first.starts_at == datetime(
+            2026, 9, 9, 22, 0, tzinfo=RECIFE_TZ
+        ).astimezone(timezone.utc)
+        assert first.occurrence_id == f"{EVENT_ID}_2026-09-09"
+
+    def test_a_non_recurring_row_is_untouched_by_the_nightlife_day(self):
+        """The one-off path never consults `reference_time` at all — this
+        change is additive to the shipped PAST_GRACE behaviour, not a
+        replacement for it."""
+        row = _row(starts_at=datetime(2026, 9, 9, 22, 0, tzinfo=RECIFE_TZ))
+        for hour in (0, 6, 18):
+            reference = datetime(2026, 9, 10, hour, 30, tzinfo=RECIFE_TZ)
+            occ = expand_occurrences(row, horizon_days=21, reference_time=reference)
+            assert len(occ) == 1
+            assert occ[0].occurrence_date == "2026-09-09"
+            assert occ[0].occurrence_id == EVENT_ID

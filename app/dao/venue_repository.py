@@ -72,16 +72,39 @@ class VenueRepository(RedisVenueDAO):
         needed on this wrapper."""
         self.rds_store.update_venue_address_components(venue_id, **components)
 
-    def list_address_backfill_candidates(self, after_venue_id, limit: int) -> list[dict]:
+    def list_address_backfill_candidates(
+        self, after_venue_id, limit: int, *, mode: str = "fill"
+    ) -> list[dict]:
         """Forwards to the RDS store's bounded, cursor-paged selection of
-        `venues.address` rows still missing at least one structured field
-        (plans/260906_address-components-backfill.md Phase 4)."""
-        return self.rds_store.list_address_backfill_candidates(after_venue_id, limit)
+        `venues.address` backfill candidates
+        (plans/260906_address-components-backfill.md Phase 4).
+
+        `mode` picks the population — `fill` (a column is still NULL, the
+        shipped default) or `upgrade` (also rows whose column is filled but
+        sourced `parsed`, so the Google rung can correct them; see
+        plans/260906_events-venue-bairro-and-ticket-url.md §1). Forwarded BY
+        KEYWORD: this wrapper is the hop `VenueAddressBackfillService`
+        actually calls, and a `mode` added only to the store would never
+        reach production."""
+        return self.rds_store.list_address_backfill_candidates(
+            after_venue_id, limit, mode=mode
+        )
 
     def count_address_backfill_remaining(self) -> dict:
         """Forwards to the RDS store's per-field null-count — backs the
         `VENUE_ADDRESS_BACKFILL_REMAINING{field}` gauge."""
         return self.rds_store.count_address_backfill_remaining()
+
+    def count_address_source_rows(self) -> dict:
+        """Forwards to the RDS store's per-field, per-provenance row count —
+        backs the `VENUE_ADDRESS_SOURCE_ROWS{field,source}` gauge."""
+        return self.rds_store.count_address_source_rows()
+
+    def count_address_neighborhood_equals_city(self) -> int:
+        """Forwards to the RDS store's count of rows whose stored
+        neighborhood equals its stored city — backs the
+        `VENUE_ADDRESS_NEIGHBORHOOD_EQUALS_CITY` gauge."""
+        return self.rds_store.count_address_neighborhood_equals_city()
 
     def get_vibe_attributes(self, venue_id):
         return self._rds_enrichment("google_places.vibe_attributes", VibeAttributes, venue_id)

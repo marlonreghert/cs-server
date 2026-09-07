@@ -308,3 +308,187 @@ class TestCrossSourcePrecedence:
         assert addr["neighborhood"] == "Recife Antigo"  # untouched
         assert addr["city"] == "Recife"  # sibling field DID write
         assert addr["city_source"] == "google"
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# neighborhood-equals-city suppression at the SHARED write boundary
+# (plans/260906_events-venue-bairro-and-ticket-url.md §2 — F09/R08/R11)
+# ══════════════════════════════════════════════════════════════════════════
+class TestNeighborhoodEqualsCitySuppression:
+    """The guard lives at `update_venue_address_components`, the ONE
+    boundary every writer passes through — `google` (write_mapped_
+    components), `parsed` (apply_parser_fallback) and any future
+    `operator` writer — rather than inside `map_address_components`, which
+    only the Google half reaches. 3,452 production rows are parser-sourced,
+    so a Google-only guard would have covered almost none of them."""
+
+    # ── the Google half: administrative_area_level_2 is BOTH rungs ───────
+    def test_a_google_write_of_the_city_as_the_bairro_is_dropped(self):
+        """`_NEIGHBORHOOD_TYPES` ends with `administrative_area_level_2`
+        and `_CITY_TYPES` begins with it, so any municipality publishing no
+        `sublocality*` maps to neighborhood == city."""
+        store = _seeded_store()
+        mapped = map_address_components(
+            [_component("Igarassu", "administrative_area_level_2", "political")]
+        )
+        assert mapped["neighborhood"] == mapped["city"] == "Igarassu"  # the mapper is pure
+        store.update_venue_address_components("addr_venue_1", source="google", **mapped)
+        addr = store.get_address("addr_venue_1")
+        assert addr["neighborhood"] is None
+        assert addr["city"] == "Igarassu"  # the sibling column still writes
+
+    # ── the parser half: the one revision 1 missed ───────────────────────
+    def test_a_parsed_write_of_the_city_as_the_bairro_is_dropped(self):
+        store = _seeded_store()
+        store.update_venue_address_components(
+            "addr_venue_1", source="parsed", city="Igarassu", neighborhood="Igarassu",
+        )
+        addr = store.get_address("addr_venue_1")
+        assert addr["neighborhood"] is None
+        assert addr["city"] == "Igarassu"
+
+    def test_it_compares_against_the_stored_city_when_the_write_carries_none(self):
+        store = _seeded_store()
+        store.update_venue_address_components("addr_venue_1", source="parsed", city="Igarassu")
+        store.update_venue_address_components(
+            "addr_venue_1", source="parsed", neighborhood="Igarassu",
+        )
+        assert store.get_address("addr_venue_1")["neighborhood"] is None
+
+    @pytest.mark.parametrize("stored_city,incoming", [
+        ("São Paulo", "SAO PAULO"),
+        ("São Paulo", "sao paulo"),
+        ("Recife", "  recife  "),
+        ("Igarassu", "IGARASSU"),
+    ])
+    def test_the_comparison_folds_accents_case_and_whitespace(self, stored_city, incoming):
+        store = _seeded_store()
+        store.update_venue_address_components("addr_venue_1", source="parsed", city=stored_city)
+        store.update_venue_address_components(
+            "addr_venue_1", source="parsed", neighborhood=incoming,
+        )
+        assert store.get_address("addr_venue_1")["neighborhood"] is None
+
+    # ── it must not become a blanket drop ────────────────────────────────
+    def test_a_bairro_that_differs_from_the_city_still_writes(self):
+        store = _seeded_store()
+        store.update_venue_address_components(
+            "addr_venue_1", source="parsed", city="Recife", neighborhood="Espinheiro",
+        )
+        addr = store.get_address("addr_venue_1")
+        assert addr["neighborhood"] == "Espinheiro"
+        assert addr["neighborhood_source"] == "parsed"
+
+    def test_the_other_three_columns_are_unaffected_when_the_bairro_is_dropped(self):
+        """The suppression is per-COLUMN, not per-write: a caption that
+        happens to produce a city-named bairro must not cost the street."""
+        store = _seeded_store()
+        store.update_venue_address_components("addr_venue_1", source="parsed", city="Igarassu")
+        store.update_venue_address_components(
+            "addr_venue_1", source="parsed", neighborhood="Igarassu",
+            street="Rua do Sol", postal_code="53600-000",
+        )
+        addr = store.get_address("addr_venue_1")
+        assert addr["neighborhood"] is None
+        assert addr["street"] == "Rua do Sol"
+        assert addr["postal_code"] == "53600-000"
+        assert addr["city"] == "Igarassu"
+
+    def test_it_can_only_prevent_a_write_never_erase_a_stored_value(self):
+        """A None never clobbers under the precedence-guarded write, so a
+        good stored bairro survives a later city-named write attempt."""
+        store = _seeded_store()
+        store.update_venue_address_components(
+            "addr_venue_1", source="parsed", city="Recife", neighborhood="Espinheiro",
+        )
+        store.update_venue_address_components(
+            "addr_venue_1", source="google", city="Recife", neighborhood="Recife",
+        )
+        addr = store.get_address("addr_venue_1")
+        assert addr["neighborhood"] == "Espinheiro"
+        assert addr["neighborhood_source"] == "parsed"
+
+    # ── R08: the operator exemption ──────────────────────────────────────
+    def test_an_operator_may_assert_a_bairro_named_after_its_city(self):
+        """Bairro do Recife (Recife Antigo) is a real, central neighbourhood
+        OF the city of Recife. The guard is a heuristic over machine-written
+        values; a human write is trusted verbatim, and is the documented
+        repair path when the heuristic drops a correct value."""
+        store = _seeded_store()
+        store.update_venue_address_components("addr_venue_1", source="parsed", city="Recife")
+        store.update_venue_address_components(
+            "addr_venue_1", source="operator", neighborhood="Recife",
+        )
+        addr = store.get_address("addr_venue_1")
+        assert addr["neighborhood"] == "Recife"
+        assert addr["neighborhood_source"] == "operator"
+
+    def test_the_exemption_is_operator_only(self):
+        for source in ("google", "parsed"):
+            store = _seeded_store()
+            store.update_venue_address_components("addr_venue_1", source="parsed", city="Recife")
+            store.update_venue_address_components(
+                "addr_venue_1", source=source, neighborhood="Recife",
+            )
+            assert store.get_address("addr_venue_1")["neighborhood"] is None, source
+
+    # ── R11: the EFFECTIVE post-write city, in both directions ───────────
+    def test_it_drops_when_the_incoming_city_loses_and_the_kept_city_matches(self):
+        """The shape this plan's own upgrade sweep creates: `city_source`
+        is already 'google' while `neighborhood_source` is NULL/'parsed',
+        and `apply_parser_fallback` then runs against it. The city column
+        does not write (parsed < google), so comparing only against the
+        INCOMING city would leave the row holding neighborhood == city."""
+        store = _seeded_store()
+        store.update_venue_address_components("addr_venue_1", source="google", city="Recife")
+        store.update_venue_address_components(
+            "addr_venue_1", source="parsed", city="Igarassu", neighborhood="Recife",
+        )
+        addr = store.get_address("addr_venue_1")
+        assert addr["neighborhood"] is None
+        assert addr["city"] == "Recife"
+        assert addr["city_source"] == "google"
+
+    def test_it_keeps_the_bairro_when_the_incoming_city_wins_and_differs(self):
+        """The mirror case, and the false positive R11's literal
+        "incoming OR STORED city" rule would have caused: the row commits
+        with city="Igarassu" and neighborhood="Recife", no equality at all,
+        so a correct bairro must survive."""
+        store = _seeded_store()
+        store.update_venue_address_components("addr_venue_1", source="parsed", city="Recife")
+        store.update_venue_address_components(
+            "addr_venue_1", source="google", city="Igarassu", neighborhood="Recife",
+        )
+        addr = store.get_address("addr_venue_1")
+        assert addr["city"] == "Igarassu"
+        assert addr["neighborhood"] == "Recife"
+        assert addr["neighborhood_source"] == "google"
+
+    def test_it_drops_when_the_incoming_city_matches_even_though_it_loses(self):
+        """Both comparisons matter independently: here the incoming city
+        loses precedence AND equals the bairro, and the row's kept city is
+        something else entirely."""
+        store = _seeded_store()
+        store.update_venue_address_components("addr_venue_1", source="google", city="Recife")
+        store.update_venue_address_components(
+            "addr_venue_1", source="parsed", city="Olinda", neighborhood="Olinda",
+        )
+        addr = store.get_address("addr_venue_1")
+        assert addr["neighborhood"] is None
+        assert addr["city"] == "Recife"
+
+    def test_a_row_with_no_stored_city_at_all_still_compares_the_incoming_one(self):
+        store = _seeded_store()
+        store.update_venue_address_components(
+            "addr_venue_1", source="google", city="Olinda", neighborhood="Olinda",
+        )
+        addr = store.get_address("addr_venue_1")
+        assert addr["neighborhood"] is None
+        assert addr["city"] == "Olinda"
+
+    def test_a_write_with_neither_city_nor_stored_city_is_untouched(self):
+        store = _seeded_store()
+        store.update_venue_address_components(
+            "addr_venue_1", source="parsed", neighborhood="Espinheiro",
+        )
+        assert store.get_address("addr_venue_1")["neighborhood"] == "Espinheiro"

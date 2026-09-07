@@ -1135,3 +1135,126 @@ def test_address_backfill_candidates_and_remaining_count_round_trip(store):
     assert vid not in {r["venue_id"] for r in candidates_after}, (
         "a fully-filled row must be excluded from future candidate pages"
     )
+
+
+# ── plans/260906_events-venue-bairro-and-ticket-url.md §1 + Observability ──
+# Same contract discipline as the precedence block above: the fake always,
+# the REAL SQL whenever RDS_TEST_URL points at a migrated scratch database.
+# These pin SQL this repo cannot otherwise exercise offline — the `upgrade`
+# predicate's OR-chain, the UNION-ALL GROUP BY behind the provenance gauge,
+# and the `lower(btrim(...))` comparison behind the equals-city gauge.
+def test_upgrade_mode_reaches_a_fully_filled_parsed_row_on_real_sql(store):
+    vid = _vid()
+    store.upsert_venue(_venue(vid))
+    store.update_venue_address_components(
+        vid, source="parsed", street="S", neighborhood="N", city="C", postal_code="50000-000",
+    )
+    assert vid not in {
+        r["venue_id"] for r in store.list_address_backfill_candidates(None, 10000)
+    }
+    assert vid in {
+        r["venue_id"]
+        for r in store.list_address_backfill_candidates(None, 10000, mode="upgrade")
+    }
+
+
+def test_upgrade_mode_skips_a_fully_filled_google_row_on_real_sql(store):
+    vid = _vid()
+    store.upsert_venue(_venue(vid))
+    store.update_venue_address_components(
+        vid, source="google", street="S", neighborhood="N", city="C", postal_code="50000-000",
+    )
+    assert vid not in {
+        r["venue_id"]
+        for r in store.list_address_backfill_candidates(None, 10000, mode="upgrade")
+    }
+
+
+def test_an_unknown_backfill_mode_raises_on_real_sql(store):
+    with pytest.raises(ValueError):
+        store.list_address_backfill_candidates(None, 10, mode="everything")
+
+
+def test_neighborhood_equal_to_the_city_is_suppressed_on_real_sql(store):
+    """The write-boundary guard, against a real UPDATE: the neighborhood is
+    dropped while the other columns still land."""
+    vid = _vid()
+    store.upsert_venue(_venue(vid))
+    store.update_venue_address_components(
+        vid, source="parsed", city="Igarassu", neighborhood="Igarassu", street="Rua do Sol",
+    )
+    addr = store.get_address(vid)
+    assert addr["neighborhood"] is None
+    assert addr["city"] == "Igarassu"
+    assert addr["street"] == "Rua do Sol"
+
+
+def test_an_operator_neighborhood_equal_to_the_city_is_stored_on_real_sql(store):
+    vid = _vid()
+    store.upsert_venue(_venue(vid))
+    store.update_venue_address_components(vid, source="operator", city="Recife")
+    store.update_venue_address_components(vid, source="operator", neighborhood="Recife")
+    addr = store.get_address(vid)
+    assert addr["neighborhood"] == "Recife"
+    assert addr["neighborhood_source"] == "operator"
+
+
+def test_the_effective_post_write_city_is_what_is_compared_on_real_sql(store):
+    """The incoming city LOSES its precedence check, so the row keeps
+    "Recife" — and the bairro "Recife" must still be dropped."""
+    vid = _vid()
+    store.upsert_venue(_venue(vid))
+    store.update_venue_address_components(vid, source="google", city="Recife")
+    store.update_venue_address_components(
+        vid, source="parsed", city="Igarassu", neighborhood="Recife",
+    )
+    addr = store.get_address(vid)
+    assert addr["neighborhood"] is None
+    assert addr["city"] == "Recife"
+    assert addr["city_source"] == "google"
+
+
+def test_address_source_rows_and_equals_city_counts_on_real_sql(store):
+    vid = _vid()
+    store.upsert_venue(_venue(vid))
+    store.update_venue_address_components(
+        vid, source="google", street="S", neighborhood="Espinheiro",
+        city="Recife", postal_code="50000-000",
+    )
+
+    counts = store.count_address_source_rows()
+    assert set(counts) == {"street", "neighborhood", "city", "postal_code"}
+    for field, buckets in counts.items():
+        assert set(buckets) == {"operator", "google", "parsed", "none"}, field
+        assert buckets["google"] >= 1, field
+
+    equals_before = store.count_address_neighborhood_equals_city()
+    store.update_venue_address_components(vid, source="operator", neighborhood="  RECIFE ")
+    assert store.count_address_neighborhood_equals_city() == equals_before + 1
+
+
+def test_the_fake_mirrors_the_real_store_address_signatures():
+    """Runs WITHOUT a scratch Postgres, deliberately: the interface half of
+    the contract is what F17 is about — a `mode` added to the real store but
+    not to the fake (or forwarded positionally) would leave every offline
+    test green while production selected the wrong population."""
+    import inspect
+
+    from app.dao.rds_venue_store import RdsVenueStore
+
+    for name in (
+        "list_address_backfill_candidates",
+        "update_venue_address_components",
+        "count_address_backfill_remaining",
+        "count_address_source_rows",
+        "count_address_neighborhood_equals_city",
+    ):
+        real = inspect.signature(getattr(RdsVenueStore, name))
+        fake = inspect.signature(getattr(InMemoryRdsVenueStore, name))
+        assert real.parameters.keys() == fake.parameters.keys(), name
+        for param in real.parameters:
+            assert real.parameters[param].kind == fake.parameters[param].kind, (name, param)
+            assert real.parameters[param].default == fake.parameters[param].default, (name, param)
+    assert (
+        RdsVenueStore.ADDRESS_BACKFILL_MODES == InMemoryRdsVenueStore.ADDRESS_BACKFILL_MODES
+    )

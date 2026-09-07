@@ -34,6 +34,26 @@ from datetime import date, datetime, timedelta, timezone
 
 from app.services.event_date_resolver import RECIFE_TZ, weekdays_from_recurrence_text
 
+# ── the frozen cross-repo nightlife cutoff ────────────────────────────────
+# Before this Recife LOCAL hour, the nightlife "today" is still last night's
+# calendar date: a party that started at 22:00 is still running at 00:30 and
+# must still be in the serving index.
+#
+# THIS VALUE IS CROSS-REPO AND FROZEN. It must equal:
+#   - vibes_bot `app/services/events_service.py::_EFFECTIVE_DAY_CUTOFF_HOUR`
+#     (promoted by that repo's plan to
+#     `Settings.EVENTS_NIGHTLIFE_CUTOFF_HOUR`, default 6), which decides the
+#     SERVED window, and
+#   - vibe_sense_mobile's `RECIFE_NIGHTLIFE_CUTOFF_HOUR`, which decides the
+#     day LABELS the user reads.
+#
+# Change it in one repo only and the three desynchronise: cs-server stops
+# projecting hours vibes_bot still queries, or keeps projecting hours mobile
+# labels as yesterday. Changing it is a coordinated three-repo release, not
+# a local edit — and deliberately NOT a setting and NOT an admin-config key,
+# so no runtime flip can break the agreement.
+NIGHTLIFE_CUTOFF_HOUR = 6
+
 
 @dataclass(frozen=True)
 class Occurrence:
@@ -56,6 +76,22 @@ def _as_aware_utc(value: datetime) -> datetime:
     if value.tzinfo is None:
         return value.replace(tzinfo=timezone.utc)
     return value.astimezone(timezone.utc)
+
+
+def nightlife_date(reference_time: datetime) -> date:
+    """The Recife nightlife date at `reference_time`: the local calendar
+    date, rolled back one day while the local hour is strictly below
+    `NIGHTLIFE_CUTOFF_HOUR`. Same rule, same direction and the same strict
+    `<` boundary as vibes_bot's `_effective_local_date`, so the projected
+    window and the served window agree at both 05:59 and 06:00.
+
+    Exported so a future caller (or a test) never re-derives the rule — a
+    second, subtly different copy of it is exactly how the cross-repo
+    agreement above would rot."""
+    local = _as_aware_utc(reference_time).astimezone(RECIFE_TZ)
+    if local.hour < NIGHTLIFE_CUTOFF_HOUR:
+        return (local - timedelta(days=1)).date()
+    return local.date()
 
 
 def _single_occurrence(event_id: str, starts_at: datetime) -> list[Occurrence]:
@@ -92,8 +128,13 @@ def expand_occurrences(
       unchanged (converted to UTC).
     - Recurring with a resolvable weekday set: one occurrence per matching
       local (Recife) day in the CLOSED interval
-      [today, today + horizon_days] — both endpoints included, so
-      `horizon_days=21` spans 22 calendar days. Each occurrence's id is
+      [nightlife_date(reference_time), local_calendar_date + horizon_days]
+      — both endpoints included, so `horizon_days=21` spans 22 calendar
+      days from 06:00 onward and 23 while the nightlife day is rolled back.
+      The two edges move independently ON PURPOSE: the near edge follows
+      the nightlife day so last night's 22:00 party is still generated at
+      00:30, while the forward edge stays anchored to the calendar date so
+      the horizon tail does not flap nightly. Each occurrence's id is
       `<event_id>_<YYYY-MM-DD>` (see the module-level separator rule in the
       plan's Data section — never `#`) and its `starts_at` is that local
       date at the announcement's OWN clock time (the stored `starts_at`'s
@@ -123,11 +164,25 @@ def expand_occurrences(
 
     starts_at_utc = _as_aware_utc(starts_at)
     clock = starts_at_utc.astimezone(RECIFE_TZ).timetz()
-    today = _as_aware_utc(reference_time).astimezone(RECIFE_TZ).date()
+    # Two independent bounds, deliberately not one offset range:
+    #  - the NEAR edge follows the nightlife day, so between 00:00 and 06:00
+    #    local it rolls back to yesterday and last night's 22:00 party is
+    #    still generated (and therefore still survives the projector's
+    #    prune-what-is-not-fresh pass);
+    #  - the FORWARD edge stays anchored to the CALENDAR date. Rolling it
+    #    back too would delete and re-create every horizon-edge occurrence
+    #    once a night, flapping the tail of the served window for six hours
+    #    and churning payload keys for no benefit.
+    # Net effect: at most one extra expanded day per recurring event, and
+    # only while the local clock is before the cutoff.
+    start_day = nightlife_date(reference_time)
+    end_day = _as_aware_utc(reference_time).astimezone(RECIFE_TZ).date() + timedelta(
+        days=horizon_days
+    )
 
     occurrences: list[Occurrence] = []
-    for offset in range(0, horizon_days + 1):
-        day: date = today + timedelta(days=offset)
+    for offset in range((end_day - start_day).days + 1):
+        day: date = start_day + timedelta(days=offset)
         if day.weekday() not in weekdays:
             continue
         local_dt = datetime.combine(day, clock, tzinfo=RECIFE_TZ)
@@ -142,4 +197,9 @@ def expand_occurrences(
     return occurrences
 
 
-__all__ = ["Occurrence", "expand_occurrences"]
+__all__ = [
+    "NIGHTLIFE_CUTOFF_HOUR",
+    "Occurrence",
+    "expand_occurrences",
+    "nightlife_date",
+]

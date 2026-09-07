@@ -1,4 +1,3 @@
-@wip
 Feature: Events venue bairro, ticket URL and nightlife-day projection
   As the VibeSense app
   I want every event card to show a real bairro and an openable ticket link,
@@ -236,9 +235,22 @@ Feature: Events venue bairro, ticket URL and nightlife-day projection
   # backfill batch — the job has no scheduler entry — so the reading needs its
   # own age, or a months-old snapshot is indistinguishable from a live one
   # (review finding R10).
-  Scenario: Report no refresh timestamp before any batch has ever run
+  # Rewritten: as first drafted this scenario set the gauge to 0 in its Given
+  # and asserted it was 0 in its Then, with no When and no production code in
+  # the path — it asserted `Gauge.set` on itself and could not fail. The real,
+  # falsifiable claim underneath it is that ONLY a completed backfill batch
+  # moves the stamp. Refreshing these gauges from the 2-minute projection
+  # cycle was considered and rejected in the plan (it would bolt an
+  # address-quality GROUP BY onto the serving projector's all-or-nothing
+  # preparation read), so a projection cycle must leave the stamp untouched —
+  # which is what makes `time() - <stamp>` a usable staleness alert instead of
+  # a number that silently refreshes itself.
+  Scenario: Report no refresh timestamp until a backfill batch actually runs
     Given no address components backfill batch has ever run
-    Then the address gauges refresh timestamp reports 0
+    And an accepted event at "Downtown Beer Garden" starting 2026-09-06 20:00
+    When the events projection runs
+    Then the occurrence payload carries no ticket url
+    And the address gauges refresh timestamp reports 0
 
   Scenario: Stamp when the address gauges were last refreshed
     Given no address components backfill batch has ever run
@@ -330,9 +342,35 @@ Feature: Events venue bairro, ticket URL and nightlife-day projection
     And the events projection runs again
     Then the known events cities are "joao-pessoa" and "recife"
 
-  Scenario: Keep projecting when the known-cities write fails
+  # The configured-slug loop is ADDITIVE and best-effort, and it runs
+  # BEFORE the write pass (redis_projection_service.py:397 vs :516), so an
+  # unguarded raise there would lose EVERY occurrence in the cycle. It is
+  # also the only writer for a configured city that has no events tonight —
+  # a slug `index_event_occurrence` will never be asked to remember — which
+  # is exactly the failure this guard has to absorb without costing a cycle
+  # that would otherwise serve.
+  Scenario: Keep projecting when remembering a configured city fails
     Given the geo fence configures the cities "recife" and "joao-pessoa"
-    And remembering a city slug fails
+    And every accepted event is in Recife
+    And remembering the configured city "joao-pessoa" fails
     When the events projection runs
-    Then the projection still writes every accepted occurrence
+    Then remembering that configured city was attempted and failed
+    And the projection still writes every accepted occurrence
     And the projection cycle is not reported as failed
+
+  # The OPPOSITE contract, and deliberately so — this one must NOT be
+  # guarded. `index_event_occurrence` (redis_venue_dao.py:1429-1442) writes
+  # the two index memberships and the known-cities membership in ONE call
+  # precisely so the durability write can never lag the index write it
+  # exists to protect. vibes_bot validates an incoming `city` against that
+  # set, so an occurrence indexed under a slug that was never remembered
+  # would make it 422 a city that genuinely has events. Swallowing this
+  # failure would hide that divergence; failing the cycle surfaces it, and
+  # main.py:321 already isolates the raise from the venue projection.
+  Scenario: Fail the cycle when the city an occurrence is indexed under cannot be remembered
+    Given the geo fence configures the cities "recife" and "joao-pessoa"
+    And every accepted event is in Recife
+    And remembering any city slug fails
+    When the events projection runs and is allowed to fail
+    Then the projection cycle fails loudly instead of returning a summary
+    And the divergence that failure exists to surface is visible

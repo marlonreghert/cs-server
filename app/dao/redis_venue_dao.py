@@ -1443,7 +1443,19 @@ class RedisVenueDAO:
 
     def remember_city_slug(self, city_slug: str) -> None:
         """SADD `city_slug` into the durable `events_known_cities_v1` set —
-        the city-side counterpart of `rds_known`
+        every slug ever INDEXED under, or ever CONFIGURED in the geo fence.
+
+        Two callers, deliberately: `index_event_occurrence` below (once per
+        occurrence write), and `RedisProjectionService.project_events` for
+        every CONFIGURED `admin.geo_fence_city` slug on every cycle
+        (plans/260906_events-venue-bairro-and-ticket-url.md §5). The second
+        is what makes the set a COMPLETE vocabulary rather than "cities that
+        happen to have events right now" — vibes_bot validates an incoming
+        `city` param against it, so without it a configured-but-quiet city
+        would 422 instead of serving 200-empty, and a rebuilt Redis dataset
+        would come back holding only the cities with live events.
+
+        The set is also the city-side counterpart of `rds_known`
         (`list_active_venue_ids() | list_deprecated_venue_ids()`), which
         `project_events`'s venue-index prune reads so a deprecated venue is
         never forgotten. A city slug has no equivalent durable RDS-side
