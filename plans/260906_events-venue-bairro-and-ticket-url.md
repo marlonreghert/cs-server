@@ -416,10 +416,17 @@ below `google`, so the already-shipped Place Details rung can correct them.
 Google's answer replaces a `parsed` neighborhood and stamps
 `neighborhood_source = 'google'`. An `operator` value is never replaced. A
 Google response that answers nothing leaves the stored value exactly as it is —
-never nulled, never poisoned. **Any** incoming neighborhood that fold-compares
-equal to that write's city (incoming, else stored) is dropped before it is
-written, for every writer and every source. The events projection re-asserts the
-corrected bairro on its next 2-minute cycle with no code change of its own.
+never nulled, never poisoned. At the shared write boundary, an incoming
+neighborhood from a `google` or `parsed` writer is dropped before it is written
+when it `fold_text`-compares equal to **either** that write's own incoming city
+**or** the **effective post-write city** — the city the row actually holds once
+the statement commits, which is not always the incoming one because every column
+is precedence-guarded independently (R11). `source="operator"` is **exempt**
+(R08): a human may deliberately assert a bairro that is named after its city
+(Bairro do Recife is a real neighbourhood of Recife), and this plan's own F37
+contingency writes through that source, so an unconditional guard would silently
+swallow the named fallback. The events projection re-asserts the corrected bairro
+on its next 2-minute cycle with no code change of its own.
 
 **Ticket URL.** The events projection normalises `ticket_url` into a
 scheme-qualified absolute `http`/`https` URL, or `null` when the stored value is
@@ -1024,7 +1031,7 @@ payload keys the projector itself wrote. **No scenario may hand-seed
 `events_index_v1:*` or `event_occurrence_v1:*`**; F01's whole point is that a
 hand-seeded index would go green while production stayed broken.
 
-Scenarios (ticket URL) — 9:
+Scenarios (ticket URL) — 13:
 - **Qualify a scheme-less ticket host with a scheme** — a stored
   `"evenyx.com"` is projected as `"https://evenyx.com"`, counted `scheme_added`.
 - **Preserve the path, query and fragment when adding the scheme.**
