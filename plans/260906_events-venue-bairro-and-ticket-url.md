@@ -614,8 +614,20 @@ it is pinned here):
    punctuation). Empty result → `None`.
 3. Longer than 2048 characters → `None`.
 4. Contains any internal whitespace → `None` (it is prose, not a URL).
-5. Case-insensitively begins `http://` or `https://` → returned as-is (after
-   step 2's trim). Never rewritten, never upgraded http→https.
+5. Case-insensitively begins `http://` or `https://` → its authority is
+   validated by rule 8's host test (below), then it is returned BYTE-FOR-BYTE
+   as-is (after step 2's trim). Never rewritten, never upgraded http→https,
+   never normalised — but never passed through unvalidated either.
+   **Corrected after review.** Revision 3 said only "returned as-is", and the
+   implementation faithfully reproduced that: `"https://"`, `"https:///"` and
+   `"https://."` (which step 2 trims to `"https://"`) were all projected as
+   live `ticket_url` values with outcome `passthrough`. That renders a ticket
+   button that opens nothing, and because the outcome is `passthrough` the
+   `rejected` counter never moves, so the defect is invisible to the one
+   signal an operator watches. It also contradicted this section's own
+   promise that the value is "either null or an absolute http/https URL".
+   A bare scheme is now `rejected`. One shared authority validator serves
+   rules 5 and 8 so they cannot drift apart again.
 6. **(Revised — F30.)** Begins with any OTHER scheme → `None`. A leading token
    counts as a scheme only when the text before the FIRST `:` matches
    `^[A-Za-z][A-Za-z0-9+.-]*$` **and contains no `.`**. So `mailto:`, `tel:`,
@@ -706,8 +718,36 @@ for city in cities:
 ```
 
 wrapped in its own `try/except` that logs and continues — the same posture as
-every other best-effort read/write in that method; the set is an optimisation
-for the prune and a vocabulary for vibes_bot, never a reason to lose a cycle.
+every other best-effort read/write in that method.
+
+**The best-effort guarantee is scoped to THIS loop and to nothing else.**
+Revision 3's wording ("the set is an optimisation for the prune and a
+vocabulary for vibes_bot, never a reason to lose a cycle") read as a property
+of the known-cities set in general. It is not, and stating it that broadly was
+more reassuring than the code:
+
+- **Guarded — this loop only.** It writes CONFIGURED slugs, including a city
+  that holds no events tonight and that `index_event_occurrence` will
+  therefore never be asked to remember. It is additive, and it runs BEFORE the
+  write pass (`redis_projection_service.py:397` vs `:516`), so an unguarded
+  raise here would lose EVERY occurrence in the cycle. Absorbing it is
+  strictly better than failing.
+- **NOT guarded, by design — the SADD inside `index_event_occurrence`**
+  (`redis_venue_dao.py:1429-1442`). That method writes both index
+  memberships and the known-cities membership in ONE call precisely so the
+  durability write can never lag the index write it exists to protect, and
+  the projection's write pass deliberately does not wrap it. **A failure
+  there still fails the cycle, and must keep failing it.** vibes_bot's B5
+  validates an incoming `city` against this set, so an occurrence indexed
+  under a slug that was never remembered would make it 422 a city that
+  genuinely has events. The two ZADDs land before the SADD, so swallowing the
+  raise would silently leave the index and the vocabulary diverged on every
+  affected cycle; failing surfaces it. `main.py:321-329` already wraps
+  `project_events`, so the raise is isolated from the venue projection and
+  logged rather than killing the shared scheduled job.
+
+Do not "fix" the second bullet by adding a try/except. Two scenarios pin both
+halves so the distinction cannot be lost.
 
 `remember_city_slug`'s docstring is updated: the set is now "every slug ever
 INDEXED under **or ever CONFIGURED in the fence**". Nothing else changes — same
@@ -846,6 +886,12 @@ coordinated, three-repo release.
   (one SMEMBERS over a set bounded by the number of cities ever configured, 27
   capitals at most today). Read failures must fail OPEN downstream: an empty
   read means "Redis had a bad moment", never "no cities exist".
+  **The invariant B5 actually rests on:** a slug that keys a populated
+  `events_index_v1:<slug>` is ALWAYS a member, because the SADD is issued
+  inside the same `index_event_occurrence` call as the two ZADDs and its
+  failure fails the whole projection cycle rather than being swallowed (§5).
+  So "indexed but not remembered" is not a state a completed cycle can leave
+  behind — which is what makes 422-ing an unknown slug safe.
 - `city_slug` derivation: the slug of the NEAREST `admin.geo_fence_city` circle
   CENTRE to the venue's stored coordinates (`nearest_city_slug`, haversine, no
   distance limit, no containment requirement). It is therefore NOT guaranteed to
@@ -1093,11 +1139,19 @@ Scenarios (bairro):
 - **Report how many stored bairros are still just the city name** — the
   `venue_address_neighborhood_equals_city` gauge, which is what makes the
   contract's wording measured rather than asserted.
-- **Report no refresh timestamp before any batch has ever run** and **Stamp
-  when the address gauges were last refreshed** (R10) — before any batch,
-  `venue_address_gauges_refreshed_timestamp_seconds` is 0; after one it carries
-  that batch's time, so a never-refreshed snapshot can never be mistaken for a
-  live reading.
+- **Report no refresh timestamp until a backfill batch actually runs** and
+  **Stamp when the address gauges were last refreshed** (R10) — after one
+  batch `venue_address_gauges_refreshed_timestamp_seconds` carries that
+  batch's time, so a never-refreshed snapshot can never be mistaken for a live
+  reading. **Rewritten after review:** as first drafted the first scenario set
+  the gauge to 0 in its Given and asserted 0 in its Then, with no When and no
+  production code in the path — it asserted `Gauge.set` on itself and could
+  not fail. It now drives a full projection cycle and asserts the stamp is
+  still 0, which is the falsifiable half of the claim: ONLY a completed
+  backfill batch moves it. That is exactly the design decision Observability
+  records (refreshing from the 2-minute projection cycle was considered and
+  rejected), so the scenario now fails if anyone wires the refresh into the
+  projector.
 
 Scenarios (nightlife day — C3/F01):
 - **Keep last night's recurring occurrence in the index at 00:30 local** — a
@@ -1128,8 +1182,20 @@ Scenarios (city vocabulary — F02):
 - **Keep remembering a city after its last occurrence is gone** — the fence is
   reduced and the slug survives, because the prune depends on it.
 - **Rebuild the whole vocabulary on the next cycle after the set is erased.**
-- **Keep projecting when the known-cities write fails** — the §5 write is
-  best-effort and must never cost a cycle.
+- **Keep projecting when remembering a configured city fails** — §5's
+  configured-slug loop is best-effort and must never cost a cycle. The
+  scenario carries a real accepted occurrence and fails the write for the
+  configured-but-eventless city, so the "every accepted occurrence is still
+  written" assertion iterates a NON-EMPTY set and the guarded path is the one
+  actually exercised. (Revision 3's single scenario had no event in its Given:
+  it iterated an empty set, proved nothing, and asserted a guarantee the
+  system does not provide — a false green.)
+- **Fail the cycle when the city an occurrence is indexed under cannot be
+  remembered** — the opposite half, and deliberately unguarded: the SADD
+  coupled to the index write inside `index_event_occurrence` still fails the
+  cycle. Asserts that `project_events` raises rather than returning a summary,
+  and observes the index/vocabulary divergence that the loud failure exists to
+  surface.
 
 Existing coverage that must stay green unchanged:
 `tests/test_events_redis_dao.py::test_no_known_city_slugs_before_anything_is_ever_indexed`
@@ -1369,6 +1435,78 @@ blast radius of the change depends entirely on which table it is.
   `serving.eligible_venue`'s geo term is fail-open on it, so today the fence
   restricts nothing. That is a separate, deliberate decision — not something to
   flip as a side effect of a coordinate repair.
+
+## Follow-ups (recorded, deliberately NOT fixed here)
+
+Surfaced by the post-implementation review. Neither is a merge blocker; both
+are consequences of §2 that this plan did not spell out, and both are recorded
+with their evidence so they are not lost.
+
+### 1. `administrative_area_level_2` is now a DEAD neighbourhood rung, and that
+### makes `fill` mode permanently undrainable for the affected venues
+
+`venue_address_components._NEIGHBORHOOD_TYPES` ends with
+`administrative_area_level_2` and `_CITY_TYPES` BEGINS with it, so for any
+municipality publishing no `sublocality*` the mapper necessarily returns
+`neighborhood == city`. §2's guard therefore drops it on every `google` and
+`parsed` write — meaning the third fallback rung can never again reach the
+column. That is the intended fix (a card must not read "Igarassu · 2,3 km"),
+but it has an unstated consequence: those venues' `neighborhood` stays NULL
+forever, so they stay in the **`fill`** population forever and
+`venue_address_backfill_remaining{field="neighborhood"}` can never reach 0 for
+them. An operator driving `fill` to "done" will find it never fully drains.
+
+Measured (read-only, 2026-09-06): `venues.address` holds **211** rows with no
+`neighborhood_source` at all, against 3,026 `parsed` and 363 `google`. Some
+share of those 211 are exactly this class. The follow-up should decide whether
+"Google answered, and the honest answer is *no bairro*" deserves a distinct
+stored state (e.g. a `neighborhood_source` of `google` with a NULL value, or a
+per-venue "no sublocality published" marker) so the row can leave the backfill
+population without inventing a bairro. `tests/bdd/enrichment/venue-address-
+components.feature`'s rewritten scenario documents the behaviour today.
+
+### 2. The scheduled `google_places_enrichment` job — not the manual backfill —
+### is the guard's widest blast radius
+
+This plan reasons about §2 almost entirely through
+`address_components_backfill`, which is **manual-trigger-only** (no
+`scheduler.add_job` registration). But `enrich_venue` also writes through the
+same boundary — `google_places_enrichment_service.py:250` calls
+`write_mapped_components(..., source="google")` — and `enrich_all_venues` IS a
+**scheduled** job (`main.py:215-225`, job name `google_places_enrichment`). So
+the guard's real, continuous exposure is the daily enrichment cron, which runs
+whether or not an operator ever triggers a backfill batch, and whose writes are
+NOT covered by the batch-scoped gauges (those only refresh at the end of a
+backfill batch). A follow-up should confirm the daily cron's address writes are
+observable — today a bairro dropped by the guard on that path moves no counter
+at all.
+
+### 3. Selection has no lifecycle filter, and `upgrade`'s population is an
+### order of magnitude larger than `fill`'s
+
+`list_address_backfill_candidates` selects from `venues.address` alone, with no
+join to `venues.venue` and no `lifecycle_status` predicate, so **soft-deleted
+(deprecated) venues sit in BOTH populations** and are processed like any other
+row. That was already true of `fill`; `upgrade` makes it matter more, because
+the populations differ by roughly an order of magnitude. Measured provenance
+census (read-only, 2026-09-06, 3,600 address rows):
+
+| field | operator | google | parsed | none |
+|---|---|---|---|---|
+| street | 0 | 319 | 3,158 | 123 |
+| neighborhood | 0 | 363 | 3,026 | 211 |
+| city | 0 | 367 | 3,061 | 172 |
+| postal_code | 0 | 353 | 3,161 | 86 |
+
+`fill` selects on the `none` column only (at most ~592 rows, and fewer after
+the union); `upgrade` additionally selects every `parsed` row, i.e. **~3,200+**.
+Each selected venue that has a stored `google_place_id` costs one Place Details
+call while `address_backfill_geocoding_enabled` is on. The plan's ≈3,452-call /
+$0 estimate against the 10,000/month Essentials allowance still holds, but the
+sweep should skip deprecated venues rather than spend free-tier quota on rows
+that can never be served. Adding a lifecycle predicate is a selection change
+with its own cursor-orphaning considerations (see
+`VenueAddressBackfillService`'s docstring) and is deliberately not made here.
 
 ## Residual risks
 
