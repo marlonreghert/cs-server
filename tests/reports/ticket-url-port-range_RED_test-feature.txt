@@ -1,0 +1,718 @@
+/media/mario/ssd/projects/vibesense_wrapper/cs-server/.venv/bin/python -m behave "tests/bdd/persistence/events-venue-bairro-and-ticket-url.feature"
+USING RUNNER: behave.runner:Runner
+Feature: Events venue bairro, ticket URL and nightlife-day projection # tests/bdd/persistence/events-venue-bairro-and-ticket-url.feature:1
+  As the VibeSense app
+  I want every event card to show a real bairro and an openable ticket link,
+  and last night's party to still be in the index while the night is still on
+  So that a served event neither names a venue complex as its neighbourhood,
+  nor offers a link the phone refuses to open, nor vanishes at midnight while
+  it is still running
+  Feature: Events venue bairro, ticket URL and nightlife-day projection  # tests/bdd/persistence/events-venue-bairro-and-ticket-url.feature:1
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: Qualify a scheme-less ticket host with a scheme                                   # tests/bdd/persistence/events-venue-bairro-and-ticket-url.feature:22
+    Given the events projection is enabled                                                    # tests/bdd/steps/events_serving_projection_steps.py:154
+    And "Downtown Beer Garden" is a servable venue in Recife                                  # tests/bdd/steps/events_serving_projection_steps.py:164
+    And the current time is 2026-09-06 18:00 in Recife                                        # tests/bdd/steps/events_serving_projection_steps.py:169
+    Given an accepted event at "Downtown Beer Garden" whose stored ticket url is "evenyx.com" # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:174
+    When the events projection runs                                                           # tests/bdd/steps/events_serving_projection_steps.py:478
+LOG_INFO:app.services.redis_projection_service: [EventsProjection] {'occurrences': 1, 'source_rows': 1, 'bytes': 730, 'errors': 0, 'error_events': [], 'flyer': {}}
+    Then the occurrence payload carries the ticket url "https://evenyx.com"                   # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:236
+    And the ticket url normalisation outcome "scheme_added" is counted once                   # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:252
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: Preserve the path, query and fragment when adding the scheme                      # tests/bdd/persistence/events-venue-bairro-and-ticket-url.feature:28
+    Given the events projection is enabled                                                    # tests/bdd/steps/events_serving_projection_steps.py:154
+    And "Downtown Beer Garden" is a servable venue in Recife                                  # tests/bdd/steps/events_serving_projection_steps.py:164
+    And the current time is 2026-09-06 18:00 in Recife                                        # tests/bdd/steps/events_serving_projection_steps.py:169
+    Given an accepted event whose stored ticket url is "evenyx.com/e/42?ref=ig#lote2"         # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:183
+    When the events projection runs                                                           # tests/bdd/steps/events_serving_projection_steps.py:478
+LOG_INFO:app.services.redis_projection_service: [EventsProjection] {'occurrences': 1, 'source_rows': 1, 'bytes': 748, 'errors': 0, 'error_events': [], 'flyer': {}}
+    Then the occurrence payload carries the ticket url "https://evenyx.com/e/42?ref=ig#lote2" # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:236
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: Qualify a scheme-less ticket host that carries a port                      # tests/bdd/persistence/events-venue-bairro-and-ticket-url.feature:33
+    Given the events projection is enabled                                             # tests/bdd/steps/events_serving_projection_steps.py:154
+    And "Downtown Beer Garden" is a servable venue in Recife                           # tests/bdd/steps/events_serving_projection_steps.py:164
+    And the current time is 2026-09-06 18:00 in Recife                                 # tests/bdd/steps/events_serving_projection_steps.py:169
+    Given an accepted event whose stored ticket url is "evenyx.com:8080/lote2"         # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:183
+    When the events projection runs                                                    # tests/bdd/steps/events_serving_projection_steps.py:478
+LOG_INFO:app.services.redis_projection_service: [EventsProjection] {'occurrences': 1, 'source_rows': 1, 'bytes': 741, 'errors': 0, 'error_events': [], 'flyer': {}}
+    Then the occurrence payload carries the ticket url "https://evenyx.com:8080/lote2" # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:236
+    And the ticket url normalisation outcome "scheme_added" is counted once            # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:252
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: Project no ticket url for a host whose pseudo-port is not numeric  # tests/bdd/persistence/events-venue-bairro-and-ticket-url.feature:39
+    Given the events projection is enabled                                     # tests/bdd/steps/events_serving_projection_steps.py:154
+    And "Downtown Beer Garden" is a servable venue in Recife                   # tests/bdd/steps/events_serving_projection_steps.py:164
+    And the current time is 2026-09-06 18:00 in Recife                         # tests/bdd/steps/events_serving_projection_steps.py:169
+    Given an accepted event whose stored ticket url is "evenyx.com:lote2"      # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:183
+    When the events projection runs                                            # tests/bdd/steps/events_serving_projection_steps.py:478
+LOG_INFO:app.services.redis_projection_service: [EventsProjection] {'occurrences': 1, 'source_rows': 1, 'bytes': 714, 'errors': 0, 'error_events': [], 'flyer': {}}
+    Then the occurrence payload carries no ticket url                          # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:244
+    And the ticket url normalisation outcome "rejected" is counted once        # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:252
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: Project no ticket url for a host whose port is not a real TCP port  # tests/bdd/persistence/events-venue-bairro-and-ticket-url.feature:45
+    Given the events projection is enabled                                      # tests/bdd/steps/events_serving_projection_steps.py:154
+    And "Downtown Beer Garden" is a servable venue in Recife                    # tests/bdd/steps/events_serving_projection_steps.py:164
+    And the current time is 2026-09-06 18:00 in Recife                          # tests/bdd/steps/events_serving_projection_steps.py:169
+    Given an accepted event whose stored ticket url is "evenyx.com:80808/x"     # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:183
+    When the events projection runs                                             # tests/bdd/steps/events_serving_projection_steps.py:478
+LOG_INFO:app.services.redis_projection_service: [EventsProjection] {'occurrences': 1, 'source_rows': 1, 'bytes': 738, 'errors': 0, 'error_events': [], 'flyer': {}}
+    Then the occurrence payload carries no ticket url                           # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:244
+      ASSERT FAILED: ('6bbd06c4d4bb4a61b763083405813222', 'https://evenyx.com:80808/x')
+
+    And the ticket url normalisation outcome "rejected" is counted once         # None
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+----
+CAPTURED LOG: before_scenario
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+---- CAPTURED_SCENARIO_OUTPUT_END ----
+
+  Scenario: Leave an already absolute ticket url exactly as stored                        # tests/bdd/persistence/events-venue-bairro-and-ticket-url.feature:51
+    Given the events projection is enabled                                                # tests/bdd/steps/events_serving_projection_steps.py:154
+    And "Downtown Beer Garden" is a servable venue in Recife                              # tests/bdd/steps/events_serving_projection_steps.py:164
+    And the current time is 2026-09-06 18:00 in Recife                                    # tests/bdd/steps/events_serving_projection_steps.py:169
+    Given an accepted event whose stored ticket url is "https://sympla.com.br/evento/123" # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:183
+    When the events projection runs                                                       # tests/bdd/steps/events_serving_projection_steps.py:478
+LOG_INFO:app.services.redis_projection_service: [EventsProjection] {'occurrences': 1, 'source_rows': 1, 'bytes': 744, 'errors': 0, 'error_events': [], 'flyer': {}}
+    Then the occurrence payload carries the ticket url "https://sympla.com.br/evento/123" # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:236
+    And the ticket url normalisation outcome "passthrough" is counted once                # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:252
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: Do not upgrade a stored plaintext ticket url to https                       # tests/bdd/persistence/events-venue-bairro-and-ticket-url.feature:57
+    Given the events projection is enabled                                              # tests/bdd/steps/events_serving_projection_steps.py:154
+    And "Downtown Beer Garden" is a servable venue in Recife                            # tests/bdd/steps/events_serving_projection_steps.py:164
+    And the current time is 2026-09-06 18:00 in Recife                                  # tests/bdd/steps/events_serving_projection_steps.py:169
+    Given an accepted event whose stored ticket url is "http://ingressos.example.com/x" # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:183
+    When the events projection runs                                                     # tests/bdd/steps/events_serving_projection_steps.py:478
+LOG_INFO:app.services.redis_projection_service: [EventsProjection] {'occurrences': 1, 'source_rows': 1, 'bytes': 742, 'errors': 0, 'error_events': [], 'flyer': {}}
+    Then the occurrence payload carries the ticket url "http://ingressos.example.com/x" # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:236
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: Project no ticket url for caption prose                            # tests/bdd/persistence/events-venue-bairro-and-ticket-url.feature:62
+    Given the events projection is enabled                                     # tests/bdd/steps/events_serving_projection_steps.py:154
+    And "Downtown Beer Garden" is a servable venue in Recife                   # tests/bdd/steps/events_serving_projection_steps.py:164
+    And the current time is 2026-09-06 18:00 in Recife                         # tests/bdd/steps/events_serving_projection_steps.py:169
+    Given an accepted event whose stored ticket url is "ingressos na portaria" # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:183
+    When the events projection runs                                            # tests/bdd/steps/events_serving_projection_steps.py:478
+LOG_INFO:app.services.redis_projection_service: [EventsProjection] {'occurrences': 1, 'source_rows': 1, 'bytes': 714, 'errors': 0, 'error_events': [], 'flyer': {}}
+    Then the occurrence payload carries no ticket url                          # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:244
+    And the ticket url normalisation outcome "rejected" is counted once        # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:252
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: Project no ticket url for a non-web scheme                          # tests/bdd/persistence/events-venue-bairro-and-ticket-url.feature:68
+    Given the events projection is enabled                                      # tests/bdd/steps/events_serving_projection_steps.py:154
+    And "Downtown Beer Garden" is a servable venue in Recife                    # tests/bdd/steps/events_serving_projection_steps.py:164
+    And the current time is 2026-09-06 18:00 in Recife                          # tests/bdd/steps/events_serving_projection_steps.py:169
+    Given an accepted event whose stored ticket url is "mailto:vendas@casa.com" # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:183
+    When the events projection runs                                             # tests/bdd/steps/events_serving_projection_steps.py:478
+LOG_INFO:app.services.redis_projection_service: [EventsProjection] {'occurrences': 1, 'source_rows': 1, 'bytes': 714, 'errors': 0, 'error_events': [], 'flyer': {}}
+    Then the occurrence payload carries no ticket url                           # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:244
+    And the ticket url normalisation outcome "rejected" is counted once         # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:252
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: Project no ticket url when the extraction found none      # tests/bdd/persistence/events-venue-bairro-and-ticket-url.feature:74
+    Given the events projection is enabled                            # tests/bdd/steps/events_serving_projection_steps.py:154
+    And "Downtown Beer Garden" is a servable venue in Recife          # tests/bdd/steps/events_serving_projection_steps.py:164
+    And the current time is 2026-09-06 18:00 in Recife                # tests/bdd/steps/events_serving_projection_steps.py:169
+    Given an accepted event with no stored ticket url                 # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:188
+    When the events projection runs                                   # tests/bdd/steps/events_serving_projection_steps.py:478
+LOG_INFO:app.services.redis_projection_service: [EventsProjection] {'occurrences': 1, 'source_rows': 1, 'bytes': 714, 'errors': 0, 'error_events': [], 'flyer': {}}
+    Then the occurrence payload carries no ticket url                 # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:244
+    And the ticket url normalisation outcome "absent" is counted once # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:252
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: Leave the stored ticket url verbatim in the system of record  # tests/bdd/persistence/events-venue-bairro-and-ticket-url.feature:80
+    Given the events projection is enabled                                # tests/bdd/steps/events_serving_projection_steps.py:154
+    And "Downtown Beer Garden" is a servable venue in Recife              # tests/bdd/steps/events_serving_projection_steps.py:164
+    And the current time is 2026-09-06 18:00 in Recife                    # tests/bdd/steps/events_serving_projection_steps.py:169
+    Given an accepted event whose stored ticket url is "evenyx.com"       # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:183
+    When the events projection runs                                       # tests/bdd/steps/events_serving_projection_steps.py:478
+LOG_INFO:app.services.redis_projection_service: [EventsProjection] {'occurrences': 1, 'source_rows': 1, 'bytes': 730, 'errors': 0, 'error_events': [], 'flyer': {}}
+    Then the event row still holds the ticket url "evenyx.com"            # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:264
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: Re-assert the normalised ticket url on the next projection cycle  # tests/bdd/persistence/events-venue-bairro-and-ticket-url.feature:85
+    Given the events projection is enabled                                    # tests/bdd/steps/events_serving_projection_steps.py:154
+    And "Downtown Beer Garden" is a servable venue in Recife                  # tests/bdd/steps/events_serving_projection_steps.py:164
+    And the current time is 2026-09-06 18:00 in Recife                        # tests/bdd/steps/events_serving_projection_steps.py:169
+    Given an accepted event whose stored ticket url is "evenyx.com"           # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:183
+    And the events projection has already run once                            # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:208
+LOG_INFO:app.services.redis_projection_service: [EventsProjection] {'occurrences': 1, 'source_rows': 1, 'bytes': 730, 'errors': 0, 'error_events': [], 'flyer': {}}
+    When the events projection runs again                                     # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:217
+LOG_INFO:app.services.redis_projection_service: [EventsProjection] {'occurrences': 1, 'source_rows': 1, 'bytes': 730, 'errors': 0, 'error_events': [], 'flyer': {}}
+    Then the occurrence payload carries the ticket url "https://evenyx.com"   # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:236
+    And no event row was written during either cycle                          # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:271
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: Count a recurring event's ticket url once, not once per occurrence                                                   # tests/bdd/persistence/events-venue-bairro-and-ticket-url.feature:95
+    Given the events projection is enabled                                                                                       # tests/bdd/steps/events_serving_projection_steps.py:154
+    And "Downtown Beer Garden" is a servable venue in Recife                                                                     # tests/bdd/steps/events_serving_projection_steps.py:164
+    And the current time is 2026-09-06 18:00 in Recife                                                                           # tests/bdd/steps/events_serving_projection_steps.py:169
+    Given an accepted recurring event whose recurrence text is "todo dia" and whose stored ticket url is "ingressos na portaria" # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:197
+    When the events projection runs                                                                                              # tests/bdd/steps/events_serving_projection_steps.py:478
+LOG_INFO:app.services.redis_projection_service: [EventsProjection] {'occurrences': 22, 'source_rows': 1, 'bytes': 16060, 'errors': 0, 'error_events': [], 'flyer': {}}
+    Then more than one occurrence is projected for that event                                                                    # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:280
+    And every one of those occurrence payloads carries no ticket url                                                             # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:287
+    And the ticket url normalisation outcome "rejected" is counted once                                                          # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:252
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: Count the ticket url again on the next projection cycle                    # tests/bdd/persistence/events-venue-bairro-and-ticket-url.feature:105
+    Given the events projection is enabled                                             # tests/bdd/steps/events_serving_projection_steps.py:154
+    And "Downtown Beer Garden" is a servable venue in Recife                           # tests/bdd/steps/events_serving_projection_steps.py:164
+    And the current time is 2026-09-06 18:00 in Recife                                 # tests/bdd/steps/events_serving_projection_steps.py:169
+    Given an accepted event whose stored ticket url is "evenyx.com"                    # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:183
+    And the events projection has already run once                                     # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:208
+LOG_INFO:app.services.redis_projection_service: [EventsProjection] {'occurrences': 1, 'source_rows': 1, 'bytes': 730, 'errors': 0, 'error_events': [], 'flyer': {}}
+    When the events projection runs again                                              # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:217
+LOG_INFO:app.services.redis_projection_service: [EventsProjection] {'occurrences': 1, 'source_rows': 1, 'bytes': 730, 'errors': 0, 'error_events': [], 'flyer': {}}
+    Then the ticket url normalisation outcome "scheme_added" is counted twice in total # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:258
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: Select a fully populated parsed address row in upgrade mode                # tests/bdd/persistence/events-venue-bairro-and-ticket-url.feature:113
+    Given the events projection is enabled                                             # tests/bdd/steps/events_serving_projection_steps.py:154
+    And "Downtown Beer Garden" is a servable venue in Recife                           # tests/bdd/steps/events_serving_projection_steps.py:164
+    And the current time is 2026-09-06 18:00 in Recife                                 # tests/bdd/steps/events_serving_projection_steps.py:169
+    Given "Downtown Beer Garden" has street, neighborhood, city and postal code stored # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:296
+    And every one of those four values is sourced "parsed"                             # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:308
+    When the address components backfill selects candidates in upgrade mode            # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:332
+    Then "Downtown Beer Garden" is among the selected candidates                       # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:347
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: Do not select a fully populated parsed address row in the default mode     # tests/bdd/persistence/events-venue-bairro-and-ticket-url.feature:119
+    Given the events projection is enabled                                             # tests/bdd/steps/events_serving_projection_steps.py:154
+    And "Downtown Beer Garden" is a servable venue in Recife                           # tests/bdd/steps/events_serving_projection_steps.py:164
+    And the current time is 2026-09-06 18:00 in Recife                                 # tests/bdd/steps/events_serving_projection_steps.py:169
+    Given "Downtown Beer Garden" has street, neighborhood, city and postal code stored # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:296
+    And every one of those four values is sourced "parsed"                             # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:308
+    When the address components backfill selects candidates in the default mode        # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:337
+    Then no candidates are selected                                                    # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:355
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: Reject an unknown selection mode instead of falling back             # tests/bdd/persistence/events-venue-bairro-and-ticket-url.feature:125
+    Given the events projection is enabled                                       # tests/bdd/steps/events_serving_projection_steps.py:154
+    And "Downtown Beer Garden" is a servable venue in Recife                     # tests/bdd/steps/events_serving_projection_steps.py:164
+    And the current time is 2026-09-06 18:00 in Recife                           # tests/bdd/steps/events_serving_projection_steps.py:169
+    When the address components backfill selects candidates in mode "everything" # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:342
+    Then the selection is rejected with an error naming the allowed modes        # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:361
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: Replace a parsed venue-complex name with Google's bairro                        # tests/bdd/persistence/events-venue-bairro-and-ticket-url.feature:129
+    Given the events projection is enabled                                                  # tests/bdd/steps/events_serving_projection_steps.py:154
+    And "Downtown Beer Garden" is a servable venue in Recife                                # tests/bdd/steps/events_serving_projection_steps.py:164
+    And the current time is 2026-09-06 18:00 in Recife                                      # tests/bdd/steps/events_serving_projection_steps.py:169
+    Given "Downtown Beer Garden" has the neighborhood "Quintal Espinheiro" sourced "parsed" # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:373
+    And the free-tier address lookup switch is on                                           # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:384
+    And Google answers that venue's address components with the sublocality "Espinheiro"    # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:405
+    When the address components backfill runs one batch in upgrade mode                     # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:433
+LOG_INFO:app.services.venue_address_backfill_service: [VenueAddressBackfill] batch complete: mode=upgrade processed=1 written=1 cursor=evs_7c881cbbf0f0 remaining={'street': 1, 'neighborhood': 0, 'city': 1, 'postal_code': 1}
+    Then "Downtown Beer Garden" has the neighborhood "Espinheiro"                           # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:442
+    And that neighborhood is sourced "google"                                               # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:454
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: Never replace an operator-set bairro                                      # tests/bdd/persistence/events-venue-bairro-and-ticket-url.feature:137
+    Given the events projection is enabled                                            # tests/bdd/steps/events_serving_projection_steps.py:154
+    And "Downtown Beer Garden" is a servable venue in Recife                          # tests/bdd/steps/events_serving_projection_steps.py:164
+    And the current time is 2026-09-06 18:00 in Recife                                # tests/bdd/steps/events_serving_projection_steps.py:169
+    Given "Downtown Beer Garden" has the neighborhood "Espinheiro" sourced "operator" # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:373
+    And the free-tier address lookup switch is on                                     # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:384
+    And Google answers that venue's address components with the sublocality "Aflitos" # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:405
+    When the address components backfill runs one batch in upgrade mode               # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:433
+LOG_INFO:app.services.venue_address_backfill_service: [VenueAddressBackfill] batch complete: mode=upgrade processed=1 written=1 cursor=evs_3f4a6798fa59 remaining={'street': 1, 'neighborhood': 0, 'city': 1, 'postal_code': 1}
+    Then "Downtown Beer Garden" has the neighborhood "Espinheiro"                     # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:442
+    And that neighborhood is sourced "operator"                                       # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:454
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: Never null a stored bairro when Google answers nothing                          # tests/bdd/persistence/events-venue-bairro-and-ticket-url.feature:145
+    Given the events projection is enabled                                                  # tests/bdd/steps/events_serving_projection_steps.py:154
+    And "Downtown Beer Garden" is a servable venue in Recife                                # tests/bdd/steps/events_serving_projection_steps.py:164
+    And the current time is 2026-09-06 18:00 in Recife                                      # tests/bdd/steps/events_serving_projection_steps.py:169
+    Given "Downtown Beer Garden" has the neighborhood "Quintal Espinheiro" sourced "parsed" # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:373
+    And the free-tier address lookup switch is on                                           # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:384
+    And Google answers that venue's address components with no components at all            # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:412
+    When the address components backfill runs one batch in upgrade mode                     # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:433
+LOG_INFO:app.services.venue_address_backfill_service: [VenueAddressBackfill] batch complete: mode=upgrade processed=1 written=1 cursor=evs_84238ff1fa72 remaining={'street': 1, 'neighborhood': 0, 'city': 1, 'postal_code': 1}
+    Then "Downtown Beer Garden" has the neighborhood "Quintal Espinheiro"                   # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:442
+    And that neighborhood is sourced "parsed"                                               # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:454
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: Suppress a Google neighbourhood that is only the city name                                           # tests/bdd/persistence/events-venue-bairro-and-ticket-url.feature:153
+    Given the events projection is enabled                                                                       # tests/bdd/steps/events_serving_projection_steps.py:154
+    And "Downtown Beer Garden" is a servable venue in Recife                                                     # tests/bdd/steps/events_serving_projection_steps.py:164
+    And the current time is 2026-09-06 18:00 in Recife                                                           # tests/bdd/steps/events_serving_projection_steps.py:169
+    Given a servable venue in a municipality that publishes no sublocality                                       # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:428
+    And the free-tier address lookup switch is on                                                                # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:384
+    And Google answers that venue's address components with the same name for the second-level area and the city # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:417
+    When the address components backfill runs one batch in upgrade mode                                          # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:433
+LOG_INFO:app.services.venue_address_backfill_service: [VenueAddressBackfill] batch complete: mode=upgrade processed=2 written=1 cursor=evs_da9d165c0ccd remaining={'street': 1, 'neighborhood': 2, 'city': 1, 'postal_code': 1}
+    Then that venue has no neighborhood stored                                                                   # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:460
+    And that venue has the city stored                                                                           # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:466
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: Drop a parsed bairro that is only the city name                        # tests/bdd/persistence/events-venue-bairro-and-ticket-url.feature:161
+    Given the events projection is enabled                                         # tests/bdd/steps/events_serving_projection_steps.py:154
+    And "Downtown Beer Garden" is a servable venue in Recife                       # tests/bdd/steps/events_serving_projection_steps.py:164
+    And the current time is 2026-09-06 18:00 in Recife                             # tests/bdd/steps/events_serving_projection_steps.py:169
+    Given a servable venue whose stored city is "Igarassu"                         # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:487
+    When the address text parser writes the neighborhood "Igarassu" for that venue # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:507
+    Then that venue has no neighborhood stored                                     # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:460
+    And that venue still has the city "Igarassu" stored                            # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:549
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: Fold case and accents when comparing a bairro to the stored city        # tests/bdd/persistence/events-venue-bairro-and-ticket-url.feature:167
+    Given the events projection is enabled                                          # tests/bdd/steps/events_serving_projection_steps.py:154
+    And "Downtown Beer Garden" is a servable venue in Recife                        # tests/bdd/steps/events_serving_projection_steps.py:164
+    And the current time is 2026-09-06 18:00 in Recife                              # tests/bdd/steps/events_serving_projection_steps.py:169
+    Given a servable venue whose stored city is "São Paulo"                         # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:487
+    When the address text parser writes the neighborhood "SAO PAULO" for that venue # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:507
+    Then that venue has no neighborhood stored                                      # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:460
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: Store a bairro that genuinely differs from the city                      # tests/bdd/persistence/events-venue-bairro-and-ticket-url.feature:172
+    Given the events projection is enabled                                           # tests/bdd/steps/events_serving_projection_steps.py:154
+    And "Downtown Beer Garden" is a servable venue in Recife                         # tests/bdd/steps/events_serving_projection_steps.py:164
+    And the current time is 2026-09-06 18:00 in Recife                               # tests/bdd/steps/events_serving_projection_steps.py:169
+    Given a servable venue whose stored city is "Recife"                             # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:487
+    When the address text parser writes the neighborhood "Espinheiro" for that venue # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:507
+    Then that venue has the neighborhood "Espinheiro"                                # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:543
+    And that neighborhood is sourced "parsed"                                        # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:454
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: Trust an operator's bairro that is named after its city  # tests/bdd/persistence/events-venue-bairro-and-ticket-url.feature:182
+    Given the events projection is enabled                           # tests/bdd/steps/events_serving_projection_steps.py:154
+    And "Downtown Beer Garden" is a servable venue in Recife         # tests/bdd/steps/events_serving_projection_steps.py:164
+    And the current time is 2026-09-06 18:00 in Recife               # tests/bdd/steps/events_serving_projection_steps.py:169
+    Given a servable venue whose stored city is "Recife"             # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:487
+    When an operator writes the neighborhood "Recife" for that venue # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:536
+    Then that venue has the neighborhood "Recife"                    # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:543
+    And that neighborhood is sourced "operator"                      # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:454
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: Drop a bairro that equals the city the row will keep, even when the write's own city is different  # tests/bdd/persistence/events-venue-bairro-and-ticket-url.feature:192
+    Given the events projection is enabled                                                                     # tests/bdd/steps/events_serving_projection_steps.py:154
+    And "Downtown Beer Garden" is a servable venue in Recife                                                   # tests/bdd/steps/events_serving_projection_steps.py:164
+    And the current time is 2026-09-06 18:00 in Recife                                                         # tests/bdd/steps/events_serving_projection_steps.py:169
+    Given a servable venue whose stored city is "Recife" sourced "google"                                      # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:496
+    When the address text parser writes the city "Igarassu" and the neighborhood "Recife" for that venue       # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:514
+    Then that venue has no neighborhood stored                                                                 # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:460
+    And that venue still has the city "Recife" stored                                                          # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:549
+    And that city is sourced "google"                                                                          # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:556
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: Keep a bairro when the write's own city wins and differs from it            # tests/bdd/persistence/events-venue-bairro-and-ticket-url.feature:202
+    Given the events projection is enabled                                              # tests/bdd/steps/events_serving_projection_steps.py:154
+    And "Downtown Beer Garden" is a servable venue in Recife                            # tests/bdd/steps/events_serving_projection_steps.py:164
+    And the current time is 2026-09-06 18:00 in Recife                                  # tests/bdd/steps/events_serving_projection_steps.py:169
+    Given a servable venue whose stored city is "Recife" sourced "parsed"               # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:496
+    When Google writes the city "Igarassu" and the neighborhood "Recife" for that venue # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:529
+    Then that venue has the city "Igarassu" stored                                      # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:549
+    And that venue has the neighborhood "Recife"                                        # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:543
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: Write the other address fields even when the bairro is dropped                                     # tests/bdd/persistence/events-venue-bairro-and-ticket-url.feature:208
+    Given the events projection is enabled                                                                     # tests/bdd/steps/events_serving_projection_steps.py:154
+    And "Downtown Beer Garden" is a servable venue in Recife                                                   # tests/bdd/steps/events_serving_projection_steps.py:164
+    And the current time is 2026-09-06 18:00 in Recife                                                         # tests/bdd/steps/events_serving_projection_steps.py:169
+    Given a servable venue whose stored city is "Igarassu"                                                     # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:487
+    When the address text parser writes the neighborhood "Igarassu" and the street "Rua do Sol" for that venue # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:521
+    Then that venue has no neighborhood stored                                                                 # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:460
+    And that venue has the street "Rua do Sol" stored                                                          # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:562
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: Make no address lookup at all while the free-tier switch is off                 # tests/bdd/persistence/events-venue-bairro-and-ticket-url.feature:214
+    Given the events projection is enabled                                                  # tests/bdd/steps/events_serving_projection_steps.py:154
+    And "Downtown Beer Garden" is a servable venue in Recife                                # tests/bdd/steps/events_serving_projection_steps.py:164
+    And the current time is 2026-09-06 18:00 in Recife                                      # tests/bdd/steps/events_serving_projection_steps.py:169
+    Given "Downtown Beer Garden" has the neighborhood "Quintal Espinheiro" sourced "parsed" # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:373
+    And the free-tier address lookup switch is off                                          # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:389
+    When the address components backfill runs one batch in upgrade mode                     # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:433
+LOG_INFO:app.services.venue_address_backfill_service: [VenueAddressBackfill] batch complete: mode=upgrade processed=1 written=0 cursor=evs_08974c7f7ac5 remaining={'street': 1, 'neighborhood': 0, 'city': 1, 'postal_code': 1}
+    Then no Place Details address lookup is made                                            # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:472
+    And the address lookup outcome "disabled" is counted                                    # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:477
+    And "Downtown Beer Garden" still has the neighborhood "Quintal Espinheiro"              # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:449
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: Serve the corrected bairro on the next projection cycle             # tests/bdd/persistence/events-venue-bairro-and-ticket-url.feature:222
+    Given the events projection is enabled                                      # tests/bdd/steps/events_serving_projection_steps.py:154
+    And "Downtown Beer Garden" is a servable venue in Recife                    # tests/bdd/steps/events_serving_projection_steps.py:164
+    And the current time is 2026-09-06 18:00 in Recife                          # tests/bdd/steps/events_serving_projection_steps.py:169
+    Given an accepted event at "Downtown Beer Garden" starting 2026-09-06 20:00 # tests/bdd/steps/events_serving_projection_steps.py:184
+    And that venue's stored neighborhood has been corrected to "Espinheiro"     # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:568
+    When the events projection runs                                             # tests/bdd/steps/events_serving_projection_steps.py:478
+LOG_INFO:app.services.redis_projection_service: [EventsProjection] {'occurrences': 1, 'source_rows': 1, 'bytes': 722, 'errors': 0, 'error_events': [], 'flyer': {}}
+    Then the occurrence payload carries the venue neighborhood "Espinheiro"     # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:577
+    And the occurrence payload still carries every other contracted field       # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:585
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: Report the address provenance distribution after a batch               # tests/bdd/persistence/events-venue-bairro-and-ticket-url.feature:229
+    Given the events projection is enabled                                         # tests/bdd/steps/events_serving_projection_steps.py:154
+    And "Downtown Beer Garden" is a servable venue in Recife                       # tests/bdd/steps/events_serving_projection_steps.py:164
+    And the current time is 2026-09-06 18:00 in Recife                             # tests/bdd/steps/events_serving_projection_steps.py:169
+    Given the catalog holds address rows sourced "parsed", "google" and "operator" # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:607
+    When the address components backfill runs one batch in upgrade mode            # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:433
+LOG_INFO:app.services.venue_address_backfill_service: [VenueAddressBackfill] batch complete: mode=upgrade processed=2 written=1 cursor=evs_477f5f4b53b6 remaining={'street': 1, 'neighborhood': 1, 'city': 1, 'postal_code': 1}
+    Then the address provenance gauge reports a row count per field and per source # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:642
+    And the reported counts match the rows actually stored                         # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:653
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: Report how many stored bairros are still just the city name                       # tests/bdd/persistence/events-venue-bairro-and-ticket-url.feature:235
+    Given the events projection is enabled                                                    # tests/bdd/steps/events_serving_projection_steps.py:154
+    And "Downtown Beer Garden" is a servable venue in Recife                                  # tests/bdd/steps/events_serving_projection_steps.py:164
+    And the current time is 2026-09-06 18:00 in Recife                                        # tests/bdd/steps/events_serving_projection_steps.py:169
+    Given the catalog holds two address rows whose stored neighborhood equals its stored city # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:620
+    When the address components backfill runs one batch in upgrade mode                       # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:433
+LOG_INFO:app.services.venue_address_backfill_service: [VenueAddressBackfill] batch complete: mode=upgrade processed=3 written=2 cursor=evs_40041a6deb3a remaining={'street': 1, 'neighborhood': 1, 'city': 1, 'postal_code': 1}
+    Then the neighborhood-equals-city gauge reports 2                                         # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:665
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: Report no refresh timestamp until a backfill batch actually runs  # tests/bdd/persistence/events-venue-bairro-and-ticket-url.feature:254
+    Given the events projection is enabled                                    # tests/bdd/steps/events_serving_projection_steps.py:154
+    And "Downtown Beer Garden" is a servable venue in Recife                  # tests/bdd/steps/events_serving_projection_steps.py:164
+    And the current time is 2026-09-06 18:00 in Recife                        # tests/bdd/steps/events_serving_projection_steps.py:169
+    Given no address components backfill batch has ever run                   # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:635
+    And an accepted event at "Downtown Beer Garden" starting 2026-09-06 20:00 # tests/bdd/steps/events_serving_projection_steps.py:184
+    When the events projection runs                                           # tests/bdd/steps/events_serving_projection_steps.py:478
+LOG_INFO:app.services.redis_projection_service: [EventsProjection] {'occurrences': 1, 'source_rows': 1, 'bytes': 714, 'errors': 0, 'error_events': [], 'flyer': {}}
+    Then the occurrence payload carries no ticket url                         # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:244
+    And the address gauges refresh timestamp reports 0                        # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:671
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: Stamp when the address gauges were last refreshed           # tests/bdd/persistence/events-venue-bairro-and-ticket-url.feature:261
+    Given the events projection is enabled                              # tests/bdd/steps/events_serving_projection_steps.py:154
+    And "Downtown Beer Garden" is a servable venue in Recife            # tests/bdd/steps/events_serving_projection_steps.py:164
+    And the current time is 2026-09-06 18:00 in Recife                  # tests/bdd/steps/events_serving_projection_steps.py:169
+    Given no address components backfill batch has ever run             # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:635
+    When the address components backfill runs one batch in upgrade mode # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:433
+LOG_INFO:app.services.venue_address_backfill_service: [VenueAddressBackfill] batch complete: mode=upgrade processed=1 written=0 cursor=evs_b3190cc7543f remaining={'street': 1, 'neighborhood': 1, 'city': 1, 'postal_code': 1}
+    Then the address gauges refresh timestamp reports that batch's time # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:677
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: Keep last night's recurring occurrence in the index at 00:30 local                                                          # tests/bdd/persistence/events-venue-bairro-and-ticket-url.feature:268
+    Given the events projection is enabled                                                                                              # tests/bdd/steps/events_serving_projection_steps.py:154
+    And "Downtown Beer Garden" is a servable venue in Recife                                                                            # tests/bdd/steps/events_serving_projection_steps.py:164
+    And the current time is 2026-09-06 18:00 in Recife                                                                                  # tests/bdd/steps/events_serving_projection_steps.py:169
+    Given an accepted recurring event at "Downtown Beer Garden" whose recurrence text is "toda quarta" and whose resolved time is 22:00 # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:688
+    And the current time is 2026-09-10 00:30 in Recife                                                                                  # tests/bdd/steps/events_serving_projection_steps.py:169
+    When the events projection runs                                                                                                     # tests/bdd/steps/events_serving_projection_steps.py:478
+LOG_INFO:app.services.redis_projection_service: [EventsProjection] {'occurrences': 4, 'source_rows': 1, 'bytes': 2932, 'errors': 0, 'error_events': [], 'flyer': {}}
+    Then the city index for "recife" contains the occurrence for 2026-09-09                                                             # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:731
+    And that occurrence has a payload key                                                                                               # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:757
+    And that occurrence is scored by its own start time of 2026-09-09 22:00 in Recife                                                   # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:769
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: Keep last night's recurring occurrence in the venue index too                                                               # tests/bdd/persistence/events-venue-bairro-and-ticket-url.feature:276
+    Given the events projection is enabled                                                                                              # tests/bdd/steps/events_serving_projection_steps.py:154
+    And "Downtown Beer Garden" is a servable venue in Recife                                                                            # tests/bdd/steps/events_serving_projection_steps.py:164
+    And the current time is 2026-09-06 18:00 in Recife                                                                                  # tests/bdd/steps/events_serving_projection_steps.py:169
+    Given an accepted recurring event at "Downtown Beer Garden" whose recurrence text is "toda quarta" and whose resolved time is 22:00 # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:688
+    And the current time is 2026-09-10 00:30 in Recife                                                                                  # tests/bdd/steps/events_serving_projection_steps.py:169
+    When the events projection runs                                                                                                     # tests/bdd/steps/events_serving_projection_steps.py:478
+LOG_INFO:app.services.redis_projection_service: [EventsProjection] {'occurrences': 4, 'source_rows': 1, 'bytes': 2932, 'errors': 0, 'error_events': [], 'flyer': {}}
+    Then the venue index for "Downtown Beer Garden" contains the occurrence for 2026-09-09                                              # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:743
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: Prune last night's recurring occurrence after 06:00 local                                                                   # tests/bdd/persistence/events-venue-bairro-and-ticket-url.feature:282
+    Given the events projection is enabled                                                                                              # tests/bdd/steps/events_serving_projection_steps.py:154
+    And "Downtown Beer Garden" is a servable venue in Recife                                                                            # tests/bdd/steps/events_serving_projection_steps.py:164
+    And the current time is 2026-09-06 18:00 in Recife                                                                                  # tests/bdd/steps/events_serving_projection_steps.py:169
+    Given an accepted recurring event at "Downtown Beer Garden" whose recurrence text is "toda quarta" and whose resolved time is 22:00 # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:688
+    And the events projection has already run at 2026-09-10 00:30 in Recife                                                             # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:704
+LOG_INFO:app.services.redis_projection_service: [EventsProjection] {'occurrences': 4, 'source_rows': 1, 'bytes': 2932, 'errors': 0, 'error_events': [], 'flyer': {}}
+    And the current time is 2026-09-10 06:30 in Recife                                                                                  # tests/bdd/steps/events_serving_projection_steps.py:169
+    When the events projection runs again                                                                                               # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:217
+LOG_INFO:app.services.redis_projection_service: [EventsProjection] {'occurrences': 3, 'source_rows': 1, 'bytes': 2199, 'errors': 0, 'error_events': [], 'flyer': {}}
+    Then the city index for "recife" does not contain the occurrence for 2026-09-09                                                     # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:737
+    And the venue index for "Downtown Beer Garden" does not contain the occurrence for 2026-09-09                                       # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:750
+    And the occurrence for 2026-09-09 has no payload key                                                                                # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:763
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: Roll the near edge back only while the local hour is below the cutoff                                                       # tests/bdd/persistence/events-venue-bairro-and-ticket-url.feature:291
+    Given the events projection is enabled                                                                                              # tests/bdd/steps/events_serving_projection_steps.py:154
+    And "Downtown Beer Garden" is a servable venue in Recife                                                                            # tests/bdd/steps/events_serving_projection_steps.py:164
+    And the current time is 2026-09-06 18:00 in Recife                                                                                  # tests/bdd/steps/events_serving_projection_steps.py:169
+    Given an accepted recurring event at "Downtown Beer Garden" whose recurrence text is "toda quarta" and whose resolved time is 22:00 # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:688
+    And the current time is 2026-09-10 05:59 in Recife                                                                                  # tests/bdd/steps/events_serving_projection_steps.py:169
+    When the events projection runs                                                                                                     # tests/bdd/steps/events_serving_projection_steps.py:478
+LOG_INFO:app.services.redis_projection_service: [EventsProjection] {'occurrences': 4, 'source_rows': 1, 'bytes': 2932, 'errors': 0, 'error_events': [], 'flyer': {}}
+    Then the city index for "recife" contains the occurrence for 2026-09-09                                                             # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:731
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: Keep the forward horizon unchanged during the small hours                                                                # tests/bdd/persistence/events-venue-bairro-and-ticket-url.feature:297
+    Given the events projection is enabled                                                                                           # tests/bdd/steps/events_serving_projection_steps.py:154
+    And "Downtown Beer Garden" is a servable venue in Recife                                                                         # tests/bdd/steps/events_serving_projection_steps.py:164
+    And the current time is 2026-09-06 18:00 in Recife                                                                               # tests/bdd/steps/events_serving_projection_steps.py:169
+    Given an accepted recurring event at "Downtown Beer Garden" whose recurrence text is "todo dia" and whose resolved time is 22:00 # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:688
+    And the current time is 2026-09-10 00:30 in Recife                                                                               # tests/bdd/steps/events_serving_projection_steps.py:169
+    When the events projection runs                                                                                                  # tests/bdd/steps/events_serving_projection_steps.py:478
+LOG_INFO:app.services.redis_projection_service: [EventsProjection] {'occurrences': 23, 'source_rows': 1, 'bytes': 16790, 'errors': 0, 'error_events': [], 'flyer': {}}
+    Then the city index for "recife" contains the occurrence for 2026-10-01                                                          # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:731
+    And the city index for "recife" does not contain the occurrence for 2026-10-02                                                   # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:737
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: Keep the same forward horizon after the cutoff has passed                                                                # tests/bdd/persistence/events-venue-bairro-and-ticket-url.feature:304
+    Given the events projection is enabled                                                                                           # tests/bdd/steps/events_serving_projection_steps.py:154
+    And "Downtown Beer Garden" is a servable venue in Recife                                                                         # tests/bdd/steps/events_serving_projection_steps.py:164
+    And the current time is 2026-09-06 18:00 in Recife                                                                               # tests/bdd/steps/events_serving_projection_steps.py:169
+    Given an accepted recurring event at "Downtown Beer Garden" whose recurrence text is "todo dia" and whose resolved time is 22:00 # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:688
+    And the current time is 2026-09-10 06:30 in Recife                                                                               # tests/bdd/steps/events_serving_projection_steps.py:169
+    When the events projection runs                                                                                                  # tests/bdd/steps/events_serving_projection_steps.py:478
+LOG_INFO:app.services.redis_projection_service: [EventsProjection] {'occurrences': 22, 'source_rows': 1, 'bytes': 16060, 'errors': 0, 'error_events': [], 'flyer': {}}
+    Then the city index for "recife" contains the occurrence for 2026-10-01                                                          # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:731
+    And the city index for "recife" does not contain the occurrence for 2026-10-02                                                   # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:737
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: Keep last night's non-recurring occurrence in the index as well     # tests/bdd/persistence/events-venue-bairro-and-ticket-url.feature:311
+    Given the events projection is enabled                                      # tests/bdd/steps/events_serving_projection_steps.py:154
+    And "Downtown Beer Garden" is a servable venue in Recife                    # tests/bdd/steps/events_serving_projection_steps.py:164
+    And the current time is 2026-09-06 18:00 in Recife                          # tests/bdd/steps/events_serving_projection_steps.py:169
+    Given an accepted event at "Downtown Beer Garden" starting 2026-09-09 22:00 # tests/bdd/steps/events_serving_projection_steps.py:184
+    And the current time is 2026-09-10 00:30 in Recife                          # tests/bdd/steps/events_serving_projection_steps.py:169
+    When the events projection runs                                             # tests/bdd/steps/events_serving_projection_steps.py:478
+LOG_INFO:app.services.redis_projection_service: [EventsProjection] {'occurrences': 1, 'source_rows': 1, 'bytes': 714, 'errors': 0, 'error_events': [], 'flyer': {}}
+    Then the city index for "recife" contains the occurrence for 2026-09-09     # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:731
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: Count the cycles that ran with the nightlife day rolled back                                                                # tests/bdd/persistence/events-venue-bairro-and-ticket-url.feature:317
+    Given the events projection is enabled                                                                                              # tests/bdd/steps/events_serving_projection_steps.py:154
+    And "Downtown Beer Garden" is a servable venue in Recife                                                                            # tests/bdd/steps/events_serving_projection_steps.py:164
+    And the current time is 2026-09-06 18:00 in Recife                                                                                  # tests/bdd/steps/events_serving_projection_steps.py:169
+    Given an accepted recurring event at "Downtown Beer Garden" whose recurrence text is "toda quarta" and whose resolved time is 22:00 # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:688
+    And the current time is 2026-09-10 00:30 in Recife                                                                                  # tests/bdd/steps/events_serving_projection_steps.py:169
+    When the events projection runs                                                                                                     # tests/bdd/steps/events_serving_projection_steps.py:478
+LOG_INFO:app.services.redis_projection_service: [EventsProjection] {'occurrences': 4, 'source_rows': 1, 'bytes': 2932, 'errors': 0, 'error_events': [], 'flyer': {}}
+    Then the nightlife rollback counter is bumped once                                                                                  # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:779
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: Do not count a rollback for a cycle that ran after the cutoff                                                               # tests/bdd/persistence/events-venue-bairro-and-ticket-url.feature:323
+    Given the events projection is enabled                                                                                              # tests/bdd/steps/events_serving_projection_steps.py:154
+    And "Downtown Beer Garden" is a servable venue in Recife                                                                            # tests/bdd/steps/events_serving_projection_steps.py:164
+    And the current time is 2026-09-06 18:00 in Recife                                                                                  # tests/bdd/steps/events_serving_projection_steps.py:169
+    Given an accepted recurring event at "Downtown Beer Garden" whose recurrence text is "toda quarta" and whose resolved time is 22:00 # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:688
+    And the current time is 2026-09-10 06:30 in Recife                                                                                  # tests/bdd/steps/events_serving_projection_steps.py:169
+    When the events projection runs                                                                                                     # tests/bdd/steps/events_serving_projection_steps.py:478
+LOG_INFO:app.services.redis_projection_service: [EventsProjection] {'occurrences': 3, 'source_rows': 1, 'bytes': 2199, 'errors': 0, 'error_events': [], 'flyer': {}}
+    Then the nightlife rollback counter is not bumped                                                                                   # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:786
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: Remember a configured geo-fence city that holds no events    # tests/bdd/persistence/events-venue-bairro-and-ticket-url.feature:331
+    Given the events projection is enabled                               # tests/bdd/steps/events_serving_projection_steps.py:154
+    And "Downtown Beer Garden" is a servable venue in Recife             # tests/bdd/steps/events_serving_projection_steps.py:164
+    And the current time is 2026-09-06 18:00 in Recife                   # tests/bdd/steps/events_serving_projection_steps.py:169
+    Given the geo fence configures the cities "recife" and "joao-pessoa" # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:796
+    And every accepted event is in Recife                                # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:810
+    When the events projection runs                                      # tests/bdd/steps/events_serving_projection_steps.py:478
+LOG_INFO:app.services.redis_projection_service: [EventsProjection] {'occurrences': 1, 'source_rows': 1, 'bytes': 714, 'errors': 0, 'error_events': [], 'flyer': {}}
+    Then the known events cities are "joao-pessoa" and "recife"          # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:919
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: Keep remembering a city after its last occurrence is gone    # tests/bdd/persistence/events-venue-bairro-and-ticket-url.feature:337
+    Given the events projection is enabled                               # tests/bdd/steps/events_serving_projection_steps.py:154
+    And "Downtown Beer Garden" is a servable venue in Recife             # tests/bdd/steps/events_serving_projection_steps.py:164
+    And the current time is 2026-09-06 18:00 in Recife                   # tests/bdd/steps/events_serving_projection_steps.py:169
+    Given the geo fence configures the cities "recife" and "joao-pessoa" # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:796
+    And the events projection has already run once                       # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:208
+LOG_INFO:app.services.redis_projection_service: [EventsProjection] {'occurrences': 0, 'source_rows': 0, 'bytes': 0, 'errors': 0, 'error_events': [], 'flyer': {}}
+    When the geo fence is reduced to the city "recife"                   # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:905
+    And the events projection runs again                                 # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:217
+LOG_INFO:app.services.redis_projection_service: [EventsProjection] {'occurrences': 0, 'source_rows': 0, 'bytes': 0, 'errors': 0, 'error_events': [], 'flyer': {}}
+    Then the known events cities are "joao-pessoa" and "recife"          # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:919
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: Rebuild the whole vocabulary on the next cycle after the set is erased  # tests/bdd/persistence/events-venue-bairro-and-ticket-url.feature:344
+    Given the events projection is enabled                                          # tests/bdd/steps/events_serving_projection_steps.py:154
+    And "Downtown Beer Garden" is a servable venue in Recife                        # tests/bdd/steps/events_serving_projection_steps.py:164
+    And the current time is 2026-09-06 18:00 in Recife                              # tests/bdd/steps/events_serving_projection_steps.py:169
+    Given the geo fence configures the cities "recife" and "joao-pessoa"            # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:796
+    And the events projection has already run once                                  # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:208
+LOG_INFO:app.services.redis_projection_service: [EventsProjection] {'occurrences': 0, 'source_rows': 0, 'bytes': 0, 'errors': 0, 'error_events': [], 'flyer': {}}
+    When the known events cities set is erased                                      # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:913
+    And the events projection runs again                                            # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:217
+LOG_INFO:app.services.redis_projection_service: [EventsProjection] {'occurrences': 0, 'source_rows': 0, 'bytes': 0, 'errors': 0, 'error_events': [], 'flyer': {}}
+    Then the known events cities are "joao-pessoa" and "recife"                     # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:919
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: Keep projecting when remembering a configured city fails     # tests/bdd/persistence/events-venue-bairro-and-ticket-url.feature:358
+    Given the events projection is enabled                               # tests/bdd/steps/events_serving_projection_steps.py:154
+    And "Downtown Beer Garden" is a servable venue in Recife             # tests/bdd/steps/events_serving_projection_steps.py:164
+    And the current time is 2026-09-06 18:00 in Recife                   # tests/bdd/steps/events_serving_projection_steps.py:169
+    Given the geo fence configures the cities "recife" and "joao-pessoa" # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:796
+    And every accepted event is in Recife                                # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:810
+    And remembering the configured city "joao-pessoa" fails              # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:841
+    When the events projection runs                                      # tests/bdd/steps/events_serving_projection_steps.py:478
+LOG_WARNING:app.services.redis_projection_service: [EventsProjection] remembering configured city slugs failed; continuing this cycle: SADD events_known_cities_v1 joao-pessoa failed
+LOG_INFO:app.services.redis_projection_service: [EventsProjection] {'occurrences': 1, 'source_rows': 1, 'bytes': 714, 'errors': 0, 'error_events': [], 'flyer': {}}
+    Then remembering that configured city was attempted and failed       # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:870
+    And the projection still writes every accepted occurrence            # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:925
+    And the projection cycle is not reported as failed                   # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:944
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: Fail the cycle when the city an occurrence is indexed under cannot be remembered  # tests/bdd/persistence/events-venue-bairro-and-ticket-url.feature:376
+    Given the events projection is enabled                                                    # tests/bdd/steps/events_serving_projection_steps.py:154
+    And "Downtown Beer Garden" is a servable venue in Recife                                  # tests/bdd/steps/events_serving_projection_steps.py:164
+    And the current time is 2026-09-06 18:00 in Recife                                        # tests/bdd/steps/events_serving_projection_steps.py:169
+    Given the geo fence configures the cities "recife" and "joao-pessoa"                      # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:796
+    And every accepted event is in Recife                                                     # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:810
+    And remembering any city slug fails                                                       # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:852
+    When the events projection runs and is allowed to fail                                    # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:858
+LOG_WARNING:app.services.redis_projection_service: [EventsProjection] remembering configured city slugs failed; continuing this cycle: SADD events_known_cities_v1 recife failed
+    Then the projection cycle fails loudly instead of returning a summary                     # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:879
+    And the divergence that failure exists to surface is visible                              # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:891
+
+
+Failing scenarios:
+  tests/bdd/persistence/events-venue-bairro-and-ticket-url.feature:45  Project no ticket url for a host whose port is not a real TCP port
+
+0 features passed, 1 failed, 0 skipped
+47 scenarios passed, 1 failed, 0 skipped
+355 steps passed, 1 failed, 1 skipped
+Took 0min 0.168s
+make: *** [Makefile:192: test-feature] Error 1

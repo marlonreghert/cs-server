@@ -1,0 +1,414 @@
+........FFF.......FFF..................................................F [ 36%]
+FF.......FFF................................................F......FFF.. [ 73%]
+........F.F.....F..................................                      [100%]
+=================================== FAILURES ===================================
+__________ test_classify_ticket_url[evenyx.com:80808/x-None-rejected] __________
+
+stored = 'evenyx.com:80808/x', expected = None, outcome = 'rejected'
+
+    @pytest.mark.parametrize("stored,expected,outcome", _CASES)
+    def test_classify_ticket_url(stored, expected, outcome):
+>       assert classify_ticket_url(stored) == (expected, outcome)
+E       AssertionError: assert ('https://eve...scheme_added') == (None, 'rejected')
+E         
+E         At index 0 diff: 'https://evenyx.com:80808/x' != None
+E         Use -v to get more diff
+
+tests/test_event_ticket_url.py:142: AssertionError
+__________ test_classify_ticket_url[evenyx.com:99999/x-None-rejected] __________
+
+stored = 'evenyx.com:99999/x', expected = None, outcome = 'rejected'
+
+    @pytest.mark.parametrize("stored,expected,outcome", _CASES)
+    def test_classify_ticket_url(stored, expected, outcome):
+>       assert classify_ticket_url(stored) == (expected, outcome)
+E       AssertionError: assert ('https://eve...scheme_added') == (None, 'rejected')
+E         
+E         At index 0 diff: 'https://evenyx.com:99999/x' != None
+E         Use -v to get more diff
+
+tests/test_event_ticket_url.py:142: AssertionError
+__________ test_classify_ticket_url[evenyx.com:65536/x-None-rejected] __________
+
+stored = 'evenyx.com:65536/x', expected = None, outcome = 'rejected'
+
+    @pytest.mark.parametrize("stored,expected,outcome", _CASES)
+    def test_classify_ticket_url(stored, expected, outcome):
+>       assert classify_ticket_url(stored) == (expected, outcome)
+E       AssertionError: assert ('https://eve...scheme_added') == (None, 'rejected')
+E         
+E         At index 0 diff: 'https://evenyx.com:65536/x' != None
+E         Use -v to get more diff
+
+tests/test_event_ticket_url.py:142: AssertionError
+_________ test_classify_ticket_url[//evenyx.com:80808/x-None-rejected] _________
+
+stored = '//evenyx.com:80808/x', expected = None, outcome = 'rejected'
+
+    @pytest.mark.parametrize("stored,expected,outcome", _CASES)
+    def test_classify_ticket_url(stored, expected, outcome):
+>       assert classify_ticket_url(stored) == (expected, outcome)
+E       AssertionError: assert ('https://eve...scheme_added') == (None, 'rejected')
+E         
+E         At index 0 diff: 'https://evenyx.com:80808/x' != None
+E         Use -v to get more diff
+
+tests/test_event_ticket_url.py:142: AssertionError
+______ test_classify_ticket_url[https://evenyx.com:80808/x-None-rejected] ______
+
+stored = 'https://evenyx.com:80808/x', expected = None, outcome = 'rejected'
+
+    @pytest.mark.parametrize("stored,expected,outcome", _CASES)
+    def test_classify_ticket_url(stored, expected, outcome):
+>       assert classify_ticket_url(stored) == (expected, outcome)
+E       AssertionError: assert ('https://eve...'passthrough') == (None, 'rejected')
+E         
+E         At index 0 diff: 'https://evenyx.com:80808/x' != None
+E         Use -v to get more diff
+
+tests/test_event_ticket_url.py:142: AssertionError
+______ test_classify_ticket_url[https://evenyx.com:65536/x-None-rejected] ______
+
+stored = 'https://evenyx.com:65536/x', expected = None, outcome = 'rejected'
+
+    @pytest.mark.parametrize("stored,expected,outcome", _CASES)
+    def test_classify_ticket_url(stored, expected, outcome):
+>       assert classify_ticket_url(stored) == (expected, outcome)
+E       AssertionError: assert ('https://eve...'passthrough') == (None, 'rejected')
+E         
+E         At index 0 diff: 'https://evenyx.com:65536/x' != None
+E         Use -v to get more diff
+
+tests/test_event_ticket_url.py:142: AssertionError
+_ test_normalize_ticket_url_matches_the_classifier[evenyx.com:80808/x-None-rejected] _
+
+stored = 'evenyx.com:80808/x', expected = None, _outcome = 'rejected'
+
+    @pytest.mark.parametrize("stored,expected,_outcome", _CASES)
+    def test_normalize_ticket_url_matches_the_classifier(stored, expected, _outcome):
+        """`normalize_ticket_url` is the plan's named export; it must never
+        disagree with the classifier the projector's counter reads."""
+>       assert normalize_ticket_url(stored) == expected
+E       AssertionError: assert 'https://evenyx.com:80808/x' == None
+E        +  where 'https://evenyx.com:80808/x' = normalize_ticket_url('evenyx.com:80808/x')
+
+tests/test_event_ticket_url.py:149: AssertionError
+_ test_normalize_ticket_url_matches_the_classifier[evenyx.com:99999/x-None-rejected] _
+
+stored = 'evenyx.com:99999/x', expected = None, _outcome = 'rejected'
+
+    @pytest.mark.parametrize("stored,expected,_outcome", _CASES)
+    def test_normalize_ticket_url_matches_the_classifier(stored, expected, _outcome):
+        """`normalize_ticket_url` is the plan's named export; it must never
+        disagree with the classifier the projector's counter reads."""
+>       assert normalize_ticket_url(stored) == expected
+E       AssertionError: assert 'https://evenyx.com:99999/x' == None
+E        +  where 'https://evenyx.com:99999/x' = normalize_ticket_url('evenyx.com:99999/x')
+
+tests/test_event_ticket_url.py:149: AssertionError
+_ test_normalize_ticket_url_matches_the_classifier[evenyx.com:65536/x-None-rejected] _
+
+stored = 'evenyx.com:65536/x', expected = None, _outcome = 'rejected'
+
+    @pytest.mark.parametrize("stored,expected,_outcome", _CASES)
+    def test_normalize_ticket_url_matches_the_classifier(stored, expected, _outcome):
+        """`normalize_ticket_url` is the plan's named export; it must never
+        disagree with the classifier the projector's counter reads."""
+>       assert normalize_ticket_url(stored) == expected
+E       AssertionError: assert 'https://evenyx.com:65536/x' == None
+E        +  where 'https://evenyx.com:65536/x' = normalize_ticket_url('evenyx.com:65536/x')
+
+tests/test_event_ticket_url.py:149: AssertionError
+_ test_normalize_ticket_url_matches_the_classifier[//evenyx.com:80808/x-None-rejected] _
+
+stored = '//evenyx.com:80808/x', expected = None, _outcome = 'rejected'
+
+    @pytest.mark.parametrize("stored,expected,_outcome", _CASES)
+    def test_normalize_ticket_url_matches_the_classifier(stored, expected, _outcome):
+        """`normalize_ticket_url` is the plan's named export; it must never
+        disagree with the classifier the projector's counter reads."""
+>       assert normalize_ticket_url(stored) == expected
+E       AssertionError: assert 'https://evenyx.com:80808/x' == None
+E        +  where 'https://evenyx.com:80808/x' = normalize_ticket_url('//evenyx.com:80808/x')
+
+tests/test_event_ticket_url.py:149: AssertionError
+_ test_normalize_ticket_url_matches_the_classifier[https://evenyx.com:80808/x-None-rejected] _
+
+stored = 'https://evenyx.com:80808/x', expected = None, _outcome = 'rejected'
+
+    @pytest.mark.parametrize("stored,expected,_outcome", _CASES)
+    def test_normalize_ticket_url_matches_the_classifier(stored, expected, _outcome):
+        """`normalize_ticket_url` is the plan's named export; it must never
+        disagree with the classifier the projector's counter reads."""
+>       assert normalize_ticket_url(stored) == expected
+E       AssertionError: assert 'https://evenyx.com:80808/x' == None
+E        +  where 'https://evenyx.com:80808/x' = normalize_ticket_url('https://evenyx.com:80808/x')
+
+tests/test_event_ticket_url.py:149: AssertionError
+_ test_normalize_ticket_url_matches_the_classifier[https://evenyx.com:65536/x-None-rejected] _
+
+stored = 'https://evenyx.com:65536/x', expected = None, _outcome = 'rejected'
+
+    @pytest.mark.parametrize("stored,expected,_outcome", _CASES)
+    def test_normalize_ticket_url_matches_the_classifier(stored, expected, _outcome):
+        """`normalize_ticket_url` is the plan's named export; it must never
+        disagree with the classifier the projector's counter reads."""
+>       assert normalize_ticket_url(stored) == expected
+E       AssertionError: assert 'https://evenyx.com:65536/x' == None
+E        +  where 'https://evenyx.com:65536/x' = normalize_ticket_url('https://evenyx.com:65536/x')
+
+tests/test_event_ticket_url.py:149: AssertionError
+__________ test_an_impossible_port_is_counted_rejected_not_qualified ___________
+
+    def test_an_impossible_port_is_counted_rejected_not_qualified():
+        """The counter is the only signal that would ever reveal this class of
+        defect, so labelling matters as much as the value. `:80808` used to come
+        back as `https://evenyx.com:80808/x` under `scheme_added` — a dead ticket
+        button recorded as a SUCCESS. It must now be None AND `rejected`; None
+        under `scheme_added` or `passthrough` would hide the drift just as
+        effectively."""
+        for value in (
+            "evenyx.com:80808/x",
+            "evenyx.com:99999/x",
+            "evenyx.com:65536/x",
+            "//evenyx.com:80808/x",
+            "https://evenyx.com:80808/x",
+            "https://evenyx.com:65536/x",
+        ):
+            normalised, outcome = classify_ticket_url(value)
+>           assert normalised is None, (value, normalised)
+E           AssertionError: ('evenyx.com:80808/x', 'https://evenyx.com:80808/x')
+E           assert 'https://evenyx.com:80808/x' is None
+
+tests/test_event_ticket_url.py:224: AssertionError
+__ test_the_two_repos_agree_input_for_input[evenyx.com:65536/x-None-rejected] __
+
+stored = 'evenyx.com:65536/x', expected = None, outcome = 'rejected'
+
+    @pytest.mark.parametrize("stored,expected,outcome", _CROSS_REPO_CONTRACT)
+    def test_the_two_repos_agree_input_for_input(stored, expected, outcome):
+        """cs-server and vibes_bot must classify the same value the same way.
+    
+        HONEST ABOUT WHAT THIS IS: it does NOT import vibes_bot. The two repos
+        are separate git repositories with separate virtualenvs; vibes_bot is
+        not on this repo's import path in any developer checkout or in CI, and
+        faking the cross-import (a sys.path poke at a sibling directory) would
+        pass locally on one machine and be meaningless everywhere else.
+    
+        So the expected column below was CAPTURED by running vibes_bot's
+        `app/services/event_ticket_url.py` (branch `fix/events-ui-api-hardening`,
+        plan `plans/260906_events-ui-api-hardening.md`, sha256
+        5ad397dad358202732cb48fa788549e063e5bac43bf51b73561aca96df003c57) over
+        this exact input list, and pinned. It is a regression guard on OUR side
+        of a contract, not a live equality proof: if cs-server drifts, this goes
+        red; if vibes_bot drifts, only vibes_bot's own copy of the table does.
+        That is why both repos keep the rules in a same-named, same-shaped
+        module — the two files are meant to stay trivially diffable.
+    
+        At the time of pinning, all 62 rows agreed, plus 2400 generated
+        `prefix + host + :port + path` permutations.
+        """
+>       assert classify_ticket_url(stored) == (expected, outcome)
+E       AssertionError: assert ('https://eve...scheme_added') == (None, 'rejected')
+E         
+E         At index 0 diff: 'https://evenyx.com:65536/x' != None
+E         Use -v to get more diff
+
+tests/test_event_ticket_url.py:319: AssertionError
+__ test_the_two_repos_agree_input_for_input[evenyx.com:80808/x-None-rejected] __
+
+stored = 'evenyx.com:80808/x', expected = None, outcome = 'rejected'
+
+    @pytest.mark.parametrize("stored,expected,outcome", _CROSS_REPO_CONTRACT)
+    def test_the_two_repos_agree_input_for_input(stored, expected, outcome):
+        """cs-server and vibes_bot must classify the same value the same way.
+    
+        HONEST ABOUT WHAT THIS IS: it does NOT import vibes_bot. The two repos
+        are separate git repositories with separate virtualenvs; vibes_bot is
+        not on this repo's import path in any developer checkout or in CI, and
+        faking the cross-import (a sys.path poke at a sibling directory) would
+        pass locally on one machine and be meaningless everywhere else.
+    
+        So the expected column below was CAPTURED by running vibes_bot's
+        `app/services/event_ticket_url.py` (branch `fix/events-ui-api-hardening`,
+        plan `plans/260906_events-ui-api-hardening.md`, sha256
+        5ad397dad358202732cb48fa788549e063e5bac43bf51b73561aca96df003c57) over
+        this exact input list, and pinned. It is a regression guard on OUR side
+        of a contract, not a live equality proof: if cs-server drifts, this goes
+        red; if vibes_bot drifts, only vibes_bot's own copy of the table does.
+        That is why both repos keep the rules in a same-named, same-shaped
+        module — the two files are meant to stay trivially diffable.
+    
+        At the time of pinning, all 62 rows agreed, plus 2400 generated
+        `prefix + host + :port + path` permutations.
+        """
+>       assert classify_ticket_url(stored) == (expected, outcome)
+E       AssertionError: assert ('https://eve...scheme_added') == (None, 'rejected')
+E         
+E         At index 0 diff: 'https://evenyx.com:80808/x' != None
+E         Use -v to get more diff
+
+tests/test_event_ticket_url.py:319: AssertionError
+__ test_the_two_repos_agree_input_for_input[evenyx.com:99999/x-None-rejected] __
+
+stored = 'evenyx.com:99999/x', expected = None, outcome = 'rejected'
+
+    @pytest.mark.parametrize("stored,expected,outcome", _CROSS_REPO_CONTRACT)
+    def test_the_two_repos_agree_input_for_input(stored, expected, outcome):
+        """cs-server and vibes_bot must classify the same value the same way.
+    
+        HONEST ABOUT WHAT THIS IS: it does NOT import vibes_bot. The two repos
+        are separate git repositories with separate virtualenvs; vibes_bot is
+        not on this repo's import path in any developer checkout or in CI, and
+        faking the cross-import (a sys.path poke at a sibling directory) would
+        pass locally on one machine and be meaningless everywhere else.
+    
+        So the expected column below was CAPTURED by running vibes_bot's
+        `app/services/event_ticket_url.py` (branch `fix/events-ui-api-hardening`,
+        plan `plans/260906_events-ui-api-hardening.md`, sha256
+        5ad397dad358202732cb48fa788549e063e5bac43bf51b73561aca96df003c57) over
+        this exact input list, and pinned. It is a regression guard on OUR side
+        of a contract, not a live equality proof: if cs-server drifts, this goes
+        red; if vibes_bot drifts, only vibes_bot's own copy of the table does.
+        That is why both repos keep the rules in a same-named, same-shaped
+        module — the two files are meant to stay trivially diffable.
+    
+        At the time of pinning, all 62 rows agreed, plus 2400 generated
+        `prefix + host + :port + path` permutations.
+        """
+>       assert classify_ticket_url(stored) == (expected, outcome)
+E       AssertionError: assert ('https://eve...scheme_added') == (None, 'rejected')
+E         
+E         At index 0 diff: 'https://evenyx.com:99999/x' != None
+E         Use -v to get more diff
+
+tests/test_event_ticket_url.py:319: AssertionError
+_ test_the_two_repos_agree_input_for_input[https://evenyx.com:80808/x-None-rejected] _
+
+stored = 'https://evenyx.com:80808/x', expected = None, outcome = 'rejected'
+
+    @pytest.mark.parametrize("stored,expected,outcome", _CROSS_REPO_CONTRACT)
+    def test_the_two_repos_agree_input_for_input(stored, expected, outcome):
+        """cs-server and vibes_bot must classify the same value the same way.
+    
+        HONEST ABOUT WHAT THIS IS: it does NOT import vibes_bot. The two repos
+        are separate git repositories with separate virtualenvs; vibes_bot is
+        not on this repo's import path in any developer checkout or in CI, and
+        faking the cross-import (a sys.path poke at a sibling directory) would
+        pass locally on one machine and be meaningless everywhere else.
+    
+        So the expected column below was CAPTURED by running vibes_bot's
+        `app/services/event_ticket_url.py` (branch `fix/events-ui-api-hardening`,
+        plan `plans/260906_events-ui-api-hardening.md`, sha256
+        5ad397dad358202732cb48fa788549e063e5bac43bf51b73561aca96df003c57) over
+        this exact input list, and pinned. It is a regression guard on OUR side
+        of a contract, not a live equality proof: if cs-server drifts, this goes
+        red; if vibes_bot drifts, only vibes_bot's own copy of the table does.
+        That is why both repos keep the rules in a same-named, same-shaped
+        module — the two files are meant to stay trivially diffable.
+    
+        At the time of pinning, all 62 rows agreed, plus 2400 generated
+        `prefix + host + :port + path` permutations.
+        """
+>       assert classify_ticket_url(stored) == (expected, outcome)
+E       AssertionError: assert ('https://eve...'passthrough') == (None, 'rejected')
+E         
+E         At index 0 diff: 'https://evenyx.com:80808/x' != None
+E         Use -v to get more diff
+
+tests/test_event_ticket_url.py:319: AssertionError
+_ test_the_two_repos_agree_input_for_input[https://evenyx.com:65536/x-None-rejected] _
+
+stored = 'https://evenyx.com:65536/x', expected = None, outcome = 'rejected'
+
+    @pytest.mark.parametrize("stored,expected,outcome", _CROSS_REPO_CONTRACT)
+    def test_the_two_repos_agree_input_for_input(stored, expected, outcome):
+        """cs-server and vibes_bot must classify the same value the same way.
+    
+        HONEST ABOUT WHAT THIS IS: it does NOT import vibes_bot. The two repos
+        are separate git repositories with separate virtualenvs; vibes_bot is
+        not on this repo's import path in any developer checkout or in CI, and
+        faking the cross-import (a sys.path poke at a sibling directory) would
+        pass locally on one machine and be meaningless everywhere else.
+    
+        So the expected column below was CAPTURED by running vibes_bot's
+        `app/services/event_ticket_url.py` (branch `fix/events-ui-api-hardening`,
+        plan `plans/260906_events-ui-api-hardening.md`, sha256
+        5ad397dad358202732cb48fa788549e063e5bac43bf51b73561aca96df003c57) over
+        this exact input list, and pinned. It is a regression guard on OUR side
+        of a contract, not a live equality proof: if cs-server drifts, this goes
+        red; if vibes_bot drifts, only vibes_bot's own copy of the table does.
+        That is why both repos keep the rules in a same-named, same-shaped
+        module — the two files are meant to stay trivially diffable.
+    
+        At the time of pinning, all 62 rows agreed, plus 2400 generated
+        `prefix + host + :port + path` permutations.
+        """
+>       assert classify_ticket_url(stored) == (expected, outcome)
+E       AssertionError: assert ('https://eve...'passthrough') == (None, 'rejected')
+E         
+E         At index 0 diff: 'https://evenyx.com:65536/x' != None
+E         Use -v to get more diff
+
+tests/test_event_ticket_url.py:319: AssertionError
+_ test_the_two_repos_agree_input_for_input[//evenyx.com:80808/x-None-rejected] _
+
+stored = '//evenyx.com:80808/x', expected = None, outcome = 'rejected'
+
+    @pytest.mark.parametrize("stored,expected,outcome", _CROSS_REPO_CONTRACT)
+    def test_the_two_repos_agree_input_for_input(stored, expected, outcome):
+        """cs-server and vibes_bot must classify the same value the same way.
+    
+        HONEST ABOUT WHAT THIS IS: it does NOT import vibes_bot. The two repos
+        are separate git repositories with separate virtualenvs; vibes_bot is
+        not on this repo's import path in any developer checkout or in CI, and
+        faking the cross-import (a sys.path poke at a sibling directory) would
+        pass locally on one machine and be meaningless everywhere else.
+    
+        So the expected column below was CAPTURED by running vibes_bot's
+        `app/services/event_ticket_url.py` (branch `fix/events-ui-api-hardening`,
+        plan `plans/260906_events-ui-api-hardening.md`, sha256
+        5ad397dad358202732cb48fa788549e063e5bac43bf51b73561aca96df003c57) over
+        this exact input list, and pinned. It is a regression guard on OUR side
+        of a contract, not a live equality proof: if cs-server drifts, this goes
+        red; if vibes_bot drifts, only vibes_bot's own copy of the table does.
+        That is why both repos keep the rules in a same-named, same-shaped
+        module — the two files are meant to stay trivially diffable.
+    
+        At the time of pinning, all 62 rows agreed, plus 2400 generated
+        `prefix + host + :port + path` permutations.
+        """
+>       assert classify_ticket_url(stored) == (expected, outcome)
+E       AssertionError: assert ('https://eve...scheme_added') == (None, 'rejected')
+E         
+E         At index 0 diff: 'https://evenyx.com:80808/x' != None
+E         Use -v to get more diff
+
+tests/test_event_ticket_url.py:319: AssertionError
+=============================== warnings summary ===============================
+../../vibesense_wrapper/cs-server/.venv/lib/python3.12/site-packages/pydantic/_internal/_config.py:291
+  /media/mario/ssd/projects/vibesense_wrapper/cs-server/.venv/lib/python3.12/site-packages/pydantic/_internal/_config.py:291: PydanticDeprecatedSince20: Support for class-based `config` is deprecated, use ConfigDict instead. Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.9/migration/
+    warnings.warn(DEPRECATION_MESSAGE, DeprecationWarning)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/test_event_ticket_url.py::test_classify_ticket_url[evenyx.com:80808/x-None-rejected]
+FAILED tests/test_event_ticket_url.py::test_classify_ticket_url[evenyx.com:99999/x-None-rejected]
+FAILED tests/test_event_ticket_url.py::test_classify_ticket_url[evenyx.com:65536/x-None-rejected]
+FAILED tests/test_event_ticket_url.py::test_classify_ticket_url[//evenyx.com:80808/x-None-rejected]
+FAILED tests/test_event_ticket_url.py::test_classify_ticket_url[https://evenyx.com:80808/x-None-rejected]
+FAILED tests/test_event_ticket_url.py::test_classify_ticket_url[https://evenyx.com:65536/x-None-rejected]
+FAILED tests/test_event_ticket_url.py::test_normalize_ticket_url_matches_the_classifier[evenyx.com:80808/x-None-rejected]
+FAILED tests/test_event_ticket_url.py::test_normalize_ticket_url_matches_the_classifier[evenyx.com:99999/x-None-rejected]
+FAILED tests/test_event_ticket_url.py::test_normalize_ticket_url_matches_the_classifier[evenyx.com:65536/x-None-rejected]
+FAILED tests/test_event_ticket_url.py::test_normalize_ticket_url_matches_the_classifier[//evenyx.com:80808/x-None-rejected]
+FAILED tests/test_event_ticket_url.py::test_normalize_ticket_url_matches_the_classifier[https://evenyx.com:80808/x-None-rejected]
+FAILED tests/test_event_ticket_url.py::test_normalize_ticket_url_matches_the_classifier[https://evenyx.com:65536/x-None-rejected]
+FAILED tests/test_event_ticket_url.py::test_an_impossible_port_is_counted_rejected_not_qualified
+FAILED tests/test_event_ticket_url.py::test_the_two_repos_agree_input_for_input[evenyx.com:65536/x-None-rejected]
+FAILED tests/test_event_ticket_url.py::test_the_two_repos_agree_input_for_input[evenyx.com:80808/x-None-rejected]
+FAILED tests/test_event_ticket_url.py::test_the_two_repos_agree_input_for_input[evenyx.com:99999/x-None-rejected]
+FAILED tests/test_event_ticket_url.py::test_the_two_repos_agree_input_for_input[https://evenyx.com:80808/x-None-rejected]
+FAILED tests/test_event_ticket_url.py::test_the_two_repos_agree_input_for_input[https://evenyx.com:65536/x-None-rejected]
+FAILED tests/test_event_ticket_url.py::test_the_two_repos_agree_input_for_input[//evenyx.com:80808/x-None-rejected]
+19 failed, 176 passed, 1 warning in 0.97s

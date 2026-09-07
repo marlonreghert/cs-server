@@ -17,7 +17,8 @@ re-extraction.
 The rules below are the CONTRACT vibes_bot and the mobile app plan against,
 so they are pinned here in the order they are applied. `ticket_url` is
 therefore either `null` or an absolute `http`/`https` URL **carrying a real
-host** — never a bare host, never a bare scheme (`https://`), never
+host** — never a bare host, never a bare scheme (`https://`), never a
+`host:port` whose port is not a real TCP port, never
 `mailto:`/`tel:`/`javascript:`/`data:`, never prose.
 """
 from __future__ import annotations
@@ -37,14 +38,33 @@ _TRAILING_PUNCTUATION = ".,;!"
 # in `evenyx.com:8080/lote2` reads as a scheme and a legitimate host:port
 # ticket link is thrown away (review finding F30).
 _SCHEME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.\-]*$")
-_PORT_RE = re.compile(r"^[0-9]{1,5}$")
+_PORT_DIGITS_RE = re.compile(r"^[0-9]{1,5}$")
 _ALPHA_RE = re.compile(r"^[A-Za-z]+$")
+
+# The highest TCP port. The digit COUNT alone is not the rule: `:80808` and
+# `:99999` are five digits and are not ports, so a URL built around them is
+# one no client can open. vibes_bot's serve-time twin
+# (`vibes_bot/app/services/event_ticket_url.py`) applies the same numeric
+# bound, so the two modules agree input-for-input.
+_MAX_PORT = 65535
 
 # Outcome labels for `events_projection_ticket_url_total{outcome}`.
 OUTCOME_ABSENT = "absent"
 OUTCOME_PASSTHROUGH = "passthrough"
 OUTCOME_SCHEME_ADDED = "scheme_added"
 OUTCOME_REJECTED = "rejected"
+
+
+def _valid_port(port: str) -> bool:
+    """A `host:<port>` suffix counts as a port only when it is 1-5 digits AND
+    a real TCP port (<= 65535). The digit-count half alone accepted
+    `evenyx.com:80808`, which was then qualified to
+    `https://evenyx.com:80808/...` and counted `scheme_added` — a link the
+    phone cannot open, recorded as a success. Leading zeros are tolerated
+    (`:0080` is port 80); an empty suffix (`host:`) is not a port."""
+    if not _PORT_DIGITS_RE.match(port):
+        return False
+    return int(port) <= _MAX_PORT
 
 
 def _looks_like_a_host(authority: str) -> bool:
@@ -67,8 +87,9 @@ def _looks_like_a_host(authority: str) -> bool:
 def _authority_is_valid(after_scheme: str) -> bool:
     """`after_scheme` is everything following any `scheme://` (or the whole
     value when there is no scheme). Splits off the authority at the first
-    `/`, `?` or `#`, requires any `:`-suffix to be a real 1-5 digit port,
-    and runs the remaining host through `_looks_like_a_host`.
+    `/`, `?` or `#`, requires any `:`-suffix to be a real TCP port
+    (`_valid_port`), and runs the remaining host through
+    `_looks_like_a_host`.
 
     Shared by rule 5 and rule 8 deliberately. Rule 5 originally returned any
     `http(s)://`-prefixed string untouched, which accepted `https://`,
@@ -81,7 +102,7 @@ def _authority_is_valid(after_scheme: str) -> bool:
     host = authority
     if ":" in authority:
         host, _, port = authority.rpartition(":")
-        if not _PORT_RE.match(port):
+        if not _valid_port(port):
             return False
     return _looks_like_a_host(host)
 
