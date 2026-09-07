@@ -56,7 +56,14 @@ mobile can build an events filter without client-side bucketing
 - **Re-parsing recurrence prose to invent occurrence days.** Unchanged.
 - **`mode="handles"` re-extraction behaviour, the per-venue cap, and the
   already-extracted skip** (`plans/260826_skip-already-extracted-posts.md`).
-  Used as-is by the verification plan; not modified.
+  Used as-is by Path B1; not modified.
+- **A dry-run / non-persisting mode on `POST /admin/trigger/
+  event_extraction`.** Considered as the safe production proof and rejected:
+  it adds a second branch to a live write path in order to avoid using that
+  write path. Path B0's offline script achieves the same proof with no
+  production code at all (§4).
+- **Un-confirming a row, or any RDS write outside the admin API.** Recorded
+  as a rollback limitation in §4, not built here.
 
 ## Evidence
 
@@ -236,8 +243,31 @@ line 372) — the same handle `load_post_category_vocabulary` needs.
   unless `post_type == "event"`, so a PATCHed row leaves the projection on
   the next cycle through the existing prune-then-delete
   (`redis_projection_service.py:544-576`). No deletion code is needed.
-- `post_type` is in `event_reconciliation.py`'s operator-protected field
-  tuple, so a later re-extraction of the same post cannot flip it back.
+  `SELECTABLE_STATUSES = ("accepted", "confirmed")`, so confirming a row
+  does not deproject it.
+- **A PATCH alone does NOT protect `post_type` from the next
+  re-extraction.** Revision 1 of this plan asserted it did ("`post_type` is
+  in `event_reconciliation.py`'s operator-protected field tuple, so a later
+  re-extraction of the same post cannot flip it back"). That is **false for
+  a non-confirmed row**, which is the state every row in this corpus is in.
+  `reconcile_post_events` consults `operator_edited_fields` on ONE branch
+  only — `event_reconciliation.py:749`, `existing["status"] ==
+  STATUS_CONFIRMED`, via `_confirmed_update_fields`. Every other row takes
+  the branch at `:790-802`, which does a plain `fields.update(prepared)`:
+  **every** content field is overwritten (`post_type`, `title`, `starts_at`,
+  `category`, …), `status` is recomputed by `is_clean_extraction`, and
+  `operator_edited_fields` is never read. So the protection is
+  **PATCH _then_ confirm**: the PATCH records the field
+  (`admin_events_router.py:721-722`), and `POST /admin/events/{id}/confirm`
+  (`:731-738`) moves the row onto the branch that honours the record.
+  Because `apply_operator_field_protection` is PER FIELD, patching only
+  `post_type` freezes only `post_type`: title, dates, lineup and everything
+  else keep refreshing from each re-extraction, and a model that later
+  disagrees raises `REVIEW_REASON_DIVERGES_FROM_CONFIRMED` instead of
+  silently winning. Cost on record: the admin API has `confirm` and
+  `reject` but **no un-confirm**, and `EventPatch` does not accept `status`
+  (`admin_events_router.py:327-347`), so confirming is one-way through the
+  API today.
 - `POST /admin/trigger/event_extraction` with
   `{"eligibility": {"mode": "handles", ...}}` is the sanctioned deliberate
   re-extraction path and calls the model unconditionally, bypassing the
@@ -256,11 +286,25 @@ vocabulary that a non-match falls out of.
 
 ### Corrections to earlier documents
 
-- The Events UI v1 coordination plan states *"28% of events have no
-  category"*. Measured today: **0 of 44 occurrences have a null
-  `category`**. 11 distinct values, 5 of them off-vocabulary.
-- `141-DETAIL-DEFECTS.md` D11 lists `endsAt` as *"15/44 real"*. It is 15/44
-  PRESENT and 0/44 real — every one is inverted.
+These are measurements, not opinions, and the sibling 1.4.1 plans were
+written in parallel with this one, so the corrections did not propagate.
+**These figures supersede the earlier ones wherever they appear.**
+
+- **`category` is never null in production.** `plans/260906_events-ui-v1-
+  coordination.md:31-32` states *"28% of events have no category"*. Measured
+  in this census: **0 of 44 occurrences have a null `category`**; 11 distinct
+  values, 5 of them off-vocabulary. The 28% figure is also quoted in
+  vibes_bot's 1.4.1 contract table (*"category (str|null, ~28% null)"*) and
+  in mobile's D15 (*"a card with `category: null` (28% of the feed)"*) —
+  both should read **"nullable by contract; 0/44 null in the 2026-09-07
+  census"**. The defensive null handling both plans specify is correct and
+  must stay: `category` IS nullable in the contract, `EventOccurrence` has
+  always allowed it, and this round does not change that. Only the stated
+  evidence was wrong.
+- **`ends_at` is present on 15/44 and correct on 0/44.**
+  `141-DETAIL-DEFECTS.md` D11 lists `endsAt` as *"15/44 real"*. It is 15/44
+  PRESENT and **0/44 correct** — every one of the 15 is strictly before its
+  own occurrence's `starts_at`.
 
 ## Current Behavior
 
@@ -282,17 +326,27 @@ vocabulary that a non-match falls out of.
 
 1. The extraction prompt must classify a recurring venue service offering as
    `menu` or `promotion`, never `event`, even when it names days and times —
-   and must keep classifying a genuine recurring night, and a recurring
-   scheduled class, as `event`.
+   and must keep classifying as `event` **every shape this repo's own
+   `DEFAULT_CATEGORY_VOCABULARY` names**, including the food-anchored ones
+   (`food festival`, `tasting`) and the food-alongside ones (a feijoada with
+   a roda de samba, a rodízio with a jogo no telão). A rule that removes the
+   buffet but also kills a real recurring night is worse than the defect it
+   fixes.
 2. The serving projection must carry a casing-normalised `recurrence_text`,
    while RDS keeps the verbatim extraction.
 3. The serving projection must carry a `category` canonicalised against the
    LIVE admin vocabulary at projection time, while RDS keeps the stored
    value.
-4. The serving projection must carry, for a recurring occurrence, an
-   `ends_at` derived by applying the source row's stored DURATION to that
-   occurrence's own re-derived `starts_at` — and must carry `null` rather
-   than a wrong instant whenever that duration is not usable.
+4. The serving projection must carry, for an occurrence whose `starts_at`
+   was **RE-DERIVED** from a weekday pattern, an `ends_at` derived by
+   applying the source row's stored DURATION to that occurrence's own
+   `starts_at` — and `null` rather than a wrong instant whenever that
+   duration is not usable. For an occurrence served on the announcement's
+   own stored `starts_at` it must carry the stored `ends_at` verbatim **at
+   any length**, dropping only a stored end that precedes its own start.
+   The decision is keyed on DERIVATION, never on `is_recurring`: a recurring
+   row whose recurrence prose this repo cannot parse is served on its own
+   stored dates and its stored end is correct (§3a).
 5. Every substitution must be observable per outcome, computed once per
    source row, and must never abort a projection cycle.
 
@@ -305,30 +359,124 @@ prompts interpolate, so the single-event and multi-event prompts cannot
 drift — CLAUDE.md's own warning ("both extraction prompts must change
 together; they have drifted before") is satisfied structurally.
 
-Add a STANDING-OFFER test in the same pre-ladder position the existing
-"does this announce something attendable" test occupies, stating in
-substance:
+Add a WHAT-REPEATS test in the same pre-ladder position the existing "does
+this announce something attendable" test occupies, stating in substance:
 
-> A recurring cadence only makes something an event when the thing itself is
-> a HAPPENING — a show, a party, a DJ night, a class, a screening. The venue
-> operating normally on its normal days is not a happening, however many
-> days it names: a buffet or lunch served Terça a Domingo, a standing happy
-> hour every Thursday, opening hours, a permanent menu, a daily special
-> ("especial do dia"), a standing discount. Decide WHAT is being offered
-> before deciding whether it repeats. If what repeats is FOOD, a PRICE, or
-> the venue simply being open, answer "menu" or "promotion" — never "event"
-> — even when the post states days and times. A performance, a competition,
-> a class or a screening that repeats IS still an event.
+> Before applying the precedence, also ask WHAT repeats. A recurring cadence
+> only makes a post an event when the thing that repeats is a PROGRAMMED
+> OCCASION — something the venue puts on, that would not happen if nobody
+> had staged it: a show, a party, a DJ or live set, a karaoke or quiz night,
+> a class or workshop, a screening, a kids' or family session, a festival, a
+> tasting or degustação, a themed night.
+>
+> The venue simply OPERATING is not a programmed occasion, however many days
+> it names: its standing menu, a buffet or lunch served "de Terça a
+> Domingo", a rodízio every night, its opening hours, a permanent price
+> list, a daily special ("especial do dia"), a standing discount, a happy
+> hour that is only cheaper drinks during ordinary hours. Answer "menu" when
+> what is announced is a dish or a menu, "promotion" when it is a price —
+> never "event" — even when the post states days and times.
+>
+> FOOD AND PRICE DO NOT DECIDE THIS BY THEMSELVES. The post is still an
+> "event" whenever, alongside the food or the price, it announces something
+> programmed: a named performer, band, DJ, host, teacher or team; a lineup;
+> a ticket, cover, couvert or paid enrolment; a competition; a named edition
+> or theme ("Feijoada com samba ao vivo", "Oktoberfest", "degustação
+> guiada", "noite de karaokê"); a stated start time that is not simply the
+> venue's opening hours. When BOTH readings are available — food or a price
+> AND a programmed occasion — answer "event". The existing "event first"
+> precedence is unchanged for that case; this test removes only the posts
+> where there is NO programmed occasion at all, only the venue being open.
 
-The final sentence is load-bearing: it names the boundary the rule must not
-cross (see §5's boundary cases). No other prompt field changes; token
-budgets are unchanged (this replaces no field and adds ~90 tokens of prompt,
-not of output).
+The third paragraph is the load-bearing one, and it is derived against this
+repo's OWN shipped category vocabulary rather than against a hunch — §1a
+enumerates all 18 categories and shows the rule keeps every one.
+
+**Revision 1 of this plan got this wrong and the correction is the point of
+this revision.** It closed the rule with a single sentence — "a performance,
+a competition, a class or a screening that repeats IS still an event" — in
+front of a clause reading "if what repeats is FOOD, a PRICE, or the venue
+simply being open, answer 'menu' or 'promotion' — never 'event'". Audited
+against `DEFAULT_CATEGORY_VOCABULARY` (§1a), that pair left **5 of the 18
+shipped event categories unrescued** (`karaoke`, `quiz / trivia`,
+`kids / family`, `food festival`, `tasting`) and **affirmatively suppressed
+two of them** (`food festival`, `tasting`) plus every food-alongside shape
+(`samba / pagode` at a feijoada, `sports screening` at a rodízio + jogo).
+A rule that removes "Buffet de Terça a Domingo" but also kills a weekly
+degustação or a feijoada com samba ao vivo is worse than the defect it
+fixes. That is why the clause is now three paragraphs and why §1a exists.
+
+No other prompt field changes. The constant grows by roughly 260 tokens of
+INPUT on a prompt that already carries a vision payload; output-token
+budgets (`DEFAULT_MAX_COMPLETION_TOKENS = 6400`) are untouched, and the
+reasoning work this adds is the same *shape* the `kind` precedence already
+asks for — the constant's own comment names this exact overlap ("a risotto
+special at a stated price on weekdays is simultaneously a dish, an offer and
+a recurring weekly thing").
 
 **This change is forward-only.** `plans/260826_skip-already-extracted-posts.md`
 makes the scheduled path skip a post already turned into an event, so the
 amended prompt reaches only new posts unless the operator deliberately
-re-extracts. That is the point of §4 below, not an oversight.
+re-extracts. That is the point of §4 below, not an oversight — and it is
+also why the Test Plan's false-positive signal must be a STANDING counter and not a
+one-off check: a regression would otherwise appear only at new venues, on
+new posts, gradually, with nothing to scroll past.
+
+### 1a. The rule checked against this repo's own shipped category vocabulary
+
+`app/models/post_category.py::DEFAULT_CATEGORY_VOCABULARY` is the list this
+repo already ships as *what an event's category may be*. A `kind` rule that
+suppresses a shape the category vocabulary blesses is self-contradictory, so
+the rule is derived against that list rather than against the two offenders.
+All 18 entries, each with the recurring caption shape that would carry it
+and the clause that keeps it:
+
+| shipped category | recurring caption shape | kept by |
+|---|---|---|
+| live music | "toda sexta com a banda X" | named performer |
+| DJ / club night | "toda sexta, DJ Bibi no comando" | named performer |
+| samba / pagode | "feijoada de sábado com roda de samba" | **a performance ALONGSIDE food** |
+| forró | "forró todo domingo, 20h" | programmed occasion + start time |
+| rock | "quarta do rock, banda convidada" | named performer |
+| MPB | "MPB às quintas, voz e violão" | programmed occasion |
+| jazz | "jazz night toda terça" | named theme |
+| sertanejo | "sertanejo na sexta, dupla X" | named performer |
+| funk | "baile funk todo sábado" | party |
+| karaoke | "toda terça é noite de KARAOKÊ, 20h" | **karaoke night named explicitly** |
+| comedy | "stand-up toda quinta, R$ 20" | ticket + performance |
+| quiz / trivia | "quiz da quarta, o time vencedor leva uma rodada" | **a competition whose prize is a drink** |
+| kids / family | "domingo é dia da criança, recreação 10h-14h" | **family session named explicitly** |
+| workshop | "aula de forró toda quarta, mensalidade R$ 100" | class + paid enrolment |
+| food festival | "Oktoberfest todo sábado de outubro, banda + concurso" | **festival named explicitly, and it is FOOD** |
+| tasting | "degustação guiada de cachaça toda quinta, R$ 45" | **tasting named explicitly, and it is FOOD** |
+| sports screening | "todo domingo jogo no telão + rodízio de petiscos" | **a screening ALONGSIDE food** |
+| party | "toda sexta é Lovezinho, open bar até meia-noite" | party alongside a drinks offer |
+
+The five in bold-with-emphasis are precisely the ones revision 1's single
+rescue sentence did not reach; `food festival`, `tasting`,
+`samba / pagode`-at-a-feijoada and `sports screening`-at-a-rodízio were
+additionally suppressed OUTRIGHT by its "if what repeats is FOOD … never
+event" clause.
+
+**This is not hypothetical.** `Oktoberfest BeerDock`
+(`evt_01KZVGAW45PBBRKGEGE4W6SG90`, handle `beerdock_recife`) is a REAL row in
+today's 21-event corpus — a food festival by name, currently `category:
+party`, `is_recurring: false`. The corpus has no *recurring* one only because
+21 events is a small sample; the vocabulary says the shape is expected, and
+the rule must survive it.
+
+The near-miss pairs the rule must separate, and the clause that separates
+them:
+
+| stays `event` | becomes `menu` / `promotion` | separator |
+|---|---|---|
+| "todo domingo jogo no telão + rodízio de petiscos" | "nosso rodízio roda todas as noites, 19h-23h" | a screening is programmed; a rodízio is the kitchen |
+| "feijoada de sábado com roda de samba do grupo X" | "Buffet de Terça a Domingo" | a named performance vs. the kitchen's own hours |
+| "quinta do stand-up, R$ 20 na porta" | "QUINTA É DIA DE HAPPY HOUR" (a price list) | a ticketed performance vs. cheaper drinks |
+| "degustação guiada, R$ 45, vagas limitadas" | "especial do dia: risoto, R$ 39,90" | paid enrolment in a session vs. a dish at a price |
+
+All eight of those captions are blocking rows in the Test Plan's eval (see the
+synthetic-control table in §5).
 
 ### 2. Projection — `recurrence_text` (new `app/services/event_recurrence_text.py`)
 
@@ -376,68 +524,252 @@ own labelled counter exactly once per row:
   loader; a value that matches nothing is passed through unchanged, never
   dropped. This makes an operator's vocabulary edit reach the app on the
   next 2-minute cycle instead of requiring a re-extraction of every row.
-- `ends_at` — a duration, not an instant. Compute
-  `duration = row.ends_at - row.starts_at` once per row, then:
-  - **non-recurring row** → carry `row["ends_at"]` verbatim, exactly as
-    today (outcome `carried`; zero live examples, so this branch is
-    unchanged and unexercised in production);
-  - **recurring row**, `duration` present, strictly positive, and
-    `<= MAX_OCCURRENCE_DURATION` (a module constant, 24h — the same
-    "pure module, frozen constant, never a setting" posture as
-    `NIGHTLIFE_CUTOFF_HOUR` and `PAST_GRACE`) → `occ.starts_at + duration`
-    (outcome `derived`);
-  - **recurring row**, duration null/zero/negative → `None` (outcome
-    `dropped_inverted`);
-  - **recurring row**, duration over the bound → `None` (outcome
-    `dropped_implausible`);
-  - row has no `ends_at` → `None` (outcome `absent`).
+- `ends_at` — see §3a. This is the only one of the three that varies per
+  occurrence, so the per-row work is the stored PAIR and the per-occurrence
+  work is one comparison plus at most one addition.
 
-  Projecting `None` rather than a wrong instant is the same posture
-  `time_known: false` already takes for a defaulted midnight: suppress a
-  misleading value rather than serve it.
+### 3a. `ends_at` — keyed on DERIVATION, never on `is_recurring`
 
-`ends_at` is the only one of the three that varies per occurrence, so the
-per-row work is the DURATION and the per-occurrence work is one addition.
+**Revision 1 keyed this decision on `is_recurring`, and that was wrong.**
+`app/services/event_occurrences.py:161-163`: a row with `is_recurring: true`
+whose `recurrence_text` yields no weekday set falls through to
+`_single_occurrence(event_id, starts_at)` — ONE occurrence whose `starts_at`
+**is** the stored `starts_at` and whose `occurrence_id` is the bare
+`event_id`. For that occurrence the stored `ends_at` is simply correct, and
+revision 1's `is_recurring`-keyed table would have nulled a genuine
+multi-day interval ("de quinta a domingo") as `dropped_implausible`. That is
+exactly the deletion vibes_bot's own 1.4.1 plan REFUSED to make at serve
+time (`plans/260907_events-ends-at-invariant.md`, Non-goals: "applying it at
+serve time would delete the genuine end of a multi-day non-recurring
+festival, whose stored `ends_at` cs-server carries verbatim by design").
+**vibes_bot is right and cs-server was wrong**; the two repos are aligned
+below, and the contract sentence in Acceptance Criteria is written so
+vibes_bot can hold its guard unchanged.
+
+The correct discriminator is not "was the row recurring" but **"was this
+occurrence's `starts_at` RE-DERIVED"** — because that is the only case in
+which the stored `ends_at`'s DATE was thrown away. `expand_occurrences`
+answers it unambiguously: a re-derived occurrence's id is
+`f"{event_id}_{day.isoformat()}"`, a single-shape occurrence's id is the
+bare `event_id`. So the test is `occ.occurrence_id != occ.event_id`, read
+off the `Occurrence` the projector already has in hand. (`occ.starts_at !=
+row["starts_at"]` is equivalent but weaker — it depends on tz-awareness
+normalisation and would misread a re-derived occurrence that happens to land
+on the stored date.)
+
+The logic moves into a new pure module `app/services/event_occurrence_end.py`
+— sibling to `event_ticket_url.py` and `event_recurrence_text.py`, no I/O,
+no config — so the six-way table is unit-testable as a pure-input matrix
+rather than only through the projector:
+
+`resolve_occurrence_end(stored_start, stored_end, occurrence_start, *, derived) -> (value, outcome)`
+
+| branch | condition | projected `ends_at` | outcome |
+|---|---|---|---|
+| any | `stored_end` is None/absent | `None` | `absent` |
+| **carried** (`occ.occurrence_id == occ.event_id`) | `stored_end < stored_start` | `None` | `dropped_inverted` |
+| **carried** | anything else, **any length** | `stored_end` **verbatim** | `carried` |
+| **derived** (`occ.occurrence_id != occ.event_id`) | `duration < 0` | `None` | `dropped_inverted` |
+| **derived** | `duration == 0` | `None` | `dropped_zero` |
+| **derived** | `0 < duration <= MAX_DERIVED_DURATION` (24h) | `occurrence_start + duration` | `derived` |
+| **derived** | `duration > MAX_DERIVED_DURATION` | `None` | `dropped_implausible` |
+
+`MAX_DERIVED_DURATION` is a module constant of 24h — the same "pure module,
+frozen constant, never a setting" posture as `NIGHTLIFE_CUTOFF_HOUR` and
+`PAST_GRACE`.
+
+Why the carried branch has **no length bound at all**: on that branch the
+occurrence IS the stored announcement, so the stored `ends_at` is the end
+of that exact interval and a three-day festival's end is real data, not a
+stale instant. Applying a 24h bound there is precisely the multi-day
+deletion this repo and vibes_bot both refuse. The bound belongs only where
+the stored end's DATE has been discarded — the derived branch — and there it
+is not a plausibility heuristic about events but a statement about what
+survives the discard: a >24h "duration" on a weekly night is
+indistinguishable from the announcement's original absolute end, which is
+the exact defect C3 exists to fix.
+
+Why `dropped_zero` is split out from `dropped_inverted` (revision 1 folded
+them): a zero-length interval is not an inversion, and merging them makes
+the counter unreadable as the data-defect signal it is for. They also do
+different things — a zero-length interval is **carried** on the carried
+branch (matching vibes_bot, whose plan states "Equality is permitted by the
+upstream invariant, so a zero-length interval is served, not dropped") and
+**dropped** on the derived branch, where deriving it would produce an end
+equal to the start it was derived from, which tells a reader nothing.
+
+Also on record: a null `stored_start` is **unreachable here** —
+`event_occurrences.py:154-155` returns no occurrences at all when
+`starts_at` is None, so such a row never enters the payload loop.
+`resolve_occurrence_end` still returns `(None, "absent")` for it rather than
+raising, because a pure function must be total; the plan simply does not
+claim that outcome will ever be observed.
+
+Projecting `None` rather than a wrong instant is the same posture
+`time_known: false` already takes for a defaulted midnight: suppress a
+misleading value rather than serve it.
+
+**What today's production will read, and how confident that is.** The public
+API serves each occurrence's RE-DERIVED `starts_at`, never the row's stored
+one, so the 44-occurrence census cannot measure a stored duration directly
+and this plan does not claim it did. It is a strong inference: every one of
+the 15 stored `ends_at` values falls on a weekday its own `recurrence_text`
+matches — `Terça a Domingo` → `2026-08-04` (Tuesday), `Toda QUARTA` →
+`2026-08-12` and `2026-09-02` (both Wednesdays), `todos os sábados` →
+`2026-09-05` (Saturday) — which is what a stored `starts_at` on the SAME
+calendar day implies, and the resulting durations are 3.5h, 1h and 1.5h
+against each occurrence's own time-of-day (which `expand_occurrences` copies
+from the stored `starts_at`). The 15 affected occurrences belong to **4
+source rows** (the buffet, both `Aula de FORRÓ` rows and `Residência drag da
+Metrópole`), and the counter is per row, so the expected reading is
+`derived: 4` / `absent: 17` — 21 selected rows in total. It is
+**verified, not asserted**, by the post-deploy metrics check in the Test Plan, which
+reads the split rather than predicting it — if any of those rows turns out
+to store a negative or over-24h duration it will read `dropped_inverted` or
+`dropped_implausible` instead, and the served value is `null` either way,
+which is correct in both cases.
 
 No feature flag. `ticket_url` normalisation shipped unflagged in the same
 function for the same reason: the projector re-asserts every 2 minutes, so a
 bad rule is visible within minutes and reverted by a deploy, and a flag
 would add a second code path to an already-branchy loop.
 
-### 4. Removal path for rows already projected — operator-gated, no new code
+### 4. Removal path for rows already projected — operator-gated, and safe by construction
 
-Both paths exist. **Yes, it is operator-gated**, and it must be: an
-automatic drop is the blocklist this plan rejects, wearing a different hat.
+**Yes, it is operator-gated**, and it must be: an automatic drop is the
+blocklist this plan rejects, wearing a different hat.
 
-**Path B first (the proof), then Path A (the guarantee).**
+**Revision 1 sequenced the write-path re-extraction FIRST, as the proof,
+and that sequencing was unsafe.** The reasoning behind it was right — a real
+caption through the real model beats any fixture — but as specified the
+proof had write authority over the very rows it was measuring, and the
+precondition it demanded (`operator_edited_fields: null`) is exactly the
+state in which that authority is unrestricted. Concretely:
+`downtownbeergarden_` is the home of BOTH the happy-hour offender and
+`Sambinha Downtown` (`evt_01KZVG66809JD1SCTQ2EJQAFJ4`), a genuine recurring
+night §5 pins as must-stay-`event`, whose own description says "HAPPY HOUR a
+tarde toda" — the single caption in the corpus most likely to trip a
+standing-offer test. A misfire would have deprojected it within one 2-minute
+cycle. And per the corrected Evidence bullet above, the damage is not
+limited to `post_type`: on a non-confirmed row the re-extraction rewrites
+every content field and resets `status`.
 
-- **Path B — deliberate re-extraction, after §1 deploys.** `POST /admin/
-  trigger/event_extraction` with `{"eligibility": {"mode": "handles",
-  "handles": ["ctradicao", "downtownbeergarden_"]}}`. This bypasses the
-  already-extracted skip and re-reads the real captions through the amended
-  prompt. Two handles, bounded by the per-venue cap of 20, so ≤40 vision
-  calls. If the buffet row comes back `post_type: "menu"` and the happy hour
-  `"promotion"`, the rule is proven **on production captions**, and both
-  rows leave the index on the next projector cycle with nothing further
-  done. This is a far stronger gate than any fixture.
-  Precondition, checked read-only first: `GET /admin/events?venue_id=…` must
-  show `status: "accepted"` and `operator_edited_fields: null` for both
-  rows. A `confirmed` row is frozen against reconciliation by design — if
-  either is confirmed, Path B cannot correct it and Path A is the only
-  route.
-- **Path A — operator correction.** `PATCH /admin/events/{event_id}` with
-  `{"post_type": "menu"}` (buffet, `evt_01M1Y1W3V4HNXDQ7R2KN20B5JM`) and
-  `{"post_type": "promotion"}` (happy hour,
-  `evt_01M0XTA552MYQMA8P83AB01HN5`). Deprojects within one 2-minute cycle
-  via `is_selectable`; records the field in `operator_edited_fields`, so no
-  future re-extraction can flip it back. Removes 9 of 44 occurrences
-  (20.5%) from the feed. Nothing is deleted; the row stays in RDS,
-  correctly typed.
+The proof is therefore redesigned so it **cannot write at all**, and the
+write-path run is demoted to optional and gated behind an explicit freeze.
 
-The operator dispatches both. No agent dispatches either — the same posture
-the 1.4.0 coordination plan takes for the bairro sweep and the EAS release.
+#### Step 0 — enumerate the blast radius (read-only, before anything else)
+
+`GET /admin/events?venue_id=ven_49496f596d643751764b4d52637771597350507948306e4a496843`
+(Cachaçaria Tradição, `ctradicao`) and
+`GET /admin/events?venue_id=ven_3870374f6b554444626c61526377715a38634c624662354a496843`
+(Downtown Beer Garden, `downtownbeergarden_`), **with no status and no date
+filter** — the serving census cannot answer this, because
+`mode="handles"` re-extraction is bounded by the per-venue post cap (20),
+not by the 70-day serving window, so it reaches rows that are outside the
+window, `pending_review`, or already past. Record `event_id`, `title`,
+`status`, `post_type` and `operator_edited_fields` for every row returned.
+That list, not the census, is the blast radius.
+
+The three rows already known from the census, with their expected
+post-round `post_type`:
+
+| event_id | handle | title | today | expected after |
+|---|---|---|---|---|
+| `evt_01M1Y1W3V4HNXDQ7R2KN20B5JM` | ctradicao | Buffet de Terça a Domingo | `event` | **`menu`** |
+| `evt_01M0XTA552MYQMA8P83AB01HN5` | downtownbeergarden_ | QUINTA É DIA DE HAPPY HOUR | `event` | **`promotion`** |
+| `evt_01KZVG66809JD1SCTQ2EJQAFJ4` | downtownbeergarden_ | Sambinha Downtown | `event` | **`event` (unchanged)** |
+
+Occurrence effect: `ctradicao` goes 6 → **0** occurrences and leaves the
+feed entirely; `downtownbeergarden_` goes 6 → **3** (Sambinha only); the
+city total goes 44 → **35**. Any other value, at any row, is a failure of
+this round and is rolled back per "Rollback" below.
+
+#### Path A — operator correction (the guarantee). Run FIRST.
+
+For each row in the Step-0 list, `PATCH /admin/events/{event_id}` with its
+CORRECT `post_type` — `{"post_type": "menu"}` for the buffet,
+`{"post_type": "promotion"}` for the happy hour, and `{"post_type":
+"event"}` for every genuine row at those two handles including Sambinha —
+sending **only** `post_type` (the router records exactly the keys sent, so
+this freezes that one field and nothing else). Then
+`POST /admin/events/{event_id}/confirm` on each, which is what actually
+makes `operator_edited_fields` binding (see the corrected Evidence bullet).
+
+The two offenders deproject within one 2-minute cycle via `is_selectable`.
+The genuine rows stay projected — `confirmed` is a selectable status — and
+are now immune to a re-extraction misfire on `post_type`, while their
+titles, dates and lineups keep refreshing normally.
+
+Nothing is deleted. Every row stays in RDS, correctly typed and inspectable.
+
+#### Path B0 — the production proof, with NO write path. Run after §1 deploys.
+
+The proof does not need the write path; it needs the real captions and the
+real model. Both are available without persisting anything.
+
+Run `scripts/eval_kind_on_captions.py` (the Test Plan's fixture-builder, reused with a
+`--handles` argument) inside the production container over SSM: for every
+archived post at `ctradicao` and `downtownbeergarden_` within the extraction
+cap, read the caption out of the archive
+(`post_item_source.cover_photo_key` → `event_source_media.derive_run_partition`
+→ `retrieved/…/info/_manifest.json` → `event_extraction_service.
+EventPostSource._bucket_entries`' own `caption` field), call
+`OpenAIEventExtractionClient` with the deployed prompt, and print
+`shortcode → kind` to stdout. **It constructs no DAO, calls no
+`reconcile_post_events`, and writes nothing** — it has no write path to
+misfire through. It is read-only against S3 and RDS and additive-only
+against the OpenAI bill (≤40 calls).
+
+Pass condition: the buffet's post answers `menu`, the happy hour's answers
+`promotion`, and **every other post at those two handles that is a genuine
+event still answers `event`** — Sambinha's above all. That last clause is
+the half revision 1 could not check at all, and it is the whole point.
+
+#### Path B1 — the write-path re-extraction. OPTIONAL, and only after A and B0.
+
+If the operator wants the rows re-typed by the model rather than by hand,
+`POST /admin/trigger/event_extraction` with `{"eligibility": {"mode":
+"handles", "handles": ["ctradicao", "downtownbeergarden_"]}}`.
+
+**Preconditions, all three:** Path A is complete for EVERY row in the Step-0
+list (patched AND confirmed); B0 is green; and a read-back confirms
+`status: "confirmed"` and `post_type` in `operator_edited_fields` on every
+one of them. With those in place the confirmed branch runs, the
+re-extraction may write only `raw_extraction` / `last_seen_at` /
+`source_event_key` / `source_handle` / `source_shortcode` plus unedited
+fields, and a model that now disagrees sets
+`REVIEW_REASON_DIVERGES_FROM_CONFIRMED` rather than overwriting anything.
+
+Read the model's fresh answer out of `GET /admin/events/{event_id}` →
+`sources[].raw_extraction["kind"]`, which is written on the confirmed branch
+too (`event_reconciliation.py:753`) and stores the model's word verbatim
+(`event_kind.normalize_kind`). B1 therefore yields the same evidence B0
+does, at strictly higher risk, which is why it is optional.
+
+#### Rollback
+
+- Path A, per row: `PATCH /admin/events/{event_id}` with the previous
+  `post_type` recorded in Step 0. Deprojection/reprojection follows on the
+  next 2-minute cycle. `operator_edited_fields` still lists `post_type`
+  after the revert — harmless, and the honest record that a human decided
+  this field.
+- Confirming is one-way through the API (no un-confirm route, and
+  `EventPatch` does not accept `status`). A row that must be returned to
+  `accepted` needs a direct RDS update, which is out of scope for this round
+  — which is why Path A confirms only rows at these two handles and never a
+  broader sweep.
+- B0 has nothing to roll back.
+- B1: any field it moved on an unedited row is restored by re-running B1
+  after the prompt is fixed, or by a PATCH. `post_type` cannot have moved if
+  the preconditions held.
+
+The operator dispatches every step. No agent dispatches any of them — the
+same posture the 1.4.0 coordination plan takes for the bairro sweep and the
+EAS release.
 
 ### 5. The boundary the rule must not cross
+
+#### What the LIVE corpus can pin
 
 `Aula de FORRÓ na Sala de Reboco` (two rows, 6 of 44 occurrences, `category`
 `workshop`/`forró`, `'Mensalidade: R$ 100'`, a named teacher, stated hours
@@ -445,7 +777,7 @@ the 1.4.0 coordination plan takes for the bairro sweep and the EAS release.
 paid, and it is not a party — the closest thing in the corpus to the class
 this change removes. It **must stay `event`**: what repeats is a scheduled
 activity a person attends, not food, not a price, and not the venue merely
-being open. §1's closing sentence exists for it, and §7's eval pins it.
+being open.
 
 Also pinned to stay `event`: `Sambinha Downtown` (whose own description
 mentions "HAPPY HOUR a tarde toda"), `Residência drag da Metrópole`,
@@ -453,6 +785,52 @@ mentions "HAPPY HOUR a tarde toda"), `Residência drag da Metrópole`,
 `FORRÓ DOS PAIS`, `Drag Ataque`, `Baile Dançante`. Three of those name a
 promotion inside an event caption — the existing "event first" precedence
 was written for exactly that and must survive intact.
+
+#### What the live corpus CANNOT pin, and the synthetic controls that do
+
+The 21-event corpus is exactly today's live feed, which means the eval built
+from it is a *regression* test, not a *boundary* test: it contains not one
+food-anchored happening. A grep of the whole corpus for
+feijoada / degustação / gastro / almoço / jantar / churrasco / rodízio
+returns nothing, and the one food festival present (`Oktoberfest BeerDock`)
+is non-recurring, so the new clause's seam is never touched. **This is the
+one boundary the live corpus cannot exercise, and it is the boundary the
+rule is most likely to get wrong.**
+
+Thirteen synthetic captions therefore join the eval, labelled SYNTHETIC in
+the fixture so nobody mistakes them for production data, and **blocking on
+exactly the same terms as the 21 live ones**. Each is mapped to the shipped
+category vocabulary entry it stands in for, so the set is derived from §1a's
+audit rather than assembled by taste:
+
+| # | caption (abridged) | vocabulary entry | expected `kind` |
+|---|---|---|---|
+| S1 | "OKTOBERFEST — todo sábado de outubro, chopp alemão, banda Die Kapelle e concurso de dança bávara. Entrada R$ 20." | food festival | **event** |
+| S2 | "Degustação guiada de cachaças artesanais, toda quinta às 19h, com o mestre alambiqueiro João Ramos. Vagas limitadas, R$ 45." | tasting | **event** |
+| S3 | "FEIJOADA DO SÁBADO 🥁 Todo sábado a partir das 13h com roda de samba do grupo Samba de Mesa. Couvert R$ 15." | samba / pagode | **event** |
+| S4 | "Toda terça é noite de KARAOKÊ, 20h, inscrição na hora, sem couvert." | karaoke | **event** |
+| S5 | "Domingo é dia da criança: recreação, contação de história e brinquedoteca, das 10h às 14h, todo domingo." | kids / family | **event** |
+| S6 | "TODA SEXTA É LOVEZINHO 💚 open bar de caipirinha até meia-noite, DJ Bibi no comando." | party | **event** |
+| S7 | "Quiz da Quarta, 20h, equipes de até 5 pessoas — o time vencedor leva uma rodada de chopp." | quiz / trivia | **event** |
+| S8 | "Todo domingo tem jogo no telão + rodízio de petiscos a partir das 16h." | sports screening | **event** |
+| S9 | "Buffet de Terça a Domingo — a melhor hora do dia 🍛" (the live offender, verbatim) | — | **menu** |
+| S10 | "QUINTA É DIA DE HAPPY HOUR. Promoções em dobro: caldinhos x2, gin tônica x2… Chopp por R$ 6,99." (the live offender, verbatim) | — | **promotion** |
+| S11 | "Especial do dia: risoto de camarão, de segunda a sexta no almoço, R$ 39,90." | — | **menu** |
+| S12 | "De segunda a quinta, chopp em dobro o dia inteiro." | — | **promotion** |
+| S13 | "Nosso rodízio de pizza roda todas as noites, das 19h às 23h." | — | **menu** |
+
+S8/S13 and S3/S9 are the discriminating pairs: the same food, the same
+cadence, separated only by whether anything is *programmed*. A rule that
+gets S8 and S13 both right is a rule that has understood the distinction; a
+rule that answers `menu` to both has simply learned "rodízio", and a rule
+that answers `event` to both has learned nothing at all. S11 is the
+`"Especial do dia"` regression named in the 1.4.1 brief. S6 and S7 pin that
+a drinks offer *inside* an event caption still loses to "event first".
+
+The five vocabulary entries revision 1's rule failed (`karaoke`,
+`quiz / trivia`, `kids / family`, `food festival`, `tasting`) are S4, S7,
+S5, S1 and S2 respectively. A future revision of this clause that reproduces
+that failure fails those five rows and cannot merge.
 
 ## The events-filter question — what the system of record can offer
 
@@ -532,16 +910,28 @@ above is what retires it.
 - **Config:** no new setting, no new admin-config key, no feature flag.
   `admin_config:post_category_vocabulary` gains a second reader (the
   projector); its shape and validator are untouched.
-- **Prompt:** `_KIND_FIELD_DOC` grows by one paragraph. Both prompts
-  interpolate it, so both change together by construction. No output-token
-  budget change.
+- **Prompt:** `_KIND_FIELD_DOC` grows by three paragraphs (~260 input
+  tokens). Both prompts interpolate it, so both change together by
+  construction. No output-token budget change.
+- **New files, all additive:** `app/services/event_recurrence_text.py` and
+  `app/services/event_occurrence_end.py` (pure, no I/O, no config) and
+  `scripts/eval_kind_on_captions.py` (an offline read-only tool: it builds
+  the caption fixture and runs Path B0; it constructs no DAO and calls no
+  reconciler, so it has no write path). Nothing existing is renamed or
+  removed.
+- **Metrics:** four new counters (see Error Handling And Observability), all
+  with closed label sets. `EVENTS_PROJECTION_ENDS_AT_TOTAL` carries six
+  outcome labels, not five — `dropped_zero` is split from
+  `dropped_inverted`.
 
 ## Error Handling And Observability
 
-Three new counters, all mirroring `EVENTS_PROJECTION_TICKET_URL_TOTAL`'s
+Four new counters. Three mirror `EVENTS_PROJECTION_TICKET_URL_TOTAL`'s
 shape (closed `outcome` label set, zero-filled at import so an absent label
 is real evidence a path never ran — see the `/metrics` diagnostic that
-depends on that property), each incremented **once per source row**:
+depends on that property) and are incremented **once per source row**; the
+fourth lives on the extraction path, because that is the only place the
+suppression this plan introduces is ever visible.
 
 - `EVENTS_PROJECTION_RECURRENCE_TEXT_TOTAL{outcome}` —
   `normalized|unchanged|absent`.
@@ -555,9 +945,38 @@ depends on that property), each incremented **once per source row**:
   and duplicating that at projection time would be a second cardinality
   surface for the same question).
 - `EVENTS_PROJECTION_ENDS_AT_TOTAL{outcome}` —
-  `carried|derived|dropped_inverted|dropped_implausible|absent`. Today's
-  production would read `derived: 15` (or `dropped_*` if any stored pair is
-  itself inverted) and `absent: 29`.
+  `carried|derived|dropped_inverted|dropped_zero|dropped_implausible|absent`
+  (six labels; §3a explains why `dropped_zero` is split out from
+  `dropped_inverted` — a zero-length interval is not an inversion, and
+  folding them makes the counter unreadable as the data-defect signal it
+  exists to be). Counted once per SOURCE ROW, on the branch that row's
+  occurrences take. Expected reading today: `derived: 4` rows / `absent: 17`
+  rows (the 15 affected occurrences belong to 4 source rows) — see §3a for
+  why that is a well-founded inference rather than a measured fact, and why
+  a `dropped_*` reading instead would also be a correct outcome.
+
+- **`EVENT_EXTRACTION_SUPPRESSED_RECURRING_TOTAL{kind}`** — the
+  false-positive signal for the §1 rule, on the EXTRACTION path
+  (`event_extraction_service`, in the same loop that already reads `kind`
+  and `category`, before any date/confidence filtering so no branch can hide
+  a suppression). Incremented once per parsed item whose `kind` is
+  `menu`/`promotion`/`food`/`other` AND whose parsed answer states a
+  recurring cadence (`is_recurring` true, or a non-blank `recurrence_text` —
+  both are parsed for every item regardless of kind,
+  `openai_event_extraction_client.py:523-524`). `kind` is the only label and
+  it is a closed four-value set, so there is no cardinality surface.
+
+  **This is the only place a suppression can be seen.** A post the rule sends
+  to `menu` is never selected by `is_selectable`, so it is never projected,
+  so `EVENTS_PROJECTION_CATEGORY_TOTAL` and every other projection counter
+  are structurally blind to it — a false positive is counted nowhere else,
+  produces no row an operator would scroll past, and (because the prompt fix
+  is forward-only) shows up only on NEW posts at NEW venues, gradually.
+  Watch rule: today's steady state is roughly the two known offenders' posts
+  per crawl of those two handles. A step change, or a non-zero reading at a
+  venue that has never had one, means the rule is eating real recurring
+  nights and is the trigger to revert the prompt paragraph — which is a
+  deploy, with no data to repair, because nothing was deleted.
 
 Also: `load_post_category_vocabulary`'s existing fallback logging covers the
 unreadable-config path; a fallback must not fail the cycle. Every new
@@ -588,6 +1007,16 @@ Scenarios:
   pattern covers the horizon contributes zero occurrences to
   `events_index_v1:recife`, and no `event_occurrence_v1:*` key exists for
   it. (The C1 outcome, expressed at the boundary the projection owns.)
+- **A recurring food-anchored event is still projected.** A row with
+  `post_type: "event"` and `category: "food festival"`, recurring, still
+  reaches `events_index_v1:recife`. The projection must never filter on
+  category — `food festival` and `tasting` are first-class entries in this
+  repo's own `DEFAULT_CATEGORY_VOCABULARY`, and the C1 rule lives in the
+  extraction prompt precisely so nobody is tempted to solve it here with a
+  category blocklist, which would delete this row too. (The BDD counterpart
+  of §1a.)
+- **A recurring class with a paid enrolment is still projected.**
+  `category: "workshop"`, recurring weekly — the `Aula de FORRÓ` shape.
 - **An operator reclassification deprojects every occurrence of the event.**
   A recurring row already projected as 6 occurrences, PATCHed to
   `post_type: "menu"`, leaves zero occurrence keys and zero members in both
@@ -628,6 +1057,21 @@ Scenarios:
   over 24h yields null.
 - **A non-recurring row's `ends_at` is carried verbatim.** Unchanged
   behaviour, pinned so the fix cannot leak into it.
+- **A recurring row whose recurrence text cannot be parsed carries its
+  stored `ends_at` verbatim.** `is_recurring: true`, `recurrence_text:
+  "toda semana"` (prose this repo deliberately does not parse), so
+  `expand_occurrences` yields the single-occurrence shape on the stored
+  `starts_at` — the stored end is served unchanged, NOT re-derived and NOT
+  dropped. This is the F04 branch; revision 1 would have nulled it.
+- **A multi-day interval on the carried branch survives the 24h bound.**
+  A row starting Thursday 18:00 and ending Sunday 04:00 — `is_recurring:
+  true` with unparseable recurrence text — projects its stored end
+  verbatim, 82 hours out. The bound must not reach this branch: this is the
+  deletion vibes_bot refused at serve time.
+- **A zero-length stored interval is carried, not dropped, on the carried
+  branch.** Equality is permitted by the contract and vibes_bot serves it.
+- **An inverted stored pair on the carried branch projects null.** cs-server
+  never emits an occurrence that ends before it starts, on either branch.
 - **No occurrence in a full cycle has `ends_at` before its `starts_at`.**
   An exhaustive assertion over every written payload, not a per-scenario
   one — an enumerated check over named scenarios would go green while a
@@ -644,42 +1088,106 @@ Pytest unit tests:
   computations happen once per row regardless of occurrence count: a
   6-occurrence recurring row increments each new counter exactly once.
   This is the defect `classify_ticket_url`'s own comment warns about.
-- `tests/test_redis_projection_events.py` (extend) — the `ends_at` decision
-  table as a parametrised pure-input matrix over all five outcomes.
+- `tests/test_event_occurrence_end.py` (new) — `resolve_occurrence_end` as a
+  parametrised pure-input matrix over all **six** outcomes on **both**
+  branches, explicitly including:
+  - a CARRIED occurrence whose stored interval is 3 days long keeps its
+    stored `ends_at` verbatim (the multi-day festival vibes_bot refuses to
+    truncate — the 24h bound must not reach this branch);
+  - a CARRIED occurrence with a zero-length stored interval keeps it
+    (equality is served, matching vibes_bot's serve-time guard);
+  - a CARRIED occurrence whose stored end precedes its stored start is
+    dropped (`dropped_inverted`) — cs-server never emits the inversion its
+    own invariant forbids;
+  - a DERIVED occurrence with a 30h duration is dropped
+    (`dropped_implausible`), and one with a 0h duration is `dropped_zero`,
+    not `dropped_inverted`.
+- `tests/test_redis_projection_events.py` (extend) — the projector routes to
+  the right branch: a recurring row with a PARSEABLE `recurrence_text`
+  produces `occurrence_id != event_id` and takes the derived branch, while a
+  recurring row with UNPARSEABLE text ("toda semana") produces
+  `occurrence_id == event_id` and takes the carried branch. This is the
+  routing revision 1 got wrong; asserting it only inside
+  `resolve_occurrence_end` would not catch a projector that passes the wrong
+  `derived` flag.
+- `tests/test_event_extraction_service.py` (extend) —
+  `EVENT_EXTRACTION_SUPPRESSED_RECURRING_TOTAL` increments once per parsed
+  item whose `kind` is `menu`/`promotion`/`food`/`other` AND whose answer
+  carries a recurring cadence, and does NOT increment for a `menu` item with
+  no cadence, nor for an `event` item with one. Asserted with a stub client,
+  no network.
 - `tests/test_event_projection_selection.py` (extend) — `is_selectable` is
   False for `post_type` in `menu`/`promotion`/`food`/`other` with every
   other criterion passing. (Guards the removal path's mechanism.)
 - `tests/test_event_extraction_prompt_kind.py` (new) — an OFFLINE assertion
   that both `EXTRACTION_PROMPT` and `MULTI_EVENT_EXTRACTION_PROMPT` contain
-  the standing-offer paragraph, and that they contain it because both
-  interpolate `_KIND_FIELD_DOC` (assert on the shared constant, then on both
-  prompts). This is the anti-drift guard CLAUDE.md asks for; it asserts
-  wiring, not model behaviour.
+  all three paragraphs of the what-repeats test, and that they contain them
+  because both interpolate `_KIND_FIELD_DOC` (assert on the shared constant,
+  then on both prompts). This is the anti-drift guard CLAUDE.md asks for; it
+  asserts wiring, not model behaviour. It asserts the THIRD paragraph
+  specifically — the "food and price do not decide this by themselves" one —
+  because that is the paragraph revision 1 lacked, and an edit that trims
+  the clause back to revision 1's shape must fail a test, not only an eval
+  someone might skip.
 
 Manual or integration checks:
 
+- **Fixture builder — `scripts/eval_kind_on_captions.py` (new).** Revision 1
+  built the eval from `title + description + category + recurrence_text`,
+  i.e. POST-EXTRACTION PROSE, and said so. That is not good enough: that
+  prose is a cleaned summary the previous run already decided was
+  event-shaped, so it biases the eval toward passing on the 19 genuine
+  events — **the eval could not have detected a false positive on a real
+  caption, which is the only failure mode that matters.** The eval is
+  therefore built from RAW CAPTIONS.
+
+  Captions are not in RDS (`post_item_source` has no caption column and
+  `raw_extraction` holds the model's parsed answer, not its input) but they
+  ARE archived, and they are addressable without a listing scan: for each
+  event, `list_event_sources(event_id)` gives `cover_photo_key` and
+  `source_shortcode`; `event_source_media.derive_run_partition` recovers the
+  run prefix from that key; `retrieved/…/info/_manifest.json` holds the
+  post's own `caption` (this is exactly the field
+  `event_extraction_service.EventPostSource._bucket_entries` reads at
+  ingestion, so the eval sees byte-for-byte what the model saw). The script
+  runs in the production container over SSM (`docs`' prod verification
+  playbook: ship to `/app`, not `/tmp`), reads S3 and RDS read-only, writes
+  nothing, and emits the fixture JSON. **It is the same script Path B0 in §4
+  re-uses with `--handles`.**
+
 - **Prompt eval, resampled — the pre-merge gate for §1.** A checked-in
-  fixture of all 21 live events (title + description + category +
-  recurrence_text, transcribed from the census in Evidence), each labelled
-  with its expected `kind`: `menu` for the buffet, `promotion` for the happy
-  hour, `event` for the other 19 **including both `Aula de FORRÓ` rows and
-  all three events whose captions mention a promotion**. Run against the
-  real model behind `@pytest.mark.live_openai`, deselected by default so
-  neither `make test-unit` nor `make test-bdd` acquires a network
-  dependency. **Resample 3×**; all three runs must agree, and a single false
-  positive on the 19 blocks the merge — a rule that removes a real event is
-  worse than the defect it fixes. Honest limitation, recorded here so nobody
-  over-reads a green run: `description` is post-extraction prose, not the
-  raw caption (captions are not persisted in RDS; they travel with archived
-  photos in the S3 `retrieved/` layout), so this is strong evidence about
-  the amended precedence, not proof over raw captions. The proof is the next
-  item.
-- **Production proof, post-deploy — Path B of §4.** Read-only precondition
-  check (`status: "accepted"`, `operator_edited_fields: null`), then
-  `mode="handles"` re-extraction of `ctradicao` and `downtownbeergarden_`,
-  then re-read `GET /admin/events?venue_id=…`: the buffet row must be
-  `post_type: "menu"` and the happy hour `"promotion"`. This runs the real
-  captions through the amended prompt. Operator-dispatched.
+  fixture of **34 rows: the RAW CAPTION of all 21 live events** (built as
+  above) **plus the 13 synthetic boundary controls in §5**, each labelled
+  with its expected `kind` — `menu` for the buffet, `promotion` for the
+  happy hour, `event` for the other 19 **including both `Aula de FORRÓ` rows
+  and all three events whose captions mention a promotion**, and each
+  synthetic row's label per §5's table. Synthetic rows are marked
+  `"synthetic": true` in the fixture so nobody mistakes one for production
+  data, and are **blocking on exactly the same terms as the live ones** —
+  they are the only rows that exercise the new clause's risky side at all
+  (§5: the live corpus contains no food-anchored happening).
+
+  Run against the real model behind `@pytest.mark.live_openai`, deselected
+  by default so neither `make test-unit` nor `make test-bdd` acquires a
+  network dependency. **Resample 3×**; all three runs must agree, and a
+  single false positive — one row expected `event` that comes back
+  `menu`/`promotion`/`food`/`other` — blocks the merge, live or synthetic.
+  A rule that removes a real event is worse than the defect it fixes.
+
+  Residual limitation, recorded so nobody over-reads a green run: the eval
+  sends the caption but not the flyer IMAGE, so a post whose only
+  event evidence is on the flyer is judged more harshly here than in
+  production. That biases the eval toward finding false positives, which is
+  the safe direction; the two offenders are caption-only anyway.
+
+- **Production proof, post-deploy — Path B0 of §4.** The same script,
+  `--handles ctradicao downtownbeergarden_`, over every archived post at
+  those handles within the extraction cap: the buffet's post must answer
+  `menu`, the happy hour's `promotion`, and **every genuine event at those
+  handles must still answer `event`** — `Sambinha Downtown` above all, whose
+  caption says "HAPPY HOUR a tarde toda". No DAO, no `reconcile_post_events`,
+  no writes. Operator-dispatched. §4 states why the write-path re-extraction
+  (B1) is optional and gated behind the Path A freeze.
 - **Production verification, post-deploy, read-only.** Re-run the same
   44-occurrence sweep used to build this plan
   (`GET /events?city=recife&from=…&to=…&page_size=100`, then each
@@ -688,6 +1196,30 @@ Manual or integration checks:
   values contain no two entries differing only by casing; no occurrence's
   `category` is `buffet` or `happy hour`; `total_count` has dropped by 9
   (or by whatever the two rows contributed at that moment).
+
+- **Per-venue occurrence baseline — the standing false-positive check.**
+  The sweep above also groups by venue. The 2026-09-07 baseline, and the
+  only movement this round is allowed to cause:
+
+  | handle | occurrences today | expected after | why |
+  |---|---|---|---|
+  | saladerebocorecife | 10 | 10 | — |
+  | clubmetropole | 9 | 9 | — |
+  | ctradicao | 6 | **0** | the buffet is its only event |
+  | downtownbeergarden_ | 6 | **3** | happy hour out, Sambinha stays |
+  | casabacurau | 5 | 5 | — |
+  | tropical_gardeniashow | 3 | 3 | — |
+  | ferroviariodeafogados | 2 | 2 | — |
+  | tatubola.bar / seubotecorecife / beerdock_recife | 1 each | 1 each | — |
+  | **total** | **44** | **35** | |
+
+  Any OTHER venue's count falling is a false positive and is the trigger to
+  revert the §1 paragraph. Re-read at deploy + 1 day and deploy + 7 days,
+  because the prompt fix is forward-only: a regression reaches the feed only
+  as new posts are crawled, so a single post-deploy reading proves nothing
+  about it. `ctradicao` disappearing from the feed entirely is the EXPECTED
+  outcome here, not a defect — it has exactly one event and that event is
+  the buffet.
 - **Metrics check.** `EVENTS_PROJECTION_ENDS_AT_TOTAL{outcome="derived"}`
   and `EVENTS_PROJECTION_RECURRENCE_TEXT_TOTAL{outcome="normalized"}` must
   both be non-zero after a cycle, and `EVENTS_PROJECTION_ERRORS_TOTAL
@@ -706,8 +1238,15 @@ Manual or integration checks:
   code.
 - `_KIND_FIELD_DOC` is the only prompt constant edited, and a test proves
   both prompts carry the change.
-- The prompt eval passes 3/3 resamples with zero false positives on the 19
-  genuine events, both `Aula de FORRÓ` rows included.
+- The prompt eval passes **3/3 resamples over all 34 rows** — the 21 live
+  events built from their RAW ARCHIVED CAPTIONS plus the 13 synthetic
+  boundary controls — with **zero false positives**: no row expected `event`
+  comes back `menu`, `promotion`, `food` or `other`. Both `Aula de FORRÓ`
+  rows and all eight food-anchored synthetic controls (S1-S8) are included
+  in that zero.
+- `EVENT_EXTRACTION_SUPPRESSED_RECURRING_TOTAL` exists, is zero-filled at
+  import over its four `kind` labels, and has a unit test proving it counts
+  a recurring `menu` answer and does not count a recurring `event` one.
 - **After deploy, the events serving projection carries exactly the
   1.4.0 field list, with three fields changed in VALUE only:**
   - `recurrence_text` — casing-normalised sentence case (`'Toda QUARTA'` →
@@ -715,17 +1254,148 @@ Manual or integration checks:
   - `category` — canonicalised against the LIVE
     `admin_config:post_category_vocabulary` at projection time, with an
     off-vocabulary value passed through unchanged and never dropped;
-  - `ends_at` — for a recurring occurrence, the source row's duration
-    applied to that occurrence's own `starts_at`, or `null` when that
-    duration is missing, non-positive or over 24h; for a non-recurring
-    occurrence, the stored value verbatim, unchanged from today.
+  - `ends_at` — see the contract sentence below. **`is_recurring` does not
+    appear in it.**
 
   Every other field is byte-for-byte what 1.4.0 served.
-- Production, verified read-only after the deploy and the operator's Path B
-  or Path A run: zero occurrences with `ends_at < starts_at`; zero
-  case-variant duplicate `recurrence_text` values; zero occurrences whose
-  `category` is `buffet` or `happy hour`.
+
+- **The `ends_at` contract, stated for vibes_bot and mobile** (this is the
+  sentence the sibling repos should align to; it replaces revision 1's
+  `is_recurring`-keyed wording, which was wrong):
+
+  > An occurrence whose `starts_at` cs-server **re-derived** from a weekday
+  > pattern (`occurrence_id` of the form `<event_id>_<YYYY-MM-DD>`) carries
+  > an `ends_at` derived by applying the source row's stored DURATION to
+  > that occurrence's own `starts_at`, or `null` when that duration is
+  > missing, negative, zero, or longer than 24 hours.
+  > An occurrence served on the announcement's OWN stored `starts_at`
+  > (`occurrence_id == event_id` — every non-recurring row, and every
+  > recurring row whose recurrence prose this repo cannot parse into
+  > weekdays) carries the stored `ends_at` **verbatim, at any length**,
+  > except that a stored end strictly before its stored start is served as
+  > `null`.
+  > Therefore: cs-server never serves an occurrence whose `ends_at`
+  > precedes its `starts_at`; cs-server MAY serve an `ends_at` more than
+  > 24 hours after its `starts_at` (a multi-day festival on the carried
+  > branch) and MAY serve one exactly equal to it.
+
+  **This resolves the disagreement F04 identified, in vibes_bot's favour.**
+  vibes_bot's 1.4.1 plan declines to apply a 24h bound at serve time because
+  it would delete a real multi-day festival's end; revision 1 of THIS plan
+  would have made that deletion one layer earlier, on the recurring-but-
+  unparseable branch, by keying on `is_recurring`. cs-server was wrong and
+  is corrected in §3a. vibes_bot needs **no change**: its serve-time guard
+  (drop only when `ends_at < starts_at`; keep equality; keep a forward end
+  over 24h; keep when `starts_at` is null) is exactly compatible with the
+  contract above, and after this deploy it should observe zero drops —
+  it becomes defence in depth against a future projector bug rather than a
+  live repair.
+- Production, verified read-only after the deploy and the operator's Path A
+  run (and Path B0 if dispatched): zero occurrences with
+  `ends_at < starts_at`; zero case-variant duplicate `recurrence_text`
+  values; zero occurrences whose `category` is `buffet` or `happy hour`.
+- **Per-venue occurrence counts match the Test Plan's baseline table
+  exactly** at deploy + 1 day and deploy + 7 days: `ctradicao` 6 → 0,
+  `downtownbeergarden_` 6 → 3, city total 44 → 35, and **every other venue
+  unchanged**. A fall anywhere else is a false positive and reverts §1.
 - No feature flag, no new setting, no new admin-config key.
+
+## Review findings — disposition
+
+Every finding assigned to this repo by `141-REVIEW-FINDINGS.md`, verified
+against the shipped code and the production census before acting, and either
+FIXED here or REJECTED in writing. Two of the four verifications turned up
+something the reviewer had not seen; both are recorded.
+
+### F01 [BLOCKER] — the rescue clause is too narrow. **FIXED, and the
+finding was understated.**
+
+Verified: `app/models/post_category.py:39-45` ships `food festival` and
+`tasting` as first-class event categories, and revision 1's clause ("if what
+repeats is FOOD … never event") suppressed both. Auditing all 18 entries
+(§1a) shows the reviewer named 2 of **5** unrescued categories — `karaoke`,
+`quiz / trivia` and `kids / family` are not "a performance, a competition, a
+class or a screening" either — and that the food-alongside shapes
+(`samba / pagode` at a feijoada, `sports screening` at a rodízio + jogo)
+were suppressed too. Fixed by rewriting the clause around PROGRAMMED
+OCCASION vs. THE VENUE OPERATING with an explicit "food and price do not
+decide this by themselves" paragraph (§1), deriving it against the
+vocabulary rather than against the two offenders (§1a), and adding 13
+blocking synthetic controls (§5) of which 8 are food-anchored events that
+must survive. Also on record: `Oktoberfest BeerDock` is a REAL food festival
+already in the corpus, so the shape is not hypothetical.
+
+### F02 [BLOCKER] — Path B can destroy what it measures. **FIXED, and the
+prescribed fix was itself insufficient.**
+
+Verified: `downtownbeergarden_` hosts both the happy-hour offender and
+`Sambinha Downtown` (`evt_01KZVG66809JD1SCTQ2EJQAFJ4`). But the reviewer's
+prescription — "PATCH `post_type: 'event'` … that write populates
+`operator_edited_fields` and freezes them against reconciliation" — **does
+not work on these rows.** `event_reconciliation.py:749` gates
+`_confirmed_update_fields` (the only reader of `operator_edited_fields`) on
+`status == "confirmed"`; an `accepted` row takes the branch at `:790-802`
+which does a plain `fields.update(prepared)`, overwriting every content
+field and recomputing `status`. Revision 1 of this plan asserted the same
+false thing about Path A. Fixed by: correcting that claim in Evidence;
+making protection **PATCH _then_ confirm**; replacing the proof with **Path
+B0**, an offline caption eval with no write path at all; demoting the
+write-path run to **Path B1**, optional and gated behind the freeze;
+enumerating the blast radius by `venue_id` with expected post-run
+`post_type` per row; and recording the rollback, including that confirming
+is one-way through the admin API.
+
+### F03 [MAJOR] — no gate can detect a false positive on a real caption.
+**FIXED.**
+
+Verified: captions are genuinely absent from RDS (`post_item_source` has no
+caption column; `raw_extraction = dict(parsed)` is the model's OUTPUT) and
+genuinely present in the archive manifests that
+`event_extraction_service._bucket_entries` reads. Fixed by building the eval
+from those raw captions via a new offline script (Test Plan), by adding
+`EVENT_EXTRACTION_SUPPRESSED_RECURRING_TOTAL` on the extraction path — the
+only place a suppression is observable, since a suppressed post is never
+projected and therefore counted nowhere else — and by adding the per-venue
+occurrence baseline re-read at deploy + 1 and deploy + 7 days, because a
+forward-only prompt fix cannot regress on the first reading.
+
+### F04 [MAJOR] — the ≤24h bound is keyed on `is_recurring`. **FIXED;
+vibes_bot's position is the correct one.**
+
+Verified: `event_occurrences.py:161-163` sends a recurring row with
+unparseable recurrence text to `_single_occurrence`, whose occurrence
+carries the stored `starts_at` and the bare `event_id`. Revision 1's table
+would have nulled a genuine multi-day interval on that branch — the exact
+deletion vibes_bot's plan refuses. Fixed by re-keying on DERIVATION
+(`occ.occurrence_id != occ.event_id`), giving the carried branch **no length
+bound at all**, and stating the contract in Acceptance Criteria in terms
+that never mention `is_recurring`. vibes_bot needs no change; its serve-time
+guard is compatible as written and becomes defence in depth. Measured today:
+0 of 44 occurrences are on the recurring-but-unparseable branch, so this is
+a latent hazard, not a live one — which is why a BDD scenario, not a
+production check, pins it.
+
+### F12 [MINOR] — no positive boundary case for a food-centred event.
+**FIXED**, by the same 13 synthetic controls F01 required; §5 states
+explicitly that this is the one boundary the live corpus cannot exercise.
+
+### F18 [MINOR] — `dropped_inverted` is applied to non-inversions.
+**FIXED.** Verified both halves: a zero-length interval is not an inversion,
+and `event_occurrences.py:154-155` returns no occurrences when `starts_at`
+is None, so a null start is unreachable in the payload loop. `dropped_zero`
+is now its own label (§3a), the outcome set is six values, and §3a records
+the unreachability. Zero is **carried** on the carried branch, matching
+vibes_bot's "equality is permitted"; it is dropped only on the derived
+branch, where the derived end would equal the start it came from.
+
+### F08 / F16 [MINOR] — the stale "28% of events have no category".
+**FIXED for this repo's half.** This plan already carried the correction;
+it is now stated as superseding, names all three documents that repeat the
+figure (`plans/260906_events-ui-v1-coordination.md:31-32`, vibes_bot's
+contract table, mobile's D15), gives the replacement wording, and states
+that the defensive null handling in both sibling plans is correct and must
+stay — `category` IS nullable in the contract; only the evidence cited for
+it was wrong.
 
 ## Open Questions
 
