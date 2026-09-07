@@ -43,6 +43,37 @@ _CASES = [
     # value is prose, not a link.
     ("evenyx.com:lote2", None, OUTCOME_REJECTED),
     ("evenyx.com:99999999", None, OUTCOME_REJECTED),  # 8 digits is not a port
+    # ── the port must be a REAL TCP port, not merely 1-5 digits ──────────
+    # `_PORT_RE = ^[0-9]{1,5}$` counted digits only, so `:80808` and
+    # `:99999` were qualified into `https://evenyx.com:80808/x` — a link no
+    # client can open — and counted `scheme_added`, i.e. a success. Found by
+    # vibes_bot's serve-time twin; fixed HERE because cs-server is the
+    # canonical writer of the projection.
+    ("evenyx.com:80808/x", None, OUTCOME_REJECTED),
+    ("evenyx.com:99999/x", None, OUTCOME_REJECTED),
+    ("evenyx.com:65536/x", None, OUTCOME_REJECTED),   # one past the bound
+    # ...and the bound itself, plus every legitimate port, still passes.
+    ("evenyx.com:65535/x", "https://evenyx.com:65535/x", OUTCOME_SCHEME_ADDED),
+    ("evenyx.com:8080/lote2#a", "https://evenyx.com:8080/lote2#a", OUTCOME_SCHEME_ADDED),
+    # Edge values, pinned because vibes_bot pins them identically: `:0` and a
+    # leading-zero port are accepted (the rule is a numeric bound, not a
+    # reachability check), an EMPTY port suffix is not a port at all.
+    ("evenyx.com:0/x", "https://evenyx.com:0/x", OUTCOME_SCHEME_ADDED),
+    ("evenyx.com:0", "https://evenyx.com:0", OUTCOME_SCHEME_ADDED),
+    ("evenyx.com:0080/x", "https://evenyx.com:0080/x", OUTCOME_SCHEME_ADDED),
+    ("evenyx.com:", None, OUTCOME_REJECTED),
+    ("evenyx.com:/x", None, OUTCOME_REJECTED),
+    # rule 7 (protocol-relative) and rule 5 (already absolute) share
+    # `_authority_is_valid`, so both inherit the bound.
+    ("//evenyx.com:80808/x", None, OUTCOME_REJECTED),
+    ("https://evenyx.com:80808/x", None, OUTCOME_REJECTED),
+    ("https://evenyx.com:65536/x", None, OUTCOME_REJECTED),
+    ("https://evenyx.com:/x", None, OUTCOME_REJECTED),
+    (
+        "https://evenyx.com:65535/x",
+        "https://evenyx.com:65535/x",
+        OUTCOME_PASSTHROUGH,
+    ),
     # ── rule 7: protocol-relative ────────────────────────────────────────
     ("//evenyx.com/e/42", "https://evenyx.com/e/42", OUTCOME_SCHEME_ADDED),
     # ── rule 5: already absolute, returned untouched ─────────────────────
@@ -172,3 +203,117 @@ def test_a_dead_scheme_is_counted_rejected_not_passthrough():
         normalised, outcome = classify_ticket_url(value)
         assert normalised is None, value
         assert outcome == OUTCOME_REJECTED, (value, outcome)
+
+
+def test_an_impossible_port_is_counted_rejected_not_qualified():
+    """The counter is the only signal that would ever reveal this class of
+    defect, so labelling matters as much as the value. `:80808` used to come
+    back as `https://evenyx.com:80808/x` under `scheme_added` — a dead ticket
+    button recorded as a SUCCESS. It must now be None AND `rejected`; None
+    under `scheme_added` or `passthrough` would hide the drift just as
+    effectively."""
+    for value in (
+        "evenyx.com:80808/x",
+        "evenyx.com:99999/x",
+        "evenyx.com:65536/x",
+        "//evenyx.com:80808/x",
+        "https://evenyx.com:80808/x",
+        "https://evenyx.com:65536/x",
+    ):
+        normalised, outcome = classify_ticket_url(value)
+        assert normalised is None, (value, normalised)
+        assert outcome == OUTCOME_REJECTED, (value, outcome)
+
+
+# The cross-repo contract table. See the docstring on the test below: this
+# is vibes_bot's OUTPUT, captured and pinned, not a live import.
+_CROSS_REPO_CONTRACT = [
+    ('evenyx.com', 'https://evenyx.com', OUTCOME_SCHEME_ADDED),
+    ('www.sympla.com.br', 'https://www.sympla.com.br', OUTCOME_SCHEME_ADDED),
+    ('evenyx.com/e/42?ref=ig#lote2', 'https://evenyx.com/e/42?ref=ig#lote2', OUTCOME_SCHEME_ADDED),
+    ('evenyx.com:8080/lote2', 'https://evenyx.com:8080/lote2', OUTCOME_SCHEME_ADDED),
+    ('evenyx.com:8080', 'https://evenyx.com:8080', OUTCOME_SCHEME_ADDED),
+    ('evenyx.com:65535/x', 'https://evenyx.com:65535/x', OUTCOME_SCHEME_ADDED),
+    ('evenyx.com:65536/x', None, OUTCOME_REJECTED),
+    ('evenyx.com:80808/x', None, OUTCOME_REJECTED),
+    ('evenyx.com:99999/x', None, OUTCOME_REJECTED),
+    ('evenyx.com:99999999', None, OUTCOME_REJECTED),
+    ('evenyx.com:0/x', 'https://evenyx.com:0/x', OUTCOME_SCHEME_ADDED),
+    ('evenyx.com:0', 'https://evenyx.com:0', OUTCOME_SCHEME_ADDED),
+    ('evenyx.com:0080/x', 'https://evenyx.com:0080/x', OUTCOME_SCHEME_ADDED),
+    ('evenyx.com:00000/x', 'https://evenyx.com:00000/x', OUTCOME_SCHEME_ADDED),
+    ('evenyx.com:', None, OUTCOME_REJECTED),
+    ('evenyx.com:/x', None, OUTCOME_REJECTED),
+    ('evenyx.com:lote2', None, OUTCOME_REJECTED),
+    ('evenyx.com:-1/x', None, OUTCOME_REJECTED),
+    ('evenyx.com: 80/x', None, OUTCOME_REJECTED),
+    ('https://evenyx.com:80808/x', None, OUTCOME_REJECTED),
+    ('https://evenyx.com:65535/x', 'https://evenyx.com:65535/x', OUTCOME_PASSTHROUGH),
+    ('https://evenyx.com:65536/x', None, OUTCOME_REJECTED),
+    ('https://evenyx.com:0/x', 'https://evenyx.com:0/x', OUTCOME_PASSTHROUGH),
+    ('https://evenyx.com:0080/x', 'https://evenyx.com:0080/x', OUTCOME_PASSTHROUGH),
+    ('https://evenyx.com:/x', None, OUTCOME_REJECTED),
+    ('https://evenyx.com:8080/lote2', 'https://evenyx.com:8080/lote2', OUTCOME_PASSTHROUGH),
+    ('//evenyx.com/e/42', 'https://evenyx.com/e/42', OUTCOME_SCHEME_ADDED),
+    ('//evenyx.com:80808/x', None, OUTCOME_REJECTED),
+    ('https://sympla.com.br/evento/123', 'https://sympla.com.br/evento/123', OUTCOME_PASSTHROUGH),
+    ('http://ingressos.example.com/x', 'http://ingressos.example.com/x', OUTCOME_PASSTHROUGH),
+    ('HTTPS://SYMPLA.COM.BR/X', 'HTTPS://SYMPLA.COM.BR/X', OUTCOME_PASSTHROUGH),
+    ('https://', None, OUTCOME_REJECTED),
+    ('https:///', None, OUTCOME_REJECTED),
+    ('https://.', None, OUTCOME_REJECTED),
+    ('http://', None, OUTCOME_REJECTED),
+    ('https://?ref=ig', None, OUTCOME_REJECTED),
+    ('https://#lote2', None, OUTCOME_REJECTED),
+    ('https://localhost:8080/x', None, OUTCOME_REJECTED),
+    ('https://192.168.0.1/x', None, OUTCOME_REJECTED),
+    ('mailto:vendas@casa.com', None, OUTCOME_REJECTED),
+    ('tel:+5581999999999', None, OUTCOME_REJECTED),
+    ('whatsapp://send?phone=5581', None, OUTCOME_REJECTED),
+    ('javascript:alert(1)', None, OUTCOME_REJECTED),
+    ('data:text/html;base64,AAAA', None, OUTCOME_REJECTED),
+    ('vendas@casa.com', None, OUTCOME_REJECTED),
+    ('ingressos', None, OUTCOME_REJECTED),
+    ('R$50', None, OUTCOME_REJECTED),
+    ('evenyx.c', None, OUTCOME_REJECTED),
+    ('evenyx.123', None, OUTCOME_REJECTED),
+    ('192.168.0.1/x', None, OUTCOME_REJECTED),
+    ('evenyx..com', None, OUTCOME_REJECTED),
+    ('evenyx.com.', 'https://evenyx.com', OUTCOME_SCHEME_ADDED),
+    ('evenyx.com!', 'https://evenyx.com', OUTCOME_SCHEME_ADDED),
+    ('  https://sympla.com.br/x  ', 'https://sympla.com.br/x', OUTCOME_PASSTHROUGH),
+    ('ingressos na portaria', None, OUTCOME_REJECTED),
+    ('evenyx.com /lote2', None, OUTCOME_REJECTED),
+    (None, None, OUTCOME_ABSENT),
+    ('', None, OUTCOME_ABSENT),
+    ('   ', None, OUTCOME_ABSENT),
+    ('...', None, OUTCOME_ABSENT),
+    (12345, None, OUTCOME_ABSENT),
+    (['evenyx.com'], None, OUTCOME_ABSENT),
+]
+
+
+@pytest.mark.parametrize("stored,expected,outcome", _CROSS_REPO_CONTRACT)
+def test_the_two_repos_agree_input_for_input(stored, expected, outcome):
+    """cs-server and vibes_bot must classify the same value the same way.
+
+    HONEST ABOUT WHAT THIS IS: it does NOT import vibes_bot. The two repos
+    are separate git repositories with separate virtualenvs; vibes_bot is
+    not on this repo's import path in any developer checkout or in CI, and
+    faking the cross-import (a sys.path poke at a sibling directory) would
+    pass locally on one machine and be meaningless everywhere else.
+
+    So the expected column below was CAPTURED by running vibes_bot's
+    `app/services/event_ticket_url.py` (branch `fix/events-ui-api-hardening`,
+    plan `plans/260906_events-ui-api-hardening.md`, sha256
+    5ad397dad358202732cb48fa788549e063e5bac43bf51b73561aca96df003c57) over
+    this exact input list, and pinned. It is a regression guard on OUR side
+    of a contract, not a live equality proof: if cs-server drifts, this goes
+    red; if vibes_bot drifts, only vibes_bot's own copy of the table does.
+    That is why both repos keep the rules in a same-named, same-shaped
+    module — the two files are meant to stay trivially diffable.
+
+    At the time of pinning, all 62 rows agreed, plus 2400 generated
+    `prefix + host + :port + path` permutations.
+    """
+    assert classify_ticket_url(stored) == (expected, outcome)

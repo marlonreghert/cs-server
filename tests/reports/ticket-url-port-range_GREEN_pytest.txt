@@ -1,0 +1,10 @@
+........................................................................ [ 36%]
+........................................................................ [ 73%]
+...................................................                      [100%]
+=============================== warnings summary ===============================
+../../vibesense_wrapper/cs-server/.venv/lib/python3.12/site-packages/pydantic/_internal/_config.py:291
+  /media/mario/ssd/projects/vibesense_wrapper/cs-server/.venv/lib/python3.12/site-packages/pydantic/_internal/_config.py:291: PydanticDeprecatedSince20: Support for class-based `config` is deprecated, use ConfigDict instead. Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.9/migration/
+    warnings.warn(DEPRECATION_MESSAGE, DeprecationWarning)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+195 passed, 1 warning in 0.64s

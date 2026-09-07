@@ -42,6 +42,12 @@ Feature: Events venue bairro, ticket URL and nightlife-day projection
     Then the occurrence payload carries no ticket url
     And the ticket url normalisation outcome "rejected" is counted once
 
+  Scenario: Project no ticket url for a host whose port is not a real TCP port
+    Given an accepted event whose stored ticket url is "evenyx.com:80808/x"
+    When the events projection runs
+    Then the occurrence payload carries no ticket url
+    And the ticket url normalisation outcome "rejected" is counted once
+
   Scenario: Leave an already absolute ticket url exactly as stored
     Given an accepted event whose stored ticket url is "https://sympla.com.br/evento/123"
     When the events projection runs
