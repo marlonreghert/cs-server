@@ -20,6 +20,14 @@ Feature: Non-events stay out of the events serving projection, and its recurrenc
   # prompts carry the shared constant) and by a resampled live eval outside
   # this suite; here it is expressed only as its observable outcome — a row
   # typed `menu` or `promotion` never reaches the projection.
+  #
+  # The `ends_at` scenarios below split on whether an occurrence's
+  # `starts_at` was RE-DERIVED from a weekday pattern (`occurrence_id` is
+  # `<event_id>_<date>`) or served on the announcement's own stored
+  # `starts_at` (`occurrence_id` is the bare `event_id`). They deliberately
+  # do NOT split on `is_recurring`: a recurring row whose recurrence prose
+  # this repo cannot parse takes the SECOND shape, and treating it as the
+  # first would delete a genuine multi-day end.
 
   Background:
     Given a geo-fence city "recife" is configured
@@ -51,6 +59,29 @@ Feature: Non-events stay out of the events serving projection, and its recurrenc
     Given an accepted event row for venue "Downtown Beer Garden" titled "Sambinha Downtown"
     And that row has post_type "event"
     And that row is recurring with recurrence text "TODOS OS DOMINGOS"
+    And that row was last seen 3 days ago
+    When the events projection runs
+    Then the city events index for "recife" holds at least one occurrence of that event
+
+  Scenario: A recurring food-anchored event is still projected
+    Given an accepted event row for venue "Cachaçaria Tradição" titled "Feijoada com samba ao vivo"
+    And that row has post_type "event"
+    And that row has category "food festival"
+    And that row is recurring with recurrence text "todos os sábados"
+    And that row was last seen 3 days ago
+    When the events projection runs
+    Then the city events index for "recife" holds at least one occurrence of that event
+    # The projection must never filter on category. `food festival` and
+    # `tasting` are first-class entries in this repo's own shipped
+    # DEFAULT_CATEGORY_VOCABULARY, and the C1 rule lives in the extraction
+    # prompt precisely so that nobody is tempted to solve it here with a
+    # category blocklist -- which would also delete this row.
+
+  Scenario: A recurring class with a paid enrolment is still projected
+    Given an accepted event row for venue "Sala de Reboco" titled "Aula de FORRÓ"
+    And that row has post_type "event"
+    And that row has category "workshop"
+    And that row is recurring with recurrence text "Toda QUARTA"
     And that row was last seen 3 days ago
     When the events projection runs
     Then the city events index for "recife" holds at least one occurrence of that event
@@ -165,11 +196,16 @@ Feature: Non-events stay out of the events serving projection, and its recurrenc
     When the events projection runs
     Then every projected occurrence of that event carries a null end time
 
-  Scenario: A recurring row with a zero-length stored duration projects a null end
-    Given an accepted recurring event row whose stored end equals its stored start
+  Scenario: A re-derived occurrence with a zero-length stored duration projects a null end
+    Given an accepted recurring event row with recurrence text "Toda quarta"
+    And that row's stored end equals its stored start
     And that row was last seen 3 days ago
     When the events projection runs
     Then every projected occurrence of that event carries a null end time
+    # A zero duration carried onto a re-derived start would end the
+    # occurrence at the instant it begins, which tells a reader nothing.
+    # It is NOT an inversion, so it is counted separately -- see the
+    # outcome outline at the foot of this file.
 
   Scenario: A recurring row with an implausible stored duration projects a null end
     Given an accepted recurring event row whose stored end is 30 hours after its stored start
@@ -188,10 +224,60 @@ Feature: Non-events stay out of the events serving projection, and its recurrenc
     When the events projection runs
     Then the projected occurrence of that event ends at 2026-09-20 03:00
 
+  # ── the carried branch: recurring, but nothing was re-derived ──────────
+  #
+  # `expand_occurrences` sends a recurring row whose `recurrence_text`
+  # yields no weekday set to the SAME single-occurrence shape a
+  # non-recurring row takes: one occurrence, on the row's own stored
+  # `starts_at`, keyed by the bare `event_id`. Its stored `ends_at` is
+  # therefore the correct end for it and must be carried verbatim. Keying
+  # the decision on `is_recurring` instead of on whether the occurrence was
+  # RE-DERIVED is the defect these three scenarios exist to prevent -- it
+  # would delete the end of a genuine multi-day festival, which is exactly
+  # what vibes_bot declines to do at serve time.
+
+  Scenario: A recurring row whose recurrence text cannot be parsed carries its stored end verbatim
+    Given an accepted event row that is recurring with recurrence text "toda semana"
+    And that row starts at 2026-09-19 22:00 and ends at 2026-09-20 03:00
+    And that row was last seen 3 days ago
+    When the events projection runs
+    Then that event is projected as exactly one occurrence
+    And that occurrence's id is the bare event id
+    And that occurrence starts at 2026-09-19 22:00
+    And that occurrence ends at 2026-09-20 03:00
+
+  Scenario: A multi-day interval on the carried branch is not truncated by the 24 hour bound
+    Given an accepted event row that is recurring with recurrence text "toda semana"
+    And that row starts at 2026-10-01 18:00 and ends at 2026-10-04 04:00
+    And that row was last seen 3 days ago
+    When the events projection runs
+    Then that occurrence ends at 2026-10-04 04:00
+    And that occurrence's end time is more than 24 hours after its start
+
+  Scenario: A zero-length stored interval on the carried branch is carried, not dropped
+    Given an accepted non-recurring event row whose stored end equals its stored start
+    When the events projection runs
+    Then the projected occurrence of that event carries an end time equal to its start
+    And that end time is not null
+
+  Scenario: An inverted stored pair on the carried branch projects a null end
+    Given an accepted non-recurring event row starting at 2026-09-19 22:00 and ending at 2026-09-19 19:00
+    When the events projection runs
+    Then the projected occurrence of that event carries a null end time
+
   Scenario: No occurrence written by a full cycle ever ends before it starts
     Given the projection source holds every event row from the production census
     When the events projection runs
     Then no occurrence written by that cycle has an end time before its own start time
+    # Exhaustive over every payload the cycle wrote, not over the scenarios
+    # named above: an enumerated check would go green while a branch nobody
+    # listed stayed broken.
+
+  Scenario: Every occurrence a full cycle writes on the carried branch keeps its row's stored end
+    Given the projection source holds every event row from the production census
+    And one of those rows is recurring with recurrence text this repo cannot parse
+    When the events projection runs
+    Then every occurrence whose id is a bare event id carries its row's stored end time unchanged
 
   # ── the contract is unchanged apart from those three values ────────────
 
@@ -226,8 +312,17 @@ Feature: Non-events stay out of the events serving projection, and its recurrenc
       | a category matching the live vocabulary     | category        | canonicalized        |
       | a category off the live vocabulary          | category        | off_vocabulary       |
       | no category                                 | category        | absent               |
-      | a recurring row with a usable duration      | end time        | derived              |
-      | a recurring row with an inverted stored end | end time        | dropped_inverted     |
-      | a recurring row with a 30 hour duration     | end time        | dropped_implausible  |
-      | a non-recurring row with a stored end       | end time        | carried              |
-      | a row with no stored end                    | end time        | absent               |
+      | a re-derived occurrence with a usable duration | end time     | derived              |
+      | a re-derived occurrence with an inverted pair | end time      | dropped_inverted     |
+      | a re-derived occurrence with a zero duration | end time       | dropped_zero         |
+      | a re-derived occurrence with a 30 hour duration | end time    | dropped_implausible  |
+      | a carried occurrence with a stored end       | end time       | carried              |
+      | a carried occurrence with a 3 day stored end | end time       | carried              |
+      | a carried occurrence with an inverted pair   | end time       | dropped_inverted     |
+      | a row with no stored end                     | end time       | absent               |
+
+  # `dropped_zero` is deliberately NOT folded into `dropped_inverted`: a
+  # zero-length interval is not an inversion, and folding them makes the
+  # counter unreadable as the data-defect signal it exists to be. Note also
+  # that zero is DROPPED on the re-derived branch and CARRIED on the other:
+  # the label set encodes the branch, so no second label is needed.
