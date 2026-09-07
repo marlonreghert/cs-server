@@ -20,6 +20,7 @@ from sqlalchemy import bindparam, create_engine, text
 
 from app.dao.venue_row import split_venue_for_storage
 from app.services.pipeline_run_registry import new_run_id
+from app.utils.text_norm import fold_text
 
 logger = logging.getLogger(__name__)
 
@@ -234,7 +235,32 @@ class RdsVenueStore:
         Raises ValueError when `source` is outside
         {"operator","google","parsed"} so a future caller cannot forget it
         silently — this is a required keyword specifically so a new writer
-        added later must make an explicit provenance choice."""
+        added later must make an explicit provenance choice.
+
+        NEIGHBORHOOD-EQUALS-CITY SUPPRESSION (plans/260906_events-venue-
+        bairro-and-ticket-url.md §2). For a `google` or `parsed` write, an
+        incoming `neighborhood` is dropped before the UPDATE is built when
+        it `fold_text`-compares equal to EITHER the incoming `city` OR the
+        EFFECTIVE POST-WRITE city — the city the row will actually hold once
+        this statement commits, which is not always the incoming one because
+        every column is precedence-guarded independently. Both comparisons
+        are needed: comparing only against the incoming city lets a write
+        whose city LOSES still leave `neighborhood == the city the row
+        keeps`, and comparing against the STORED city instead would drop a
+        correct bairro whenever the incoming city legitimately WINS and
+        differs from it.
+
+        `source="operator"` is EXEMPT. A bairro named after its city is not
+        always wrong — Bairro do Recife is a real neighbourhood of Recife —
+        so this is a heuristic over MACHINE-written values, and a human
+        write is trusted verbatim. That also makes the operator write the
+        documented repair path when the guard drops a legitimate value.
+
+        The guard only ever prevents a bad write: dropping the incoming
+        value makes that ONE column a no-op under the existing per-field
+        guard, never erases a stored value, and never touches the other
+        three columns. It does NOT retro-repair rows written before it
+        landed — `count_address_neighborhood_equals_city` measures those."""
         if source not in self._PROVENANCE_RANK:
             raise ValueError(
                 "update_venue_address_components: source must be one of "
@@ -262,6 +288,9 @@ class RdsVenueStore:
             _field_clause(f) for f in ("street", "neighborhood", "city", "postal_code")
         )
         with self.engine.begin() as conn:
+            neighborhood = self._suppress_city_named_neighborhood(
+                conn, venue_id, source=source, neighborhood=neighborhood, city=city,
+            )
             conn.execute(text(
                 f"UPDATE venues.address SET {set_clause}, updated_at=now() "
                 "WHERE venue_id=:venue_id"
@@ -270,22 +299,99 @@ class RdsVenueStore:
                 "neighborhood": neighborhood, "city": city, "postal_code": postal_code,
             })
 
+    def _suppress_city_named_neighborhood(
+        self, conn, venue_id: str, *, source: str,
+        neighborhood: Optional[str], city: Optional[str],
+    ) -> Optional[str]:
+        """The neighborhood value that should actually be written — None
+        when it is just the venue's own city under another name. Reads the
+        stored city inside the CALLER's transaction so the comparison and
+        the UPDATE cannot see different rows. See
+        `update_venue_address_components`'s docstring for the rule and for
+        why `operator` is exempt."""
+        incoming_neighborhood = (neighborhood or "").strip()
+        if not incoming_neighborhood or source == "operator":
+            return neighborhood
+
+        row = conn.execute(text(
+            "SELECT city, city_source FROM venues.address WHERE venue_id=:venue_id"
+        ), {"venue_id": venue_id}).mappings().first()
+        stored_city = row["city"] if row is not None else None
+        stored_city_source = row["city_source"] if row is not None else None
+
+        incoming_city = (city or "").strip() or None
+        # The same predicate `_field_clause("city")` emits, evaluated in
+        # Python over the two values just read.
+        city_wins = incoming_city is not None and (
+            stored_city_source is None
+            or self._PROVENANCE_RANK[source]
+            >= self._PROVENANCE_RANK.get(stored_city_source, 0)
+        )
+        effective_city = incoming_city if city_wins else stored_city
+
+        folded = fold_text(incoming_neighborhood)
+        for candidate in (incoming_city, effective_city):
+            if candidate and folded == fold_text(candidate):
+                logger.info(
+                    f"[RdsVenueStore] dropping {source} neighborhood "
+                    f"{incoming_neighborhood!r} for {venue_id}: it is the "
+                    f"row's own city"
+                )
+                return None
+        return neighborhood
+
+    # The selection populations `list_address_backfill_candidates` can be
+    # asked for. `fill` is the shipped behaviour and stays the default so no
+    # existing caller, test or scheduled behaviour changes.
+    ADDRESS_BACKFILL_MODES = ("fill", "upgrade")
+
     def list_address_backfill_candidates(
-        self, after_venue_id: Optional[str], limit: int
+        self, after_venue_id: Optional[str], limit: int, *, mode: str = "fill"
     ) -> list[dict]:
         """`venues.address` rows with `venue_id > after_venue_id` (None =
-        from the very start) where at least one structured column is still
-        null, ordered by `venue_id` ALONE — never servable-first (see
-        `VenueAddressBackfillService`'s own docstring for why a two-tier
-        resume cursor is deliberately avoided: `venue_id` carries no
-        correlation to servability, so a compound ordering resumed by a
-        single `venue_id` cursor could permanently orphan a slice of the
-        non-servable backlog). Every venue — servable and non-servable
-        alike — is reachable this way. A non-positive `limit` selects
-        nothing."""
+        from the very start), ordered by `venue_id` ALONE — never
+        servable-first (see `VenueAddressBackfillService`'s own docstring
+        for why a two-tier resume cursor is deliberately avoided:
+        `venue_id` carries no correlation to servability, so a compound
+        ordering resumed by a single `venue_id` cursor could permanently
+        orphan a slice of the non-servable backlog). Every venue — servable
+        and non-servable alike — is reachable this way. A non-positive
+        `limit` selects nothing.
+
+        `mode` picks the POPULATION (plans/260906_events-venue-bairro-and-
+        ticket-url.md §1):
+
+        - `fill` (default) — at least one of the four structured columns is
+          still NULL. Byte-for-byte the predicate this method has always
+          used.
+        - `upgrade` — additionally selects a row whose column is filled but
+          provenance-ranked BELOW `google`, i.e. `<field>_source = 'parsed'`.
+          Without it the Google rung is permanently unreachable: once every
+          column is non-null, `fill` selects nothing at all and a
+          parser-sourced venue-complex name can never be corrected.
+
+        An unknown mode raises `ValueError` — the same posture as
+        `update_venue_address_components`'s source guard — so a typo in an
+        operator's trigger config cannot silently sweep the wrong
+        population."""
+        if mode not in self.ADDRESS_BACKFILL_MODES:
+            raise ValueError(
+                "list_address_backfill_candidates: mode must be one of "
+                f"{list(self.ADDRESS_BACKFILL_MODES)}, got {mode!r}"
+            )
         if limit <= 0:
             return []
-        where = ["(street IS NULL OR neighborhood IS NULL OR city IS NULL OR postal_code IS NULL)"]
+        if mode == "upgrade":
+            predicate = " OR ".join(
+                f"{f} IS NULL OR {f}_source = 'parsed'"
+                for f in ("street", "neighborhood", "city", "postal_code")
+            )
+        else:
+            predicate = (
+                "street IS NULL OR neighborhood IS NULL "
+                "OR city IS NULL OR postal_code IS NULL"
+            )
+        where = [f"({predicate})"]
         params: dict = {"limit": limit}
         if after_venue_id is not None:
             where.append("venue_id > :after")
@@ -332,6 +438,55 @@ class RdsVenueStore:
                 "FROM venues.address"
             )).mappings().first()
         return dict(row) if row else {"street": 0, "neighborhood": 0, "city": 0, "postal_code": 0}
+
+    def count_address_source_rows(self) -> dict:
+        """`{field: {source: row_count}}` over `venues.address`, one entry
+        per structured field per provenance (`operator`/`google`/`parsed`/
+        `none`, where `none` is a NULL column or a value written before the
+        provenance columns existed). Backs `venue_address_source_rows`.
+
+        Closes the blind spot `count_address_backfill_remaining` leaves:
+        that count reads 0 whether the stored data is right or wrong, which
+        is exactly why a venue-complex name sitting in `neighborhood` stayed
+        invisible. It is also the only way an operator can watch a
+        `parsed -> google` upgrade sweep progress and prove it finished."""
+        fields = ("street", "neighborhood", "city", "postal_code")
+        counts = {f: {s: 0 for s in ("operator", "google", "parsed", "none")} for f in fields}
+        union = " UNION ALL ".join(
+            f"SELECT '{f}' AS field, COALESCE({f}_source, 'none') AS source, "
+            f"count(*) AS n FROM venues.address GROUP BY 2"
+            for f in fields
+        )
+        with self.engine.connect() as conn:
+            for row in conn.execute(text(union)).mappings():
+                bucket = counts.get(row["field"])
+                if bucket is None:
+                    continue
+                # An unexpected provenance string (only reachable from a
+                # hand-written row) is folded into `none` rather than
+                # silently creating an unlabelled series.
+                key = row["source"] if row["source"] in bucket else "none"
+                bucket[key] += row["n"]
+        return counts
+
+    def count_address_neighborhood_equals_city(self) -> int:
+        """`venues.address` rows whose stored `neighborhood` equals its
+        stored `city` under `lower(btrim(...))` — backs
+        `venue_address_neighborhood_equals_city`.
+
+        Two documented limits, so the number is never over-read: the SQL
+        comparison is case-insensitive but does NOT accent-fold (this
+        database has no `unaccent` extension), so it can undercount a purely
+        accent-differing pair — the WRITE-time guard itself does fold, via
+        `fold_text`; and it counts deliberate `operator` exemptions
+        alongside real defects. Read it as "rows to inspect", never as "rows
+        that are wrong"."""
+        with self.engine.connect() as conn:
+            return int(conn.execute(text(
+                "SELECT count(*) FROM venues.address "
+                "WHERE neighborhood IS NOT NULL AND city IS NOT NULL "
+                "AND lower(btrim(neighborhood)) = lower(btrim(city))"
+            )).scalar() or 0)
 
     def soft_delete_venue(self, venue_id, reason, source, google_business_status=None) -> None:
         with self.engine.begin() as conn:

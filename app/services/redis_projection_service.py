@@ -24,7 +24,9 @@ from app.metrics import (
     EVENTS_PROJECTION_BYTES,
     EVENTS_PROJECTION_DURATION_SECONDS,
     EVENTS_PROJECTION_ERRORS_TOTAL,
+    EVENTS_PROJECTION_NIGHTLIFE_ROLLBACK_TOTAL,
     EVENTS_PROJECTION_SOURCE_ROWS,
+    EVENTS_PROJECTION_TICKET_URL_TOTAL,
     REDIS_PROJECTION_ENTITY_DELETES_TOTAL,
     REDIS_PROJECTION_REMOVED_TOTAL,
     REDIS_PROJECTION_VENUES,
@@ -40,7 +42,9 @@ from app.models import (
 from app.models.event_occurrence import EventOccurrence
 from app.models.promoter_event_visibility import is_promoter_only_item, load_hide_promoter_events
 from app.services.event_city_slug import nearest_city_slug
-from app.services.event_occurrences import expand_occurrences
+from app.services.event_date_resolver import RECIFE_TZ
+from app.services.event_occurrences import expand_occurrences, nightlife_date
+from app.services.event_ticket_url import classify_ticket_url
 from app.models.vibe_attributes import VibeAttributes
 from app.models.opening_hours import OpeningHours
 from app.models.instagram import (
@@ -343,6 +347,17 @@ class RedisProjectionService:
         started = time.perf_counter()
         now = now or datetime.now(timezone.utc)
 
+        # One cheap, unambiguous production signal that the nightlife-day
+        # rollback is actually live in the six hours where it matters: an
+        # absent or flat series after a night in production means the deploy
+        # did not take. Bumped once per CYCLE, never per event. The naive
+        # coercion mirrors `event_occurrences._as_aware_utc`, so a fixture
+        # clock and the real wall clock are compared the same way
+        # `nightlife_date` compares them.
+        now_aware = now if now.tzinfo is not None else now.replace(tzinfo=timezone.utc)
+        if nightlife_date(now_aware) != now_aware.astimezone(RECIFE_TZ).date():
+            EVENTS_PROJECTION_NIGHTLIFE_ROLLBACK_TOTAL.inc()
+
         # ── preparation: selection + geo-fence + address join ────────────
         # All-or-nothing, mirroring rebuild_redis_from_rds's own fail-safe
         # posture on a serving-view read failure: an empty/partial read here
@@ -378,6 +393,27 @@ class RedisProjectionService:
             ]
         summary["source_rows"] = len(rows)
         EVENTS_PROJECTION_SOURCE_ROWS.set(len(rows))
+
+        # ── the events city vocabulary ───────────────────────────────────
+        # `events_known_cities_v1` is what vibes_bot validates an incoming
+        # `city` param against, and until now its ONLY writer was
+        # `index_event_occurrence` — so a configured city holding zero
+        # occurrences was simply not in the set, and validating against it
+        # would 422 a real-but-quiet city instead of serving 200-empty.
+        # Remembering every CONFIGURED fence slug every cycle makes the set
+        # a complete, enumerable vocabulary, and puts a newly-added city in
+        # it BEFORE its first occurrence is indexed. Best-effort, exactly
+        # like every other optional read/write in this method: the set is an
+        # optimisation for the prune and a vocabulary for downstream, never
+        # a reason to lose a cycle.
+        try:
+            for city in cities:
+                self.redis_only_dao.remember_city_slug(city["slug"])
+        except Exception as e:
+            logger.warning(
+                f"[EventsProjection] remembering configured city slugs failed; "
+                f"continuing this cycle: {e}"
+            )
 
         # ── flyer copy (Phase 1) — isolated, never aborts the cycle ──────
         flyer_summary: dict = {}
@@ -419,6 +455,17 @@ class RedisProjectionService:
                         "no geo-fence city configured; city_slug cannot be derived"
                     )
                 flyer_url = flyer_urls.get(event_id, row.get("flyer_url"))
+                # ONCE PER SOURCE ROW, deliberately outside the occurrence
+                # loop below: `classify_ticket_url` is a pure function of
+                # the row, so calling it per occurrence would recompute an
+                # identical answer up to 22 times (23 while the nightlife
+                # day is rolled back) AND scale the counter by recurrence
+                # multiplicity — one badly-extracted recurring row would
+                # read as 22 rejections. Same shape as `flyer_url` above:
+                # the projection substitutes a serving-shaped value over
+                # the RDS one, and RDS keeps the verbatim extraction.
+                ticket_url, ticket_outcome = classify_ticket_url(row.get("ticket_url"))
+                EVENTS_PROJECTION_TICKET_URL_TOTAL.labels(outcome=ticket_outcome).inc()
 
                 for occ in expand_occurrences(
                     row,
@@ -440,7 +487,7 @@ class RedisProjectionService:
                         category=row.get("category"),
                         price_text=row.get("price_text"),
                         ticket_info=row.get("ticket_info"),
-                        ticket_url=row.get("ticket_url"),
+                        ticket_url=ticket_url,
                         lineup=row.get("lineup"),
                         attractions=row.get("attractions"),
                         flyer_url=flyer_url,

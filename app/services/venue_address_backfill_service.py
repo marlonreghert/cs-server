@@ -23,13 +23,17 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from typing import Optional
 
 from app.config import settings
 from app.metrics import (
     VENUE_ADDRESS_BACKFILL_REMAINING,
     VENUE_ADDRESS_COMPONENTS_TOTAL,
+    VENUE_ADDRESS_GAUGES_REFRESHED_TIMESTAMP_SECONDS,
+    VENUE_ADDRESS_NEIGHBORHOOD_EQUALS_CITY,
     VENUE_ADDRESS_PARSED_TOTAL,
+    VENUE_ADDRESS_SOURCE_ROWS,
     VENUE_GEOCODING_REQUESTS_TOTAL,
 )
 from app.services.venue_address_components import write_mapped_components
@@ -150,10 +154,16 @@ class VenueAddressBackfillService:
         return {"geocoding_outcome": geocoding_outcome, "parsed_outcome": parsed_outcome}
 
     # ── the bounded, resumable, idempotent batch job ──────────────────────
-    async def backfill_batch(self, limit: Optional[int] = None) -> dict:
+    async def backfill_batch(
+        self, limit: Optional[int] = None, mode: str = "fill"
+    ) -> dict:
         """Reads the persisted cursor, selects up to `limit` `venues.address`
-        rows with `venue_id > cursor` where at least one structured column
-        is still null, ordered by `venue_id` alone (NOT servable-first —
+        rows with `venue_id > cursor` from the population `mode` names —
+        `fill` (default: at least one structured column is still null, the
+        shipped behaviour) or `upgrade` (also rows whose column is filled but
+        sourced `parsed`, so Google can correct a parser-written
+        venue-complex name; plans/260906_events-venue-bairro-and-ticket-
+        url.md §1) — ordered by `venue_id` alone (NOT servable-first —
         `venue_id` carries no correlation to servability, so a two-tier
         (servable, venue_id) ordering resumed by a single `venue_id` cursor
         could permanently orphan a slice of the non-servable backlog once
@@ -165,6 +175,13 @@ class VenueAddressBackfillService:
         rule, so a crash mid-batch simply re-processes up to `limit`
         already-safe rows on the next run. Refreshes the
         `VENUE_ADDRESS_BACKFILL_REMAINING{field}` gauge at the end.
+
+        `mode` is forwarded to the REPOSITORY, which is the hop this
+        service actually calls; an unknown mode raises `ValueError` at the
+        DAO boundary rather than silently sweeping the wrong population.
+        `upgrade` costs no more than `fill` per venue: every paid call still
+        sits behind `address_backfill_geocoding_enabled` (default OFF) and
+        every run is still one bounded batch.
 
         Bounded by `limit` (default `settings.address_backfill_batch_size`).
         Yields control once per venue (`await asyncio.sleep(0)`) so the
@@ -180,7 +197,9 @@ class VenueAddressBackfillService:
             cursor_state = self.admin_config_service.get(ADMIN_CONFIG_CURSOR_KEY) or {}
         after_id = cursor_state.get("last_venue_id")
 
-        rows = self.venue_repository.list_address_backfill_candidates(after_id, effective_limit)
+        rows = self.venue_repository.list_address_backfill_candidates(
+            after_id, effective_limit, mode=mode
+        )
 
         written = 0
         for row in rows:
@@ -208,18 +227,53 @@ class VenueAddressBackfillService:
         remaining = self.venue_repository.count_address_backfill_remaining()
         for field, count in remaining.items():
             VENUE_ADDRESS_BACKFILL_REMAINING.labels(field=field).set(count)
+        self._refresh_address_quality_gauges()
 
         logger.info(
-            f"[VenueAddressBackfill] batch complete: processed={len(rows)} "
-            f"written={written} cursor={new_last_id} remaining={remaining}"
+            f"[VenueAddressBackfill] batch complete: mode={mode} "
+            f"processed={len(rows)} written={written} cursor={new_last_id} "
+            f"remaining={remaining}"
         )
         return {
             "processed": len(rows),
             "written": written,
             "cursor": new_last_id,
+            "mode": mode,
             "done": len(rows) < effective_limit,
             "remaining": remaining,
         }
+
+    def _refresh_address_quality_gauges(self) -> None:
+        """Recompute the two address-QUALITY gauges and stamp when it
+        happened. Best-effort: a metrics read must never fail a batch whose
+        writes already landed.
+
+        These gauges are BATCH-SCOPED, not continuous — this job has no
+        scheduler entry, it runs only when an operator POSTs
+        `/admin/trigger/address_components_backfill/run`. A Prometheus gauge
+        carries no staleness marker of its own, so
+        `VENUE_ADDRESS_GAUGES_REFRESHED_TIMESTAMP_SECONDS` is set in the same
+        breath: an operator can then alert on
+        `time() - venue_address_gauges_refreshed_timestamp_seconds` and a
+        process where no batch has ever run reads 0 instead of looking like
+        a measurement. Refreshing them from the 2-minute projection cycle
+        was rejected deliberately — that would bolt an address-quality
+        `GROUP BY` onto the serving projector's all-or-nothing preparation
+        read, for no gain during the sweep, which is when these are used."""
+        try:
+            by_source = self.venue_repository.count_address_source_rows()
+            equals_city = self.venue_repository.count_address_neighborhood_equals_city()
+        except Exception as e:  # pragma: no cover - defensive
+            logger.warning(
+                f"[VenueAddressBackfill] address-quality gauge refresh failed; "
+                f"leaving the previous reading and its timestamp in place: {e}"
+            )
+            return
+        for field, sources in by_source.items():
+            for source, count in sources.items():
+                VENUE_ADDRESS_SOURCE_ROWS.labels(field=field, source=source).set(count)
+        VENUE_ADDRESS_NEIGHBORHOOD_EQUALS_CITY.set(equals_city)
+        VENUE_ADDRESS_GAUGES_REFRESHED_TIMESTAMP_SECONDS.set(time.time())
 
 
 __all__ = [

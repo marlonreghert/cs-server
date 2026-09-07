@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from app.dao.venue_row import split_venue_for_storage
+from app.utils.text_norm import fold_text
 
 # venues.venue address columns dropped by the batched contract — address lives
 # only in venues.address (self.addresses). Kept out of the stored venue row so the
@@ -228,7 +229,14 @@ class InMemoryRdsVenueStore:
         upsert_venue's own column set. A venue with no address row is a
         silent no-op, mirroring a real UPDATE ... WHERE matching zero rows.
         Raises ValueError on a `source` outside
-        {"operator","google","parsed"}, exactly like the real store."""
+        {"operator","google","parsed"}, exactly like the real store.
+
+        Also mirrors the real store's neighborhood-equals-city suppression
+        (plans/260906_events-venue-bairro-and-ticket-url.md §2): for a
+        `google` or `parsed` write, an incoming neighborhood that
+        `fold_text`-equals the incoming city OR the effective post-write
+        city is dropped before any column is touched. `operator` is
+        exempt."""
         if source not in self._PROVENANCE_RANK:
             raise ValueError(
                 "update_venue_address_components: source must be one of "
@@ -239,6 +247,9 @@ class InMemoryRdsVenueStore:
         if addr is None:
             return
         incoming_rank = self._PROVENANCE_RANK[source]
+        neighborhood = self._suppress_city_named_neighborhood(
+            addr, source=source, neighborhood=neighborhood, city=city,
+        )
         for field, value in (
             ("street", street), ("neighborhood", neighborhood),
             ("city", city), ("postal_code", postal_code),
@@ -252,22 +263,64 @@ class InMemoryRdsVenueStore:
                 addr[f"{field}_source"] = source
         addr["updated_at"] = _now()
 
+    def _suppress_city_named_neighborhood(
+        self, addr: dict, *, source: str,
+        neighborhood: Optional[str], city: Optional[str],
+    ) -> Optional[str]:
+        """Mirrors RdsVenueStore._suppress_city_named_neighborhood exactly —
+        including the `operator` exemption and the comparison against the
+        EFFECTIVE post-write city (the city the row will actually hold),
+        not merely the incoming or the stored one."""
+        incoming_neighborhood = (neighborhood or "").strip()
+        if not incoming_neighborhood or source == "operator":
+            return neighborhood
+        stored_city = addr.get("city")
+        stored_city_source = addr.get("city_source")
+        incoming_city = (city or "").strip() or None
+        city_wins = incoming_city is not None and (
+            stored_city_source is None
+            or self._PROVENANCE_RANK[source]
+            >= self._PROVENANCE_RANK.get(stored_city_source, 0)
+        )
+        effective_city = incoming_city if city_wins else stored_city
+        folded = fold_text(incoming_neighborhood)
+        for candidate in (incoming_city, effective_city):
+            if candidate and folded == fold_text(candidate):
+                return None
+        return neighborhood
+
+    # Mirrors RdsVenueStore.ADDRESS_BACKFILL_MODES.
+    ADDRESS_BACKFILL_MODES = ("fill", "upgrade")
+
     def list_address_backfill_candidates(
-        self, after_venue_id: Optional[str], limit: int
+        self, after_venue_id: Optional[str], limit: int, *, mode: str = "fill"
     ) -> list[dict]:
         """Mirrors RdsVenueStore.list_address_backfill_candidates: rows
-        with `venue_id > after_venue_id` (None = from the start) where at
-        least one structured column is still null, ordered by `venue_id`
-        alone. A non-positive `limit` selects nothing."""
+        with `venue_id > after_venue_id` (None = from the start), ordered by
+        `venue_id` alone. `mode="fill"` (default) selects rows where at
+        least one structured column is still null; `mode="upgrade"` also
+        selects rows whose column is filled but sourced `parsed`. An unknown
+        mode raises ValueError, exactly like the real store. A non-positive
+        `limit` selects nothing."""
+        if mode not in self.ADDRESS_BACKFILL_MODES:
+            raise ValueError(
+                "list_address_backfill_candidates: mode must be one of "
+                f"{list(self.ADDRESS_BACKFILL_MODES)}, got {mode!r}"
+            )
         if limit <= 0:
             return []
+
+        def _selected(addr: dict) -> bool:
+            for field in ("street", "neighborhood", "city", "postal_code"):
+                if addr.get(field) is None:
+                    return True
+                if mode == "upgrade" and addr.get(f"{field}_source") == "parsed":
+                    return True
+            return False
+
         rows = [
             dict(addr) for vid, addr in sorted(self.addresses.items())
-            if (after_venue_id is None or vid > after_venue_id)
-            and (
-                addr.get("street") is None or addr.get("neighborhood") is None
-                or addr.get("city") is None or addr.get("postal_code") is None
-            )
+            if (after_venue_id is None or vid > after_venue_id) and _selected(addr)
         ]
         return rows[:limit]
 
@@ -279,6 +332,33 @@ class InMemoryRdsVenueStore:
                 if addr.get(field) is None:
                     counts[field] += 1
         return counts
+
+    def count_address_source_rows(self) -> dict:
+        """Mirrors RdsVenueStore.count_address_source_rows: `{field:
+        {source: row_count}}`, with a NULL/absent provenance counted as
+        `none` and an unrecognised one folded into `none` too."""
+        fields = ("street", "neighborhood", "city", "postal_code")
+        counts = {f: {s: 0 for s in ("operator", "google", "parsed", "none")} for f in fields}
+        for addr in self.addresses.values():
+            for field in fields:
+                source = addr.get(f"{field}_source") or "none"
+                if source not in counts[field]:
+                    source = "none"
+                counts[field][source] += 1
+        return counts
+
+    def count_address_neighborhood_equals_city(self) -> int:
+        """Mirrors RdsVenueStore.count_address_neighborhood_equals_city —
+        case-insensitive and whitespace-trimmed, deliberately NOT
+        accent-folding, exactly like the SQL."""
+        total = 0
+        for addr in self.addresses.values():
+            neighborhood, city = addr.get("neighborhood"), addr.get("city")
+            if neighborhood is None or city is None:
+                continue
+            if neighborhood.strip().lower() == city.strip().lower():
+                total += 1
+        return total
 
     def soft_delete_venue(self, venue_id, reason, source, google_business_status=None) -> None:
         self._guard()
