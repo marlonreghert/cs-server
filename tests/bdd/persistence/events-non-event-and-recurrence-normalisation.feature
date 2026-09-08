@@ -21,6 +21,15 @@ Feature: Non-events stay out of the events serving projection, and its recurrenc
   # this suite; here it is expressed only as its observable outcome — a row
   # typed `menu` or `promotion` never reaches the projection.
   #
+  # The plan's §0 operator decision simplifies that prompt rule and accepts
+  # that it also suppresses genuine food-anchored events. Nothing in THIS
+  # file implements the rule, so nothing here changes because of it — but
+  # two scenarios below carry its consequence: the projection must never
+  # filter on `category` (or the operator's re-admission would be deleted at
+  # the projection layer), and an operator PATCHing `post_type` back to
+  # "event" must restore the occurrences (that PATCH is the whole mechanism
+  # by which §0's concession is reversible).
+  #
   # The `ends_at` scenarios below split on whether an occurrence's
   # `starts_at` was RE-DERIVED from a weekday pattern (`occurrence_id` is
   # `<event_id>_<date>`) or served on the announcement's own stored
@@ -63,7 +72,7 @@ Feature: Non-events stay out of the events serving projection, and its recurrenc
     When the events projection runs
     Then the city events index for "recife" holds at least one occurrence of that event
 
-  Scenario: A recurring food-anchored event is still projected
+  Scenario: A food-anchored row typed as an event is still projected
     Given an accepted event row for venue "Cachaçaria Tradição" titled "Feijoada com samba ao vivo"
     And that row has post_type "event"
     And that row has category "food festival"
@@ -71,11 +80,25 @@ Feature: Non-events stay out of the events serving projection, and its recurrenc
     And that row was last seen 3 days ago
     When the events projection runs
     Then the city events index for "recife" holds at least one occurrence of that event
-    # The projection must never filter on category. `food festival` and
+    # The projection must never filter on category. Under the plan's §0 the
+    # extraction rule now SUPPRESSES food-anchored captions, so the only way
+    # a row like this exists is that an operator typed it `event` by hand --
+    # which makes this scenario stronger, not weaker. `food festival` and
     # `tasting` are first-class entries in this repo's own shipped
-    # DEFAULT_CATEGORY_VOCABULARY, and the C1 rule lives in the extraction
-    # prompt precisely so that nobody is tempted to solve it here with a
-    # category blocklist -- which would also delete this row.
+    # DEFAULT_CATEGORY_VOCABULARY, and a category blocklist here would
+    # delete the operator's own correction and make §0's trade irreversible.
+
+  Scenario: An operator re-admitting a suppressed row re-projects every occurrence
+    Given a recurring event row titled "Feijoada com samba ao vivo" with post_type "menu"
+    And the events projection has already run
+    And no occurrence key exists for that event
+    When an operator sets that event's post_type to "event"
+    And the events projection runs
+    Then the city events index for "recife" holds at least one occurrence of that event
+    And an occurrence key exists for that event
+    # The inverse of the reclassification scenario above, and the mechanical
+    # proof that §0's food-boundary concession is reversible per row with no
+    # migration, no re-extraction and no deploy.
 
   Scenario: A recurring class with a paid enrolment is still projected
     Given an accepted event row for venue "Sala de Reboco" titled "Aula de FORRÓ"
@@ -160,6 +183,19 @@ Feature: Non-events stay out of the events serving projection, and its recurrenc
     And an accepted event row with category "FORRÓ"
     When the events projection runs
     Then every projected occurrence of that event carries category "forró"
+
+  Scenario: A category already spelled as the vocabulary spells it is reported unchanged
+    Given the admin post category vocabulary is configured as "Forró, Party, Live Music"
+    And an accepted event row with category "Forró"
+    When the events projection runs
+    Then every projected occurrence of that event carries category "Forró"
+    And the category outcome counter records outcome "unchanged"
+    And it does not record outcome "canonicalized" for that row
+    # `canonicalized` means the vocabulary REWROTE the stored spelling;
+    # `unchanged` means the stored spelling and the vocabulary already
+    # agreed. Declaring the label without ever reaching it asserts nothing,
+    # and this plan's observability posture is that a zero-filled label's
+    # presence is the evidence.
 
   Scenario: An off-vocabulary category is projected unchanged, never dropped
     Given the admin post category vocabulary is configured as "Forró, Party, Live Music"
@@ -310,6 +346,7 @@ Feature: Non-events stay out of the events serving projection, and its recurrenc
       | a recurrence phrase already normalised      | recurrence text | unchanged            |
       | no recurrence phrase                        | recurrence text | absent               |
       | a category matching the live vocabulary     | category        | canonicalized        |
+      | a category already in the vocabulary spelling | category      | unchanged            |
       | a category off the live vocabulary          | category        | off_vocabulary       |
       | no category                                 | category        | absent               |
       | a re-derived occurrence with a usable duration | end time     | derived              |
