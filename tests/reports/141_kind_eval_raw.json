@@ -1,0 +1,948 @@
+{
+  "resamples": 3,
+  "vocabulary_live": true,
+  "model": "gpt-5.6-luna",
+  "old_doc_len": 1954,
+  "new_doc_len": 2940,
+  "results": [
+    {
+      "id": "S4",
+      "handle": null,
+      "title": null,
+      "synthetic": true,
+      "blocking": true,
+      "shape": "karaoke",
+      "census_kind": null,
+      "expected_kind": "event",
+      "accepted_kinds": [
+        "event"
+      ],
+      "discriminating": false,
+      "new": [
+        "event",
+        "event",
+        "event"
+      ],
+      "old": [],
+      "errors": []
+    },
+    {
+      "id": "S5",
+      "handle": null,
+      "title": null,
+      "synthetic": true,
+      "blocking": true,
+      "shape": "kids / family",
+      "census_kind": null,
+      "expected_kind": "event",
+      "accepted_kinds": [
+        "event"
+      ],
+      "discriminating": false,
+      "new": [
+        "event",
+        "event",
+        "event"
+      ],
+      "old": [],
+      "errors": []
+    },
+    {
+      "id": "S6",
+      "handle": null,
+      "title": null,
+      "synthetic": true,
+      "blocking": true,
+      "shape": "party, with a drinks offer alongside",
+      "census_kind": null,
+      "expected_kind": "event",
+      "accepted_kinds": [
+        "event"
+      ],
+      "discriminating": false,
+      "new": [
+        "event",
+        "event",
+        "event"
+      ],
+      "old": [],
+      "errors": []
+    },
+    {
+      "id": "S7",
+      "handle": null,
+      "title": null,
+      "synthetic": true,
+      "blocking": true,
+      "shape": "quiz / trivia, with a drinks prize alongside",
+      "census_kind": null,
+      "expected_kind": "event",
+      "accepted_kinds": [
+        "event"
+      ],
+      "discriminating": false,
+      "new": [
+        "event",
+        "event",
+        "event"
+      ],
+      "old": [],
+      "errors": []
+    },
+    {
+      "id": "S14",
+      "handle": null,
+      "title": null,
+      "synthetic": true,
+      "blocking": true,
+      "shape": "sertanejo, with a price alongside",
+      "census_kind": null,
+      "expected_kind": "event",
+      "accepted_kinds": [
+        "event"
+      ],
+      "discriminating": false,
+      "new": [
+        "event",
+        "event",
+        "event"
+      ],
+      "old": [],
+      "errors": []
+    },
+    {
+      "id": "S9",
+      "handle": null,
+      "title": null,
+      "synthetic": true,
+      "blocking": true,
+      "shape": "standing food offer",
+      "census_kind": "event",
+      "expected_kind": "menu",
+      "accepted_kinds": [
+        "menu"
+      ],
+      "discriminating": true,
+      "new": [
+        "menu",
+        "menu",
+        "menu"
+      ],
+      "old": [
+        "promotion",
+        "menu",
+        "menu"
+      ],
+      "errors": []
+    },
+    {
+      "id": "S10",
+      "handle": null,
+      "title": null,
+      "synthetic": true,
+      "blocking": true,
+      "shape": "standing price offer",
+      "census_kind": "event",
+      "expected_kind": "promotion",
+      "accepted_kinds": [
+        "promotion"
+      ],
+      "discriminating": true,
+      "new": [
+        "promotion",
+        "promotion",
+        "promotion"
+      ],
+      "old": [
+        "promotion",
+        "promotion",
+        "promotion"
+      ],
+      "errors": []
+    },
+    {
+      "id": "S11",
+      "handle": null,
+      "title": null,
+      "synthetic": true,
+      "blocking": true,
+      "shape": "daily special",
+      "census_kind": null,
+      "expected_kind": "menu",
+      "accepted_kinds": [
+        "menu"
+      ],
+      "discriminating": true,
+      "new": [
+        "menu",
+        "menu",
+        "menu"
+      ],
+      "old": [
+        "menu",
+        "menu",
+        "menu"
+      ],
+      "errors": []
+    },
+    {
+      "id": "S12",
+      "handle": null,
+      "title": null,
+      "synthetic": true,
+      "blocking": true,
+      "shape": "standing discount, no occasion at all",
+      "census_kind": null,
+      "expected_kind": "promotion",
+      "accepted_kinds": [
+        "promotion"
+      ],
+      "discriminating": true,
+      "new": [
+        "promotion",
+        "promotion",
+        "promotion"
+      ],
+      "old": [
+        "promotion",
+        "promotion",
+        "promotion"
+      ],
+      "errors": []
+    },
+    {
+      "id": "S13",
+      "handle": null,
+      "title": null,
+      "synthetic": true,
+      "blocking": true,
+      "shape": "the kitchen's own hours",
+      "census_kind": null,
+      "expected_kind": "menu",
+      "accepted_kinds": [
+        "menu"
+      ],
+      "discriminating": true,
+      "new": [
+        "menu",
+        "menu",
+        "menu"
+      ],
+      "old": [
+        "menu",
+        "menu",
+        "menu"
+      ],
+      "errors": []
+    },
+    {
+      "id": "G1",
+      "handle": null,
+      "title": null,
+      "synthetic": true,
+      "blocking": true,
+      "shape": "food subject the prompt never names",
+      "census_kind": null,
+      "expected_kind": "menu",
+      "accepted_kinds": [
+        "menu",
+        "promotion"
+      ],
+      "discriminating": true,
+      "new": [
+        "menu",
+        "menu",
+        "menu"
+      ],
+      "old": [
+        "menu",
+        "event",
+        "menu"
+      ],
+      "errors": []
+    },
+    {
+      "id": "G2",
+      "handle": null,
+      "title": null,
+      "synthetic": true,
+      "blocking": true,
+      "shape": "standing self-service, weekday range",
+      "census_kind": null,
+      "expected_kind": "menu",
+      "accepted_kinds": [
+        "menu",
+        "promotion"
+      ],
+      "discriminating": true,
+      "new": [
+        "menu",
+        "menu",
+        "menu"
+      ],
+      "old": [
+        "menu",
+        "menu",
+        "menu"
+      ],
+      "errors": []
+    },
+    {
+      "id": "G3",
+      "handle": null,
+      "title": null,
+      "synthetic": true,
+      "blocking": true,
+      "shape": "free-food weekday offer, noun not in the prompt",
+      "census_kind": null,
+      "expected_kind": "promotion",
+      "accepted_kinds": [
+        "menu",
+        "promotion"
+      ],
+      "discriminating": true,
+      "new": [
+        "promotion",
+        "promotion",
+        "promotion"
+      ],
+      "old": [
+        "promotion",
+        "promotion",
+        "promotion"
+      ],
+      "errors": []
+    },
+    {
+      "id": "G4",
+      "handle": null,
+      "title": null,
+      "synthetic": true,
+      "blocking": true,
+      "shape": "price headline + named DJ",
+      "census_kind": null,
+      "expected_kind": "event",
+      "accepted_kinds": [
+        "event"
+      ],
+      "discriminating": true,
+      "new": [
+        "event",
+        "event",
+        "event"
+      ],
+      "old": [
+        "event",
+        "event",
+        "event"
+      ],
+      "errors": []
+    },
+    {
+      "id": "G5",
+      "handle": null,
+      "title": null,
+      "synthetic": true,
+      "blocking": true,
+      "shape": "price headline + named DJ, different offer word",
+      "census_kind": null,
+      "expected_kind": "event",
+      "accepted_kinds": [
+        "event"
+      ],
+      "discriminating": true,
+      "new": [
+        "event",
+        "event",
+        "event"
+      ],
+      "old": [
+        "event",
+        "event",
+        "event"
+      ],
+      "errors": []
+    },
+    {
+      "id": "G6",
+      "handle": null,
+      "title": null,
+      "synthetic": true,
+      "blocking": true,
+      "shape": "happy hour headline + live band",
+      "census_kind": null,
+      "expected_kind": "event",
+      "accepted_kinds": [
+        "event"
+      ],
+      "discriminating": true,
+      "new": [
+        "event",
+        "event",
+        "event"
+      ],
+      "old": [
+        "event",
+        "event",
+        "event"
+      ],
+      "errors": []
+    },
+    {
+      "id": "G7",
+      "handle": null,
+      "title": null,
+      "synthetic": true,
+      "blocking": true,
+      "shape": "genre night the prompt never names, with a price",
+      "census_kind": null,
+      "expected_kind": "event",
+      "accepted_kinds": [
+        "event"
+      ],
+      "discriminating": true,
+      "new": [
+        "event",
+        "event",
+        "event"
+      ],
+      "old": [
+        "event",
+        "event",
+        "event"
+      ],
+      "errors": []
+    },
+    {
+      "id": "G8",
+      "handle": null,
+      "title": null,
+      "synthetic": true,
+      "blocking": true,
+      "shape": "screening with a food offer alongside",
+      "census_kind": null,
+      "expected_kind": "event",
+      "accepted_kinds": [
+        "event"
+      ],
+      "discriminating": true,
+      "new": [
+        "event",
+        "event",
+        "event"
+      ],
+      "old": [
+        "event",
+        "event",
+        "event"
+      ],
+      "errors": []
+    },
+    {
+      "id": "DVMKVz7kS2h",
+      "handle": "downtownbeergarden_",
+      "title": "QUINTA É DIA DE HAPPY HOUR",
+      "synthetic": false,
+      "blocking": false,
+      "shape": null,
+      "census_kind": "event",
+      "expected_kind": null,
+      "accepted_kinds": null,
+      "discriminating": null,
+      "new": [
+        "promotion",
+        "promotion",
+        "promotion"
+      ],
+      "old": [
+        "event",
+        "event",
+        "event"
+      ],
+      "errors": []
+    },
+    {
+      "id": "DYCcGo6DuXo",
+      "handle": "tropical_gardeniashow",
+      "title": "Baile Dançante",
+      "synthetic": false,
+      "blocking": false,
+      "shape": null,
+      "census_kind": "event",
+      "expected_kind": null,
+      "accepted_kinds": null,
+      "discriminating": null,
+      "new": [
+        "event",
+        "event",
+        "event"
+      ],
+      "old": [
+        "event",
+        "event",
+        "event"
+      ],
+      "errors": []
+    },
+    {
+      "id": "DZ7YEsxxTj3",
+      "handle": "downtownbeergarden_",
+      "title": "Sambinha Downtown",
+      "synthetic": false,
+      "blocking": false,
+      "shape": null,
+      "census_kind": "event",
+      "expected_kind": null,
+      "accepted_kinds": null,
+      "discriminating": null,
+      "new": [
+        "event",
+        "event",
+        "event"
+      ],
+      "old": [
+        "event",
+        "event",
+        "event"
+      ],
+      "errors": []
+    },
+    {
+      "id": "Dbn0gsFxxTG",
+      "handle": "ctradicao",
+      "title": "Buffet de Terça a Domingo",
+      "synthetic": false,
+      "blocking": false,
+      "shape": null,
+      "census_kind": "event",
+      "expected_kind": null,
+      "accepted_kinds": null,
+      "discriminating": null,
+      "new": [
+        "menu",
+        "menu",
+        "menu"
+      ],
+      "old": [
+        "menu",
+        "menu",
+        "menu"
+      ],
+      "errors": []
+    },
+    {
+      "id": "DbqF2aCRvBm",
+      "handle": "casabacurau",
+      "title": "Lovezinho",
+      "synthetic": false,
+      "blocking": false,
+      "shape": null,
+      "census_kind": "event",
+      "expected_kind": null,
+      "accepted_kinds": null,
+      "discriminating": null,
+      "new": [
+        "event",
+        "event",
+        "event"
+      ],
+      "old": [
+        "event",
+        "event",
+        "event"
+      ],
+      "errors": []
+    },
+    {
+      "id": "Db0m2buB9SO",
+      "handle": "saladerebocorecife",
+      "title": "FORRÓ DOS PAIS",
+      "synthetic": false,
+      "blocking": false,
+      "shape": null,
+      "census_kind": "event",
+      "expected_kind": null,
+      "accepted_kinds": null,
+      "discriminating": null,
+      "new": [
+        "event",
+        "event",
+        "event"
+      ],
+      "old": [
+        "event",
+        "event",
+        "event"
+      ],
+      "errors": []
+    },
+    {
+      "id": "Db1imfrRJir",
+      "handle": "saladerebocorecife",
+      "title": "Aula de FORRÓ na Sala de Reboco",
+      "synthetic": false,
+      "blocking": false,
+      "shape": null,
+      "census_kind": "event",
+      "expected_kind": null,
+      "accepted_kinds": null,
+      "discriminating": null,
+      "new": [
+        "event",
+        "event",
+        "event"
+      ],
+      "old": [
+        "event",
+        "event",
+        "event"
+      ],
+      "errors": []
+    },
+    {
+      "id": "DcizjRtp6SJ",
+      "handle": "provinhabp",
+      "title": "Brasil 70'",
+      "synthetic": false,
+      "blocking": false,
+      "shape": null,
+      "census_kind": "event",
+      "expected_kind": null,
+      "accepted_kinds": null,
+      "discriminating": null,
+      "new": [
+        "event",
+        "event",
+        "event"
+      ],
+      "old": [
+        "event",
+        "event",
+        "event"
+      ],
+      "errors": []
+    },
+    {
+      "id": "DcziABtxjSx",
+      "handle": "saladerebocorecife",
+      "title": "Aula de FORRÓ na Sala de Reboco",
+      "synthetic": false,
+      "blocking": false,
+      "shape": null,
+      "census_kind": "event",
+      "expected_kind": null,
+      "accepted_kinds": null,
+      "discriminating": null,
+      "new": [
+        "event",
+        "event",
+        "event"
+      ],
+      "old": [
+        "event",
+        "event",
+        "event"
+      ],
+      "errors": []
+    },
+    {
+      "id": "DczJz1vh04i",
+      "handle": "clubmetropole",
+      "title": "Drag Ataque – Episódio 4: DRAG DE BOATE",
+      "synthetic": false,
+      "blocking": false,
+      "shape": null,
+      "census_kind": "event",
+      "expected_kind": null,
+      "accepted_kinds": null,
+      "discriminating": null,
+      "new": [
+        "other",
+        "other",
+        "other"
+      ],
+      "old": [
+        "other",
+        "other",
+        "other"
+      ],
+      "errors": []
+    },
+    {
+      "id": "Dc3pJLRnGh_",
+      "handle": "clubmetropole",
+      "title": "Residência drag da Metrópole",
+      "synthetic": false,
+      "blocking": false,
+      "shape": null,
+      "census_kind": "event",
+      "expected_kind": null,
+      "accepted_kinds": null,
+      "discriminating": null,
+      "new": [
+        "event",
+        "event",
+        "event"
+      ],
+      "old": [
+        "event",
+        "event",
+        "event"
+      ],
+      "errors": []
+    },
+    {
+      "id": "Dctzw9go3zW",
+      "handle": "tatubola.bar",
+      "title": "Agenda Tatu Bola — 7 de Setembro",
+      "synthetic": false,
+      "blocking": false,
+      "shape": null,
+      "census_kind": "event",
+      "expected_kind": null,
+      "accepted_kinds": null,
+      "discriminating": null,
+      "new": [
+        "event",
+        "event",
+        "event"
+      ],
+      "old": [
+        "event",
+        "event",
+        "event"
+      ],
+      "errors": []
+    },
+    {
+      "id": "Dc1Qe2uRlDZ",
+      "handle": "casabacurau",
+      "title": "BALERA BAHI",
+      "synthetic": false,
+      "blocking": false,
+      "shape": null,
+      "census_kind": "event",
+      "expected_kind": null,
+      "accepted_kinds": null,
+      "discriminating": null,
+      "new": [
+        "event",
+        "event",
+        "event"
+      ],
+      "old": [
+        "event",
+        "event",
+        "event"
+      ],
+      "errors": []
+    },
+    {
+      "id": "Dcwyz5kgSMh",
+      "handle": "casabacurau",
+      "title": "FESTA MUSA",
+      "synthetic": false,
+      "blocking": false,
+      "shape": null,
+      "census_kind": "event",
+      "expected_kind": null,
+      "accepted_kinds": null,
+      "discriminating": null,
+      "new": [
+        "event",
+        "event",
+        "event"
+      ],
+      "old": [
+        "event",
+        "event",
+        "event"
+      ],
+      "errors": []
+    },
+    {
+      "id": "DcutY1UhF-2",
+      "handle": "ferroviariodeafogados",
+      "title": "ANIVERSÁRIO da Banda CHAMA DO BREGA",
+      "synthetic": false,
+      "blocking": false,
+      "shape": null,
+      "census_kind": "event",
+      "expected_kind": null,
+      "accepted_kinds": null,
+      "discriminating": null,
+      "new": [
+        "event",
+        "event",
+        "event"
+      ],
+      "old": [
+        "event",
+        "event",
+        "event"
+      ],
+      "errors": []
+    },
+    {
+      "id": "DcjD87BkT-s",
+      "handle": "clubmetropole",
+      "title": "HALESSIA NA METRÓPOLE!!!",
+      "synthetic": false,
+      "blocking": false,
+      "shape": null,
+      "census_kind": "event",
+      "expected_kind": null,
+      "accepted_kinds": null,
+      "discriminating": null,
+      "new": [
+        "event",
+        "event",
+        "event"
+      ],
+      "old": [
+        "event",
+        "event",
+        "event"
+      ],
+      "errors": []
+    },
+    {
+      "id": "DchdayOkVgC",
+      "handle": "clubmetropole",
+      "title": "METROPOLE EXPERIENCE",
+      "synthetic": false,
+      "blocking": false,
+      "shape": null,
+      "census_kind": "event",
+      "expected_kind": null,
+      "accepted_kinds": null,
+      "discriminating": null,
+      "new": [
+        "event",
+        "event",
+        "event"
+      ],
+      "old": [
+        "event",
+        "event",
+        "event"
+      ],
+      "errors": []
+    },
+    {
+      "id": "DcuLA46O5JR",
+      "handle": "seubotecorecife",
+      "title": "37ª REFENO",
+      "synthetic": false,
+      "blocking": false,
+      "shape": null,
+      "census_kind": "event",
+      "expected_kind": null,
+      "accepted_kinds": null,
+      "discriminating": null,
+      "new": [
+        "event",
+        "event",
+        "event"
+      ],
+      "old": [
+        "event",
+        "event",
+        "event"
+      ],
+      "errors": []
+    },
+    {
+      "id": "DcuT5eLBoRn",
+      "handle": "ferroviariodeafogados",
+      "title": "O ENCONTRO",
+      "synthetic": false,
+      "blocking": false,
+      "shape": null,
+      "census_kind": "event",
+      "expected_kind": null,
+      "accepted_kinds": null,
+      "discriminating": null,
+      "new": [
+        "event",
+        "event",
+        "event"
+      ],
+      "old": [
+        "event",
+        "event",
+        "event"
+      ],
+      "errors": []
+    },
+    {
+      "id": "Db3S3fyRu5E",
+      "handle": "beerdock_recife",
+      "title": "Oktoberfest BeerDock",
+      "synthetic": false,
+      "blocking": false,
+      "shape": null,
+      "census_kind": "event",
+      "expected_kind": null,
+      "accepted_kinds": null,
+      "discriminating": null,
+      "new": [
+        "event",
+        "event",
+        "event"
+      ],
+      "old": [
+        "event",
+        "event",
+        "event"
+      ],
+      "errors": []
+    },
+    {
+      "id": "Dc189NPv1Z8",
+      "handle": "saladerebocorecife",
+      "title": "BONITO – PE",
+      "synthetic": false,
+      "blocking": false,
+      "shape": null,
+      "census_kind": "event",
+      "expected_kind": null,
+      "accepted_kinds": null,
+      "discriminating": null,
+      "new": [
+        "event",
+        "event",
+        "event"
+      ],
+      "old": [
+        "event",
+        "event",
+        "event"
+      ],
+      "errors": []
+    },
+    {
+      "id": "DbeMfrBPiR2",
+      "handle": "beerdock_recife",
+      "title": "Casa BeerDock 2027",
+      "synthetic": false,
+      "blocking": false,
+      "shape": null,
+      "census_kind": "event",
+      "expected_kind": null,
+      "accepted_kinds": null,
+      "discriminating": null,
+      "new": [
+        "event",
+        "event",
+        "event"
+      ],
+      "old": [
+        "event",
+        "event",
+        "event"
+      ],
+      "errors": []
+    }
+  ]
+}

@@ -2169,6 +2169,102 @@ EVENTS_PROJECTION_NIGHTLIFE_ROLLBACK_TOTAL = Counter(
 for _outcome in ("absent", "passthrough", "scheme_added", "rejected"):
     EVENTS_PROJECTION_TICKET_URL_TOTAL.labels(outcome=_outcome)
 
+# plans/260907_events-non-event-and-recurrence-normalisation.md §3/§5. The
+# three projection counters below share EVENTS_PROJECTION_TICKET_URL_TOTAL's
+# shape and read the SAME way: bumped once per projected SOURCE ROW (never
+# once per occurrence — one recurring row expands to up to 22 of them), and
+# re-bumped on every 2-minute cycle, so each is a PER-CYCLE CENSUS of the
+# projected corpus rather than a count of distinct defects. Use a rate or a
+# ratio. Every label is zero-filled at import, so an ABSENT label is real
+# evidence that code path never ran.
+EVENTS_PROJECTION_RECURRENCE_TEXT_TOTAL = Counter(
+    "events_projection_recurrence_text_total",
+    "Recurrence-text normalisation results during the events projection, by "
+    "outcome",
+    ["outcome"],
+    # outcome: normalized (the projected sentence-case phrase differs from
+    #          the stored one) | unchanged (the stored phrase was already in
+    #          sentence case) | absent (nothing stored)
+)
+
+EVENTS_PROJECTION_CATEGORY_TOTAL = Counter(
+    "events_projection_category_total",
+    "Category canonicalisation against the live admin vocabulary during the "
+    "events projection, by outcome",
+    ["outcome"],
+    # outcome: canonicalized (the stored value matched a vocabulary entry and
+    #          the projected spelling DIFFERS from the stored one) | unchanged
+    #          (matched, and the two already agreed — the label that says the
+    #          operator's vocabulary and the extraction are in step) |
+    #          off_vocabulary (no entry matched; the value is passed through
+    #          UNCHANGED, never dropped — also the standing monitor for the
+    #          `buffet`/`happy hour` class) | absent (null or blank)
+    #
+    # The raw category is deliberately NOT a label: the extraction-time
+    # counter POST_CATEGORY_OFF_VOCABULARY_TOTAL already carries capped raw
+    # values, and duplicating that here would be a second cardinality
+    # surface for the same question.
+)
+
+EVENTS_PROJECTION_ENDS_AT_TOTAL = Counter(
+    "events_projection_ends_at_total",
+    "Occurrence end-time resolution during the events projection, by outcome",
+    ["outcome"],
+    # outcome: carried (the occurrence is served on the announcement's own
+    #          stored starts_at, so its stored end is served verbatim AT ANY
+    #          LENGTH) | derived (the occurrence's starts_at was re-derived
+    #          from a weekday pattern, so the stored DURATION was applied to
+    #          it) | dropped_inverted (the stored end precedes its stored
+    #          start) | dropped_zero (a zero-length stored interval on the
+    #          DERIVED branch — deliberately NOT folded into
+    #          dropped_inverted: zero is not an inversion, and it is CARRIED
+    #          on the other branch) | dropped_implausible (a derived duration
+    #          over 24h, which is indistinguishable from the announcement's
+    #          own stale absolute end) | absent (nothing stored)
+)
+
+for _outcome in ("normalized", "unchanged", "absent"):
+    EVENTS_PROJECTION_RECURRENCE_TEXT_TOTAL.labels(outcome=_outcome)
+for _outcome in ("canonicalized", "unchanged", "off_vocabulary", "absent"):
+    EVENTS_PROJECTION_CATEGORY_TOTAL.labels(outcome=_outcome)
+for _outcome in (
+    "carried", "derived", "dropped_inverted", "dropped_zero",
+    "dropped_implausible", "absent",
+):
+    EVENTS_PROJECTION_ENDS_AT_TOTAL.labels(outcome=_outcome)
+
+# plans/260907_events-non-event-and-recurrence-normalisation.md §5. The ONLY
+# place the non-event suppression that plan introduces is ever observable: a
+# post the amended `kind` rule sends to menu/promotion/food/other is never
+# selected by `is_selectable`, so it is never projected and every projection
+# counter above is structurally blind to it. Bumped once per parsed item
+# whose kind is a non-event AND whose own answer states a recurring cadence
+# (is_recurring true, or a non-blank recurrence_text), before any
+# date/confidence filtering so no branch can hide a suppression.
+#
+# WATCH RULE: steady state is roughly the known standing-offer posts per
+# crawl of the handles that have them. A step change, or a non-zero reading
+# at a venue that has never had one, means the rule is eating real recurring
+# nights — revert the prompt paragraph (a deploy; nothing was deleted, so
+# there is no data to repair).
+EVENT_EXTRACTION_SUPPRESSED_RECURRING_TOTAL = Counter(
+    "event_extraction_suppressed_recurring_total",
+    "Parsed extraction items typed as a NON-event whose own answer states a "
+    "recurring cadence, by kind — the false-positive signal for the "
+    "what-is-announced rule",
+    ["kind"],
+    # kind: menu | promotion | food | other (a closed four-value set, so
+    #       there is no cardinality surface)
+)
+
+# The four values spelled out rather than imported from
+# app.models.event_kind: `app.models.__init__` imports app.metrics (via
+# new_venue), so importing anything from that package here is a cycle. The
+# service that increments this counter DOES import the constants, and
+# tests/test_event_extraction_service.py pins the two lists together.
+for _kind in ("menu", "promotion", "food", "other"):
+    EVENT_EXTRACTION_SUPPRESSED_RECURRING_TOTAL.labels(kind=_kind)
+
 # =============================================================================
 # APPLICATION INFO
 # =============================================================================

@@ -19,6 +19,7 @@ from app.models.post_category import (
     _MAX_TRACKED_OFF_VOCABULARY_LABELS,
     _seen_off_vocabulary_labels,
     canonicalize_category,
+    classify_category,
     is_in_vocabulary,
     load_post_category_vocabulary,
     record_off_vocabulary_category,
@@ -195,3 +196,69 @@ class TestOffVocabularyCardinalityCap:
         record_off_vocabulary_category("bingo")
         after = POST_CATEGORY_OFF_VOCABULARY_TOTAL.labels(category="bingo")._value.get()
         assert after - before == 1.0
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# classify_category — the projection-time twin
+# (plans/260907_events-non-event-and-recurrence-normalisation.md §3, N3)
+# ══════════════════════════════════════════════════════════════════════════
+_VOCABULARY = ["Forró", "Party", "Live Music"]
+
+
+@pytest.mark.parametrize("raw,value,outcome", [
+    ("forró", "Forró", "canonicalized"),
+    ("FORRÓ", "Forró", "canonicalized"),
+    ("  forró  ", "Forró", "canonicalized"),
+    ("Forró", "Forró", "unchanged"),
+    ("Live Music", "Live Music", "unchanged"),
+    ("brega", "brega", "off_vocabulary"),
+    ("drag show", "drag show", "off_vocabulary"),
+    (None, None, "absent"),
+    ("", None, "absent"),
+    ("   ", None, "absent"),
+])
+def test_classify_category_reports_the_four_declared_outcomes(raw, value, outcome):
+    assert classify_category(raw, _VOCABULARY) == (value, outcome)
+
+
+def test_classify_category_never_drops_an_off_vocabulary_value():
+    """The `post_category` constraint on record: nothing here may turn a
+    category into a closed vocabulary a non-match falls out of."""
+    for raw in ("buffet", "happy hour", "turismo / excursão"):
+        value, outcome = classify_category(raw, _VOCABULARY)
+        assert value == raw
+        assert outcome == "off_vocabulary"
+
+
+def test_canonicalize_category_agrees_with_classify_category():
+    """The two must never drift: `canonicalize_category` delegates, and this
+    pins that it still does."""
+    for raw in (None, "", "forró", "Forró", "brega", "  FORRÓ "):
+        assert canonicalize_category(raw, _VOCABULARY) == (
+            classify_category(raw, _VOCABULARY)[0]
+        )
+
+
+def test_canonicalize_category_actually_delegates(monkeypatch):
+    """F4: asserting only that the two AGREE is satisfied by a faithful COPY
+    of the fold, so the exposure it leaves open is "silently forked, then
+    drifts" — and drift is exactly the incident this module's own docstring
+    exists to prevent. A spy on the delegate closes it: a forked
+    implementation never calls `classify_category` and fails here while
+    every value-equality test stays green.
+    """
+    import app.models.post_category as module
+
+    calls = []
+    real = module.classify_category
+
+    def spy(raw, vocabulary):
+        calls.append(raw)
+        return real(raw, vocabulary)
+
+    monkeypatch.setattr(module, "classify_category", spy)
+    assert module.canonicalize_category("forró", _VOCABULARY) == "Forró"
+    assert calls == ["forró"], (
+        "canonicalize_category did not route through classify_category — it "
+        "has grown its own copy of the casefold match"
+    )

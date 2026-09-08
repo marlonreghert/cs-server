@@ -6,6 +6,8 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
+import pytest
+
 from app.services.event_projection_selection import (
     DEFAULT_RECURRING_MAX_SOURCE_AGE,
     is_selectable,
@@ -170,4 +172,39 @@ def test_non_recurring_row_behaviour_is_unchanged_by_the_source_freshness_bound(
     assert is_selectable(row, now=NOW) is True
     very_stale_seen = NOW - timedelta(days=400)
     row = _row(is_recurring=False, last_seen_at=very_stale_seen)
+    assert is_selectable(row, now=NOW) is True
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# plans/260907_events-non-event-and-recurrence-normalisation.md §4.
+#
+# The removal path this plan relies on needs NO deletion code: reclassifying
+# a row's `post_type` is enough, because this predicate tests `post_type`
+# FIRST and the projector's own prune-then-delete removes what is no longer
+# fresh. These tests pin that mechanism, since the whole operator correction
+# path (and §0's reversibility promise) rests on it.
+# ══════════════════════════════════════════════════════════════════════════
+@pytest.mark.parametrize("post_type", ["menu", "promotion", "food", "other"])
+def test_a_non_event_post_type_is_never_selectable(post_type):
+    """Every other criterion passes; only the type differs. A standing
+    buffet reclassified `menu` therefore leaves the projection on the next
+    2-minute cycle with no deletion endpoint involved."""
+    assert is_selectable(_row(post_type=post_type), now=NOW) is False
+
+
+@pytest.mark.parametrize("status", ["accepted", "confirmed"])
+def test_confirming_a_reclassified_row_does_not_rescue_it(status):
+    """`post_type` is tested BEFORE `status`, so the operator path's
+    "PATCH then confirm" freeze cannot accidentally put a reclassified row
+    back in the feed."""
+    assert is_selectable(_row(post_type="menu", status=status), now=NOW) is False
+
+
+def test_re_admitting_a_row_as_an_event_makes_it_selectable_again():
+    """The inverse, and the mechanical proof that §0's food-boundary
+    concession is reversible per row with no migration, no re-extraction and
+    no deploy: a PATCH back to `event` is all it takes."""
+    row = _row(post_type="menu")
+    assert is_selectable(row, now=NOW) is False
+    row["post_type"] = "event"
     assert is_selectable(row, now=NOW) is True

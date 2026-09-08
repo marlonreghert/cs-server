@@ -20,12 +20,15 @@ from app.api.openai_event_extraction_client import (
     parse_extraction_response,
 )
 from app.dao.venue_repository import VenueRepository
+from app.metrics import EVENT_EXTRACTION_SUPPRESSED_RECURRING_TOTAL
+from app.models.event_kind import EVENT_KINDS, KIND_EVENT
 from app.models.instagram import VenueInstagram
 from app.models.venue import Venue
 from app.services.event_extraction_service import (
     ArchivedPost,
     EventExtractionService,
     EventPostSource,
+    _SUPPRESSIBLE_POST_TYPES,
     OUTCOME_ACCEPTED,
     OUTCOME_EXTRACTION_FAILED,
     OUTCOME_LOW_CONFIDENCE,
@@ -908,3 +911,103 @@ class TestRunTruncatesToNewestPosts:
         assert result["qualifying_posts"] == 2
         assert dao.get_event_by_source("v1_handle", "newest") is not None
         assert dao.get_event_by_source("v1_handle", "oldest") is not None
+
+
+class TestSuppressedRecurringNonEventIsCounted:
+    """plans/260907_events-non-event-and-recurrence-normalisation.md §5.
+    `EVENT_EXTRACTION_SUPPRESSED_RECURRING_TOTAL` is the ONLY place the
+    amended `kind` rule's suppressions are observable: a post that rule
+    sends to menu/promotion/food/other is never selected by `is_selectable`,
+    so it is never projected and every projection counter is structurally
+    blind to it. A false positive would otherwise be counted nowhere, and —
+    because the prompt fix is forward-only — would surface only on NEW posts
+    at NEW venues, gradually, with nothing to scroll past.
+    """
+
+    @staticmethod
+    def _counter(kind):
+        return EVENT_EXTRACTION_SUPPRESSED_RECURRING_TOTAL.labels(
+            kind=kind
+        )._value.get()
+
+    @staticmethod
+    def _extract(kind, *, is_recurring, recurrence_text):
+        dao = _dao()
+        _seed_venue(dao, "v1", "v1_handle")
+        posts = {"v1": [_post(
+            "s1", caption="Ingressos!", flyer_photo_key="s1.jpg", flyer_confidence=0.9,
+            timestamp=datetime(2026, 7, 1, 20, tzinfo=timezone.utc),
+        )]}
+        cfg = {"eligibility": {"mode": "venue_ids", "venue_ids": "v1"}}
+        client = _FakeOpenAIClient([_extraction_json(
+            kind=kind, is_recurring=is_recurring, recurrence_text=recurrence_text,
+        )])
+        service = EventExtractionService(dao, _FakePostSource(posts), client)
+        _run(service.run(cfg))
+
+    @pytest.mark.parametrize("kind", ["menu", "promotion", "food", "other"])
+    def test_a_recurring_non_event_answer_counts_once_under_its_own_kind(self, kind):
+        before = self._counter(kind)
+        self._extract(kind, is_recurring=True, recurrence_text="Toda quinta")
+        assert self._counter(kind) - before == 1
+
+    @pytest.mark.parametrize("kind", ["menu", "promotion", "food", "other"])
+    def test_a_non_event_with_no_cadence_is_not_counted(self, kind):
+        """A one-off dish post is not a suppression of a recurring night —
+        counting it would drown the signal this counter exists to give."""
+        before = self._counter(kind)
+        self._extract(kind, is_recurring=False, recurrence_text=None)
+        assert self._counter(kind) - before == 0
+
+    def test_a_recurring_event_answer_is_not_counted(self):
+        """The control: this counter measures what the rule REMOVED, so a
+        recurring row that stayed an event must never appear in it."""
+        before = {
+            kind: self._counter(kind)
+            for kind in ("menu", "promotion", "food", "other")
+        }
+        self._extract("event", is_recurring=True, recurrence_text="Toda quinta")
+        for kind, value in before.items():
+            assert self._counter(kind) == value, kind
+
+    def test_a_recurrence_phrase_without_the_flag_still_counts(self):
+        """Both signals are parsed for every item regardless of its kind, and
+        either one alone is enough evidence that the post named a cadence."""
+        before = self._counter("menu")
+        self._extract("menu", is_recurring=False, recurrence_text="Terça a Domingo")
+        assert self._counter("menu") - before == 1
+
+    def test_an_unrecognised_kind_never_becomes_a_prometheus_label(self):
+        """`resolve_post_type` stores an unrecognised kind VERBATIM, so a
+        "not an event" test would feed model-authored free text straight
+        into a label. The closed four-value set is the guard."""
+        before = sum(
+            self._counter(kind)
+            for kind in ("menu", "promotion", "food", "other")
+        )
+        self._extract("giveaway", is_recurring=True, recurrence_text="Toda quinta")
+        after = sum(
+            self._counter(kind)
+            for kind in ("menu", "promotion", "food", "other")
+        )
+        assert after == before
+        # NO label outside the closed set was created. Deliberately a SUBSET
+        # check, not an equality one: this class's own `_counter` helper
+        # calls `.labels(...)`, which CREATES the child, so an equality
+        # assertion here would manufacture the very labels it claims to
+        # find (F3). That the four exist AT IMPORT is a different property
+        # needing a different vantage point — tests/test_metrics_zero_fill.py,
+        # from a fresh interpreter that imports app.metrics and nothing else.
+        samples = {
+            s.labels["kind"]
+            for metric in EVENT_EXTRACTION_SUPPRESSED_RECURRING_TOTAL.collect()
+            for s in metric.samples
+        }
+        assert samples <= {"menu", "promotion", "food", "other"}, samples
+        assert "giveaway" not in samples
+
+    def test_the_label_set_matches_the_kind_vocabulary(self):
+        """The counter's zero-fill in app.metrics spells the four values out
+        rather than importing them (an import cycle), so the two lists are
+        pinned together here."""
+        assert _SUPPRESSIBLE_POST_TYPES == set(EVENT_KINDS) - {KIND_EVENT}

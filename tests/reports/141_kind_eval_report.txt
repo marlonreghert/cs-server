@@ -1,0 +1,79 @@
+model=gpt-5.6-luna  resamples=3  live_vocabulary=True  old_doc=1954ch new_doc=2940ch
+
+====================================================================================================
+GATED SYNTHETIC CONTROLS  (blocking: a single disagreement fails the merge)
+====================================================================================================
+PASS  S4   expect=event              new=event/event/event         
+PASS  S5   expect=event              new=event/event/event         
+PASS  S6   expect=event              new=event/event/event         
+PASS  S7   expect=event              new=event/event/event         
+PASS  S14  expect=event              new=event/event/event         
+PASS  S9   expect=menu               new=menu/menu/menu              (old: promotion/menu/menu)  <-- BEHAVIOUR CHANGED
+PASS  S10  expect=promotion          new=promotion/promotion/promotion  (old: promotion/promotion/promotion)
+PASS  S11  expect=menu               new=menu/menu/menu              (old: menu/menu/menu)
+PASS  S12  expect=promotion          new=promotion/promotion/promotion  (old: promotion/promotion/promotion)
+PASS  S13  expect=menu               new=menu/menu/menu              (old: menu/menu/menu)
+PASS  G1   expect=menu|promotion     new=menu/menu/menu              (old: menu/event/menu)  <-- BEHAVIOUR CHANGED
+PASS  G2   expect=menu|promotion     new=menu/menu/menu              (old: menu/menu/menu)
+PASS  G3   expect=menu|promotion     new=promotion/promotion/promotion  (old: promotion/promotion/promotion)
+PASS  G4   expect=event              new=event/event/event           (old: event/event/event)
+PASS  G5   expect=event              new=event/event/event           (old: event/event/event)
+PASS  G6   expect=event              new=event/event/event           (old: event/event/event)
+PASS  G7   expect=event              new=event/event/event           (old: event/event/event)
+PASS  G8   expect=event              new=event/event/event           (old: event/event/event)
+
+0 blocking failure(s) out of 18 gated rows
+
+====================================================================================================
+LIVE CORPUS  (observed, NOT gated — operator confirms the labels)
+====================================================================================================
+agree     DVMKVz7kS2h    downtownbeergarden_    proposed=promotion  new=promotion/promotion/promotion old=event/event/event          <-- MOVED
+          title='QUINTA É DIA DE HAPPY HOUR'
+agree     DYCcGo6DuXo    tropical_gardeniashow  proposed=event      new=event/event/event          old=event/event/event         
+          title='Baile Dançante'
+agree     DZ7YEsxxTj3    downtownbeergarden_    proposed=event      new=event/event/event          old=event/event/event         
+          title='Sambinha Downtown'
+agree     Dbn0gsFxxTG    ctradicao              proposed=menu       new=menu/menu/menu             old=menu/menu/menu            
+          title='Buffet de Terça a Domingo'
+agree     DbqF2aCRvBm    casabacurau            proposed=event      new=event/event/event          old=event/event/event         
+          title='Lovezinho'
+agree     Db0m2buB9SO    saladerebocorecife     proposed=event      new=event/event/event          old=event/event/event         
+          title='FORRÓ DOS PAIS'
+agree     Db1imfrRJir    saladerebocorecife     proposed=event      new=event/event/event          old=event/event/event         
+          title='Aula de FORRÓ na Sala de Reboco'
+agree     DcizjRtp6SJ    provinhabp             proposed=event      new=event/event/event          old=event/event/event         
+          title="Brasil 70'"
+agree     DcziABtxjSx    saladerebocorecife     proposed=event      new=event/event/event          old=event/event/event         
+          title='Aula de FORRÓ na Sala de Reboco'
+DISAGREE  DczJz1vh04i    clubmetropole          proposed=event      new=other/other/other          old=other/other/other         
+          title='Drag Ataque – Episódio 4: DRAG DE BOATE'
+agree     Dc3pJLRnGh_    clubmetropole          proposed=event      new=event/event/event          old=event/event/event         
+          title='Residência drag da Metrópole'
+agree     Dctzw9go3zW    tatubola.bar           proposed=event      new=event/event/event          old=event/event/event         
+          title='Agenda Tatu Bola — 7 de Setembro'
+agree     Dc1Qe2uRlDZ    casabacurau            proposed=event      new=event/event/event          old=event/event/event         
+          title='BALERA BAHI'
+agree     Dcwyz5kgSMh    casabacurau            proposed=event      new=event/event/event          old=event/event/event         
+          title='FESTA MUSA'
+agree     DcutY1UhF-2    ferroviariodeafogados  proposed=event      new=event/event/event          old=event/event/event         
+          title='ANIVERSÁRIO da Banda CHAMA DO BREGA'
+agree     DcjD87BkT-s    clubmetropole          proposed=event      new=event/event/event          old=event/event/event         
+          title='HALESSIA NA METRÓPOLE!!!'
+agree     DchdayOkVgC    clubmetropole          proposed=event      new=event/event/event          old=event/event/event         
+          title='METROPOLE EXPERIENCE'
+agree     DcuLA46O5JR    seubotecorecife        proposed=event      new=event/event/event          old=event/event/event         
+          title='37ª REFENO'
+agree     DcuT5eLBoRn    ferroviariodeafogados  proposed=event      new=event/event/event          old=event/event/event         
+          title='O ENCONTRO'
+agree     Db3S3fyRu5E    beerdock_recife        proposed=event      new=event/event/event          old=event/event/event         
+          title='Oktoberfest BeerDock'
+agree     Dc189NPv1Z8    saladerebocorecife     proposed=event      new=event/event/event          old=event/event/event         
+          title='BONITO – PE'
+agree     DbeMfrBPiR2    beerdock_recife        proposed=event      new=event/event/event          old=event/event/event         
+          title='Casa BeerDock 2027'
+
+1 live row(s) where the new prompt disagrees with my proposed label
+
+  DczJz1vh04i (clubmetropole) 'Drag Ataque – Episódio 4: DRAG DE BOATE'
+    proposed: event — A drag show episode with a stated premiere time.
+    new prompt: Counter({'other': 3})   old prompt: Counter({'other': 3})

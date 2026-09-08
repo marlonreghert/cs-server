@@ -1,4 +1,3 @@
-@wip
 Feature: Non-events stay out of the events serving projection, and its recurrence, category and end-time values are serving-correct
 
   As the system of record for the events serving projection

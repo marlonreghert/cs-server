@@ -80,6 +80,24 @@ _MUSIC_STYLES = ", ".join(TAXONOMY["musica"])
 # into a coin flip. Extending only MULTI_EVENT_EXTRACTION_PROMPT with this
 # is the exact half-fix the plan calls out; both prompts interpolate this
 # SAME constant so they can never disagree about the rule.
+#
+# plans/260907_events-non-event-and-recurrence-normalisation.md §1 adds a
+# SECOND pre-ladder test — WHAT IS ANNOUNCED — because the precedence below
+# puts "event" first, so a buffet served Tuesday to Sunday and a happy hour
+# every Thursday both state a recurring schedule and the `promotion` and
+# `menu` branches were UNREACHABLE for exactly the posts they were written
+# for (9 of 44 live occurrences on 2026-09-07, including the `happy hour`
+# example the `promotion` bullet names by hand). The new rule is
+# deliberately ASYMMETRIC, and that asymmetry is the whole design: a
+# food-or-price SUBJECT wins over anything mentioned alongside it, and a
+# non-food subject wins over food or a price mentioned alongside IT. The
+# second half is ONE sentence — "Food or a price mentioned ALONGSIDE one of
+# those does not change the answer" — and it is the only thing keeping
+# karaoke, quiz / trivia, kids / family and every music or genre night.
+# Trim it and all four fail at once, which is why
+# tests/test_event_extraction_prompt_kind.py asserts that sentence
+# specifically. The plan's §0 records the operator decision that a genuine
+# FOOD-ANCHORED event suppressed by the first half is an accepted cost.
 _KIND_FIELD_DOC = """- kind: what this post actually IS — exactly one of:
     - "event": a happening at a time — show, party, DJ night, live music
     - "promotion": an offer or price advantage — happy hour, birthday freebie
@@ -106,6 +124,23 @@ _KIND_FIELD_DOC = """- kind: what this post actually IS — exactly one of:
   "other", not "event", no matter how much detail it includes about what
   already happened. The test is always "does this announce something
   attendable", never "does this post contain event-shaped words".
+  ALSO BEFORE applying that precedence, ask ONE question: what is this post
+  ANNOUNCING?
+    - If the answer is FOOD — a dish, a menu, a buffet, a rodízio, a
+      self-service, a lunch, a daily special ("especial do dia") — answer
+      "menu".
+    - If the answer is a PRICE — a happy hour, a discount, a standing
+      offer, "chopp em dobro", a price list — answer "promotion".
+  Answer that way even when the post states days, a date or times. A
+  schedule does not turn the venue's own kitchen or its own price list into
+  an event.
+  For ANYTHING ELSE the precedence above is unchanged and the answer is
+  still "event": a show, a party, a DJ or live set, a karaoke or quiz
+  night, a class or workshop, a screening, a kids' or family session, any
+  named music or genre night. Food or a price mentioned ALONGSIDE one of
+  those does not change the answer — "toda sexta é Lovezinho, open bar até
+  meia-noite" and "todo sábado tem sertanejo, chopp em dobro" are both
+  "event".
   A post with no photo attached still gets a kind, judged from the caption
   alone. This field is REQUIRED — always answer with one of the five values
   above, never omit it."""
