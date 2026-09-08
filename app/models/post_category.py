@@ -125,15 +125,61 @@ def canonicalize_category(raw, vocabulary) -> Optional[str]:
     "Rock" and "ROCK" converge on one stored value); a genuine miss stores
     the model's own (whitespace-normalized) text, UNCHANGED otherwise —
     never rejected. Returns None for a missing/blank input.
+
+    Delegates to `classify_category` so the extraction-time and the
+    projection-time answers come from ONE matching pass and can never
+    drift — two copies of a fold rule is exactly the duplication CLAUDE.md
+    warns about.
+    """
+    value, _outcome = classify_category(raw, vocabulary)
+    return value
+
+
+# Outcome labels for `events_projection_category_total{outcome}`
+# (plans/260907_events-non-event-and-recurrence-normalisation.md §3).
+CATEGORY_OUTCOME_ABSENT = "absent"
+CATEGORY_OUTCOME_CANONICALIZED = "canonicalized"
+CATEGORY_OUTCOME_OFF_VOCABULARY = "off_vocabulary"
+CATEGORY_OUTCOME_UNCHANGED = "unchanged"
+
+
+def classify_category(raw, vocabulary) -> tuple[Optional[str], str]:
+    """`canonicalize_category`'s answer, plus the OUTCOME the events
+    projection counts — returned together, from one matching pass, so the
+    value and the label can never disagree (the same contract
+    `event_ticket_url.classify_ticket_url` holds to).
+
+    - `absent` — missing or blank.
+    - `canonicalized` — a vocabulary entry matched and the projected
+      spelling DIFFERS from the stored one (`'forró'` -> `"Forró"`).
+    - `unchanged` — a vocabulary entry matched and the two already agreed
+      (`'Forró'` -> `"Forró"`). Distinct from `canonicalized` on purpose: a
+      fleet where this reads 0 while `canonicalized` is high means every
+      stored spelling is being rewritten, which is worth knowing.
+    - `off_vocabulary` — nothing matched. The value is passed through
+      UNCHANGED, never dropped: the vocabulary must keep growing from
+      evidence (this module's own docstring), and this is also the standing
+      projection-time monitor for a `buffet`-shaped category appearing in
+      production.
+
+    Read at PROJECTION time against the LIVE admin vocabulary, which is what
+    makes an operator's vocabulary edit reach the app on the next 2-minute
+    cycle instead of requiring a re-extraction of every affected row — and
+    reaches the already-released clients, which cannot re-map anything
+    themselves.
     """
     text = _normalize_text(raw)
     if text is None:
-        return None
+        return None, CATEGORY_OUTCOME_ABSENT
     folded = text.casefold()
     for known in vocabulary:
         if known.casefold() == folded:
-            return known
-    return text
+            outcome = (
+                CATEGORY_OUTCOME_UNCHANGED if known == text
+                else CATEGORY_OUTCOME_CANONICALIZED
+            )
+            return known, outcome
+    return text, CATEGORY_OUTCOME_OFF_VOCABULARY
 
 
 def is_in_vocabulary(category, vocabulary) -> bool:
@@ -169,6 +215,9 @@ def record_off_vocabulary_category(raw_category: str) -> None:
 __all__ = [
     "ADMIN_CONFIG_POST_CATEGORY_VOCABULARY_KEY", "DEFAULT_CATEGORY_VOCABULARY",
     "OFF_VOCABULARY_OVERFLOW_LABEL",
+    "CATEGORY_OUTCOME_ABSENT", "CATEGORY_OUTCOME_CANONICALIZED",
+    "CATEGORY_OUTCOME_OFF_VOCABULARY", "CATEGORY_OUTCOME_UNCHANGED",
     "validate_post_category_vocabulary_config", "load_post_category_vocabulary",
-    "canonicalize_category", "is_in_vocabulary", "record_off_vocabulary_category",
+    "canonicalize_category", "classify_category", "is_in_vocabulary",
+    "record_off_vocabulary_category",
 ]

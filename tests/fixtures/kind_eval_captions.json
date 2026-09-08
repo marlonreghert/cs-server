@@ -1,0 +1,869 @@
+[
+  {
+    "id": "S4",
+    "synthetic": true,
+    "blocking": true,
+    "shape": "karaoke",
+    "caption": "Toda terça é noite de KARAOKÊ, 20h, inscrição na hora, sem couvert.",
+    "census_kind": null,
+    "expected_kind": "event",
+    "why": "The announced subject is a karaoke night; 'sem couvert' is a price mentioned alongside it. Protected by §0 and not conceded.",
+    "accepted_kinds": [
+      "event"
+    ],
+    "discriminating": false,
+    "names_a_prompt_noun": true
+  },
+  {
+    "id": "S5",
+    "synthetic": true,
+    "blocking": true,
+    "shape": "kids / family",
+    "caption": "Domingo é dia da criança: recreação, contação de história e brinquedoteca, das 10h às 14h, todo domingo.",
+    "census_kind": null,
+    "expected_kind": "event",
+    "why": "The announced subject is a family session; there is no food or price subject at all.",
+    "accepted_kinds": [
+      "event"
+    ],
+    "discriminating": false,
+    "names_a_prompt_noun": true
+  },
+  {
+    "id": "S6",
+    "synthetic": true,
+    "blocking": true,
+    "shape": "party, with a drinks offer alongside",
+    "caption": "TODA SEXTA É LOVEZINHO 💚 open bar de caipirinha até meia-noite, DJ Bibi no comando.",
+    "census_kind": null,
+    "expected_kind": "event",
+    "why": "The seam the live corpus DOES exercise (Sambinha Downtown, Lovezinho): a drinks offer inside an event caption still loses to the announced subject.",
+    "accepted_kinds": [
+      "event"
+    ],
+    "discriminating": false,
+    "names_a_prompt_noun": true
+  },
+  {
+    "id": "S7",
+    "synthetic": true,
+    "blocking": true,
+    "shape": "quiz / trivia, with a drinks prize alongside",
+    "caption": "Quiz da Quarta, 20h, equipes de até 5 pessoas — o time vencedor leva uma rodada de chopp.",
+    "census_kind": null,
+    "expected_kind": "event",
+    "why": "The announced subject is a quiz; the free round is a prize alongside.",
+    "accepted_kinds": [
+      "event"
+    ],
+    "discriminating": false,
+    "names_a_prompt_noun": true
+  },
+  {
+    "id": "S14",
+    "synthetic": true,
+    "blocking": true,
+    "shape": "sertanejo, with a price alongside",
+    "caption": "TODO SÁBADO TEM SERTANEJO 🤠 com a dupla Léo & Rafa. Chopp em dobro até as 22h.",
+    "census_kind": null,
+    "expected_kind": "event",
+    "why": "The control the operator named by hand. S12 and S14 both offer 'chopp em dobro' on a recurring cadence; only S14 announces a music night. A rule that answers promotion to both has learned the phrase and is eating genre nights.",
+    "accepted_kinds": [
+      "event"
+    ],
+    "discriminating": false,
+    "names_a_prompt_noun": true
+  },
+  {
+    "id": "S9",
+    "synthetic": true,
+    "blocking": true,
+    "shape": "standing food offer",
+    "caption": "Buffet de Terça a Domingo — a melhor hora do dia 🍛",
+    "census_kind": "event",
+    "expected_kind": "menu",
+    "why": "The live offender, verbatim. 6 of the 44 live occurrences on 2026-09-07.",
+    "accepted_kinds": [
+      "menu"
+    ],
+    "discriminating": true,
+    "names_a_prompt_noun": true
+  },
+  {
+    "id": "S10",
+    "synthetic": true,
+    "blocking": true,
+    "shape": "standing price offer",
+    "caption": "QUINTA É DIA DE HAPPY HOUR. Promoções em dobro: caldinhos x2, gin tônica x2, caipirinha x2, caipiroska x2 e bananinha x2. Chopp Amstel gelado por R$ 6,99 e Amstel 600ml por R$ 10,99.",
+    "census_kind": "event",
+    "expected_kind": "promotion",
+    "why": "The live offender, verbatim. 3 of the 44 live occurrences, and the shape the `promotion` bullet already named by hand while the event-first precedence made that branch unreachable.",
+    "accepted_kinds": [
+      "promotion"
+    ],
+    "discriminating": true,
+    "names_a_prompt_noun": true
+  },
+  {
+    "id": "S11",
+    "synthetic": true,
+    "blocking": true,
+    "shape": "daily special",
+    "caption": "Especial do dia: risoto de camarão, de segunda a sexta no almoço, R$ 39,90.",
+    "census_kind": null,
+    "expected_kind": "menu",
+    "why": "The 'Especial do dia' regression named in the 1.4.1 brief — one generic recurring title that was 28% of the feed at one point.",
+    "accepted_kinds": [
+      "menu"
+    ],
+    "discriminating": true,
+    "names_a_prompt_noun": true
+  },
+  {
+    "id": "S12",
+    "synthetic": true,
+    "blocking": true,
+    "shape": "standing discount, no occasion at all",
+    "caption": "De segunda a quinta, chopp em dobro o dia inteiro.",
+    "census_kind": null,
+    "expected_kind": "promotion",
+    "why": "Pairs with S14. Same offer, same cadence, no announced occasion.",
+    "accepted_kinds": [
+      "promotion"
+    ],
+    "discriminating": true,
+    "names_a_prompt_noun": true
+  },
+  {
+    "id": "S13",
+    "synthetic": true,
+    "blocking": true,
+    "shape": "the kitchen's own hours",
+    "caption": "Nosso rodízio de pizza roda todas as noites, das 19h às 23h.",
+    "census_kind": null,
+    "expected_kind": "menu",
+    "why": "A schedule does not turn the venue's own kitchen into an event.",
+    "accepted_kinds": [
+      "menu"
+    ],
+    "discriminating": true,
+    "names_a_prompt_noun": true
+  },
+  {
+    "id": "G1",
+    "synthetic": true,
+    "blocking": true,
+    "shape": "food subject the prompt never names",
+    "caption": "Feijoada toda quinta, R$45",
+    "census_kind": null,
+    "expected_kind": "menu",
+    "accepted_kinds": [
+      "menu",
+      "promotion"
+    ],
+    "discriminating": true,
+    "names_a_prompt_noun": false,
+    "why": "F2: every §5 control turns on a noun the prompt itself lists (buffet, happy hour, especial do dia, rodizio). 'Feijoada' is named nowhere in the prompt, so this tests whether the FOOD-SUBJECT rule generalises rather than whether the model follows an enumeration. Either suppression is correct: the subject is a dish (menu) carrying a price (promotion)."
+  },
+  {
+    "id": "G2",
+    "synthetic": true,
+    "blocking": true,
+    "shape": "standing self-service, weekday range",
+    "caption": "self-service por quilo, seg a sex",
+    "census_kind": null,
+    "expected_kind": "menu",
+    "accepted_kinds": [
+      "menu",
+      "promotion"
+    ],
+    "discriminating": true,
+    "names_a_prompt_noun": true,
+    "why": "'self-service' IS one of the prompt's own enumerated nouns, so this is a weaker control than G1/G3 and is labelled as such — it is kept because the operator named it and because 'por quilo'/'seg a sex' is the exact shape of the live buffet without its title."
+  },
+  {
+    "id": "G3",
+    "synthetic": true,
+    "blocking": true,
+    "shape": "free-food weekday offer, noun not in the prompt",
+    "caption": "caldinho grátis na segunda",
+    "census_kind": null,
+    "expected_kind": "promotion",
+    "accepted_kinds": [
+      "menu",
+      "promotion"
+    ],
+    "discriminating": true,
+    "names_a_prompt_noun": false,
+    "why": "'caldinho' appears nowhere in the prompt. Subject is a free dish on a standing weekday, so both suppressions are correct and neither is worth pinning to a coin flip."
+  },
+  {
+    "id": "G4",
+    "synthetic": true,
+    "blocking": true,
+    "shape": "price headline + named DJ",
+    "caption": "QUINTA DO CHOPP EM DOBRO 🍺 com DJ Marcos ao vivo",
+    "census_kind": null,
+    "expected_kind": "event",
+    "accepted_kinds": [
+      "event"
+    ],
+    "discriminating": true,
+    "names_a_prompt_noun": true,
+    "why": "The headline IS the offer ('chopp em dobro', a phrase the prompt lists under PRICE) and the body is a real act. Must stay `event`: a rule that suppresses this deletes a real music night. This is the over-suppression seam."
+  },
+  {
+    "id": "G5",
+    "synthetic": true,
+    "blocking": true,
+    "shape": "price headline + named DJ, different offer word",
+    "caption": "SÁBADO OPEN BAR R$60 — DJ Bibi",
+    "census_kind": null,
+    "expected_kind": "event",
+    "accepted_kinds": [
+      "event"
+    ],
+    "discriminating": true,
+    "names_a_prompt_noun": false,
+    "why": "Same seam as G4 with an offer word the prompt does not list ('open bar' appears only inside a worked example, as part of an EVENT caption). A stated price leads the caption; a named DJ follows."
+  },
+  {
+    "id": "G6",
+    "synthetic": true,
+    "blocking": true,
+    "shape": "happy hour headline + live band",
+    "caption": "HAPPY HOUR COM MÚSICA AO VIVO — toda sexta a partir das 18h, banda Sururu no palco.",
+    "census_kind": null,
+    "expected_kind": "event",
+    "accepted_kinds": [
+      "event"
+    ],
+    "discriminating": true,
+    "names_a_prompt_noun": true,
+    "why": "'happy hour' is the prompt's own PRICE example AND leads the caption, but the announced subject is a live band. The hardest of the three seam rows, and the closest to the live Sambinha Downtown row."
+  },
+  {
+    "id": "G7",
+    "synthetic": true,
+    "blocking": true,
+    "shape": "genre night the prompt never names, with a price",
+    "caption": "TODA TERÇA É NOITE DE FREVO 🎺 com a Orquestra do Recife. Petisco em dobro a noite toda.",
+    "census_kind": null,
+    "expected_kind": "event",
+    "accepted_kinds": [
+      "event"
+    ],
+    "discriminating": true,
+    "names_a_prompt_noun": false,
+    "why": "'frevo' is not in the prompt's kind rule (it is only a music-style label elsewhere), and 'petisco em dobro' is not one of its listed offer phrases. Tests that 'any named music or genre night' generalises past sertanejo."
+  },
+  {
+    "id": "G8",
+    "synthetic": true,
+    "blocking": true,
+    "shape": "screening with a food offer alongside",
+    "caption": "Domingo tem jogo no telão, 16h. Porção de bolinho a R$ 20 durante a partida.",
+    "census_kind": null,
+    "expected_kind": "event",
+    "accepted_kinds": [
+      "event"
+    ],
+    "discriminating": true,
+    "names_a_prompt_noun": false,
+    "why": "A screening (named in the protected list) with a priced dish alongside. §1b concedes a rodizio-anchored screening; this one is anchored on the GAME, so it must survive."
+  },
+  {
+    "id": "DVMKVz7kS2h",
+    "synthetic": false,
+    "blocking": false,
+    "shape": "live production caption",
+    "caption": "Quinta-feira é dia de Happy Hour especial no Downtown Beer Garden 🍻\n\nAqui você tem o dobro de motivos pra curtir e começar o fim de semana mais cedo! Toda quinta, o happy hour vem daquele jeito que a gente gosta: promoções em dobro, clima leve, boa música e mesa cheia de amigos ✨\n\nTem caldinhos x2 pra aquecer, gin tônica x2, caipirinha x2, caipiroska x2 e bananinha x2 pra brindar sem pensar duas vezes!\n\nE pra completar, chopp Amstel gelado por R$ 6,99 e Amstel 600ml por R$ 10,99, daquele jeito que desce gelando a goela 🍻\n\nTudo isso até as 22h, no melhor Jardim da cidade, com aquele astral perfeito pra esticar a conversa, rir alto e aproveitar cada gole ⭐️\n\nQuinta no Downtown não é só happy hour, é encontro. É o dobro de motivos pra você estar aqui 🪴",
+    "handle": "downtownbeergarden_",
+    "title": "QUINTA É DIA DE HAPPY HOUR",
+    "event_id": "evt_01M0XTA552MYQMA8P83AB01HN5",
+    "census_kind": "event",
+    "expected_kind": null,
+    "accepted_kinds": null,
+    "discriminating": null,
+    "proposed_kind": "promotion",
+    "proposed_why": "Announced subject is the weekly happy hour itself: the whole body is a price list (caldinhos x2, chopp R$6,99). No act, no occasion.",
+    "observed_new_prompt": [
+      "promotion",
+      "promotion",
+      "promotion"
+    ],
+    "observed_deployed_prompt": [
+      "event",
+      "event",
+      "event"
+    ],
+    "why": "Emitted from production on 2026-09-08 by scripts/eval_kind_on_captions.py --emit-fixture. `expected_kind` is NULL and `blocking` is false BY DESIGN: the label must be confirmed by the operator from the caption text before this row can gate anything. `proposed_kind` is my reading, recorded so the confirmation is a review rather than a fresh labelling exercise."
+  },
+  {
+    "id": "DYCcGo6DuXo",
+    "synthetic": false,
+    "blocking": false,
+    "shape": "live production caption",
+    "caption": "TODOS OS SÁBADOS você pode contar com a melhor programação da região para se divertir a noite toda! A partir das 20h\n\n🎟️ Meia entrada para todos: R$ 30,00\n🎂 Aniversariante do dia não paga entrada!\n📍 Rua Manoel Bezerra, 326 – Madalena, Recife\n📲 Reservas: (81) 98600-9795 | 98775-3760\n\nChama os amigos e vem curtir essa noite especial! 🍹🎶🌺\n\n#NoiteCaribenha #TropicalGardenia #Recife #MusicaAoVivo #VesperaDeFeriado FestaRecife AgendaRecife",
+    "handle": "tropical_gardeniashow",
+    "title": "Baile Dançante",
+    "event_id": "evt_01M1Y1WKCPGX1J5AVE65H266PR",
+    "census_kind": "event",
+    "expected_kind": null,
+    "accepted_kinds": null,
+    "discriminating": null,
+    "proposed_kind": "event",
+    "proposed_why": "A weekly Saturday dance night with a stated programme and door price; the subject is the night, not the price.",
+    "observed_new_prompt": [
+      "event",
+      "event",
+      "event"
+    ],
+    "observed_deployed_prompt": [
+      "event",
+      "event",
+      "event"
+    ],
+    "why": "Emitted from production on 2026-09-08 by scripts/eval_kind_on_captions.py --emit-fixture. `expected_kind` is NULL and `blocking` is false BY DESIGN: the label must be confirmed by the operator from the caption text before this row can gate anything. `proposed_kind` is my reading, recorded so the confirmation is a review rather than a fresh labelling exercise."
+  },
+  {
+    "id": "DZ7YEsxxTj3",
+    "synthetic": false,
+    "blocking": false,
+    "shape": "live production caption",
+    "caption": "Vem comemorar seu aniversário em nosso Domingo a tarde! A partir das 13h no coração da Zona Norte do Recife e com HAPPY HOUR a tarde toda, comandas individuais, muito samba ao ar livre em um ambiente lindo. Somos o Sambinha Downtown, que fica localizado no @downtownbeergarden_ 🌳🍺🪕\n\nEntre em contato e faça a sua reserva! 📲\n\n📆 TODOS OS DOMINGOS - 13:00\n🍻 HAPPY HOUR a tarde toda\n🪪 Comanda Individual \n📍 Rua Quarenta e Oito, 490 - Espinheiro\n📱 Infos e Reservas: (81)98896.8122",
+    "handle": "downtownbeergarden_",
+    "title": "Sambinha Downtown",
+    "event_id": "evt_01KZVG66809JD1SCTQ2EJQAFJ4",
+    "census_kind": "event",
+    "expected_kind": null,
+    "accepted_kinds": null,
+    "discriminating": null,
+    "proposed_kind": "event",
+    "proposed_why": "Sunday samba session; 'HAPPY HOUR a tarde toda' is a price named ALONGSIDE the announced samba. The §1a seam row.",
+    "observed_new_prompt": [
+      "event",
+      "event",
+      "event"
+    ],
+    "observed_deployed_prompt": [
+      "event",
+      "event",
+      "event"
+    ],
+    "why": "Emitted from production on 2026-09-08 by scripts/eval_kind_on_captions.py --emit-fixture. `expected_kind` is NULL and `blocking` is false BY DESIGN: the label must be confirmed by the operator from the caption text before this row can gate anything. `proposed_kind` is my reading, recorded so the confirmation is a review rather than a fresh labelling exercise."
+  },
+  {
+    "id": "Dbn0gsFxxTG",
+    "synthetic": false,
+    "blocking": false,
+    "shape": "live production caption",
+    "caption": "A melhor hora do dia 🍛\n\nBuffet de Terça a Domingo das 11h30 às 15h\n\nRua Amélia, 422 - Graças\n\n#almoco #buffet #selfservice",
+    "handle": "ctradicao",
+    "title": "Buffet de Terça a Domingo",
+    "event_id": "evt_01M1Y1W3V4HNXDQ7R2KN20B5JM",
+    "census_kind": "event",
+    "expected_kind": null,
+    "accepted_kinds": null,
+    "discriminating": null,
+    "proposed_kind": "menu",
+    "proposed_why": "Subject is the lunch buffet and its serving hours. Hashtags #almoco #buffet #selfservice. The live offender.",
+    "observed_new_prompt": [
+      "menu",
+      "menu",
+      "menu"
+    ],
+    "observed_deployed_prompt": [
+      "menu",
+      "menu",
+      "menu"
+    ],
+    "why": "Emitted from production on 2026-09-08 by scripts/eval_kind_on_captions.py --emit-fixture. `expected_kind` is NULL and `blocking` is false BY DESIGN: the label must be confirmed by the operator from the caption text before this row can gate anything. `proposed_kind` is my reading, recorded so the confirmation is a review rather than a fresh labelling exercise."
+  },
+  {
+    "id": "DbqF2aCRvBm",
+    "synthetic": false,
+    "blocking": false,
+    "shape": "live production caption",
+    "caption": "Simples assim 💁🏽‍♀️\n\nA gente garante que marcar um date por aqui no dia do Lovezinho (toda quarta) é sucesso! Chama a @ pra aproveitar o happy hour, pô!🍔 + 🍸+ 🎶= 💘\n\nRolezinho no quintal, com música gostosinha de fundo e promoções de combo a noite toda. É o match perfeito! 💅🏼\n\n⏰ A partir das 19h\n📍Rua Capitão Lima, 100\n🎟️ Ingressos na shotgun (link na bio)",
+    "handle": "casabacurau",
+    "title": "Lovezinho",
+    "event_id": "evt_01KZVGC9XDZ7JCR55FWWDSGJE4",
+    "census_kind": "event",
+    "expected_kind": null,
+    "accepted_kinds": null,
+    "discriminating": null,
+    "proposed_kind": "event",
+    "proposed_why": "Weekly Lovezinho night with music; 'promocoes de combo a noite toda' is alongside. The second §1a seam row.",
+    "observed_new_prompt": [
+      "event",
+      "event",
+      "event"
+    ],
+    "observed_deployed_prompt": [
+      "event",
+      "event",
+      "event"
+    ],
+    "why": "Emitted from production on 2026-09-08 by scripts/eval_kind_on_captions.py --emit-fixture. `expected_kind` is NULL and `blocking` is false BY DESIGN: the label must be confirmed by the operator from the caption text before this row can gate anything. `proposed_kind` is my reading, recorded so the confirmation is a review rather than a fresh labelling exercise."
+  },
+  {
+    "id": "Db0m2buB9SO",
+    "synthetic": false,
+    "blocking": false,
+    "shape": "live production caption",
+    "caption": "*DOMINGOU COM O “FORRÓ DOS PAIS”. VENHAM DANÇAR MUITO FORRÓ PÉ-DE-SERRA E FORRÓ DAS ANTIGAS. É HOJE, AQUI NA SALA DE REBOCO.*\n\nNeste *domingo, 09/08*, a banda *XAMEGÕES DO FORRÓ* vai botar todo mundo pra balançar.\n\nA abertura será por conta do nosso *Quinteto Sala de Reboco*.\n\nAos domingos, nossa Casa abre às 16h, o forró ao vivo começa às 17h. Vamos até às 22h, no mínimo…\nCheguem cedo.\n\n*Temos promoções para mulheres e estudantes universitários (apresentando a carteirinha) que chegarem até às 18h: estes pagarão apenas R$10,00 no couvert artístico!*😃😃\n\nConfira o banner e o convite de *LUCIANA RODRIGUES*",
+    "handle": "saladerebocorecife",
+    "title": "FORRÓ DOS PAIS",
+    "event_id": "evt_01KZVGBPFCRM3B0T4S3C7MDB5P",
+    "census_kind": "event",
+    "expected_kind": null,
+    "accepted_kinds": null,
+    "discriminating": null,
+    "proposed_kind": "event",
+    "proposed_why": "Forro night with a named band; the couvert discount is alongside.",
+    "observed_new_prompt": [
+      "event",
+      "event",
+      "event"
+    ],
+    "observed_deployed_prompt": [
+      "event",
+      "event",
+      "event"
+    ],
+    "why": "Emitted from production on 2026-09-08 by scripts/eval_kind_on_captions.py --emit-fixture. `expected_kind` is NULL and `blocking` is false BY DESIGN: the label must be confirmed by the operator from the caption text before this row can gate anything. `proposed_kind` is my reading, recorded so the confirmation is a review rather than a fresh labelling exercise."
+  },
+  {
+    "id": "Db1imfrRJir",
+    "synthetic": false,
+    "blocking": false,
+    "shape": "live production caption",
+    "caption": "QUARTA também É DIA DE FORRÓ na Sala de Reboco 🔥💃🕺\n\nNovos passos, novos amigos, novos sorrisos 🎶\n\nVocê não precisa saber dançar. É só chegar, aprender na QUARTA e se divertir com a galera no final de semana. 😉\n\n✨ Aulas para todos os níveis\n🕖 19h — Iniciados\n🕗 20h — Iniciantes\n\n🔥 Forró + música boa + gente animada = noite garantida!\n\n💰 Mensalidade: R$ 100\n\n📲 Inscrições pelo WhatsApp: 81 98613-8570\nProfessor: Marcelo Lima \n\n📍 Sala de Reboco\nRua Gregório Júnior, 264 — Cordeiro, Recife.\n\nVem dançar. Vem se divertir. Vem fazer parte dessa turma! ❤️‍🔥",
+    "handle": "saladerebocorecife",
+    "title": "Aula de FORRÓ na Sala de Reboco",
+    "event_id": "evt_01M0XSJEV722P8SPP5BRA38K8W",
+    "census_kind": "event",
+    "expected_kind": null,
+    "accepted_kinds": null,
+    "discriminating": null,
+    "proposed_kind": "event",
+    "proposed_why": "A recurring forro CLASS with a named teacher and a monthly fee; the fee is alongside.",
+    "observed_new_prompt": [
+      "event",
+      "event",
+      "event"
+    ],
+    "observed_deployed_prompt": [
+      "event",
+      "event",
+      "event"
+    ],
+    "why": "Emitted from production on 2026-09-08 by scripts/eval_kind_on_captions.py --emit-fixture. `expected_kind` is NULL and `blocking` is false BY DESIGN: the label must be confirmed by the operator from the caption text before this row can gate anything. `proposed_kind` is my reading, recorded so the confirmation is a review rather than a fresh labelling exercise."
+  },
+  {
+    "id": "DcizjRtp6SJ",
+    "synthetic": false,
+    "blocking": false,
+    "shape": "live production caption",
+    "caption": "Hoje temos mais uma edição da Brasil 70' - 100% Vinil, festa que acontece mensalmente aqui no provzzZzZ com diversos tesourinhos da música brasileira no som, principalmente da década de setenta. Projeto dos DJs @seletorys & @gabriel.melo420 , o evento chega a sua vigésima primeira edição com uma noite especial como after da sessão de estréia do @noturnofestival .",
+    "handle": "provinhabp",
+    "title": "Brasil 70'",
+    "event_id": "evt_01M1Y1X9YN66PNDDGQYVQA3C6K",
+    "census_kind": "event",
+    "expected_kind": null,
+    "accepted_kinds": null,
+    "discriminating": null,
+    "proposed_kind": "event",
+    "proposed_why": "A monthly vinyl party with named DJs.",
+    "observed_new_prompt": [
+      "event",
+      "event",
+      "event"
+    ],
+    "observed_deployed_prompt": [
+      "event",
+      "event",
+      "event"
+    ],
+    "why": "Emitted from production on 2026-09-08 by scripts/eval_kind_on_captions.py --emit-fixture. `expected_kind` is NULL and `blocking` is false BY DESIGN: the label must be confirmed by the operator from the caption text before this row can gate anything. `proposed_kind` is my reading, recorded so the confirmation is a review rather than a fresh labelling exercise."
+  },
+  {
+    "id": "DcziABtxjSx",
+    "synthetic": false,
+    "blocking": false,
+    "shape": "live production caption",
+    "caption": "Aula de Forró na Sala de Reboco.\n\nNovos amigos, sorrisos e muito Forró.\n\nToda QUARTA.\n\nInformações: 81986138570",
+    "handle": "saladerebocorecife",
+    "title": "Aula de FORRÓ na Sala de Reboco",
+    "event_id": "evt_01M1NG496CC72V35A8JN4JS5YN",
+    "census_kind": "event",
+    "expected_kind": null,
+    "accepted_kinds": null,
+    "discriminating": null,
+    "proposed_kind": "event",
+    "proposed_why": "The same forro class, terser caption.",
+    "observed_new_prompt": [
+      "event",
+      "event",
+      "event"
+    ],
+    "observed_deployed_prompt": [
+      "event",
+      "event",
+      "event"
+    ],
+    "why": "Emitted from production on 2026-09-08 by scripts/eval_kind_on_captions.py --emit-fixture. `expected_kind` is NULL and `blocking` is false BY DESIGN: the label must be confirmed by the operator from the caption text before this row can gate anything. `proposed_kind` is my reading, recorded so the confirmation is a review rather than a fresh labelling exercise."
+  },
+  {
+    "id": "DczJz1vh04i",
+    "synthetic": false,
+    "blocking": false,
+    "shape": "live production caption",
+    "caption": "O lip-sync tá pronto, o visual tá impecável e a nossa música vai ecoar alto! 🎤✨\n\nNo 4º episódio do Drag Ataque, a boate @clubmetropole vira palco para um espetáculo inesquecível ao som do melhor da música nordestina! É talento, bate-cabelo, emoção e muita entrega em cena.\n\nAperta o play, arrasta pro lado e vem sentir um gostinho do que vem por aí! ➡️👠🔥\n\n📺 Episódio 4 – DRAG DE BOATE\n🍿 Estreia: Sexta-feira, 04 de setembro, às 21h, no @fashiontv_brasil\n🔁 Reprises: Sábado (09h), Domingo (19h), Segunda (07h e 13h15), Terça (22h30) e Quarta (10h30)\n\n👑 Drag Ataque\nSua nova série documental no @fashiontv_brasil\nToda sexta, às 21 horas, na tela do canal Fashion TV.\n\n✴️Uma produção:\nPlano 9 Produções @plano9prod\ncom direção de Vinícius Gouveia @vinivv\nProjeto realizado com recursos:\nBRDE – Banco Regional de Desenvolvimento do Extremo Sul\nFundo Setorial do Audiovisual (FSA)\nAgência Nacional do Cinema (ANCINE)\nGoverno de Pernambuco\nFuncultura Audiovisual\nPolítica Nacional Aldir Blanc Pernambuco",
+    "handle": "clubmetropole",
+    "title": "Drag Ataque – Episódio 4: DRAG DE BOATE",
+    "event_id": "evt_01M1NG3JRENCFF1NTQ8F7YKDPK",
+    "census_kind": "event",
+    "expected_kind": null,
+    "accepted_kinds": null,
+    "discriminating": null,
+    "proposed_kind": "event",
+    "proposed_why": "A drag show episode with a stated premiere time.",
+    "observed_new_prompt": [
+      "other",
+      "other",
+      "other"
+    ],
+    "observed_deployed_prompt": [
+      "other",
+      "other",
+      "other"
+    ],
+    "why": "Emitted from production on 2026-09-08 by scripts/eval_kind_on_captions.py --emit-fixture. `expected_kind` is NULL and `blocking` is false BY DESIGN: the label must be confirmed by the operator from the caption text before this row can gate anything. `proposed_kind` is my reading, recorded so the confirmation is a review rather than a fresh labelling exercise."
+  },
+  {
+    "id": "Dc3pJLRnGh_",
+    "synthetic": false,
+    "blocking": false,
+    "shape": "live production caption",
+    "caption": "A noite recifense está vivendo um resgate cultural que merece atenção. Enquanto muitas casas noturnas abandonaram os shows para focar apenas em DJs, o @clubmetropole foi na contramão e colocou a arte drag de volta no centro da pista.\n\nHoje, a casa conta com um time de sete residentes de peso que se apresentam todos os sábados, às 00h30 e 2h da manhã. O elenco mistura história e excelência: temos a força de Fabi Oliveira @lindaloirachique (mulher trans de 54 anos) e Dercy Fortunato @dercyfortunato (pioneira na Pista Brasil); o carisma de Charlotte Delphina; a moda impecável da estilista Courtney @itcourtney ; e a técnica nacional da miss Tory Millicent @torycent .\n\nO talento recifense é tão fora da curva que rompeu fronteiras. Polly Pockety hoje divide a residência com Fernando de Noronha e viaja o Brasil, enquanto Britnney Hill, com 20 anos de carreira, foi chamada para brilhar nos palcos de um cabaret na Alemanha. Manter a cena drag viva semanalmente é garantir que o coração da cultura LGBTQIA+ continue batendo forte na nossa cidade.\n\n@IVANPOSTOU : Eles escondem. Eu analiso!\n\nQual dessas estrelas você já acompanhou de perto no palco da Metrópole? Deixe seu comentário.",
+    "handle": "clubmetropole",
+    "title": "Residência drag da Metrópole",
+    "event_id": "evt_01M1TMY0MMQTJYQWAFDMKEN99Z",
+    "census_kind": "event",
+    "expected_kind": null,
+    "accepted_kinds": null,
+    "discriminating": null,
+    "proposed_kind": "event",
+    "proposed_why": "Weekly drag residency with a named cast and set times.",
+    "observed_new_prompt": [
+      "event",
+      "event",
+      "event"
+    ],
+    "observed_deployed_prompt": [
+      "event",
+      "event",
+      "event"
+    ],
+    "why": "Emitted from production on 2026-09-08 by scripts/eval_kind_on_captions.py --emit-fixture. `expected_kind` is NULL and `blocking` is false BY DESIGN: the label must be confirmed by the operator from the caption text before this row can gate anything. `proposed_kind` is my reading, recorded so the confirmation is a review rather than a fresh labelling exercise."
+  },
+  {
+    "id": "Dctzw9go3zW",
+    "synthetic": false,
+    "blocking": false,
+    "shape": "live production caption",
+    "caption": "🇧🇷 Agenda Tatu Bola — 7 de Setembro\n\nSegundou + Feriado = motivo perfeito pra viver o melhor do Tatu Bola! 🍻🎶\n\nNeste 7 de setembro, a casa abre a partir das 12h com uma programação especial pra você curtir o feriado do começo ao fim.\n\nAnota aí:\n\n* 🕛 Casa aberta: a partir das 12h\n* 🍺 Happy Hour: das 12h às 17h\n* 💃 Mulheres não pagam couvert chegando até às 15h\n* 🎤 Samba de Mesa\n* 🎶 Júnior Santos\n* 🥁 Amigo do Bar\n\nChama a galera, garante a resenha e vem aproveitar o feriado no melhor clima de Recife. Nos vemos no Tatu Bola! 🐢🔥\n\n#TatuBolaRecife #7DeSetembro #HappyHour #SambaNoTatu #DomingoNoTatu",
+    "handle": "tatubola.bar",
+    "title": "Agenda Tatu Bola — 7 de Setembro",
+    "event_id": "evt_01M1DD19731YF9R6NE1QS11DQ9",
+    "census_kind": "event",
+    "expected_kind": null,
+    "accepted_kinds": null,
+    "discriminating": null,
+    "proposed_kind": "event",
+    "proposed_why": "A dated holiday programme naming three acts; the happy hour and couvert waiver are alongside.",
+    "observed_new_prompt": [
+      "event",
+      "event",
+      "event"
+    ],
+    "observed_deployed_prompt": [
+      "event",
+      "event",
+      "event"
+    ],
+    "why": "Emitted from production on 2026-09-08 by scripts/eval_kind_on_captions.py --emit-fixture. `expected_kind` is NULL and `blocking` is false BY DESIGN: the label must be confirmed by the operator from the caption text before this row can gate anything. `proposed_kind` is my reading, recorded so the confirmation is a review rather than a fresh labelling exercise."
+  },
+  {
+    "id": "Dc1Qe2uRlDZ",
+    "synthetic": false,
+    "blocking": false,
+    "shape": "live production caption",
+    "caption": "🎺 Clarinho que vai ter AFTER das PRÉVIAS por aqui!\n\nSegunda-feira, 7 de setembro, depois do frevo tem fervo com @gabryellalima__ e @asafirablue 💥\n\n🎟️ Os ingressos no precinho estão disponíveis no link da bio!\n\n📍Rua Capitão Lima, 100\n⏰20h",
+    "handle": "casabacurau",
+    "title": "BALERA BAHI",
+    "event_id": "evt_01M1TMXWNXQGNMDDDP0XA18FCP",
+    "census_kind": "event",
+    "expected_kind": null,
+    "accepted_kinds": null,
+    "discriminating": null,
+    "proposed_kind": "event",
+    "proposed_why": "A dated after-party with two named DJs.",
+    "observed_new_prompt": [
+      "event",
+      "event",
+      "event"
+    ],
+    "observed_deployed_prompt": [
+      "event",
+      "event",
+      "event"
+    ],
+    "why": "Emitted from production on 2026-09-08 by scripts/eval_kind_on_captions.py --emit-fixture. `expected_kind` is NULL and `blocking` is false BY DESIGN: the label must be confirmed by the operator from the caption text before this row can gate anything. `proposed_kind` is my reading, recorded so the confirmation is a review rather than a fresh labelling exercise."
+  },
+  {
+    "id": "Dcwyz5kgSMh",
+    "synthetic": false,
+    "blocking": false,
+    "shape": "live production caption",
+    "caption": "@priscilasennaoficial vai fazer história no Rock in Rio e é claro que a gente vai fazer parte disso! 👑✨\n\nNo dia 12/09, a partir das 15h, tem FESTA MUSA com esquenta ao som da @bandasedutoraoficial e after com os djs @akababiloniamusic e @pedroflorentino14 !  Ah, e teremos transmissão dupla! Vai rolar telão de led no quintal + projeção na pista pra gente acompanhar o show ao vivo!\n\n ❗CHEGA CEDO porque teremos brindes surpresa! Além do lançamento do Drink Musa, edição especial do evento, exclusivo para os 100 primeiros clientes. 👀\n\n🎟️ Ingressos LIMITADOS gratuitos na Shotgun (link na bio)\n⏰ 15h\n📍 Rua Capitão Lima, 100",
+    "handle": "casabacurau",
+    "title": "FESTA MUSA",
+    "event_id": "evt_01M1NG4H0FAZ07DA56ZSM6YEWG",
+    "census_kind": "event",
+    "expected_kind": null,
+    "accepted_kinds": null,
+    "discriminating": null,
+    "proposed_kind": "event",
+    "proposed_why": "A dated party with named acts and a screening.",
+    "observed_new_prompt": [
+      "event",
+      "event",
+      "event"
+    ],
+    "observed_deployed_prompt": [
+      "event",
+      "event",
+      "event"
+    ],
+    "why": "Emitted from production on 2026-09-08 by scripts/eval_kind_on_captions.py --emit-fixture. `expected_kind` is NULL and `blocking` is false BY DESIGN: the label must be confirmed by the operator from the caption text before this row can gate anything. `proposed_kind` is my reading, recorded so the confirmation is a review rather than a fresh labelling exercise."
+  },
+  {
+    "id": "DcutY1UhF-2",
+    "synthetic": false,
+    "blocking": false,
+    "shape": "live production caption",
+    "caption": "#VemProFerroviario VEM AÍ! Está chegando o ANIVERSÁRIO da Banda CHAMA DO BREGA com MAGNO SOUZA & MANINHO e EXPRESSO AO PASSADO no Clube Ferroviário de Afogados. Nos intervalos a festa continua com nosso DJ JUNIOR 100%. Não percam!\n\n⏰ A partir das 13h\n🗓 DOMINGO (13/Setembro)\n🎟 HOMENS - R$ 20,00\n🎟 MULHERES - Grátis até as 15h\n📍 Clube Ferroviário de Afogados\n\nInformações: ☎ 81 98354.7170\n\nSigam nossas redes sociais no Facebook e Instagram\n@PagoderiaAcessoLivreOficial\n@FerroviarioDeAfogados\n@ClubeBatutasDeSaoJose\n@TardeDancanteRecife",
+    "handle": "ferroviariodeafogados",
+    "title": "ANIVERSÁRIO da Banda CHAMA DO BREGA",
+    "event_id": "evt_01M1Y1VR1X4YK0XN3G7D96H2VE",
+    "census_kind": "event",
+    "expected_kind": null,
+    "accepted_kinds": null,
+    "discriminating": null,
+    "proposed_kind": "event",
+    "proposed_why": "A dated band anniversary show with named acts.",
+    "observed_new_prompt": [
+      "event",
+      "event",
+      "event"
+    ],
+    "observed_deployed_prompt": [
+      "event",
+      "event",
+      "event"
+    ],
+    "why": "Emitted from production on 2026-09-08 by scripts/eval_kind_on_captions.py --emit-fixture. `expected_kind` is NULL and `blocking` is false BY DESIGN: the label must be confirmed by the operator from the caption text before this row can gate anything. `proposed_kind` is my reading, recorded so the confirmation is a review rather than a fresh labelling exercise."
+  },
+  {
+    "id": "DcjD87BkT-s",
+    "synthetic": false,
+    "blocking": false,
+    "shape": "live production caption",
+    "caption": "HALESSIA NA METRÓPOLE!!! @halessia \n19 de setembro (Sábado) vamos viver momentos muito especiais aqui nas nossas pistas 💖\n\nJunto com @bella_longuinho a nossa diva @halessia vai comandar a noite da Metrópole Experience com essa presença marcante que conquistou milhões na internet!!! Vocês estão preparados?\n\nCorre pra garantir teu antecipado!!!!\n🎫 TICKETS\n🔗 @sympla na BIO\n📲 (81) 99828.1640",
+    "handle": "clubmetropole",
+    "title": "HALESSIA NA METRÓPOLE!!!",
+    "event_id": "evt_01M13FAQB5Q6MY6J6FN1NMNS6C",
+    "census_kind": "event",
+    "expected_kind": null,
+    "accepted_kinds": null,
+    "discriminating": null,
+    "proposed_kind": "event",
+    "proposed_why": "A dated club night with a named headliner.",
+    "observed_new_prompt": [
+      "event",
+      "event",
+      "event"
+    ],
+    "observed_deployed_prompt": [
+      "event",
+      "event",
+      "event"
+    ],
+    "why": "Emitted from production on 2026-09-08 by scripts/eval_kind_on_captions.py --emit-fixture. `expected_kind` is NULL and `blocking` is false BY DESIGN: the label must be confirmed by the operator from the caption text before this row can gate anything. `proposed_kind` is my reading, recorded so the confirmation is a review rather than a fresh labelling exercise."
+  },
+  {
+    "id": "DchdayOkVgC",
+    "synthetic": false,
+    "blocking": false,
+    "shape": "live production caption",
+    "caption": "ELA CHEGOU!!!\nBELLA LONGUINHO NA METRÓPOLE!!!\n19/SETEMBRO • SÁBADO \n@bella_longuinho \n\nUm dos nomes que mais movimentam as redes desembarca em Recife. Bella Longuinho chega à Metrópole trazendo sua beleza, irreverência e uma trajetória que vem conquistando milhões de pessoas pelo Brasil!\n\nUma noite para celebrar liberdade & transformação 💖\n\n🎫 TICKETS\n🔗 @sympla na BIO\n📲 (81) 99828.1640",
+    "handle": "clubmetropole",
+    "title": "METROPOLE EXPERIENCE",
+    "event_id": "evt_01M13FAXAZAV364F4AD3R166FY",
+    "census_kind": "event",
+    "expected_kind": null,
+    "accepted_kinds": null,
+    "discriminating": null,
+    "proposed_kind": "event",
+    "proposed_why": "A dated club night with a named headliner.",
+    "observed_new_prompt": [
+      "event",
+      "event",
+      "event"
+    ],
+    "observed_deployed_prompt": [
+      "event",
+      "event",
+      "event"
+    ],
+    "why": "Emitted from production on 2026-09-08 by scripts/eval_kind_on_captions.py --emit-fixture. `expected_kind` is NULL and `blocking` is false BY DESIGN: the label must be confirmed by the operator from the caption text before this row can gate anything. `proposed_kind` is my reading, recorded so the confirmation is a review rather than a fresh labelling exercise."
+  },
+  {
+    "id": "DcuLA46O5JR",
+    "synthetic": false,
+    "blocking": false,
+    "shape": "live production caption",
+    "caption": "A largada da @refenooficial vai ser ainda mais especial vista do Seu Boteco! ⚓\n\nVenha acompanhar de perto com vista privilegiada, muito conforto, música ao vivo e comida boa pra você aproveitar cada instante. ⛵\n\nReúna os amigos e a família, escolha seu lugar e venha viver a emoção da largada da REFENO com a gente! 🌊\n\nEsperamos por vocês!\n\n#Refeno2026",
+    "handle": "seubotecorecife",
+    "title": "37ª REFENO",
+    "event_id": "evt_01M1Y1VQV4YTRMV98PR81CERE3",
+    "census_kind": "event",
+    "expected_kind": null,
+    "accepted_kinds": null,
+    "discriminating": null,
+    "proposed_kind": "event",
+    "proposed_why": "A dated regatta watch-party with live music.",
+    "observed_new_prompt": [
+      "event",
+      "event",
+      "event"
+    ],
+    "observed_deployed_prompt": [
+      "event",
+      "event",
+      "event"
+    ],
+    "why": "Emitted from production on 2026-09-08 by scripts/eval_kind_on_captions.py --emit-fixture. `expected_kind` is NULL and `blocking` is false BY DESIGN: the label must be confirmed by the operator from the caption text before this row can gate anything. `proposed_kind` is my reading, recorded so the confirmation is a review rather than a fresh labelling exercise."
+  },
+  {
+    "id": "DcuT5eLBoRn",
+    "synthetic": false,
+    "blocking": false,
+    "shape": "live production caption",
+    "caption": "#VemProFerroviario ELES ESTÃO CHEGANDO! Se preparem O ENCONTRO traz ASAS MORENAS de volta a TARDE DANÇANTE com AMIGAS DO BREGA, TRIUNFO DE AMOR e PAIXÃO BRASILEIRA DO BREGA no Clube Ferroviário de Afogados.\n\nNos intervalos a festa continua com nosso DJ JUNIOR 100%. Não percam!\n\n⏰ A partir das 13h\n🗓 DOMINGO (27/Setembro)\n🎟 HOMENS - R$ 20,00\n🎟 MULHERES - R$ 15,00 até as 15h\n📍 Clube Ferroviário de Afogados\n\nInformações: ☎ 81 98354.7170\n\nSigam nossas redes sociais no Facebook e Instagram\n@PagoderiaAcessoLivreOficial\n@FerroviarioDeAfogados\n@ClubeBatutasDeSaoJose\n@TardeDancanteRecife",
+    "handle": "ferroviariodeafogados",
+    "title": "O ENCONTRO",
+    "event_id": "evt_01M1Y1WFFXGGXKJN69HHK2T4YY",
+    "census_kind": "event",
+    "expected_kind": null,
+    "accepted_kinds": null,
+    "discriminating": null,
+    "proposed_kind": "event",
+    "proposed_why": "A dated Sunday dance with four named acts.",
+    "observed_new_prompt": [
+      "event",
+      "event",
+      "event"
+    ],
+    "observed_deployed_prompt": [
+      "event",
+      "event",
+      "event"
+    ],
+    "why": "Emitted from production on 2026-09-08 by scripts/eval_kind_on_captions.py --emit-fixture. `expected_kind` is NULL and `blocking` is false BY DESIGN: the label must be confirmed by the operator from the caption text before this row can gate anything. `proposed_kind` is my reading, recorded so the confirmation is a review rather than a fresh labelling exercise."
+  },
+  {
+    "id": "Db3S3fyRu5E",
+    "synthetic": false,
+    "blocking": false,
+    "shape": "live production caption",
+    "caption": "🍺 RECIFE VAI VIVER UMA NOVA OKTOBERFEST! 🇩🇪\n\nA tradição alemã ganha uma nova experiência por aqui. Cerveja, música, festa e aquela energia que só o BeerDock sabe entregar. 🍻\n\n📅 17 de outubro\n📍 Recife\n🎟️ Ingressos disponíveis pela Evenyx ou link na bio.\n\nSalva a data. A Oktoberfest BeerDock vem aí!\n\n#OktoberfestRecife #FestasRecife #AgendaRecife #EventosRecife #RecifeTemFesta",
+    "handle": "beerdock_recife",
+    "title": "Oktoberfest BeerDock",
+    "event_id": "evt_01KZVGAW45PBBRKGEGE4W6SG90",
+    "census_kind": "event",
+    "expected_kind": null,
+    "accepted_kinds": null,
+    "discriminating": null,
+    "proposed_kind": "event",
+    "proposed_why": "Oktoberfest BeerDock — §1b's named live casualty. Subject is a NAMED FESTIVAL on a stated date, not a dish or a price, so `event` is my reading; §0 accepts either answer and this row is NOT gated.",
+    "observed_new_prompt": [
+      "event",
+      "event",
+      "event"
+    ],
+    "observed_deployed_prompt": [
+      "event",
+      "event",
+      "event"
+    ],
+    "why": "Emitted from production on 2026-09-08 by scripts/eval_kind_on_captions.py --emit-fixture. `expected_kind` is NULL and `blocking` is false BY DESIGN: the label must be confirmed by the operator from the caption text before this row can gate anything. `proposed_kind` is my reading, recorded so the confirmation is a review rather than a fresh labelling exercise."
+  },
+  {
+    "id": "Dc189NPv1Z8",
+    "synthetic": false,
+    "blocking": false,
+    "shape": "live production caption",
+    "caption": "🍃 BONITO – PE\n\n📅 18 DE OUTUBRO | DOMINGO\n💰 R$ 220,00\n\nVenha viver uma experiência inesquecível em um dos destinos mais encantadores de Pernambuco, com paisagens deslumbrantes e muita aventura! 🌿✨\n\n✨ Incluso no passeio:\n☕ Café da manhã\n🍽️ Almoço\n🚌 Transporte ida e volta\n🥾 Taxas das trilhas inclusas\n🧭 Guia credenciado acompanhando o grupo\n🛡️ Seguro viagem e transporte\n🎁 Brindes exclusivos\n📿 Pulseiras de identificação\n\n📲 Reservas e informações:\nWhatsApp: 81 9.9785-8972\nInstagram: @Otturismo\n\n✨ Otturismo — viaje, viva e colecione experiências!",
+    "handle": "saladerebocorecife",
+    "title": "BONITO – PE",
+    "event_id": "evt_01M1R2G48E10FV035A2V0NYAH0",
+    "census_kind": "event",
+    "expected_kind": null,
+    "accepted_kinds": null,
+    "discriminating": null,
+    "proposed_kind": "event",
+    "proposed_why": "A dated day-trip excursion with a price; the subject is the trip.",
+    "observed_new_prompt": [
+      "event",
+      "event",
+      "event"
+    ],
+    "observed_deployed_prompt": [
+      "event",
+      "event",
+      "event"
+    ],
+    "why": "Emitted from production on 2026-09-08 by scripts/eval_kind_on_captions.py --emit-fixture. `expected_kind` is NULL and `blocking` is false BY DESIGN: the label must be confirmed by the operator from the caption text before this row can gate anything. `proposed_kind` is my reading, recorded so the confirmation is a review rather than a fresh labelling exercise."
+  },
+  {
+    "id": "DbeMfrBPiR2",
+    "synthetic": false,
+    "blocking": false,
+    "shape": "live production caption",
+    "caption": "As vendas estão oficialmente abertas! 🍻🎉\n\nChegou a hora de garantir seu lugar na Casa BeerDock 2027\n\nDe 06 a 09 de fevereiro, vamos viver mais quatro dias de Carnaval com muita música, open bar premium e uma energia que só quem já foi conhece.\n\n🎫 Garanta seu ingresso agora pela Evenyx ou pelo link na bio! \n\nNos vemos na Casa BeerDock! 🍺✨️\n\n#casabeerdock #carnaval2027 #beerdockrecife #carnavaldeolinda #openbarpremium",
+    "handle": "beerdock_recife",
+    "title": "Casa BeerDock 2027",
+    "event_id": "evt_01KZVGAZSS855EBC9V11MJY88P",
+    "census_kind": "event",
+    "expected_kind": null,
+    "accepted_kinds": null,
+    "discriminating": null,
+    "proposed_kind": "event",
+    "proposed_why": "A dated four-day Carnival house with open bar; the subject is the event.",
+    "observed_new_prompt": [
+      "event",
+      "event",
+      "event"
+    ],
+    "observed_deployed_prompt": [
+      "event",
+      "event",
+      "event"
+    ],
+    "why": "Emitted from production on 2026-09-08 by scripts/eval_kind_on_captions.py --emit-fixture. `expected_kind` is NULL and `blocking` is false BY DESIGN: the label must be confirmed by the operator from the caption text before this row can gate anything. `proposed_kind` is my reading, recorded so the confirmation is a review rather than a fresh labelling exercise."
+  }
+]

@@ -1,0 +1,1110 @@
+/media/mario/ssd/projects/vibesense_wrapper/cs-server/.venv/bin/python -m behave "tests/bdd/persistence/events-non-event-and-recurrence-normalisation.feature"
+USING RUNNER: behave.runner:Runner
+Feature: Non-events stay out of the events serving projection, and its recurrence, category and end-time values are serving-correct # tests/bdd/persistence/events-non-event-and-recurrence-normalisation.feature:1
+  As the system of record for the events serving projection
+  I must never project a recurring venue service offering as an event,
+  and I must serve a casing-normalised recurrence phrase, a category
+  canonicalised against the live admin vocabulary, and an end time that
+  belongs to the occurrence it is attached to,
+  so that the app renders one spelling per recurrence, one spelling per
+  genre, an end time that is never before its own start, and nothing that
+  is merely the venue being open on its ordinary days.
+  Feature: Non-events stay out of the events serving projection, and its recurrence, category and end-time values are serving-correct  # tests/bdd/persistence/events-non-event-and-recurrence-normalisation.feature:1
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: A standing service offering is never selected for the projection                       # tests/bdd/persistence/events-non-event-and-recurrence-normalisation.feature:47
+    Given a geo-fence city "recife" is configured                                                  # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:218
+    And the events projection horizon is 21 days                                                   # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:230
+    And the current Recife local time is 2026-09-07 12:00                                          # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:235
+    Given an accepted event row for venue "Cachaçaria Tradição" titled "Buffet de Terça a Domingo" # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:243
+    And that row has post_type "menu"                                                              # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:251
+    And that row is recurring with recurrence text "Terça a Domingo"                               # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:265
+    And that row was last seen 3 days ago                                                          # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:279
+    When the events projection runs                                                                # tests/bdd/steps/events_serving_projection_steps.py:478
+LOG_INFO:app.services.redis_projection_service: [EventsProjection] {'occurrences': 0, 'source_rows': 0, 'bytes': 0, 'errors': 0, 'error_events': [], 'flyer': {}}
+    Then no occurrence key exists for that event                                                   # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:335
+    And the city events index for "recife" holds no occurrence of that event                       # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:350
+    And the venue events index for "Cachaçaria Tradição" holds no occurrence of that event         # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:391
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: A standing price offering is never selected for the projection                           # tests/bdd/persistence/events-non-event-and-recurrence-normalisation.feature:57
+    Given a geo-fence city "recife" is configured                                                    # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:218
+    And the events projection horizon is 21 days                                                     # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:230
+    And the current Recife local time is 2026-09-07 12:00                                            # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:235
+    Given an accepted event row for venue "Downtown Beer Garden" titled "QUINTA É DIA DE HAPPY HOUR" # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:243
+    And that row has post_type "promotion"                                                           # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:251
+    And that row is recurring with recurrence text "Toda quinta"                                     # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:265
+    And that row was last seen 3 days ago                                                            # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:279
+    When the events projection runs                                                                  # tests/bdd/steps/events_serving_projection_steps.py:478
+LOG_INFO:app.services.redis_projection_service: [EventsProjection] {'occurrences': 0, 'source_rows': 0, 'bytes': 0, 'errors': 0, 'error_events': [], 'flyer': {}}
+    Then no occurrence key exists for that event                                                     # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:335
+    And the city events index for "recife" holds no occurrence of that event                         # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:350
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: A genuine recurring night is still projected                                    # tests/bdd/persistence/events-non-event-and-recurrence-normalisation.feature:66
+    Given a geo-fence city "recife" is configured                                           # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:218
+    And the events projection horizon is 21 days                                            # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:230
+    And the current Recife local time is 2026-09-07 12:00                                   # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:235
+    Given an accepted event row for venue "Downtown Beer Garden" titled "Sambinha Downtown" # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:243
+    And that row has post_type "event"                                                      # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:251
+    And that row is recurring with recurrence text "TODOS OS DOMINGOS"                      # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:265
+    And that row was last seen 3 days ago                                                   # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:279
+    When the events projection runs                                                         # tests/bdd/steps/events_serving_projection_steps.py:478
+LOG_INFO:app.services.redis_projection_service: [EventsProjection] {'occurrences': 3, 'source_rows': 1, 'bytes': 2262, 'errors': 0, 'error_events': [], 'flyer': {}}
+    Then the city events index for "recife" holds at least one occurrence of that event     # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:362
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: A food-anchored row typed as an event is still projected                                # tests/bdd/persistence/events-non-event-and-recurrence-normalisation.feature:74
+    Given a geo-fence city "recife" is configured                                                   # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:218
+    And the events projection horizon is 21 days                                                    # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:230
+    And the current Recife local time is 2026-09-07 12:00                                           # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:235
+    Given an accepted event row for venue "Cachaçaria Tradição" titled "Feijoada com samba ao vivo" # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:243
+    And that row has post_type "event"                                                              # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:251
+    And that row has category "food festival"                                                       # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:258
+    And that row is recurring with recurrence text "todos os sábados"                               # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:265
+    And that row was last seen 3 days ago                                                           # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:279
+    When the events projection runs                                                                 # tests/bdd/steps/events_serving_projection_steps.py:478
+LOG_INFO:app.services.redis_projection_service: [EventsProjection] {'occurrences': 3, 'source_rows': 1, 'bytes': 2328, 'errors': 0, 'error_events': [], 'flyer': {}}
+    Then the city events index for "recife" holds at least one occurrence of that event             # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:362
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: An operator re-admitting a suppressed row re-projects every occurrence        # tests/bdd/persistence/events-non-event-and-recurrence-normalisation.feature:90
+    Given a geo-fence city "recife" is configured                                         # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:218
+    And the events projection horizon is 21 days                                          # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:230
+    And the current Recife local time is 2026-09-07 12:00                                 # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:235
+    Given a recurring event row titled "Feijoada com samba ao vivo" with post_type "menu" # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:284
+    And the events projection has already run                                             # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:320
+LOG_INFO:app.services.redis_projection_service: [EventsProjection] {'occurrences': 0, 'source_rows': 0, 'bytes': 0, 'errors': 0, 'error_events': [], 'flyer': {}}
+    And no occurrence key exists for that event                                           # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:335
+    When an operator sets that event's post_type to "event"                               # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:328
+    And the events projection runs                                                        # tests/bdd/steps/events_serving_projection_steps.py:478
+LOG_INFO:app.services.redis_projection_service: [EventsProjection] {'occurrences': 3, 'source_rows': 1, 'bytes': 2277, 'errors': 0, 'error_events': [], 'flyer': {}}
+    Then the city events index for "recife" holds at least one occurrence of that event   # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:362
+    And an occurrence key exists for that event                                           # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:345
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: A recurring class with a paid enrolment is still projected                  # tests/bdd/persistence/events-non-event-and-recurrence-normalisation.feature:102
+    Given a geo-fence city "recife" is configured                                       # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:218
+    And the events projection horizon is 21 days                                        # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:230
+    And the current Recife local time is 2026-09-07 12:00                               # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:235
+    Given an accepted event row for venue "Sala de Reboco" titled "Aula de FORRÓ"       # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:243
+    And that row has post_type "event"                                                  # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:251
+    And that row has category "workshop"                                                # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:258
+    And that row is recurring with recurrence text "Toda QUARTA"                        # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:265
+    And that row was last seen 3 days ago                                               # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:279
+    When the events projection runs                                                     # tests/bdd/steps/events_serving_projection_steps.py:478
+LOG_INFO:app.services.redis_projection_service: [EventsProjection] {'occurrences': 3, 'source_rows': 1, 'bytes': 2235, 'errors': 0, 'error_events': [], 'flyer': {}}
+    Then the city events index for "recife" holds at least one occurrence of that event # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:362
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: An operator reclassification deprojects every occurrence of the event                   # tests/bdd/persistence/events-non-event-and-recurrence-normalisation.feature:111
+    Given a geo-fence city "recife" is configured                                                   # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:218
+    And the events projection horizon is 21 days                                                    # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:230
+    And the current Recife local time is 2026-09-07 12:00                                           # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:235
+    Given an accepted recurring event row titled "Buffet de Terça a Domingo" with post_type "event" # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:294
+    And the events projection has already run                                                       # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:320
+LOG_INFO:app.services.redis_projection_service: [EventsProjection] {'occurrences': 6, 'source_rows': 1, 'bytes': 4584, 'errors': 0, 'error_events': [], 'flyer': {}}
+    And the city events index for "recife" holds 6 occurrences of that event                        # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:386
+    When an operator sets that event's post_type to "menu"                                          # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:328
+    And the events projection runs                                                                  # tests/bdd/steps/events_serving_projection_steps.py:478
+LOG_INFO:app.services.redis_projection_service: [EventsProjection] {'occurrences': 0, 'source_rows': 0, 'bytes': 0, 'errors': 0, 'error_events': [], 'flyer': {}}
+    Then no occurrence key exists for that event                                                    # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:335
+    And the city events index for "recife" holds no occurrence of that event                        # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:350
+    And the venue events index for that event's venue holds no occurrence of it                     # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:397
+    And the event row still exists in the system of record with post_type "menu"                    # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:413
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: A reclassified event is not resurrected by a later projection cycle     # tests/bdd/persistence/events-non-event-and-recurrence-normalisation.feature:122
+    Given a geo-fence city "recife" is configured                                   # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:218
+    And the events projection horizon is 21 days                                    # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:230
+    And the current Recife local time is 2026-09-07 12:00                           # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:235
+    Given an accepted recurring event row whose post_type an operator set to "menu" # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:308
+    And the events projection has already run                                       # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:320
+LOG_INFO:app.services.redis_projection_service: [EventsProjection] {'occurrences': 0, 'source_rows': 0, 'bytes': 0, 'errors': 0, 'error_events': [], 'flyer': {}}
+    When the events projection runs again                                           # tests/bdd/steps/events_venue_bairro_and_ticket_url_steps.py:217
+LOG_INFO:app.services.redis_projection_service: [EventsProjection] {'occurrences': 0, 'source_rows': 0, 'bytes': 0, 'errors': 0, 'error_events': [], 'flyer': {}}
+    Then no occurrence key exists for that event                                    # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:335
+    And the city events index for "recife" holds no occurrence of that event        # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:350
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario Outline: A recurrence phrase is projected in normalised sentence case -- @1.1 the two case-variant pairs measured in production  # tests/bdd/persistence/events-non-event-and-recurrence-normalisation.feature:139
+    Given a geo-fence city "recife" is configured                                                                                           # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:218
+    And the events projection horizon is 21 days                                                                                            # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:230
+    And the current Recife local time is 2026-09-07 12:00                                                                                   # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:235
+    Given an accepted recurring event row with recurrence text "Toda QUARTA"                                                                # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:423
+    And that row was last seen 3 days ago                                                                                                   # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:279
+    When the events projection runs                                                                                                         # tests/bdd/steps/events_serving_projection_steps.py:478
+LOG_INFO:app.services.redis_projection_service: [EventsProjection] {'occurrences': 3, 'source_rows': 1, 'bytes': 2205, 'errors': 0, 'error_events': [], 'flyer': {}}
+    Then every projected occurrence of that event carries recurrence text "Toda quarta"                                                     # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:456
+      ASSERT FAILED: ('75e06991d1d74eea84a659eeb6555182_2026-09-09', 'Toda QUARTA')
+
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+----
+CAPTURED LOG: before_scenario
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+---- CAPTURED_SCENARIO_OUTPUT_END ----
+
+  Scenario Outline: A recurrence phrase is projected in normalised sentence case -- @1.2 the two case-variant pairs measured in production  # tests/bdd/persistence/events-non-event-and-recurrence-normalisation.feature:140
+    Given a geo-fence city "recife" is configured                                                                                           # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:218
+    And the events projection horizon is 21 days                                                                                            # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:230
+    And the current Recife local time is 2026-09-07 12:00                                                                                   # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:235
+    Given an accepted recurring event row with recurrence text "toda quarta"                                                                # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:423
+    And that row was last seen 3 days ago                                                                                                   # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:279
+    When the events projection runs                                                                                                         # tests/bdd/steps/events_serving_projection_steps.py:478
+LOG_INFO:app.services.redis_projection_service: [EventsProjection] {'occurrences': 3, 'source_rows': 1, 'bytes': 2205, 'errors': 0, 'error_events': [], 'flyer': {}}
+    Then every projected occurrence of that event carries recurrence text "Toda quarta"                                                     # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:456
+      ASSERT FAILED: ('ff6da72b4af449d5b5a09c846c47b044_2026-09-09', 'toda quarta')
+
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+----
+CAPTURED LOG: before_scenario
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+---- CAPTURED_SCENARIO_OUTPUT_END ----
+
+  Scenario Outline: A recurrence phrase is projected in normalised sentence case -- @1.3 the two case-variant pairs measured in production  # tests/bdd/persistence/events-non-event-and-recurrence-normalisation.feature:141
+    Given a geo-fence city "recife" is configured                                                                                           # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:218
+    And the events projection horizon is 21 days                                                                                            # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:230
+    And the current Recife local time is 2026-09-07 12:00                                                                                   # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:235
+    Given an accepted recurring event row with recurrence text "TODOS OS SÁBADOS"                                                           # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:423
+    And that row was last seen 3 days ago                                                                                                   # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:279
+    When the events projection runs                                                                                                         # tests/bdd/steps/events_serving_projection_steps.py:478
+LOG_INFO:app.services.redis_projection_service: [EventsProjection] {'occurrences': 3, 'source_rows': 1, 'bytes': 2223, 'errors': 0, 'error_events': [], 'flyer': {}}
+    Then every projected occurrence of that event carries recurrence text "Todos os sábados"                                                # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:456
+      ASSERT FAILED: ('e3f5bd9f47ec494fb3b969c3914889ca_2026-09-12', 'TODOS OS SÁBADOS')
+
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+----
+CAPTURED LOG: before_scenario
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+---- CAPTURED_SCENARIO_OUTPUT_END ----
+
+  Scenario Outline: A recurrence phrase is projected in normalised sentence case -- @1.4 the two case-variant pairs measured in production  # tests/bdd/persistence/events-non-event-and-recurrence-normalisation.feature:142
+    Given a geo-fence city "recife" is configured                                                                                           # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:218
+    And the events projection horizon is 21 days                                                                                            # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:230
+    And the current Recife local time is 2026-09-07 12:00                                                                                   # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:235
+    Given an accepted recurring event row with recurrence text "todos os sábados"                                                           # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:423
+    And that row was last seen 3 days ago                                                                                                   # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:279
+    When the events projection runs                                                                                                         # tests/bdd/steps/events_serving_projection_steps.py:478
+LOG_INFO:app.services.redis_projection_service: [EventsProjection] {'occurrences': 3, 'source_rows': 1, 'bytes': 2223, 'errors': 0, 'error_events': [], 'flyer': {}}
+    Then every projected occurrence of that event carries recurrence text "Todos os sábados"                                                # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:456
+      ASSERT FAILED: ('95560ff04d574fb8ac754f52ef544016_2026-09-12', 'todos os sábados')
+
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+----
+CAPTURED LOG: before_scenario
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+---- CAPTURED_SCENARIO_OUTPUT_END ----
+
+  Scenario Outline: A recurrence phrase is projected in normalised sentence case -- @1.5 the two case-variant pairs measured in production  # tests/bdd/persistence/events-non-event-and-recurrence-normalisation.feature:143
+    Given a geo-fence city "recife" is configured                                                                                           # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:218
+    And the events projection horizon is 21 days                                                                                            # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:230
+    And the current Recife local time is 2026-09-07 12:00                                                                                   # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:235
+    Given an accepted recurring event row with recurrence text "TODOS OS DOMINGOS"                                                          # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:423
+    And that row was last seen 3 days ago                                                                                                   # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:279
+    When the events projection runs                                                                                                         # tests/bdd/steps/events_serving_projection_steps.py:478
+LOG_INFO:app.services.redis_projection_service: [EventsProjection] {'occurrences': 3, 'source_rows': 1, 'bytes': 2223, 'errors': 0, 'error_events': [], 'flyer': {}}
+    Then every projected occurrence of that event carries recurrence text "Todos os domingos"                                               # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:456
+      ASSERT FAILED: ('7ced8258e5984ee8b581eb51d97f22d1_2026-09-13', 'TODOS OS DOMINGOS')
+
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+----
+CAPTURED LOG: before_scenario
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+---- CAPTURED_SCENARIO_OUTPUT_END ----
+
+  Scenario Outline: A recurrence phrase is projected in normalised sentence case -- @1.6 the two case-variant pairs measured in production  # tests/bdd/persistence/events-non-event-and-recurrence-normalisation.feature:144
+    Given a geo-fence city "recife" is configured                                                                                           # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:218
+    And the events projection horizon is 21 days                                                                                            # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:230
+    And the current Recife local time is 2026-09-07 12:00                                                                                   # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:235
+    Given an accepted recurring event row with recurrence text "Terça a Domingo"                                                            # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:423
+    And that row was last seen 3 days ago                                                                                                   # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:279
+    When the events projection runs                                                                                                         # tests/bdd/steps/events_serving_projection_steps.py:478
+LOG_INFO:app.services.redis_projection_service: [EventsProjection] {'occurrences': 6, 'source_rows': 1, 'bytes': 4440, 'errors': 0, 'error_events': [], 'flyer': {}}
+    Then every projected occurrence of that event carries recurrence text "Terça a domingo"                                                 # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:456
+      ASSERT FAILED: ('ddf509c837e64ccf96db72de6b59b664_2026-09-08', 'Terça a Domingo')
+
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+----
+CAPTURED LOG: before_scenario
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+---- CAPTURED_SCENARIO_OUTPUT_END ----
+
+  Scenario: A recurrence phrase that needs no change is projected verbatim                          # tests/bdd/persistence/events-non-event-and-recurrence-normalisation.feature:146
+    Given a geo-fence city "recife" is configured                                                   # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:218
+    And the events projection horizon is 21 days                                                    # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:230
+    And the current Recife local time is 2026-09-07 12:00                                           # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:235
+    Given an accepted recurring event row with recurrence text "Toda sexta, às 21 horas"            # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:423
+    And that row was last seen 3 days ago                                                           # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:279
+    When the events projection runs                                                                 # tests/bdd/steps/events_serving_projection_steps.py:478
+LOG_INFO:app.services.redis_projection_service: [EventsProjection] {'occurrences': 3, 'source_rows': 1, 'bytes': 2244, 'errors': 0, 'error_events': [], 'flyer': {}}
+    Then every projected occurrence of that event carries recurrence text "Toda sexta, às 21 horas" # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:456
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: Two recurrence phrases that differ by wording stay distinct              # tests/bdd/persistence/events-non-event-and-recurrence-normalisation.feature:152
+    Given a geo-fence city "recife" is configured                                    # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:218
+    And the events projection horizon is 21 days                                     # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:230
+    And the current Recife local time is 2026-09-07 12:00                            # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:235
+    Given an accepted recurring event row "A" with recurrence text "Aos domingos"    # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:432
+    And an accepted recurring event row "B" with recurrence text "TODOS OS DOMINGOS" # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:432
+    And both rows were last seen 3 days ago                                          # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:443
+    When the events projection runs                                                  # tests/bdd/steps/events_serving_projection_steps.py:478
+LOG_INFO:app.services.redis_projection_service: [EventsProjection] {'occurrences': 6, 'source_rows': 2, 'bytes': 4431, 'errors': 0, 'error_events': [], 'flyer': {}}
+    Then event "A" is projected with recurrence text "Aos domingos"                  # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:468
+    And event "B" is projected with recurrence text "Todos os domingos"              # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:468
+      ASSERT FAILED: ('B', 'TODOS OS DOMINGOS')
+
+    And the two projected recurrence texts are different                             # None
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+----
+CAPTURED LOG: before_scenario
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+---- CAPTURED_SCENARIO_OUTPUT_END ----
+
+  Scenario: The system of record keeps the verbatim extracted recurrence phrase        # tests/bdd/persistence/events-non-event-and-recurrence-normalisation.feature:161
+    Given a geo-fence city "recife" is configured                                      # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:218
+    And the events projection horizon is 21 days                                       # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:230
+    And the current Recife local time is 2026-09-07 12:00                              # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:235
+    Given an accepted recurring event row with recurrence text "Toda QUARTA"           # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:423
+    And that row was last seen 3 days ago                                              # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:279
+    When the events projection runs                                                    # tests/bdd/steps/events_serving_projection_steps.py:478
+LOG_INFO:app.services.redis_projection_service: [EventsProjection] {'occurrences': 3, 'source_rows': 1, 'bytes': 2205, 'errors': 0, 'error_events': [], 'flyer': {}}
+    Then the event row in the system of record still has recurrence text "Toda QUARTA" # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:487
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: A row with no recurrence phrase projects a null recurrence text      # tests/bdd/persistence/events-non-event-and-recurrence-normalisation.feature:167
+    Given a geo-fence city "recife" is configured                                # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:218
+    And the events projection horizon is 21 days                                 # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:230
+    And the current Recife local time is 2026-09-07 12:00                        # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:235
+    Given an accepted non-recurring event row with no recurrence text            # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:449
+    When the events projection runs                                              # tests/bdd/steps/events_serving_projection_steps.py:478
+LOG_INFO:app.services.redis_projection_service: [EventsProjection] {'occurrences': 1, 'source_rows': 1, 'bytes': 716, 'errors': 0, 'error_events': [], 'flyer': {}}
+    Then every projected occurrence of that event carries a null recurrence text # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:462
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: A category is canonicalised against the live admin vocabulary                # tests/bdd/persistence/events-non-event-and-recurrence-normalisation.feature:174
+    Given a geo-fence city "recife" is configured                                        # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:218
+    And the events projection horizon is 21 days                                         # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:230
+    And the current Recife local time is 2026-09-07 12:00                                # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:235
+    Given the admin post category vocabulary is configured as "Forró, Party, Live Music" # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:496
+    And an accepted event row with category "forró"                                      # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:529
+    When the events projection runs                                                      # tests/bdd/steps/events_serving_projection_steps.py:478
+LOG_INFO:app.services.redis_projection_service: [EventsProjection] {'occurrences': 1, 'source_rows': 1, 'bytes': 720, 'errors': 0, 'error_events': [], 'flyer': {}}
+    Then every projected occurrence of that event carries category "Forró"               # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:542
+      ASSERT FAILED: ('57241dc333514ab8981691824940d4d9', 'forró')
+
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+----
+CAPTURED LOG: before_scenario
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+---- CAPTURED_SCENARIO_OUTPUT_END ----
+
+  Scenario: With no admin vocabulary configured the shipped default spelling is projected  # tests/bdd/persistence/events-non-event-and-recurrence-normalisation.feature:180
+    Given a geo-fence city "recife" is configured                                          # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:218
+    And the events projection horizon is 21 days                                           # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:230
+    And the current Recife local time is 2026-09-07 12:00                                  # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:235
+    Given no admin post category vocabulary is configured                                  # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:506
+    And an accepted event row with category "FORRÓ"                                        # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:529
+    When the events projection runs                                                        # tests/bdd/steps/events_serving_projection_steps.py:478
+LOG_INFO:app.services.redis_projection_service: [EventsProjection] {'occurrences': 1, 'source_rows': 1, 'bytes': 720, 'errors': 0, 'error_events': [], 'flyer': {}}
+    Then every projected occurrence of that event carries category "forró"                 # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:542
+      ASSERT FAILED: ('b9804f6d9032457d8052dc1daad6126c', 'FORRÓ')
+
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+----
+CAPTURED LOG: before_scenario
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+---- CAPTURED_SCENARIO_OUTPUT_END ----
+
+  Scenario: A category already spelled as the vocabulary spells it is reported unchanged  # tests/bdd/persistence/events-non-event-and-recurrence-normalisation.feature:186
+    Given a geo-fence city "recife" is configured                                         # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:218
+    And the events projection horizon is 21 days                                          # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:230
+    And the current Recife local time is 2026-09-07 12:00                                 # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:235
+    Given the admin post category vocabulary is configured as "Forró, Party, Live Music"  # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:496
+    And an accepted event row with category "Forró"                                       # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:529
+    When the events projection runs                                                       # tests/bdd/steps/events_serving_projection_steps.py:478
+LOG_INFO:app.services.redis_projection_service: [EventsProjection] {'occurrences': 1, 'source_rows': 1, 'bytes': 720, 'errors': 0, 'error_events': [], 'flyer': {}}
+    Then every projected occurrence of that event carries category "Forró"                # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:542
+    And the category outcome counter records outcome "unchanged"                          # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:569
+      ASSERT FAILED: category outcome 'unchanged': expected >= 1, got 0.0
+
+    And it does not record outcome "canonicalized" for that row                           # None
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+----
+CAPTURED LOG: before_scenario
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+---- CAPTURED_SCENARIO_OUTPUT_END ----
+
+  Scenario: An off-vocabulary category is projected unchanged, never dropped             # tests/bdd/persistence/events-non-event-and-recurrence-normalisation.feature:199
+    Given a geo-fence city "recife" is configured                                        # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:218
+    And the events projection horizon is 21 days                                         # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:230
+    And the current Recife local time is 2026-09-07 12:00                                # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:235
+    Given the admin post category vocabulary is configured as "Forró, Party, Live Music" # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:496
+    And an accepted event row with category "brega"                                      # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:529
+    When the events projection runs                                                      # tests/bdd/steps/events_serving_projection_steps.py:478
+LOG_INFO:app.services.redis_projection_service: [EventsProjection] {'occurrences': 1, 'source_rows': 1, 'bytes': 719, 'errors': 0, 'error_events': [], 'flyer': {}}
+    Then every projected occurrence of that event carries category "brega"               # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:542
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: An unreadable vocabulary config does not fail the projection cycle  # tests/bdd/persistence/events-non-event-and-recurrence-normalisation.feature:205
+    Given a geo-fence city "recife" is configured                               # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:218
+    And the events projection horizon is 21 days                                # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:230
+    And the current Recife local time is 2026-09-07 12:00                       # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:235
+    Given the admin post category vocabulary read fails                         # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:511
+    And an accepted event row with category "forró"                             # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:529
+    When the events projection runs                                             # tests/bdd/steps/events_serving_projection_steps.py:478
+LOG_INFO:app.services.redis_projection_service: [EventsProjection] {'occurrences': 1, 'source_rows': 1, 'bytes': 720, 'errors': 0, 'error_events': [], 'flyer': {}}
+    Then every projected occurrence of that event is still written              # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:554
+    And every projected occurrence of that event carries category "forró"       # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:542
+    And the projection reports no event-stage errors                            # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:559
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: A row with no category projects a null category               # tests/bdd/persistence/events-non-event-and-recurrence-normalisation.feature:213
+    Given a geo-fence city "recife" is configured                         # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:218
+    And the events projection horizon is 21 days                          # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:230
+    And the current Recife local time is 2026-09-07 12:00                 # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:235
+    Given an accepted event row with no category                          # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:537
+    When the events projection runs                                       # tests/bdd/steps/events_serving_projection_steps.py:478
+LOG_INFO:app.services.redis_projection_service: [EventsProjection] {'occurrences': 1, 'source_rows': 1, 'bytes': 716, 'errors': 0, 'error_events': [], 'flyer': {}}
+    Then every projected occurrence of that event carries a null category # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:548
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: A recurring occurrence carries the source duration onto its own date              # tests/bdd/persistence/events-non-event-and-recurrence-normalisation.feature:220
+    Given a geo-fence city "recife" is configured                                             # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:218
+    And the events projection horizon is 21 days                                              # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:230
+    And the current Recife local time is 2026-09-07 12:00                                     # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:235
+    Given an accepted recurring event row starting at 22:00 and ending at 23:00 on 2026-08-12 # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:586
+    And that row is recurring with recurrence text "Toda quarta"                              # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:265
+    And that row was last seen 3 days ago                                                     # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:279
+    When the events projection runs                                                           # tests/bdd/steps/events_serving_projection_steps.py:478
+LOG_INFO:app.services.redis_projection_service: [EventsProjection] {'occurrences': 3, 'source_rows': 1, 'bytes': 2259, 'errors': 0, 'error_events': [], 'flyer': {}}
+    Then every projected occurrence of that event ends exactly 1 hour after its own start     # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:660
+      ASSERT FAILED: ('8f346486848745488ab6919e4d3c0b4b_2026-09-09', datetime.datetime(2026, 9, 10, 1, 0, tzinfo=TzInfo(UTC)), datetime.datetime(2026, 8, 13, 2, 0, tzinfo=TzInfo(UTC)))
+
+    And no projected occurrence of that event ends before its own start                       # None
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+----
+CAPTURED LOG: before_scenario
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+---- CAPTURED_SCENARIO_OUTPUT_END ----
+
+  Scenario: A recurring row whose stored end precedes its stored start projects a null end            # tests/bdd/persistence/events-non-event-and-recurrence-normalisation.feature:228
+    Given a geo-fence city "recife" is configured                                                     # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:218
+    And the events projection horizon is 21 days                                                      # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:230
+    And the current Recife local time is 2026-09-07 12:00                                             # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:235
+    Given an accepted recurring event row starting at 2026-09-09 22:00 and ending at 2026-08-12 23:00 # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:595
+    And that row was last seen 3 days ago                                                             # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:279
+    When the events projection runs                                                                   # tests/bdd/steps/events_serving_projection_steps.py:478
+LOG_INFO:app.services.redis_projection_service: [EventsProjection] {'occurrences': 3, 'source_rows': 1, 'bytes': 2259, 'errors': 0, 'error_events': [], 'flyer': {}}
+    Then every projected occurrence of that event carries a null end time                             # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:679
+      ASSERT FAILED: ('682b3259eab842d6a403fd34e16b5b25_2026-09-09', datetime.datetime(2026, 8, 13, 2, 0, tzinfo=TzInfo(UTC)))
+
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+----
+CAPTURED LOG: before_scenario
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+---- CAPTURED_SCENARIO_OUTPUT_END ----
+
+  Scenario: A re-derived occurrence with a zero-length stored duration projects a null end  # tests/bdd/persistence/events-non-event-and-recurrence-normalisation.feature:234
+    Given a geo-fence city "recife" is configured                                           # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:218
+    And the events projection horizon is 21 days                                            # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:230
+    And the current Recife local time is 2026-09-07 12:00                                   # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:235
+    Given an accepted recurring event row with recurrence text "Toda quarta"                # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:423
+    And that row's stored end equals its stored start                                       # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:606
+    And that row was last seen 3 days ago                                                   # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:279
+    When the events projection runs                                                         # tests/bdd/steps/events_serving_projection_steps.py:478
+LOG_INFO:app.services.redis_projection_service: [EventsProjection] {'occurrences': 3, 'source_rows': 1, 'bytes': 2259, 'errors': 0, 'error_events': [], 'flyer': {}}
+    Then every projected occurrence of that event carries a null end time                   # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:679
+      ASSERT FAILED: ('18ecb360b5ef4982881d10a1fee12559_2026-09-09', datetime.datetime(2026, 7, 10, 1, 0, tzinfo=TzInfo(UTC)))
+
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+----
+CAPTURED LOG: before_scenario
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+---- CAPTURED_SCENARIO_OUTPUT_END ----
+
+  Scenario: A recurring row with an implausible stored duration projects a null end           # tests/bdd/persistence/events-non-event-and-recurrence-normalisation.feature:245
+    Given a geo-fence city "recife" is configured                                             # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:218
+    And the events projection horizon is 21 days                                              # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:230
+    And the current Recife local time is 2026-09-07 12:00                                     # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:235
+    Given an accepted recurring event row whose stored end is 30 hours after its stored start # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:614
+    And that row was last seen 3 days ago                                                     # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:279
+    When the events projection runs                                                           # tests/bdd/steps/events_serving_projection_steps.py:478
+LOG_INFO:app.services.redis_projection_service: [EventsProjection] {'occurrences': 3, 'source_rows': 1, 'bytes': 2259, 'errors': 0, 'error_events': [], 'flyer': {}}
+    Then every projected occurrence of that event carries a null end time                     # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:679
+      ASSERT FAILED: ('c6972d45b4b94544b3eac20a99bcc63a_2026-09-09', datetime.datetime(2026, 7, 11, 7, 0, tzinfo=TzInfo(UTC)))
+
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+----
+CAPTURED LOG: before_scenario
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+---- CAPTURED_SCENARIO_OUTPUT_END ----
+
+  Scenario: A recurring row with no stored end projects a null end        # tests/bdd/persistence/events-non-event-and-recurrence-normalisation.feature:251
+    Given a geo-fence city "recife" is configured                         # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:218
+    And the events projection horizon is 21 days                          # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:230
+    And the current Recife local time is 2026-09-07 12:00                 # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:235
+    Given an accepted recurring event row with no stored end time         # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:624
+    And that row was last seen 3 days ago                                 # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:279
+    When the events projection runs                                       # tests/bdd/steps/events_serving_projection_steps.py:478
+LOG_INFO:app.services.redis_projection_service: [EventsProjection] {'occurrences': 3, 'source_rows': 1, 'bytes': 2205, 'errors': 0, 'error_events': [], 'flyer': {}}
+    Then every projected occurrence of that event carries a null end time # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:679
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: A non-recurring occurrence carries its stored end time verbatim                               # tests/bdd/persistence/events-non-event-and-recurrence-normalisation.feature:257
+    Given a geo-fence city "recife" is configured                                                         # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:218
+    And the events projection horizon is 21 days                                                          # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:230
+    And the current Recife local time is 2026-09-07 12:00                                                 # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:235
+    Given an accepted non-recurring event row starting at 2026-09-19 22:00 and ending at 2026-09-20 03:00 # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:632
+    When the events projection runs                                                                       # tests/bdd/steps/events_serving_projection_steps.py:478
+LOG_INFO:app.services.redis_projection_service: [EventsProjection] {'occurrences': 1, 'source_rows': 1, 'bytes': 734, 'errors': 0, 'error_events': [], 'flyer': {}}
+    Then the projected occurrence of that event ends at 2026-09-20 03:00                                  # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:692
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: A recurring row whose recurrence text cannot be parsed carries its stored end verbatim  # tests/bdd/persistence/events-non-event-and-recurrence-normalisation.feature:274
+    Given a geo-fence city "recife" is configured                                                   # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:218
+    And the events projection horizon is 21 days                                                    # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:230
+    And the current Recife local time is 2026-09-07 12:00                                           # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:235
+    Given an accepted event row that is recurring with recurrence text "toda semana"                # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:645
+    And that row starts at 2026-09-19 22:00 and ends at 2026-09-20 03:00                            # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:653
+    And that row was last seen 3 days ago                                                           # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:279
+    When the events projection runs                                                                 # tests/bdd/steps/events_serving_projection_steps.py:478
+LOG_INFO:app.services.redis_projection_service: [EventsProjection] {'occurrences': 1, 'source_rows': 1, 'bytes': 742, 'errors': 0, 'error_events': [], 'flyer': {}}
+    Then that event is projected as exactly one occurrence                                          # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:712
+    And that occurrence's id is the bare event id                                                   # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:719
+    And that occurrence starts at 2026-09-19 22:00                                                  # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:725
+    And that occurrence ends at 2026-09-20 03:00                                                    # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:732
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: A multi-day interval on the carried branch is not truncated by the 24 hour bound  # tests/bdd/persistence/events-non-event-and-recurrence-normalisation.feature:284
+    Given a geo-fence city "recife" is configured                                             # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:218
+    And the events projection horizon is 21 days                                              # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:230
+    And the current Recife local time is 2026-09-07 12:00                                     # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:235
+    Given an accepted event row that is recurring with recurrence text "toda semana"          # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:645
+    And that row starts at 2026-10-01 18:00 and ends at 2026-10-04 04:00                      # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:653
+    And that row was last seen 3 days ago                                                     # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:279
+    When the events projection runs                                                           # tests/bdd/steps/events_serving_projection_steps.py:478
+LOG_INFO:app.services.redis_projection_service: [EventsProjection] {'occurrences': 1, 'source_rows': 1, 'bytes': 742, 'errors': 0, 'error_events': [], 'flyer': {}}
+    Then that occurrence ends at 2026-10-04 04:00                                             # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:732
+    And that occurrence's end time is more than 24 hours after its start                      # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:742
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: A zero-length stored interval on the carried branch is carried, not dropped  # tests/bdd/persistence/events-non-event-and-recurrence-normalisation.feature:292
+    Given a geo-fence city "recife" is configured                                        # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:218
+    And the events projection horizon is 21 days                                         # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:230
+    And the current Recife local time is 2026-09-07 12:00                                # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:235
+    Given an accepted non-recurring event row whose stored end equals its stored start   # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:639
+    When the events projection runs                                                      # tests/bdd/steps/events_serving_projection_steps.py:478
+LOG_INFO:app.services.redis_projection_service: [EventsProjection] {'occurrences': 1, 'source_rows': 1, 'bytes': 734, 'errors': 0, 'error_events': [], 'flyer': {}}
+    Then the projected occurrence of that event carries an end time equal to its start   # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:699
+    And that end time is not null                                                        # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:707
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: An inverted stored pair on the carried branch projects a null end                             # tests/bdd/persistence/events-non-event-and-recurrence-normalisation.feature:298
+    Given a geo-fence city "recife" is configured                                                         # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:218
+    And the events projection horizon is 21 days                                                          # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:230
+    And the current Recife local time is 2026-09-07 12:00                                                 # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:235
+    Given an accepted non-recurring event row starting at 2026-09-19 22:00 and ending at 2026-09-19 19:00 # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:632
+    When the events projection runs                                                                       # tests/bdd/steps/events_serving_projection_steps.py:478
+LOG_INFO:app.services.redis_projection_service: [EventsProjection] {'occurrences': 1, 'source_rows': 1, 'bytes': 734, 'errors': 0, 'error_events': [], 'flyer': {}}
+    Then the projected occurrence of that event carries a null end time                                   # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:685
+      ASSERT FAILED: ('51e0ca4b4b89431c8219476ba47c4f81', datetime.datetime(2026, 9, 19, 22, 0, tzinfo=TzInfo(UTC)))
+
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+----
+CAPTURED LOG: before_scenario
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+---- CAPTURED_SCENARIO_OUTPUT_END ----
+
+  Scenario: No occurrence written by a full cycle ever ends before it starts           # tests/bdd/persistence/events-non-event-and-recurrence-normalisation.feature:303
+    Given a geo-fence city "recife" is configured                                      # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:218
+    And the events projection horizon is 21 days                                       # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:230
+    And the current Recife local time is 2026-09-07 12:00                              # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:235
+    Given the projection source holds every event row from the production census       # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:775
+    When the events projection runs                                                    # tests/bdd/steps/events_serving_projection_steps.py:478
+LOG_INFO:app.services.redis_projection_service: [EventsProjection] {'occurrences': 36, 'source_rows': 13, 'bytes': 27483, 'errors': 0, 'error_events': [], 'flyer': {}}
+    Then no occurrence written by that cycle has an end time before its own start time # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:823
+      ASSERT FAILED: [('0681d59307ef4b8fbe6a487c4203c890_2026-09-08', datetime.datetime(2026, 9, 8, 14, 0, tzinfo=TzInfo(UTC)), datetime.datetime(2026, 5, 16, 14, 0, tzinfo=TzInfo(UTC))), ('10b9301596274a90acf8bed56fc89548_2026-09-09', datetime.datetime(2026, 9, 9, 22, 0, tzinfo=TzInfo(UTC)), datetime.datetime(2026, 6, 14, 22, 0, tzinfo=TzInfo(UTC))), ('04550477832a443fbfd2063ebbef34c8_2026-09-09', datetime.datetime(2026, 9, 9, 23, 0, tzinfo=TzInfo(UTC)), datetime.datetime(2026, 7, 2, 23, 0, tzinfo=TzInfo(UTC))), ('4e55fb137dbf4a92b31cb6a1261042c2_2026-09-12', datetime.datetime(2026, 9, 12, 3, 0, tzinfo=TzInfo(UTC)), datetime.datetime(2026, 6, 18, 3, 0, tzinfo=TzInfo(UTC))), ('0681d59307ef4b8fbe6a487c4203c890_2026-09-13', datetime.datetime(2026, 9, 13, 14, 0, tzinfo=TzInfo(UTC)), datetime.datetime(2026, 5, 16, 14, 0, tzinfo=TzInfo(UTC))), ('0681d59307ef4b8fbe6a487c4203c890_2026-09-15', datetime.datetime(2026, 9, 15, 14, 0, tzinfo=TzInfo(UTC)), datetime.datetime(2026, 5, 16, 14, 0, tzinfo=TzInfo(UTC))), ('10b9301596274a90acf8bed56fc89548_2026-09-16', datetime.datetime(2026, 9, 16, 22, 0, tzinfo=TzInfo(UTC)), datetime.datetime(2026, 6, 14, 22, 0, tzinfo=TzInfo(UTC))), ('04550477832a443fbfd2063ebbef34c8_2026-09-16', datetime.datetime(2026, 9, 16, 23, 0, tzinfo=TzInfo(UTC)), datetime.datetime(2026, 7, 2, 23, 0, tzinfo=TzInfo(UTC))), ('4e55fb137dbf4a92b31cb6a1261042c2_2026-09-19', datetime.datetime(2026, 9, 19, 3, 0, tzinfo=TzInfo(UTC)), datetime.datetime(2026, 6, 18, 3, 0, tzinfo=TzInfo(UTC))), ('0681d59307ef4b8fbe6a487c4203c890_2026-09-20', datetime.datetime(2026, 9, 20, 14, 0, tzinfo=TzInfo(UTC)), datetime.datetime(2026, 5, 16, 14, 0, tzinfo=TzInfo(UTC))), ('0681d59307ef4b8fbe6a487c4203c890_2026-09-22', datetime.datetime(2026, 9, 22, 14, 0, tzinfo=TzInfo(UTC)), datetime.datetime(2026, 5, 16, 14, 0, tzinfo=TzInfo(UTC))), ('10b9301596274a90acf8bed56fc89548_2026-09-23', datetime.datetime(2026, 9, 23, 22, 0, tzinfo=TzInfo(UTC)), datetime.datetime(2026, 6, 14, 22, 0, tzinfo=TzInfo(UTC))), ('04550477832a443fbfd2063ebbef34c8_2026-09-23', datetime.datetime(2026, 9, 23, 23, 0, tzinfo=TzInfo(UTC)), datetime.datetime(2026, 7, 2, 23, 0, tzinfo=TzInfo(UTC))), ('4e55fb137dbf4a92b31cb6a1261042c2_2026-09-26', datetime.datetime(2026, 9, 26, 3, 0, tzinfo=TzInfo(UTC)), datetime.datetime(2026, 6, 18, 3, 0, tzinfo=TzInfo(UTC))), ('0681d59307ef4b8fbe6a487c4203c890_2026-09-27', datetime.datetime(2026, 9, 27, 14, 0, tzinfo=TzInfo(UTC)), datetime.datetime(2026, 5, 16, 14, 0, tzinfo=TzInfo(UTC)))]
+
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+----
+CAPTURED LOG: before_scenario
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+---- CAPTURED_SCENARIO_OUTPUT_END ----
+
+  Scenario: Every occurrence a full cycle writes on the carried branch keeps its row's stored end  # tests/bdd/persistence/events-non-event-and-recurrence-normalisation.feature:311
+    Given a geo-fence city "recife" is configured                                                  # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:218
+    And the events projection horizon is 21 days                                                   # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:230
+    And the current Recife local time is 2026-09-07 12:00                                          # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:235
+    Given the projection source holds every event row from the production census                   # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:775
+    And one of those rows is recurring with recurrence text this repo cannot parse                 # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:801
+    When the events projection runs                                                                # tests/bdd/steps/events_serving_projection_steps.py:478
+LOG_INFO:app.services.redis_projection_service: [EventsProjection] {'occurrences': 37, 'source_rows': 14, 'bytes': 28251, 'errors': 0, 'error_events': [], 'flyer': {}}
+    Then every occurrence whose id is a bare event id carries its row's stored end time unchanged  # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:835
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: The projected occurrence payload carries the pinned field set unchanged  # tests/bdd/persistence/events-non-event-and-recurrence-normalisation.feature:319
+    Given a geo-fence city "recife" is configured                                    # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:218
+    And the events projection horizon is 21 days                                     # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:230
+    And the current Recife local time is 2026-09-07 12:00                            # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:235
+    Given an accepted recurring event row with every contract field populated        # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:860
+    And that row was last seen 3 days ago                                            # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:279
+    When the events projection runs                                                  # tests/bdd/steps/events_serving_projection_steps.py:478
+LOG_INFO:app.services.redis_projection_service: [EventsProjection] {'occurrences': 3, 'source_rows': 1, 'bytes': 2937, 'errors': 0, 'error_events': [], 'flyer': {}}
+    Then every projected occurrence carries exactly the pinned occurrence field set  # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:876
+    And no field has been added, removed or renamed                                  # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:884
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+
+  Scenario: Each per-row substitution is counted once per source row, not once per occurrence     # tests/bdd/persistence/events-non-event-and-recurrence-normalisation.feature:328
+    Given a geo-fence city "recife" is configured                                                 # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:218
+    And the events projection horizon is 21 days                                                  # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:230
+    And the current Recife local time is 2026-09-07 12:00                                         # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:235
+    Given an accepted recurring event row with recurrence text "Toda QUARTA" and category "forró" # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:896
+    And that row expands to 6 occurrences                                                         # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:905
+    And that row was last seen 3 days ago                                                         # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:279
+    When the events projection runs                                                               # tests/bdd/steps/events_serving_projection_steps.py:478
+LOG_INFO:app.services.redis_projection_service: [EventsProjection] {'occurrences': 6, 'source_rows': 1, 'bytes': 4434, 'errors': 0, 'error_events': [], 'flyer': {}}
+    Then the recurrence text outcome counter records exactly 1 observation for that cycle         # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:929
+      ASSERT FAILED: recurrence text: expected 1 observation(s), got 0.0
+
+    And the category outcome counter records exactly 1 observation for that cycle                 # None
+    And the end time outcome counter records exactly 1 observation for that cycle                 # None
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+----
+CAPTURED LOG: before_scenario
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+---- CAPTURED_SCENARIO_OUTPUT_END ----
+
+  Scenario Outline: Each per-row substitution reports its own outcome -- @1.1         # tests/bdd/persistence/events-non-event-and-recurrence-normalisation.feature:344
+    Given a geo-fence city "recife" is configured                                     # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:218
+    And the events projection horizon is 21 days                                      # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:230
+    And the current Recife local time is 2026-09-07 12:00                             # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:235
+    Given an accepted event row matching "a recurrence phrase changed by normalising" # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:1042
+    When the events projection runs                                                   # tests/bdd/steps/events_serving_projection_steps.py:478
+LOG_INFO:app.services.redis_projection_service: [EventsProjection] {'occurrences': 3, 'source_rows': 1, 'bytes': 2205, 'errors': 0, 'error_events': [], 'flyer': {}}
+    Then the "recurrence text" counter records outcome "normalized"                   # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:1050
+      ASSERT FAILED: recurrence text outcome 'normalized': expected >= 1, got 0.0
+
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+----
+CAPTURED LOG: before_scenario
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+---- CAPTURED_SCENARIO_OUTPUT_END ----
+
+  Scenario Outline: Each per-row substitution reports its own outcome -- @1.2     # tests/bdd/persistence/events-non-event-and-recurrence-normalisation.feature:345
+    Given a geo-fence city "recife" is configured                                 # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:218
+    And the events projection horizon is 21 days                                  # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:230
+    And the current Recife local time is 2026-09-07 12:00                         # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:235
+    Given an accepted event row matching "a recurrence phrase already normalised" # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:1042
+    When the events projection runs                                               # tests/bdd/steps/events_serving_projection_steps.py:478
+LOG_INFO:app.services.redis_projection_service: [EventsProjection] {'occurrences': 3, 'source_rows': 1, 'bytes': 2205, 'errors': 0, 'error_events': [], 'flyer': {}}
+    Then the "recurrence text" counter records outcome "unchanged"                # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:1050
+      ASSERT FAILED: recurrence text outcome 'unchanged': expected >= 1, got 0.0
+
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+----
+CAPTURED LOG: before_scenario
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+---- CAPTURED_SCENARIO_OUTPUT_END ----
+
+  Scenario Outline: Each per-row substitution reports its own outcome -- @1.3   # tests/bdd/persistence/events-non-event-and-recurrence-normalisation.feature:346
+    Given a geo-fence city "recife" is configured                               # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:218
+    And the events projection horizon is 21 days                                # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:230
+    And the current Recife local time is 2026-09-07 12:00                       # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:235
+    Given an accepted event row matching "no recurrence phrase"                 # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:1042
+    When the events projection runs                                             # tests/bdd/steps/events_serving_projection_steps.py:478
+LOG_INFO:app.services.redis_projection_service: [EventsProjection] {'occurrences': 1, 'source_rows': 1, 'bytes': 716, 'errors': 0, 'error_events': [], 'flyer': {}}
+    Then the "recurrence text" counter records outcome "absent"                 # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:1050
+      ASSERT FAILED: recurrence text outcome 'absent': expected >= 1, got 0.0
+
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+----
+CAPTURED LOG: before_scenario
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+---- CAPTURED_SCENARIO_OUTPUT_END ----
+
+  Scenario Outline: Each per-row substitution reports its own outcome -- @1.4      # tests/bdd/persistence/events-non-event-and-recurrence-normalisation.feature:347
+    Given a geo-fence city "recife" is configured                                  # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:218
+    And the events projection horizon is 21 days                                   # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:230
+    And the current Recife local time is 2026-09-07 12:00                          # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:235
+    Given an accepted event row matching "a category matching the live vocabulary" # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:1042
+    When the events projection runs                                                # tests/bdd/steps/events_serving_projection_steps.py:478
+LOG_INFO:app.services.redis_projection_service: [EventsProjection] {'occurrences': 1, 'source_rows': 1, 'bytes': 720, 'errors': 0, 'error_events': [], 'flyer': {}}
+    Then the "category" counter records outcome "canonicalized"                    # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:1050
+      ASSERT FAILED: category outcome 'canonicalized': expected >= 1, got 0.0
+
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+----
+CAPTURED LOG: before_scenario
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+---- CAPTURED_SCENARIO_OUTPUT_END ----
+
+  Scenario Outline: Each per-row substitution reports its own outcome -- @1.5            # tests/bdd/persistence/events-non-event-and-recurrence-normalisation.feature:348
+    Given a geo-fence city "recife" is configured                                        # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:218
+    And the events projection horizon is 21 days                                         # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:230
+    And the current Recife local time is 2026-09-07 12:00                                # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:235
+    Given an accepted event row matching "a category already in the vocabulary spelling" # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:1042
+    When the events projection runs                                                      # tests/bdd/steps/events_serving_projection_steps.py:478
+LOG_INFO:app.services.redis_projection_service: [EventsProjection] {'occurrences': 1, 'source_rows': 1, 'bytes': 720, 'errors': 0, 'error_events': [], 'flyer': {}}
+    Then the "category" counter records outcome "unchanged"                              # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:1050
+      ASSERT FAILED: category outcome 'unchanged': expected >= 1, got 0.0
+
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+----
+CAPTURED LOG: before_scenario
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+---- CAPTURED_SCENARIO_OUTPUT_END ----
+
+  Scenario Outline: Each per-row substitution reports its own outcome -- @1.6   # tests/bdd/persistence/events-non-event-and-recurrence-normalisation.feature:349
+    Given a geo-fence city "recife" is configured                               # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:218
+    And the events projection horizon is 21 days                                # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:230
+    And the current Recife local time is 2026-09-07 12:00                       # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:235
+    Given an accepted event row matching "a category off the live vocabulary"   # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:1042
+    When the events projection runs                                             # tests/bdd/steps/events_serving_projection_steps.py:478
+LOG_INFO:app.services.redis_projection_service: [EventsProjection] {'occurrences': 1, 'source_rows': 1, 'bytes': 719, 'errors': 0, 'error_events': [], 'flyer': {}}
+    Then the "category" counter records outcome "off_vocabulary"                # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:1050
+      ASSERT FAILED: category outcome 'off_vocabulary': expected >= 1, got 0.0
+
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+----
+CAPTURED LOG: before_scenario
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+---- CAPTURED_SCENARIO_OUTPUT_END ----
+
+  Scenario Outline: Each per-row substitution reports its own outcome -- @1.7   # tests/bdd/persistence/events-non-event-and-recurrence-normalisation.feature:350
+    Given a geo-fence city "recife" is configured                               # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:218
+    And the events projection horizon is 21 days                                # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:230
+    And the current Recife local time is 2026-09-07 12:00                       # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:235
+    Given an accepted event row matching "no category"                          # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:1042
+    When the events projection runs                                             # tests/bdd/steps/events_serving_projection_steps.py:478
+LOG_INFO:app.services.redis_projection_service: [EventsProjection] {'occurrences': 1, 'source_rows': 1, 'bytes': 716, 'errors': 0, 'error_events': [], 'flyer': {}}
+    Then the "category" counter records outcome "absent"                        # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:1050
+      ASSERT FAILED: category outcome 'absent': expected >= 1, got 0.0
+
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+----
+CAPTURED LOG: before_scenario
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+---- CAPTURED_SCENARIO_OUTPUT_END ----
+
+  Scenario Outline: Each per-row substitution reports its own outcome -- @1.8             # tests/bdd/persistence/events-non-event-and-recurrence-normalisation.feature:351
+    Given a geo-fence city "recife" is configured                                         # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:218
+    And the events projection horizon is 21 days                                          # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:230
+    And the current Recife local time is 2026-09-07 12:00                                 # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:235
+    Given an accepted event row matching "a re-derived occurrence with a usable duration" # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:1042
+    When the events projection runs                                                       # tests/bdd/steps/events_serving_projection_steps.py:478
+LOG_INFO:app.services.redis_projection_service: [EventsProjection] {'occurrences': 3, 'source_rows': 1, 'bytes': 2259, 'errors': 0, 'error_events': [], 'flyer': {}}
+    Then the "end time" counter records outcome "derived"                                 # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:1050
+      ASSERT FAILED: end time outcome 'derived': expected >= 1, got 0.0
+
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+----
+CAPTURED LOG: before_scenario
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+---- CAPTURED_SCENARIO_OUTPUT_END ----
+
+  Scenario Outline: Each per-row substitution reports its own outcome -- @1.9            # tests/bdd/persistence/events-non-event-and-recurrence-normalisation.feature:352
+    Given a geo-fence city "recife" is configured                                        # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:218
+    And the events projection horizon is 21 days                                         # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:230
+    And the current Recife local time is 2026-09-07 12:00                                # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:235
+    Given an accepted event row matching "a re-derived occurrence with an inverted pair" # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:1042
+    When the events projection runs                                                      # tests/bdd/steps/events_serving_projection_steps.py:478
+LOG_INFO:app.services.redis_projection_service: [EventsProjection] {'occurrences': 3, 'source_rows': 1, 'bytes': 2259, 'errors': 0, 'error_events': [], 'flyer': {}}
+    Then the "end time" counter records outcome "dropped_inverted"                       # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:1050
+      ASSERT FAILED: end time outcome 'dropped_inverted': expected >= 1, got 0.0
+
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+----
+CAPTURED LOG: before_scenario
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+---- CAPTURED_SCENARIO_OUTPUT_END ----
+
+  Scenario Outline: Each per-row substitution reports its own outcome -- @1.10          # tests/bdd/persistence/events-non-event-and-recurrence-normalisation.feature:353
+    Given a geo-fence city "recife" is configured                                       # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:218
+    And the events projection horizon is 21 days                                        # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:230
+    And the current Recife local time is 2026-09-07 12:00                               # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:235
+    Given an accepted event row matching "a re-derived occurrence with a zero duration" # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:1042
+    When the events projection runs                                                     # tests/bdd/steps/events_serving_projection_steps.py:478
+LOG_INFO:app.services.redis_projection_service: [EventsProjection] {'occurrences': 3, 'source_rows': 1, 'bytes': 2259, 'errors': 0, 'error_events': [], 'flyer': {}}
+    Then the "end time" counter records outcome "dropped_zero"                          # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:1050
+      ASSERT FAILED: end time outcome 'dropped_zero': expected >= 1, got 0.0
+
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+----
+CAPTURED LOG: before_scenario
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+---- CAPTURED_SCENARIO_OUTPUT_END ----
+
+  Scenario Outline: Each per-row substitution reports its own outcome -- @1.11             # tests/bdd/persistence/events-non-event-and-recurrence-normalisation.feature:354
+    Given a geo-fence city "recife" is configured                                          # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:218
+    And the events projection horizon is 21 days                                           # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:230
+    And the current Recife local time is 2026-09-07 12:00                                  # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:235
+    Given an accepted event row matching "a re-derived occurrence with a 30 hour duration" # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:1042
+    When the events projection runs                                                        # tests/bdd/steps/events_serving_projection_steps.py:478
+LOG_INFO:app.services.redis_projection_service: [EventsProjection] {'occurrences': 3, 'source_rows': 1, 'bytes': 2259, 'errors': 0, 'error_events': [], 'flyer': {}}
+    Then the "end time" counter records outcome "dropped_implausible"                      # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:1050
+      ASSERT FAILED: end time outcome 'dropped_implausible': expected >= 1, got 0.0
+
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+----
+CAPTURED LOG: before_scenario
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+---- CAPTURED_SCENARIO_OUTPUT_END ----
+
+  Scenario Outline: Each per-row substitution reports its own outcome -- @1.12    # tests/bdd/persistence/events-non-event-and-recurrence-normalisation.feature:355
+    Given a geo-fence city "recife" is configured                                 # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:218
+    And the events projection horizon is 21 days                                  # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:230
+    And the current Recife local time is 2026-09-07 12:00                         # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:235
+    Given an accepted event row matching "a carried occurrence with a stored end" # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:1042
+    When the events projection runs                                               # tests/bdd/steps/events_serving_projection_steps.py:478
+LOG_INFO:app.services.redis_projection_service: [EventsProjection] {'occurrences': 1, 'source_rows': 1, 'bytes': 734, 'errors': 0, 'error_events': [], 'flyer': {}}
+    Then the "end time" counter records outcome "carried"                         # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:1050
+      ASSERT FAILED: end time outcome 'carried': expected >= 1, got 0.0
+
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+----
+CAPTURED LOG: before_scenario
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+---- CAPTURED_SCENARIO_OUTPUT_END ----
+
+  Scenario Outline: Each per-row substitution reports its own outcome -- @1.13          # tests/bdd/persistence/events-non-event-and-recurrence-normalisation.feature:356
+    Given a geo-fence city "recife" is configured                                       # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:218
+    And the events projection horizon is 21 days                                        # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:230
+    And the current Recife local time is 2026-09-07 12:00                               # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:235
+    Given an accepted event row matching "a carried occurrence with a 3 day stored end" # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:1042
+    When the events projection runs                                                     # tests/bdd/steps/events_serving_projection_steps.py:478
+LOG_INFO:app.services.redis_projection_service: [EventsProjection] {'occurrences': 1, 'source_rows': 1, 'bytes': 734, 'errors': 0, 'error_events': [], 'flyer': {}}
+    Then the "end time" counter records outcome "carried"                               # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:1050
+      ASSERT FAILED: end time outcome 'carried': expected >= 1, got 0.0
+
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+----
+CAPTURED LOG: before_scenario
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+---- CAPTURED_SCENARIO_OUTPUT_END ----
+
+  Scenario Outline: Each per-row substitution reports its own outcome -- @1.14        # tests/bdd/persistence/events-non-event-and-recurrence-normalisation.feature:357
+    Given a geo-fence city "recife" is configured                                     # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:218
+    And the events projection horizon is 21 days                                      # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:230
+    And the current Recife local time is 2026-09-07 12:00                             # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:235
+    Given an accepted event row matching "a carried occurrence with an inverted pair" # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:1042
+    When the events projection runs                                                   # tests/bdd/steps/events_serving_projection_steps.py:478
+LOG_INFO:app.services.redis_projection_service: [EventsProjection] {'occurrences': 1, 'source_rows': 1, 'bytes': 734, 'errors': 0, 'error_events': [], 'flyer': {}}
+    Then the "end time" counter records outcome "dropped_inverted"                    # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:1050
+      ASSERT FAILED: end time outcome 'dropped_inverted': expected >= 1, got 0.0
+
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+----
+CAPTURED LOG: before_scenario
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+---- CAPTURED_SCENARIO_OUTPUT_END ----
+
+  Scenario Outline: Each per-row substitution reports its own outcome -- @1.15   # tests/bdd/persistence/events-non-event-and-recurrence-normalisation.feature:358
+    Given a geo-fence city "recife" is configured                                # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:218
+    And the events projection horizon is 21 days                                 # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:230
+    And the current Recife local time is 2026-09-07 12:00                        # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:235
+    Given an accepted event row matching "a row with no stored end"              # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:1042
+    When the events projection runs                                              # tests/bdd/steps/events_serving_projection_steps.py:478
+LOG_INFO:app.services.redis_projection_service: [EventsProjection] {'occurrences': 1, 'source_rows': 1, 'bytes': 716, 'errors': 0, 'error_events': [], 'flyer': {}}
+    Then the "end time" counter records outcome "absent"                         # tests/bdd/steps/events_non_event_and_recurrence_normalisation_steps.py:1050
+      ASSERT FAILED: end time outcome 'absent': expected >= 1, got 0.0
+
+----
+CAPTURED LOG: before_scenario
+LOG_INFO:root: Passing redis client
+LOG_INFO:app.db.geo_redis_client: Connected to Redis
+LOG_INFO:app.routers.admin_trigger_router: [AdminTriggerRouter] Container injected
+LOG_INFO:app.routers.internal_router: [InternalRouter] Container injected
+---- CAPTURED_SCENARIO_OUTPUT_END ----
+
+
+Failing scenarios:
+  tests/bdd/persistence/events-non-event-and-recurrence-normalisation.feature:139  A recurrence phrase is projected in normalised sentence case -- @1.1 the two case-variant pairs measured in production
+  tests/bdd/persistence/events-non-event-and-recurrence-normalisation.feature:140  A recurrence phrase is projected in normalised sentence case -- @1.2 the two case-variant pairs measured in production
+  tests/bdd/persistence/events-non-event-and-recurrence-normalisation.feature:141  A recurrence phrase is projected in normalised sentence case -- @1.3 the two case-variant pairs measured in production
+  tests/bdd/persistence/events-non-event-and-recurrence-normalisation.feature:142  A recurrence phrase is projected in normalised sentence case -- @1.4 the two case-variant pairs measured in production
+  tests/bdd/persistence/events-non-event-and-recurrence-normalisation.feature:143  A recurrence phrase is projected in normalised sentence case -- @1.5 the two case-variant pairs measured in production
+  tests/bdd/persistence/events-non-event-and-recurrence-normalisation.feature:144  A recurrence phrase is projected in normalised sentence case -- @1.6 the two case-variant pairs measured in production
+  tests/bdd/persistence/events-non-event-and-recurrence-normalisation.feature:152  Two recurrence phrases that differ by wording stay distinct
+  tests/bdd/persistence/events-non-event-and-recurrence-normalisation.feature:174  A category is canonicalised against the live admin vocabulary
+  tests/bdd/persistence/events-non-event-and-recurrence-normalisation.feature:180  With no admin vocabulary configured the shipped default spelling is projected
+  tests/bdd/persistence/events-non-event-and-recurrence-normalisation.feature:186  A category already spelled as the vocabulary spells it is reported unchanged
+  tests/bdd/persistence/events-non-event-and-recurrence-normalisation.feature:220  A recurring occurrence carries the source duration onto its own date
+  tests/bdd/persistence/events-non-event-and-recurrence-normalisation.feature:228  A recurring row whose stored end precedes its stored start projects a null end
+  tests/bdd/persistence/events-non-event-and-recurrence-normalisation.feature:234  A re-derived occurrence with a zero-length stored duration projects a null end
+  tests/bdd/persistence/events-non-event-and-recurrence-normalisation.feature:245  A recurring row with an implausible stored duration projects a null end
+  tests/bdd/persistence/events-non-event-and-recurrence-normalisation.feature:298  An inverted stored pair on the carried branch projects a null end
+  tests/bdd/persistence/events-non-event-and-recurrence-normalisation.feature:303  No occurrence written by a full cycle ever ends before it starts
+  tests/bdd/persistence/events-non-event-and-recurrence-normalisation.feature:328  Each per-row substitution is counted once per source row, not once per occurrence
+  tests/bdd/persistence/events-non-event-and-recurrence-normalisation.feature:344  Each per-row substitution reports its own outcome -- @1.1 
+  tests/bdd/persistence/events-non-event-and-recurrence-normalisation.feature:345  Each per-row substitution reports its own outcome -- @1.2 
+  tests/bdd/persistence/events-non-event-and-recurrence-normalisation.feature:346  Each per-row substitution reports its own outcome -- @1.3 
+  tests/bdd/persistence/events-non-event-and-recurrence-normalisation.feature:347  Each per-row substitution reports its own outcome -- @1.4 
+  tests/bdd/persistence/events-non-event-and-recurrence-normalisation.feature:348  Each per-row substitution reports its own outcome -- @1.5 
+  tests/bdd/persistence/events-non-event-and-recurrence-normalisation.feature:349  Each per-row substitution reports its own outcome -- @1.6 
+  tests/bdd/persistence/events-non-event-and-recurrence-normalisation.feature:350  Each per-row substitution reports its own outcome -- @1.7 
+  tests/bdd/persistence/events-non-event-and-recurrence-normalisation.feature:351  Each per-row substitution reports its own outcome -- @1.8 
+  tests/bdd/persistence/events-non-event-and-recurrence-normalisation.feature:352  Each per-row substitution reports its own outcome -- @1.9 
+  tests/bdd/persistence/events-non-event-and-recurrence-normalisation.feature:353  Each per-row substitution reports its own outcome -- @1.10 
+  tests/bdd/persistence/events-non-event-and-recurrence-normalisation.feature:354  Each per-row substitution reports its own outcome -- @1.11 
+  tests/bdd/persistence/events-non-event-and-recurrence-normalisation.feature:355  Each per-row substitution reports its own outcome -- @1.12 
+  tests/bdd/persistence/events-non-event-and-recurrence-normalisation.feature:356  Each per-row substitution reports its own outcome -- @1.13 
+  tests/bdd/persistence/events-non-event-and-recurrence-normalisation.feature:357  Each per-row substitution reports its own outcome -- @1.14 
+  tests/bdd/persistence/events-non-event-and-recurrence-normalisation.feature:358  Each per-row substitution reports its own outcome -- @1.15 
+
+0 features passed, 1 failed, 0 skipped
+21 scenarios passed, 32 failed, 0 skipped
+358 steps passed, 32 failed, 5 skipped
+Took 0min 0.194s
+make: *** [Makefile:192: test-feature] Error 1

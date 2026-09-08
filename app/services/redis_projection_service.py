@@ -22,9 +22,12 @@ from app.metrics import (
     EVENT_FLYER_OBJECTS,
     EVENTS_PROJECTED_OCCURRENCES,
     EVENTS_PROJECTION_BYTES,
+    EVENTS_PROJECTION_CATEGORY_TOTAL,
     EVENTS_PROJECTION_DURATION_SECONDS,
+    EVENTS_PROJECTION_ENDS_AT_TOTAL,
     EVENTS_PROJECTION_ERRORS_TOTAL,
     EVENTS_PROJECTION_NIGHTLIFE_ROLLBACK_TOTAL,
+    EVENTS_PROJECTION_RECURRENCE_TEXT_TOTAL,
     EVENTS_PROJECTION_SOURCE_ROWS,
     EVENTS_PROJECTION_TICKET_URL_TOTAL,
     REDIS_PROJECTION_ENTITY_DELETES_TOTAL,
@@ -40,10 +43,13 @@ from app.models import (
     WeekRawDay,
 )
 from app.models.event_occurrence import EventOccurrence
+from app.models.post_category import classify_category, load_post_category_vocabulary
 from app.models.promoter_event_visibility import is_promoter_only_item, load_hide_promoter_events
 from app.services.event_city_slug import nearest_city_slug
 from app.services.event_date_resolver import RECIFE_TZ
+from app.services.event_occurrence_end import resolve_occurrence_end
 from app.services.event_occurrences import expand_occurrences, nightlife_date
+from app.services.event_recurrence_text import normalize_recurrence_text
 from app.services.event_ticket_url import classify_ticket_url
 from app.models.vibe_attributes import VibeAttributes
 from app.models.opening_hours import OpeningHours
@@ -370,6 +376,19 @@ class RedisProjectionService:
             venue_ids = sorted({r["venue_id"] for r in rows if r.get("venue_id")})
             address_by_venue = self.rds_store.get_address_bulk(venue_ids)
             hide_promoter, _ = load_hide_promoter_events(self.redis_only_dao.client)
+            # ONE admin-config read per CYCLE, next to the existing one:
+            # `category` is canonicalised against the LIVE vocabulary at
+            # projection time (plans/260907_events-non-event-and-recurrence-
+            # normalisation.md §3), so an operator's vocabulary edit reaches
+            # the app on the next 2-minute cycle instead of requiring a
+            # re-extraction of every affected row — and reaches the already-
+            # released clients, which cannot re-map anything themselves. The
+            # loader already falls back to the shipped defaults (and logs)
+            # on an unreadable or malformed config, so this can never be the
+            # reason a cycle is lost.
+            category_vocabulary, _ = load_post_category_vocabulary(
+                self.redis_only_dao.client
+            )
             sources_by_event: dict[str, list[dict]] = {}
             if hide_promoter:
                 selected_event_ids = sorted({
@@ -466,6 +485,31 @@ class RedisProjectionService:
                 # the RDS one, and RDS keeps the verbatim extraction.
                 ticket_url, ticket_outcome = classify_ticket_url(row.get("ticket_url"))
                 EVENTS_PROJECTION_TICKET_URL_TOTAL.labels(outcome=ticket_outcome).inc()
+                # Same shape, same reason, same place: pure functions of the
+                # row, so one call and one counter increment per SOURCE ROW.
+                recurrence_text, recurrence_outcome = normalize_recurrence_text(
+                    row.get("recurrence_text")
+                )
+                EVENTS_PROJECTION_RECURRENCE_TEXT_TOTAL.labels(
+                    outcome=recurrence_outcome
+                ).inc()
+                category, category_outcome = classify_category(
+                    row.get("category"), category_vocabulary
+                )
+                EVENTS_PROJECTION_CATEGORY_TOTAL.labels(outcome=category_outcome).inc()
+                # `ends_at` is the only one of the four that VARIES per
+                # occurrence, so the per-row work is the stored PAIR and the
+                # per-occurrence work is one comparison plus at most one
+                # addition. Every occurrence of a row takes the SAME branch
+                # (expand_occurrences either re-derives all of them or emits
+                # the single stored-instant shape), so the outcome is
+                # counted once, on the first. A row that expands to ZERO
+                # occurrences (no stored `starts_at`) takes no branch and is
+                # deliberately not counted here — it contributes nothing to
+                # the projection to describe.
+                stored_start = row.get("starts_at")
+                stored_end = row.get("ends_at")
+                ends_at_counted = False
 
                 for occ in expand_occurrences(
                     row,
@@ -473,18 +517,35 @@ class RedisProjectionService:
                     reference_time=now,
                 ):
                     score = occ.starts_at.timestamp()
+                    # DERIVATION, never `is_recurring`: a re-derived
+                    # occurrence's id is `<event_id>_<YYYY-MM-DD>`, a
+                    # stored-instant occurrence's id is the bare event_id
+                    # (event_occurrences.expand_occurrences). Keying on
+                    # `is_recurring` would null the genuine multi-day end of
+                    # a recurring row whose recurrence prose this repo
+                    # cannot parse — the deletion vibes_bot declines to make
+                    # at serve time.
+                    ends_at, ends_at_outcome = resolve_occurrence_end(
+                        stored_start, stored_end, occ.starts_at,
+                        derived=occ.occurrence_id != occ.event_id,
+                    )
+                    if not ends_at_counted:
+                        EVENTS_PROJECTION_ENDS_AT_TOTAL.labels(
+                            outcome=ends_at_outcome
+                        ).inc()
+                        ends_at_counted = True
                     payload = EventOccurrence(
                         occurrence_id=occ.occurrence_id,
                         event_id=event_id,
                         occurrence_date=occ.occurrence_date,
                         starts_at=occ.starts_at,
-                        ends_at=row.get("ends_at"),
+                        ends_at=ends_at,
                         time_known=bool(row.get("time_known")),
                         is_recurring=bool(row.get("is_recurring")),
-                        recurrence_text=row.get("recurrence_text"),
+                        recurrence_text=recurrence_text,
                         title=row.get("title"),
                         description=row.get("description"),
-                        category=row.get("category"),
+                        category=category,
                         price_text=row.get("price_text"),
                         ticket_info=row.get("ticket_info"),
                         ticket_url=ticket_url,

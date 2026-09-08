@@ -155,6 +155,11 @@ test-unit:
 		tests/test_image_edge_color.py \
 		tests/test_event_occurrences.py \
 		tests/test_event_ticket_url.py \
+		tests/test_event_recurrence_text.py \
+		tests/test_event_occurrence_end.py \
+		tests/test_event_extraction_prompt_kind.py \
+		tests/test_kind_eval_fixture.py \
+		tests/test_metrics_zero_fill.py \
 		tests/test_venue_address_components.py \
 		tests/test_venue_address_parser.py \
 		tests/test_venue_city_vocabulary.py \

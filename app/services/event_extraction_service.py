@@ -60,9 +60,16 @@ from app.metrics import (
     EVENT_EXTRACTION_MALFORMED_EVENTS_TOTAL,
     EVENT_EXTRACTION_POSTS_TOTAL,
     EVENT_EXTRACTION_SUPERSEDED_TOTAL,
+    EVENT_EXTRACTION_SUPPRESSED_RECURRING_TOTAL,
 )
 from app.models.date_resolution_config import load_date_year_roll_grace_days
-from app.models.event_kind import resolve_post_type
+from app.models.event_kind import (
+    KIND_FOOD,
+    KIND_MENU,
+    KIND_OTHER,
+    KIND_PROMOTION,
+    resolve_post_type,
+)
 from app.models.photo_taxonomy import CATEGORY_FLYER
 from app.models.post_category import (
     canonicalize_category,
@@ -159,6 +166,16 @@ OUTCOME_ACCEPTED = "accepted"
 # path-parity.md §D: the EVENTS_TOTAL gauge must be refreshed from BOTH
 # crawl paths, so this service can no longer be the sole owner of a helper
 # the shared-handle path also needs.
+
+# plans/260907_events-non-event-and-recurrence-normalisation.md §5: the
+# CLOSED label set for EVENT_EXTRACTION_SUPPRESSED_RECURRING_TOTAL's `kind`.
+# Deliberately not "anything that is not KIND_EVENT": `resolve_post_type`
+# stores an UNRECOGNISED kind verbatim, so that test would feed model-authored
+# free text straight into a Prometheus label — the cardinality bomb
+# app.models.post_category already caps for the category counter.
+_SUPPRESSIBLE_POST_TYPES = frozenset(
+    {KIND_MENU, KIND_PROMOTION, KIND_FOOD, KIND_OTHER}
+)
 
 # plans/260810_post-kind-and-post-extraction-attribution.md §Error Handling:
 # `EVENT_EXTRACTION_POSTS_TOTAL` gains a `kind` label so the event/non-event
@@ -1035,6 +1052,24 @@ class EventExtractionService:
             # the reasons list below, because §C's missing-date suppression
             # needs it too — one call, reused by both.
             post_type = resolve_post_type(parsed.get("kind"))
+            # plans/260907_events-non-event-and-recurrence-normalisation.md
+            # §5: the ONLY place the amended `kind` rule's suppressions are
+            # ever observable. A post that rule sends to menu/promotion/
+            # food/other is never selected by `is_selectable`, so it is
+            # never projected and every projection counter is structurally
+            # blind to it — a false positive would otherwise be counted
+            # nowhere, produce no row an operator would scroll past, and
+            # (because the prompt fix is forward-only) appear only on NEW
+            # posts at NEW venues, gradually. Counted HERE, before any
+            # date/confidence filtering below, so no later branch can hide
+            # one. `is_recurring`/`recurrence_text` are parsed for every
+            # item regardless of its kind, so both are always available.
+            if post_type in _SUPPRESSIBLE_POST_TYPES and (
+                parsed.get("is_recurring") or parsed.get("recurrence_text")
+            ):
+                EVENT_EXTRACTION_SUPPRESSED_RECURRING_TOTAL.labels(
+                    kind=post_type
+                ).inc()
             # plans/260813_review-gate-and-date-vocabulary.md §C: a missing
             # date is only ever a DEFECT for a post_type that is required to
             # carry one (`date_required_for_post_type` — the SAME predicate
