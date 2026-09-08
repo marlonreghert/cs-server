@@ -15,6 +15,12 @@ projection bug found while measuring them:
    extraction prompt's own precedence rule forces them into `kind: "event"`,
    and they reach the feed. 9 of the 44 live occurrences (20.5%) are this
    class. Fix the rule, not the rows.
+
+   **Revision 3 simplifies this rule under an explicit operator decision**
+   (§0). The rule now asks one question — what does the post ANNOUNCE — and
+   answers `menu`/`promotion` whenever the answer is food or a price,
+   however many days the post names. Genuine food-anchored events are
+   accepted as collateral. §1b names exactly what that sacrifices.
 2. **`recurrence_text` must be casing-normalised in the serving
    projection.** 33 of 44 occurrences carry it and mobile 1.4.1 renders it
    prominently; the live corpus contains two pure-casing duplicate pairs
@@ -29,11 +35,61 @@ Plus one decision recorded, not built: what the projection could offer so
 mobile can build an events filter without client-side bucketing
 (see "The events-filter question").
 
+## §0 — Operator decision, 2026-09-07 22:13 Recife: simplify the non-event rule
+
+Verbatim: *"its ok to miss food events as of now. its better then having
+dirty events or complex solutions"*
+
+This **inverts the optimisation target revision 2 was built around** and
+takes precedence over anything earlier in this plan or in
+`141-FEEDBACK.md`. Revision 2 spent a three-paragraph PROGRAMMED OCCASION
+vs. THE VENUE OPERATING clause, an 18-row category audit, a four-row
+near-miss separator table and 13 synthetic controls defending the
+food-anchored boundary. The operator has said that boundary need not be
+defended.
+
+**What the decision buys.** A false negative at the food boundary — a
+`food festival`, a `tasting`, a feijoada-plus-samba, a rodízio-plus-jogo
+answered `menu` instead of `event` — is now an ACCEPTABLE cost. A dirty
+feed is worse than a thin one, and a complex rule is worse than both.
+
+**What it does NOT buy — the two boundaries this concession must not cross.**
+
+1. It covers the FOOD/PRICE-anchored boundary and nothing else. `karaoke`,
+   `quiz / trivia`, `kids / family` and **every music or genre night**
+   remain fully protected. A rule that also kills
+   "todo sábado tem sertanejo" is still a defect, and §1a shows this one
+   does not.
+2. The cost is stated, not silent. §1b names the shapes and the live rows
+   the simplified rule sacrifices, and the re-admission follow-up is named
+   in "Follow-ups" so the trade is deliberate and reversible.
+
+**Deliberately DELETED in revision 3, and why** — kept here so a later
+reader does not restore them as an oversight:
+
+| removed | why it existed | why it goes |
+|---|---|---|
+| the third prompt paragraph ("FOOD AND PRICE DO NOT DECIDE THIS BY THEMSELVES", ~150 of the clause's ~260 tokens) | to keep food-alongside shapes as `event` | it defends the conceded boundary, and it is the paragraph that made the rule hard to reason about |
+| §1a's 18-row `DEFAULT_CATEGORY_VOCABULARY` audit | to derive the rule against every shipped category | 14 of the 18 rows are either unaffected or conceded; §1a keeps the 4 rows the concession does NOT cover |
+| §1a's four-row near-miss separator table | to show the rule separated food-alongside pairs from standing offers | those pairs now land on the same side, so the table asserts nothing |
+| synthetic controls S1, S2, S3, S8 (`food festival`, `tasting`, feijoada+samba, rodízio+jogo) | blocking gates on the food boundary | they gate a boundary that is now conceded; recorded by name in §1b instead |
+| the "34 rows, zero false positives incl. S1-S8" acceptance line | the gate for the above | replaced by a 30-row gate whose zero-false-positive clause covers only the protected set |
+
+**N4 dissolves.** "The thin food boundary is under-tested" was raised as a
+defect against revision 2. Under this decision it is not a defect: it is
+the accepted consequence, recorded here and in §1b. It is not carried as an
+open finding.
+
 ## Non-goals
 
 - **A title blocklist, a `category` blocklist, or any downstream string
   filter that hides a row while leaving `post_type = 'event'` in RDS.** See
   "Why a general rule, and why a blocklist is not achievable".
+- **Defending the food-anchored boundary in the `kind` rule.** Conceded by
+  §0. A recurring feijoada with a roda de samba, a weekly guided
+  degustação, a recurring food festival and a rodízio-with-the-game will
+  be answered `menu`/`promotion` by the simplified rule. Named in §1b,
+  re-admission named in "Follow-ups". Not a defect this round.
 - **Retro-fixing rows already in RDS by migration.** No migration, no bulk
   UPDATE. Existing wrong rows are corrected through the two operator paths
   in "Removal path for rows already projected" — both of which already
@@ -155,8 +211,14 @@ belongs in the classifier's precedence, not in a filter after it.
   next week can come back as `Almoço de Terça a Domingo`, `Self-service`,
   or `Buffet livre`. Zero of the 21 live titles repeat across venues.
 - **It cannot be right on either side.** `QUINTA É DIA DE HAPPY HOUR` must
-  go, but a real `Happy Hour com Samba ao Vivo — sexta 18h, Banda X` must
-  stay. No title substring separates them. Conversely `"Especial do dia"`
+  go, but `Sambinha Downtown` — at the SAME venue, whose own caption reads
+  "HAPPY HOUR a tarde toda" — must stay. A "happy hour" blocklist kills
+  both; no title or caption substring separates them. (Revision 2 made this
+  point with a hypothetical `Happy Hour com Samba ao Vivo`, which §0 now
+  concedes — its announced subject reads as a happy hour. `Sambinha
+  Downtown` is a real live row, is pinned in §1a and §5, and makes the
+  argument without depending on the conceded boundary.) Conversely
+  `"Especial do dia"`
   reached 28% of the feed precisely because ONE generic title carried many
   *different* posts — blocking that string would have removed genuine items
   along with the noise.
@@ -324,14 +386,16 @@ written in parallel with this one, so the corrections did not propagate.
 
 ## Desired Behavior
 
-1. The extraction prompt must classify a recurring venue service offering as
-   `menu` or `promotion`, never `event`, even when it names days and times —
-   and must keep classifying as `event` **every shape this repo's own
-   `DEFAULT_CATEGORY_VOCABULARY` names**, including the food-anchored ones
-   (`food festival`, `tasting`) and the food-alongside ones (a feijoada with
-   a roda de samba, a rodízio with a jogo no telão). A rule that removes the
-   buffet but also kills a real recurring night is worse than the defect it
-   fixes.
+1. The extraction prompt must classify a post whose announced SUBJECT is
+   FOOD or a PRICE as `menu` or `promotion`, never `event`, even when it
+   names days, a date or times — and must keep classifying as `event`
+   every post whose announced subject is something else, including
+   `karaoke`, `quiz / trivia`, `kids / family` and **every music or genre
+   night**, even when the caption mentions food or a price ALONGSIDE it.
+   A rule that removes the buffet but also kills "todo sábado tem
+   sertanejo, chopp em dobro" is worse than the defect it fixes.
+   Food-anchored events are conceded by §0 and enumerated in §1b; the
+   non-food shapes above are not conceded and are gated in §5.
 2. The serving projection must carry a casing-normalised `recurrence_text`,
    while RDS keeps the verbatim extraction.
 3. The serving projection must carry a `category` canonicalised against the
@@ -359,54 +423,54 @@ prompts interpolate, so the single-event and multi-event prompts cannot
 drift — CLAUDE.md's own warning ("both extraction prompts must change
 together; they have drifted before") is satisfied structurally.
 
-Add a WHAT-REPEATS test in the same pre-ladder position the existing "does
-this announce something attendable" test occupies, stating in substance:
+Add a WHAT-IS-ANNOUNCED test in the same pre-ladder position the existing
+"does this announce something attendable" test occupies, stating in
+substance:
 
-> Before applying the precedence, also ask WHAT repeats. A recurring cadence
-> only makes a post an event when the thing that repeats is a PROGRAMMED
-> OCCASION — something the venue puts on, that would not happen if nobody
-> had staged it: a show, a party, a DJ or live set, a karaoke or quiz night,
-> a class or workshop, a screening, a kids' or family session, a festival, a
-> tasting or degustação, a themed night.
+> Before applying the precedence, ask ONE question: what is this post
+> ANNOUNCING?
 >
-> The venue simply OPERATING is not a programmed occasion, however many days
-> it names: its standing menu, a buffet or lunch served "de Terça a
-> Domingo", a rodízio every night, its opening hours, a permanent price
-> list, a daily special ("especial do dia"), a standing discount, a happy
-> hour that is only cheaper drinks during ordinary hours. Answer "menu" when
-> what is announced is a dish or a menu, "promotion" when it is a price —
-> never "event" — even when the post states days and times.
+> - If the answer is FOOD — a dish, a menu, a buffet, a rodízio, a
+>   self-service, a lunch, a daily special ("especial do dia") — answer
+>   "menu".
+> - If the answer is a PRICE — a happy hour, a discount, a standing offer,
+>   "chopp em dobro", a price list — answer "promotion".
 >
-> FOOD AND PRICE DO NOT DECIDE THIS BY THEMSELVES. The post is still an
-> "event" whenever, alongside the food or the price, it announces something
-> programmed: a named performer, band, DJ, host, teacher or team; a lineup;
-> a ticket, cover, couvert or paid enrolment; a competition; a named edition
-> or theme ("Feijoada com samba ao vivo", "Oktoberfest", "degustação
-> guiada", "noite de karaokê"); a stated start time that is not simply the
-> venue's opening hours. When BOTH readings are available — food or a price
-> AND a programmed occasion — answer "event". The existing "event first"
-> precedence is unchanged for that case; this test removes only the posts
-> where there is NO programmed occasion at all, only the venue being open.
+> Answer that way even when the post states days, a date or times. A
+> schedule does not turn the venue's own kitchen or its own price list into
+> an event.
+>
+> For ANYTHING ELSE the existing precedence is unchanged and the answer is
+> still "event": a show, a party, a DJ or live set, a karaoke or quiz
+> night, a class or workshop, a screening, a kids' or family session, any
+> named music or genre night. Food or a price mentioned ALONGSIDE one of
+> those does not change the answer — "toda sexta é Lovezinho, open bar até
+> meia-noite" and "todo sábado tem sertanejo, chopp em dobro" are both
+> "event".
 
-The third paragraph is the load-bearing one, and it is derived against this
-repo's OWN shipped category vocabulary rather than against a hunch — §1a
-enumerates all 18 categories and shows the rule keeps every one.
+**The rule is deliberately ASYMMETRIC, and that asymmetry is the whole
+design.** A food-or-price SUBJECT wins over anything mentioned alongside
+it; a non-food subject wins over food or a price mentioned alongside IT.
+The first half is what reliably kills the standing-offer class; the second
+half is what keeps `Sambinha Downtown` (whose own caption says "HAPPY HOUR
+a tarde toda"), `Lovezinho` ("promoções de combo a noite toda") and every
+sertanejo-with-chopp night. Both halves are gated in §5; §1a shows the
+second half covers all four protected shapes.
 
-**Revision 1 of this plan got this wrong and the correction is the point of
-this revision.** It closed the rule with a single sentence — "a performance,
-a competition, a class or a screening that repeats IS still an event" — in
-front of a clause reading "if what repeats is FOOD, a PRICE, or the venue
-simply being open, answer 'menu' or 'promotion' — never 'event'". Audited
-against `DEFAULT_CATEGORY_VOCABULARY` (§1a), that pair left **5 of the 18
-shipped event categories unrescued** (`karaoke`, `quiz / trivia`,
-`kids / family`, `food festival`, `tasting`) and **affirmatively suppressed
-two of them** (`food festival`, `tasting`) plus every food-alongside shape
-(`samba / pagode` at a feijoada, `sports screening` at a rodízio + jogo).
-A rule that removes "Buffet de Terça a Domingo" but also kills a weekly
-degustação or a feijoada com samba ao vivo is worse than the defect it
-fixes. That is why the clause is now three paragraphs and why §1a exists.
+**Revision 3 replaced revision 2's clause under §0's operator decision.**
+Revision 2 asked "is there a PROGRAMMED OCCASION alongside the food?" and
+answered `event` whenever there was — three paragraphs, a tie-break, and an
+18-row audit to prove the tie-break was safe. Revision 3 does not ask that
+question at all: at the food/price boundary the subject decides and the
+alongside-test is gone. That is the simplification, and its cost is that
+food-anchored events now lose (§1b). Revision 1's own failure is still on
+record and still avoided: it left `karaoke`, `quiz / trivia` and
+`kids / family` unrescued because its rescue sentence enumerated only "a
+performance, a competition, a class or a screening". The clause above names
+those three explicitly, so that failure cannot recur even though the clause
+is now shorter than revision 2's.
 
-No other prompt field changes. The constant grows by roughly 260 tokens of
+No other prompt field changes. The constant grows by roughly 130 tokens of
 INPUT on a prompt that already carries a vision payload; output-token
 budgets (`DEFAULT_MAX_COMPLETION_TOKENS = 6400`) are untouched, and the
 reasoning work this adds is the same *shape* the `kind` precedence already
@@ -422,61 +486,77 @@ also why the Test Plan's false-positive signal must be a STANDING counter and no
 one-off check: a regression would otherwise appear only at new venues, on
 new posts, gradually, with nothing to scroll past.
 
-### 1a. The rule checked against this repo's own shipped category vocabulary
+### 1a. The four shapes the concession does NOT cover, and how the rule keeps them
 
-`app/models/post_category.py::DEFAULT_CATEGORY_VOCABULARY` is the list this
-repo already ships as *what an event's category may be*. A `kind` rule that
-suppresses a shape the category vocabulary blesses is self-contradictory, so
-the rule is derived against that list rather than against the two offenders.
-All 18 entries, each with the recurring caption shape that would carry it
-and the clause that keeps it:
+§0 concedes the food/price boundary and nothing else. Revision 2 audited all
+18 entries of `app/models/post_category.py::DEFAULT_CATEGORY_VOCABULARY` to
+prove a tie-break safe; there is no tie-break any more, so 14 of those rows
+now say only "unaffected" or "conceded" and the audit has been deleted as
+dead weight (§0). What remains is the set §0 says must still be protected —
+and it is protected by ONE clause, the rule's closing sentence:
 
-| shipped category | recurring caption shape | kept by |
-|---|---|---|
-| live music | "toda sexta com a banda X" | named performer |
-| DJ / club night | "toda sexta, DJ Bibi no comando" | named performer |
-| samba / pagode | "feijoada de sábado com roda de samba" | **a performance ALONGSIDE food** |
-| forró | "forró todo domingo, 20h" | programmed occasion + start time |
-| rock | "quarta do rock, banda convidada" | named performer |
-| MPB | "MPB às quintas, voz e violão" | programmed occasion |
-| jazz | "jazz night toda terça" | named theme |
-| sertanejo | "sertanejo na sexta, dupla X" | named performer |
-| funk | "baile funk todo sábado" | party |
-| karaoke | "toda terça é noite de KARAOKÊ, 20h" | **karaoke night named explicitly** |
-| comedy | "stand-up toda quinta, R$ 20" | ticket + performance |
-| quiz / trivia | "quiz da quarta, o time vencedor leva uma rodada" | **a competition whose prize is a drink** |
-| kids / family | "domingo é dia da criança, recreação 10h-14h" | **family session named explicitly** |
-| workshop | "aula de forró toda quarta, mensalidade R$ 100" | class + paid enrolment |
-| food festival | "Oktoberfest todo sábado de outubro, banda + concurso" | **festival named explicitly, and it is FOOD** |
-| tasting | "degustação guiada de cachaça toda quinta, R$ 45" | **tasting named explicitly, and it is FOOD** |
-| sports screening | "todo domingo jogo no telão + rodízio de petiscos" | **a screening ALONGSIDE food** |
-| party | "toda sexta é Lovezinho, open bar até meia-noite" | party alongside a drinks offer |
+| protected shape | vocabulary entries | recurring caption | why the rule keeps it |
+|---|---|---|---|
+| karaoke | `karaoke` | "toda terça é noite de KARAOKÊ, 20h, sem couvert" | the announced subject is a karaoke night; "sem couvert" is a price mentioned alongside |
+| quiz / trivia | `quiz / trivia` | "quiz da quarta, 20h — o time vencedor leva uma rodada de chopp" | the announced subject is a quiz; the free round is a prize alongside |
+| kids / family | `kids / family` | "domingo é dia da criança: recreação e contação de história, 10h-14h" | the announced subject is a family session; no food or price subject at all |
+| every music / genre night | `live music`, `DJ / club night`, `samba / pagode`, `forró`, `rock`, `MPB`, `jazz`, `sertanejo`, `funk`, `comedy`, `party` (11 of the 18) | "todo sábado tem sertanejo, chopp em dobro" | the announced subject is a music night; the drinks offer is alongside |
 
-The five in bold-with-emphasis are precisely the ones revision 1's single
-rescue sentence did not reach; `food festival`, `tasting`,
-`samba / pagode`-at-a-feijoada and `sports screening`-at-a-rodízio were
-additionally suppressed OUTRIGHT by its "if what repeats is FOOD … never
-event" clause.
+Every one of the four is kept by the same sentence — *"Food or a price
+mentioned ALONGSIDE one of those does not change the answer"* — so there is
+one clause to reason about and one clause to gate. §5's controls are exactly
+these four shapes plus the standing-offer class the rule must kill. If a
+future revision trims that sentence, all four fail at once and the eval
+blocks the merge.
 
-**This is not hypothetical.** `Oktoberfest BeerDock`
-(`evt_01KZVGAW45PBBRKGEGE4W6SG90`, handle `beerdock_recife`) is a REAL row in
-today's 21-event corpus — a food festival by name, currently `category:
-party`, `is_recurring: false`. The corpus has no *recurring* one only because
-21 events is a small sample; the vocabulary says the shape is expected, and
-the rule must survive it.
+Two live rows sit on this seam and are pinned in §5 and in Path B0: `Sambinha
+Downtown` (`evt_01KZVG66809JD1SCTQ2EJQAFJ4`, caption says "HAPPY HOUR a tarde
+toda") and `Lovezinho` ("promoções de combo a noite toda"). Both name a price
+inside a music-night caption. Both must stay `event`.
 
-The near-miss pairs the rule must separate, and the clause that separates
-them:
+### 1b. What the simplified rule sacrifices — stated, not discovered
 
-| stays `event` | becomes `menu` / `promotion` | separator |
-|---|---|---|
-| "todo domingo jogo no telão + rodízio de petiscos" | "nosso rodízio roda todas as noites, 19h-23h" | a screening is programmed; a rodízio is the kitchen |
-| "feijoada de sábado com roda de samba do grupo X" | "Buffet de Terça a Domingo" | a named performance vs. the kitchen's own hours |
-| "quinta do stand-up, R$ 20 na porta" | "QUINTA É DIA DE HAPPY HOUR" (a price list) | a ticketed performance vs. cheaper drinks |
-| "degustação guiada, R$ 45, vagas limitadas" | "especial do dia: risoto, R$ 39,90" | paid enrolment in a session vs. a dish at a price |
+This is the cost §0 accepts. It is recorded here rather than left implicit so
+that a `menu` answer on one of these shapes is read as the known trade, not
+as a new defect.
 
-All eight of those captions are blocking rows in the Test Plan's eval (see the
-synthetic-control table in §5).
+**Shapes now answered `menu`/`promotion` that revision 2 kept as `event`:**
+
+| sacrificed shape | vocabulary entry it stands in for | example caption | in today's corpus? |
+|---|---|---|---|
+| a recurring food festival | `food festival` | "Oktoberfest — todo sábado de outubro, chopp alemão, banda Die Kapelle, concurso de dança. Entrada R$ 20." | **see the Oktoberfest note below** |
+| a guided tasting / degustação | `tasting` | "Degustação guiada de cachaças, toda quinta 19h, com o mestre alambiqueiro. R$ 45." | none |
+| a food-anchored night with live music | `samba / pagode` | "FEIJOADA DO SÁBADO — todo sábado 13h com roda de samba do grupo X. Couvert R$ 15." | none |
+| a food-anchored night with a screening | `sports screening` | "todo domingo jogo no telão + rodízio de petiscos, 16h" | none |
+| a one-off dated dish or price post | `menu` / `promotion` (correctly) | "neste sábado tem feijoada com samba ao vivo" | none |
+
+**The live rows this names.** A grep of all 21 events in the 2026-09-07
+census for feijoada / degustação / gastro / almoço / jantar / churrasco /
+rodízio returns **nothing**, so four of the five rows above have no live
+example. The fifth does: **`Oktoberfest BeerDock`
+(`evt_01KZVGAW45PBBRKGEGE4W6SG90`, handle `beerdock_recife`, 1 of the 44
+occurrences)** is a real `food festival` by name in today's corpus. Stated
+precisely, because the difference matters:
+
+- It is **`is_recurring: false`** and it is **not re-extracted by this
+  round** — the prompt fix is forward-only and Path B1 reaches only
+  `ctradicao` and `downtownbeergarden_`. So it does **not** drop from the
+  44→35 acceptance table, and the plan does not claim it does.
+- Its caption's announced subject is a NAMED FESTIVAL, not a dish or a
+  price, so the rule as written does not obviously reach it either. But §0
+  has withdrawn the clause that used to guarantee it survives, so the answer
+  is now the model's unassisted judgement.
+- Consequence, recorded: **a re-post of Oktoberfest, or a recurring edition
+  of it ("todo sábado de outubro"), may come back `menu` and never reach the
+  feed.** That is the single named live casualty of this concession.
+
+**Not sacrificed, and must not be read as sacrificed:** any caption whose
+subject is not food or a price. The four shapes in §1a, and the two live
+seam rows named there, are gated in §5 on exactly the same blocking terms as
+the standing-offer class. The concession is a floor under the food boundary,
+not a licence to drop recurring nights.
+
+**Re-admission is a named follow-up, not a hope** — see "Follow-ups".
 
 ### 2. Projection — `recurrence_text` (new `app/services/event_recurrence_text.py`)
 
@@ -670,6 +750,31 @@ window, `pending_review`, or already past. Record `event_id`, `title`,
 `status`, `post_type` and `operator_edited_fields` for every row returned.
 That list, not the census, is the blast radius.
 
+**The enumeration is deliberately unfiltered; the ACTION set is not.** The
+query returns every status — `list_events(venue_id, status=None)` adds no
+status clause (`admin_events_router.py:349-359` → `rds_venue_store.py:
+1304-1315`), so `pending_review`, `rejected`, `extraction_failed` and
+superseded rows all come back. Reading them is the point. **Writing to them
+is not**, and Path A below is scoped accordingly: confirming a
+`pending_review` or `rejected` row would move its `status` into
+`SELECTABLE_STATUSES = ("accepted", "confirmed")`
+(`event_projection_selection.py:32`) and PROJECT a row that is not in the
+feed today — inflating the feed through the one transition this plan records
+as **one-way** (there is no un-confirm route and `EventPatch` does not accept
+`status`, `admin_events_router.py:327-347`), and breaking this round's own
+acceptance table in the direction the table has no room for. Split the Step-0
+list in two before touching anything:
+
+| Step-0 row | Path A does |
+|---|---|
+| `status` is `accepted` or `confirmed` **and** `post_type == "event"` **and** `venue_id` is present **and** `superseded_by` is None — i.e. **already selectable** | PATCH + confirm (below) |
+| anything else — `pending_review`, `rejected`, `extraction_failed`, superseded, or already `menu`/`promotion`/`food`/`other` | **nothing. Left exactly as found.** |
+
+The two offenders are in the first group today (both `accepted`, both
+`post_type: "event"`), so the correction still reaches them. Every row in
+the second group is already outside the projection and stays outside it;
+this round does not review the queue.
+
 The three rows already known from the census, with their expected
 post-round `post_type`:
 
@@ -686,14 +791,35 @@ this round and is rolled back per "Rollback" below.
 
 #### Path A — operator correction (the guarantee). Run FIRST.
 
-For each row in the Step-0 list, `PATCH /admin/events/{event_id}` with its
-CORRECT `post_type` — `{"post_type": "menu"}` for the buffet,
-`{"post_type": "promotion"}` for the happy hour, and `{"post_type":
-"event"}` for every genuine row at those two handles including Sambinha —
-sending **only** `post_type` (the router records exactly the keys sent, so
-this freezes that one field and nothing else). Then
-`POST /admin/events/{event_id}/confirm` on each, which is what actually
-makes `operator_edited_fields` binding (see the corrected Evidence bullet).
+For each row **in the first Step-0 group only — the ALREADY-SELECTABLE rows**
+— `PATCH /admin/events/{event_id}` with its CORRECT `post_type`:
+`{"post_type": "menu"}` for the buffet, `{"post_type": "promotion"}` for the
+happy hour, and `{"post_type": "event"}` for every genuine already-selectable
+row at those two handles including Sambinha — sending **only** `post_type`
+(the router records exactly the keys sent, so this freezes that one field and
+nothing else). Then `POST /admin/events/{event_id}/confirm` on each, which is
+what actually makes `operator_edited_fields` binding (see the corrected
+Evidence bullet).
+
+**Re-read `status` immediately before each PATCH and skip any row that is not
+`accepted`/`confirmed`.** This is the guard, not a formality: the confirm
+that follows is one-way through the API, so a `pending_review` row confirmed
+by mistake cannot be put back without a direct RDS write. Confirm changes
+selectability; that is why nothing outside the already-selectable set may be
+confirmed.
+
+Net effect on selectability, which is the reason the scope is safe:
+
+- the two offenders leave the projection (their `post_type` is no longer
+  `"event"`; `confirmed` does not rescue them, because `is_selectable` tests
+  `post_type` first — `event_projection_selection.py:67`);
+- every other row Path A touches was **already selectable and stays
+  selectable**, so it contributes exactly the occurrences it contributes
+  today. Path A can therefore only SUBTRACT from the feed, never add — which
+  is what makes the 44 → 35 acceptance table a closed prediction rather than
+  a lower bound;
+- nothing outside the already-selectable set is touched, so no row enters the
+  feed that is not in it today.
 
 The two offenders deproject within one 2-minute cycle via `is_selectable`.
 The genuine rows stay projected — `confirmed` is a selectable status — and
@@ -755,9 +881,19 @@ does, at strictly higher risk, which is why it is optional.
   this field.
 - Confirming is one-way through the API (no un-confirm route, and
   `EventPatch` does not accept `status`). A row that must be returned to
-  `accepted` needs a direct RDS update, which is out of scope for this round
-  — which is why Path A confirms only rows at these two handles and never a
-  broader sweep.
+  `accepted` — or to `pending_review` — needs a direct RDS update, which is
+  out of scope for this round. **This is why Path A confirms only rows that
+  were ALREADY selectable**, and never a `pending_review`, `rejected`,
+  `extraction_failed` or superseded row, at these two handles or anywhere
+  else. There is no rollback for a wrongly-confirmed queue row through the
+  admin API; the Step-0 scope split is the only protection, so it is checked
+  per row at write time, not once at the start.
+- If the post-round sweep shows the city total ABOVE 35, or a NEW `event_id`
+  appearing at `ctradicao`/`downtownbeergarden_` that was not in the
+  pre-round census, a queue row was confirmed in error. PATCH its
+  `post_type` to `menu` to remove it from the feed immediately, then raise
+  the RDS status repair as a separate task — the row's `status` cannot be
+  restored through the API.
 - B0 has nothing to roll back.
 - B1: any field it moved on an unedited row is restored by re-running B1
   after the prompt is fixed, or by a PATCH. `post_type` cannot have moved if
@@ -767,7 +903,7 @@ The operator dispatches every step. No agent dispatches any of them — the
 same posture the 1.4.0 coordination plan takes for the bairro sweep and the
 EAS release.
 
-### 5. The boundary the rule must not cross
+### 5. The boundaries the rule must not cross — and the one §0 lets it
 
 #### What the LIVE corpus can pin
 
@@ -775,62 +911,76 @@ EAS release.
 `workshop`/`forró`, `'Mensalidade: R$ 100'`, a named teacher, stated hours
 "19h iniciados, 20h iniciantes") is a recurring **class**. It repeats, it is
 paid, and it is not a party — the closest thing in the corpus to the class
-this change removes. It **must stay `event`**: what repeats is a scheduled
-activity a person attends, not food, not a price, and not the venue merely
-being open.
+this change removes. It **must stay `event`**: the announced subject is a
+forró class, and the `Mensalidade` is a price named ALONGSIDE it, which
+under §1's closing sentence does not change the answer.
 
 Also pinned to stay `event`: `Sambinha Downtown` (whose own description
 mentions "HAPPY HOUR a tarde toda"), `Residência drag da Metrópole`,
 `Lovezinho` (description mentions "promoções de combo a noite toda"),
 `FORRÓ DOS PAIS`, `Drag Ataque`, `Baile Dançante`. Three of those name a
-promotion inside an event caption — the existing "event first" precedence
-was written for exactly that and must survive intact.
+promotion inside an event caption — §1's closing sentence ("food or a price
+mentioned ALONGSIDE one of those does not change the answer") is the clause
+that keeps them, and it is the clause §5's S6/S14 gate.
 
 #### What the live corpus CANNOT pin, and the synthetic controls that do
 
-The 21-event corpus is exactly today's live feed, which means the eval built
-from it is a *regression* test, not a *boundary* test: it contains not one
-food-anchored happening. A grep of the whole corpus for
-feijoada / degustação / gastro / almoço / jantar / churrasco / rodízio
-returns nothing, and the one food festival present (`Oktoberfest BeerDock`)
-is non-recurring, so the new clause's seam is never touched. **This is the
-one boundary the live corpus cannot exercise, and it is the boundary the
-rule is most likely to get wrong.**
+The 21-event corpus is exactly today's live feed, so the eval built from it
+is a *regression* test, not a *boundary* test. Two boundaries it cannot
+exercise, for opposite reasons:
 
-Thirteen synthetic captions therefore join the eval, labelled SYNTHETIC in
-the fixture so nobody mistakes them for production data, and **blocking on
-exactly the same terms as the 21 live ones**. Each is mapped to the shipped
-category vocabulary entry it stands in for, so the set is derived from §1a's
-audit rather than assembled by taste:
+- **The food boundary** — a grep of the whole corpus for feijoada /
+  degustação / gastro / almoço / jantar / churrasco / rodízio returns
+  nothing. Revision 2 covered this with eight blocking food-anchored
+  controls. **§0 has conceded this boundary, so those controls are deleted**
+  (S1, S2, S3, S8) rather than left as dead weight; the shapes they stood
+  for are named in §1b and re-admitting them is a named follow-up. Nothing
+  in the gate defends them any more, and that is deliberate.
+- **The protected boundary** — the corpus contains no karaoke, quiz or
+  kids/family caption either, and only two captions (`Sambinha Downtown`,
+  `Lovezinho`) exercise the music-night-with-a-price seam. Those are the
+  shapes §0 says must still survive, so these controls STAY, and stay
+  blocking.
 
-| # | caption (abridged) | vocabulary entry | expected `kind` |
+**Ten synthetic captions** therefore join the eval — five that must survive
+and five that must be suppressed — labelled SYNTHETIC in the fixture so
+nobody mistakes them for production data, and **blocking on exactly the same
+terms as the live rows**. The surviving five are the four protected shapes
+from §1a plus the seam the operator named by hand.
+
+| # | caption (abridged) | shape | expected `kind` |
 |---|---|---|---|
-| S1 | "OKTOBERFEST — todo sábado de outubro, chopp alemão, banda Die Kapelle e concurso de dança bávara. Entrada R$ 20." | food festival | **event** |
-| S2 | "Degustação guiada de cachaças artesanais, toda quinta às 19h, com o mestre alambiqueiro João Ramos. Vagas limitadas, R$ 45." | tasting | **event** |
-| S3 | "FEIJOADA DO SÁBADO 🥁 Todo sábado a partir das 13h com roda de samba do grupo Samba de Mesa. Couvert R$ 15." | samba / pagode | **event** |
 | S4 | "Toda terça é noite de KARAOKÊ, 20h, inscrição na hora, sem couvert." | karaoke | **event** |
 | S5 | "Domingo é dia da criança: recreação, contação de história e brinquedoteca, das 10h às 14h, todo domingo." | kids / family | **event** |
-| S6 | "TODA SEXTA É LOVEZINHO 💚 open bar de caipirinha até meia-noite, DJ Bibi no comando." | party | **event** |
-| S7 | "Quiz da Quarta, 20h, equipes de até 5 pessoas — o time vencedor leva uma rodada de chopp." | quiz / trivia | **event** |
-| S8 | "Todo domingo tem jogo no telão + rodízio de petiscos a partir das 16h." | sports screening | **event** |
-| S9 | "Buffet de Terça a Domingo — a melhor hora do dia 🍛" (the live offender, verbatim) | — | **menu** |
-| S10 | "QUINTA É DIA DE HAPPY HOUR. Promoções em dobro: caldinhos x2, gin tônica x2… Chopp por R$ 6,99." (the live offender, verbatim) | — | **promotion** |
-| S11 | "Especial do dia: risoto de camarão, de segunda a sexta no almoço, R$ 39,90." | — | **menu** |
-| S12 | "De segunda a quinta, chopp em dobro o dia inteiro." | — | **promotion** |
-| S13 | "Nosso rodízio de pizza roda todas as noites, das 19h às 23h." | — | **menu** |
+| S6 | "TODA SEXTA É LOVEZINHO 💚 open bar de caipirinha até meia-noite, DJ Bibi no comando." | party, with a drinks offer alongside | **event** |
+| S7 | "Quiz da Quarta, 20h, equipes de até 5 pessoas — o time vencedor leva uma rodada de chopp." | quiz / trivia, with a drinks prize alongside | **event** |
+| S14 | "TODO SÁBADO TEM SERTANEJO 🤠 com a dupla Léo & Rafa. Chopp em dobro até as 22h." | sertanejo, with a price alongside | **event** |
+| S9 | "Buffet de Terça a Domingo — a melhor hora do dia 🍛" (the live offender, verbatim) | standing food offer | **menu** |
+| S10 | "QUINTA É DIA DE HAPPY HOUR. Promoções em dobro: caldinhos x2, gin tônica x2… Chopp por R$ 6,99." (the live offender, verbatim) | standing price offer | **promotion** |
+| S11 | "Especial do dia: risoto de camarão, de segunda a sexta no almoço, R$ 39,90." | daily special | **menu** |
+| S12 | "De segunda a quinta, chopp em dobro o dia inteiro." | standing discount, no occasion at all | **promotion** |
+| S13 | "Nosso rodízio de pizza roda todas as noites, das 19h às 23h." | the kitchen's own hours | **menu** |
 
-S8/S13 and S3/S9 are the discriminating pairs: the same food, the same
-cadence, separated only by whether anything is *programmed*. A rule that
-gets S8 and S13 both right is a rule that has understood the distinction; a
-rule that answers `menu` to both has simply learned "rodízio", and a rule
-that answers `event` to both has learned nothing at all. S11 is the
-`"Especial do dia"` regression named in the 1.4.1 brief. S6 and S7 pin that
-a drinks offer *inside* an event caption still loses to "event first".
+**S12/S14 and S6/S10 are the discriminating pairs, and they are the ones
+that matter now.** S12 and S14 both offer "chopp em dobro" on a recurring
+cadence; only S14 announces a music night. A rule that answers `promotion`
+to both has learned "chopp em dobro" and is eating genre nights — the exact
+defect §0 forbids. S6 and S10 are the same test at the seam the live corpus
+does exercise (`Sambinha Downtown`, `Lovezinho`): a drinks offer INSIDE an
+event caption still loses to the announced subject. S11 is the
+`"Especial do dia"` regression named in the 1.4.1 brief.
 
-The five vocabulary entries revision 1's rule failed (`karaoke`,
-`quiz / trivia`, `kids / family`, `food festival`, `tasting`) are S4, S7,
-S5, S1 and S2 respectively. A future revision of this clause that reproduces
-that failure fails those five rows and cannot merge.
+Revision 1's five unrescued vocabulary entries were `karaoke`,
+`quiz / trivia`, `kids / family`, `food festival` and `tasting`. Three of
+them are still gated here (S4, S7, S5); the other two are conceded by §0 and
+recorded in §1b. A future revision that trims §1's closing sentence fails
+S4, S5, S6, S7 and S14 at once and cannot merge.
+
+**`Oktoberfest BeerDock` is in the fixture but is NOT blocking.** It is the
+one named live casualty of the concession (§1b), and §0 accepts either
+answer for it, so gating on it would re-erect the boundary the operator
+removed. It is scored and its answer is **RECORDED in the merge note**, so
+the re-admission follow-up starts from a measurement rather than a guess.
 
 ## The events-filter question — what the system of record can offer
 
@@ -910,8 +1060,9 @@ above is what retires it.
 - **Config:** no new setting, no new admin-config key, no feature flag.
   `admin_config:post_category_vocabulary` gains a second reader (the
   projector); its shape and validator are untouched.
-- **Prompt:** `_KIND_FIELD_DOC` grows by three paragraphs (~260 input
-  tokens). Both prompts interpolate it, so both change together by
+- **Prompt:** `_KIND_FIELD_DOC` grows by one question, two bullets and two
+  closing sentences (~130 input tokens — revision 2's clause was ~260, and
+  §0 halved it). Both prompts interpolate it, so both change together by
   construction. No output-token budget change.
 - **New files, all additive:** `app/services/event_recurrence_text.py` and
   `app/services/event_occurrence_end.py` (pure, no I/O, no config) and
@@ -936,8 +1087,27 @@ suppression this plan introduces is ever visible.
 - `EVENTS_PROJECTION_RECURRENCE_TEXT_TOTAL{outcome}` —
   `normalized|unchanged|absent`.
 - `EVENTS_PROJECTION_CATEGORY_TOTAL{outcome}` —
-  `canonicalized|unchanged|off_vocabulary|absent`. This is the standing
-  monitor for the C1 class: a new `buffet`-shaped category appearing in
+  `canonicalized|unchanged|off_vocabulary|absent`, defined the same way
+  `recurrence_text`'s three labels are (**N3**: revision 2 declared
+  `unchanged` without defining it and without any scenario or unit test
+  reaching it, in a plan whose whole observability posture is that a
+  zero-filled label's presence is the evidence — an undefined, unexercised
+  label is a claim nobody checked):
+  - `canonicalized` — the stored value matched a vocabulary entry and the
+    projected spelling DIFFERS from the stored one (`'forró'` → `"Forró"`).
+  - `unchanged` — the stored value matched a vocabulary entry and was
+    ALREADY spelled exactly as the vocabulary spells it (`'Forró'` →
+    `"Forró"`). This is the label that says the operator's vocabulary and
+    the extraction agree; a fleet where it is 0 while `canonicalized` is
+    high means every stored spelling is being rewritten, which is worth
+    knowing.
+  - `off_vocabulary` — no entry matched; the value is passed through
+    unchanged, never dropped.
+  - `absent` — null or blank.
+
+  Exercised by a BDD Examples row and by the projector unit test (Test
+  Plan), so the label is evidence rather than decoration. This is also the
+  standing monitor for the C1 class: a new `buffet`-shaped category appearing in
   production is visible here without waiting for an operator to scroll the
   app. Label cardinality is bounded by the closed outcome set — the raw
   category is deliberately NOT a label (the extraction-time counter
@@ -1007,14 +1177,22 @@ Scenarios:
   pattern covers the horizon contributes zero occurrences to
   `events_index_v1:recife`, and no `event_occurrence_v1:*` key exists for
   it. (The C1 outcome, expressed at the boundary the projection owns.)
-- **A recurring food-anchored event is still projected.** A row with
+- **A `food festival` row is still projected.** A row with
   `post_type: "event"` and `category: "food festival"`, recurring, still
-  reaches `events_index_v1:recife`. The projection must never filter on
-  category — `food festival` and `tasting` are first-class entries in this
-  repo's own `DEFAULT_CATEGORY_VOCABULARY`, and the C1 rule lives in the
-  extraction prompt precisely so nobody is tempted to solve it here with a
-  category blocklist, which would delete this row too. (The BDD counterpart
-  of §1a.)
+  reaches `events_index_v1:recife`. **This scenario gets STRONGER under §0,
+  not weaker.** The extraction rule now suppresses food-anchored captions,
+  so the only way such a row exists is that an operator PATCHed
+  `post_type: "event"` onto it — the re-admission path §0 promises is
+  reversible. The projection must therefore never filter on category:
+  `food festival` and `tasting` are first-class entries in this repo's own
+  `DEFAULT_CATEGORY_VOCABULARY`, a category blocklist here would delete the
+  operator's own correction, and §0's trade would stop being reversible.
+- **An operator re-admitting a suppressed row re-projects it.** A row
+  currently `post_type: "menu"` with no occurrences, PATCHed to
+  `post_type: "event"`, reaches `events_index_v1:recife` on the next cycle
+  with its occurrences restored. This is the mechanical proof that §0's
+  concession is reversible per row without a migration, a re-extraction or
+  a deploy — the property the "Follow-ups" re-admission plan depends on.
 - **A recurring class with a paid enrolment is still projected.**
   `category: "workshop"`, recurring weekly — the `Aula de FORRÓ` shape.
 - **An operator reclassification deprojects every occurrence of the event.**
@@ -1040,6 +1218,11 @@ Scenarios:
   `admin_config:post_category_vocabulary` holding `"Forró"`, a row stored as
   `'forró'` projects `category: "Forró"`; with the key absent, the shipped
   default spelling is projected instead.
+- **A category already spelled as the vocabulary spells it reports
+  `unchanged`.** With the vocabulary holding `"Forró"`, a row stored as
+  `'Forró'` projects `category: "Forró"` and the category counter records
+  `unchanged`, not `canonicalized` (**N3** — the label is otherwise declared
+  but never reached).
 - **An off-vocabulary category is passed through, never dropped.** A row
   stored as `'brega'` projects `category: "brega"` with the vocabulary
   unchanged.
@@ -1088,6 +1271,11 @@ Pytest unit tests:
   computations happen once per row regardless of occurrence count: a
   6-occurrence recurring row increments each new counter exactly once.
   This is the defect `classify_ticket_url`'s own comment warns about.
+  Also parametrised over all FOUR `EVENTS_PROJECTION_CATEGORY_TOTAL`
+  outcomes — `canonicalized` (`'forró'` against a `"Forró"` vocabulary),
+  **`unchanged`** (`'Forró'` against the same vocabulary), `off_vocabulary`
+  (`'brega'`) and `absent` (null) — so no label in that counter's declared
+  set is unexercised (N3).
 - `tests/test_event_occurrence_end.py` (new) — `resolve_occurrence_end` as a
   parametrised pure-input matrix over all **six** outcomes on **both**
   branches, explicitly including:
@@ -1120,15 +1308,16 @@ Pytest unit tests:
   False for `post_type` in `menu`/`promotion`/`food`/`other` with every
   other criterion passing. (Guards the removal path's mechanism.)
 - `tests/test_event_extraction_prompt_kind.py` (new) — an OFFLINE assertion
-  that both `EXTRACTION_PROMPT` and `MULTI_EVENT_EXTRACTION_PROMPT` contain
-  all three paragraphs of the what-repeats test, and that they contain them
-  because both interpolate `_KIND_FIELD_DOC` (assert on the shared constant,
-  then on both prompts). This is the anti-drift guard CLAUDE.md asks for; it
-  asserts wiring, not model behaviour. It asserts the THIRD paragraph
-  specifically — the "food and price do not decide this by themselves" one —
-  because that is the paragraph revision 1 lacked, and an edit that trims
-  the clause back to revision 1's shape must fail a test, not only an eval
-  someone might skip.
+  that both `EXTRACTION_PROMPT` and `MULTI_EVENT_EXTRACTION_PROMPT` carry the
+  what-is-announced test, and that they carry it because both interpolate
+  `_KIND_FIELD_DOC` (assert on the shared constant, then on both prompts).
+  This is the anti-drift guard CLAUDE.md asks for; it asserts wiring, not
+  model behaviour. It asserts **the closing sentence specifically** — the
+  "food or a price mentioned ALONGSIDE one of those does not change the
+  answer" one — because that single sentence is what keeps all four
+  protected shapes (§1a), and an edit that trims it must fail a test, not
+  only an eval someone might skip. It asserts the FOOD and PRICE bullets
+  too, so a revision cannot delete the suppression half either.
 
 Manual or integration checks:
 
@@ -1155,24 +1344,56 @@ Manual or integration checks:
   nothing, and emits the fixture JSON. **It is the same script Path B0 in §4
   re-uses with `--handles`.**
 
+  **The expected label must be assigned FROM THE CAPTION, and the captions
+  must be READ before the fixture is checked in.** Revision 2 built the
+  fixture from raw captions but took each row's expected `kind` from the
+  census — which is post-extraction prose (`title`, `description`,
+  `category`, `recurrence_text`), i.e. the previous run's own output. That
+  is circular twice over, and worst exactly where it matters: the `menu` and
+  `promotion` labels on the two offenders, which are the entire prediction
+  this round rests on, were themselves inferred from prose the model wrote.
+  The script therefore emits the caption with **`expected_kind: null`**, and
+  a human reads each of the 21 captions and fills the label in from the
+  CAPTION TEXT alone before check-in. The census may be shown alongside as
+  context; it may not supply the answer.
+
+  **A caption that does not support its census-derived label is a FINDING,
+  not a fixture bug.** If the buffet's raw caption turns out not to read as
+  a menu announcement, or a row the census called a genuine event reads as a
+  standing offer, that changes what this round believes about the corpus —
+  record it in the plan and re-derive the acceptance table before merging.
+  Do not quietly relabel the row to match the census and move on. The
+  fixture records both values (`census_kind`, `expected_kind`) so any
+  divergence is visible in the diff rather than resolved in someone's head.
+
 - **Prompt eval, resampled — the pre-merge gate for §1.** A checked-in
-  fixture of **34 rows: the RAW CAPTION of all 21 live events** (built as
-  above) **plus the 13 synthetic boundary controls in §5**, each labelled
-  with its expected `kind` — `menu` for the buffet, `promotion` for the
-  happy hour, `event` for the other 19 **including both `Aula de FORRÓ` rows
-  and all three events whose captions mention a promotion**, and each
-  synthetic row's label per §5's table. Synthetic rows are marked
-  `"synthetic": true` in the fixture so nobody mistakes one for production
-  data, and are **blocking on exactly the same terms as the live ones** —
-  they are the only rows that exercise the new clause's risky side at all
-  (§5: the live corpus contains no food-anchored happening).
+  fixture of **31 rows: the RAW CAPTION of all 21 live events** (built as
+  above, each label assigned from the caption text) **plus the 10 synthetic
+  controls in §5**. Of the 31, **30 are blocking and 1 is observed only**:
+
+  | rows | expected | blocking? |
+  |---|---|---|
+  | 18 live events (incl. both `Aula de FORRÓ` rows and all three whose captions mention a promotion) | `event` | yes |
+  | `Buffet de Terça a Domingo` (live) | `menu` | yes |
+  | `QUINTA É DIA DE HAPPY HOUR` (live) | `promotion` | yes |
+  | `Oktoberfest BeerDock` (live) | — | **no — recorded, not gated (§1b)** |
+  | S4, S5, S6, S7, S14 (synthetic) | `event` | yes |
+  | S9, S10, S11, S12, S13 (synthetic) | `menu` / `promotion` per §5 | yes |
+
+  Synthetic rows are marked `"synthetic": true` in the fixture so nobody
+  mistakes one for production data, and are **blocking on exactly the same
+  terms as the live ones** — they are the only rows that exercise the
+  protected boundary at all (§5).
 
   Run against the real model behind `@pytest.mark.live_openai`, deselected
   by default so neither `make test-unit` nor `make test-bdd` acquires a
   network dependency. **Resample 3×**; all three runs must agree, and a
-  single false positive — one row expected `event` that comes back
-  `menu`/`promotion`/`food`/`other` — blocks the merge, live or synthetic.
-  A rule that removes a real event is worse than the defect it fixes.
+  single false positive on a BLOCKING row — one row expected `event` that
+  comes back `menu`/`promotion`/`food`/`other` — blocks the merge, live or
+  synthetic. A rule that removes a real music, karaoke, quiz or family
+  night is worse than the defect it fixes. A `menu`/`promotion` answer on
+  `Oktoberfest BeerDock` does **not** block; it is recorded in the merge
+  note as the measured cost of §0's concession.
 
   Residual limitation, recorded so nobody over-reads a green run: the eval
   sends the caption but not the flyer IMAGE, so a post whose only
@@ -1213,13 +1434,41 @@ Manual or integration checks:
   | tatubola.bar / seubotecorecife / beerdock_recife | 1 each | 1 each | — |
   | **total** | **44** | **35** | |
 
-  Any OTHER venue's count falling is a false positive and is the trigger to
-  revert the §1 paragraph. Re-read at deploy + 1 day and deploy + 7 days,
-  because the prompt fix is forward-only: a regression reaches the feed only
-  as new posts are crawled, so a single post-deploy reading proves nothing
-  about it. `ctradicao` disappearing from the feed entirely is the EXPECTED
-  outcome here, not a defect — it has exactly one event and that event is
-  the buffet.
+  **Why the total is still 35 under the simplified rule**, re-derived rather
+  than carried over. Only two mechanisms can remove a row this round, and
+  neither reaches a food-anchored one:
+
+  1. **Path A** — operator PATCH, at two handles, scoped to already-selectable
+     rows (§4 Step 0). It removes the buffet (6) and the happy hour (3) and
+     nothing else, and — because of the Step-0 scope split — it can only
+     subtract. 44 − 9 = **35**.
+  2. **The §1 prompt change** — forward-only
+     (`plans/260826_skip-already-extracted-posts.md`): no existing row is
+     re-typed unless Path B1 is dispatched, and B1 reaches only `ctradicao`
+     and `downtownbeergarden_`.
+
+  So the concession costs **zero occurrences in this round's table**: the
+  only food-anchored row in the corpus is `Oktoberfest BeerDock`
+  (`beerdock_recife`, 1 occurrence), which is non-recurring, sits at a handle
+  neither path touches, and is therefore unchanged at 1. **N = 35, and the
+  concession's cost is zero here by measurement, not by assumption.** Where
+  it does bite is the forward steady state — the deploy + 7 day re-read
+  below.
+
+  **The watch rule, restated under §0.** A fall at any other venue is
+  triaged, not assumed:
+
+  | what fell | verdict |
+  |---|---|
+  | a music, genre, karaoke, quiz, kids/family or class row | **false positive — revert the §1 clause.** These are §0's protected shapes and §1a's four rows. |
+  | a row whose caption's subject is food or a price | **the accepted cost of §0.** Record the `event_id` and caption in the re-admission follow-up's evidence list. Not a revert trigger. |
+  | anything you cannot classify from its caption in one reading | treat as a false positive until shown otherwise, and read the caption before deciding |
+
+  Re-read at deploy + 1 day and deploy + 7 days, because the prompt fix is
+  forward-only: a regression reaches the feed only as new posts are crawled,
+  so a single post-deploy reading proves nothing about it. `ctradicao`
+  disappearing from the feed entirely is the EXPECTED outcome here, not a
+  defect — it has exactly one event and that event is the buffet.
 - **Metrics check.** `EVENTS_PROJECTION_ENDS_AT_TOTAL{outcome="derived"}`
   and `EVENTS_PROJECTION_RECURRENCE_TEXT_TOTAL{outcome="normalized"}` must
   both be non-zero after a cycle, and `EVENTS_PROJECTION_ERRORS_TOTAL
@@ -1238,12 +1487,27 @@ Manual or integration checks:
   code.
 - `_KIND_FIELD_DOC` is the only prompt constant edited, and a test proves
   both prompts carry the change.
-- The prompt eval passes **3/3 resamples over all 34 rows** — the 21 live
-  events built from their RAW ARCHIVED CAPTIONS plus the 13 synthetic
-  boundary controls — with **zero false positives**: no row expected `event`
-  comes back `menu`, `promotion`, `food` or `other`. Both `Aula de FORRÓ`
-  rows and all eight food-anchored synthetic controls (S1-S8) are included
-  in that zero.
+- The prompt eval passes **3/3 resamples over its 30 BLOCKING rows** — 20
+  live events built from their RAW ARCHIVED CAPTIONS (each label assigned
+  from the caption text, not from the census — see the Test Plan) plus the
+  10 synthetic controls of §5 — with **zero false positives**: no blocking
+  row expected `event` comes back `menu`, `promotion`, `food` or `other`.
+  Both `Aula de FORRÓ` rows and all five protected synthetic controls
+  (S4, S5, S6, S7, S14) are included in that zero. The 31st row,
+  `Oktoberfest BeerDock`, is scored but **not gated** (§0/§1b) and its
+  answer is recorded in the merge note.
+- **The accepted cost is stated in the plan and its re-admission is a named
+  follow-up.** §1b names the sacrificed shapes and the single live row
+  (`Oktoberfest BeerDock`, `evt_01KZVGAW45PBBRKGEGE4W6SG90`); "Follow-ups"
+  names the re-admission work. A round that suppresses food-anchored events
+  without both of those recorded has made a silent regression, not a trade.
+- **Path A wrote only to rows that were already selectable.** For every
+  `event_id` PATCHed or confirmed, the Step-0 record shows
+  `status ∈ {accepted, confirmed}`, `post_type == "event"`, a non-null
+  `venue_id` and a null `superseded_by` BEFORE the write. No
+  `pending_review`, `rejected`, `extraction_failed` or superseded row was
+  confirmed. Verified from the Step-0 list, not from memory — the confirm is
+  one-way and has no rollback through the admin API (§4).
 - `EVENT_EXTRACTION_SUPPRESSED_RECURRING_TOTAL` exists, is zero-filled at
   import over its four `kind` labels, and has a unit test proving it counts
   a recurring `menu` answer and does not count a recurring `event` one.
@@ -1296,8 +1560,15 @@ Manual or integration checks:
   values; zero occurrences whose `category` is `buffet` or `happy hour`.
 - **Per-venue occurrence counts match the Test Plan's baseline table
   exactly** at deploy + 1 day and deploy + 7 days: `ctradicao` 6 → 0,
-  `downtownbeergarden_` 6 → 3, city total 44 → 35, and **every other venue
-  unchanged**. A fall anywhere else is a false positive and reverts §1.
+  `downtownbeergarden_` 6 → 3, **city total 44 → 35**, and **every other
+  venue unchanged** — including `beerdock_recife` at 1, which the
+  concession does not cost this round (the arithmetic is re-derived in the
+  Test Plan). A count ABOVE 35, or a new `event_id` at either handle, means
+  a queue row was confirmed in error (§4 Rollback).
+  A fall anywhere else is triaged by caption per the Test Plan's watch-rule
+  table: a protected shape falling reverts §1; a food- or price-subject
+  caption falling is §0's accepted cost and is recorded in the follow-up's
+  evidence list, not reverted.
 - No feature flag, no new setting, no new admin-config key.
 
 ## Review findings — disposition
@@ -1307,8 +1578,18 @@ against the shipped code and the production census before acting, and either
 FIXED here or REJECTED in writing. Two of the four verifications turned up
 something the reviewer had not seen; both are recorded.
 
-### F01 [BLOCKER] — the rescue clause is too narrow. **FIXED, and the
-finding was understated.**
+### F01 [BLOCKER] — the rescue clause is too narrow. **FIXED in revision 2;
+the FIX is SUPERSEDED by §0 in revision 3.**
+
+> Revision 2 answered F01 by widening the rescue until every food-anchored
+> shape survived. §0 has since withdrawn the requirement that they survive,
+> so the widening is gone and the eight food-anchored controls with it. The
+> half of F01 that still binds — `karaoke`, `quiz / trivia` and
+> `kids / family` were unrescued by revision 1 — is still fixed, by §1's
+> closing sentence and §1a's four-row table, and still gated (S4, S5, S7).
+> The revision-2 text below is kept for the audit trail.
+
+**FIXED, and the finding was understated.**
 
 Verified: `app/models/post_category.py:39-45` ships `food festival` and
 `tasting` as first-class event categories, and revision 1's clause ("if what
@@ -1376,8 +1657,12 @@ a latent hazard, not a live one — which is why a BDD scenario, not a
 production check, pins it.
 
 ### F12 [MINOR] — no positive boundary case for a food-centred event.
-**FIXED**, by the same 13 synthetic controls F01 required; §5 states
-explicitly that this is the one boundary the live corpus cannot exercise.
+**WITHDRAWN in revision 3.** Revision 2 fixed it with 13 synthetic controls,
+8 of them food-anchored. §0 concedes that boundary, so the food-anchored
+controls (S1, S2, S3, S8) are deleted rather than left as dead weight, and
+the shapes they gated are named as accepted cost in §1b. The finding is not
+carried as open: under §0 it is not a defect. The *other* boundary — the
+four protected shapes — is still gated, by S4, S5, S6, S7 and S14.
 
 ### F18 [MINOR] — `dropped_inverted` is applied to non-inversions.
 **FIXED.** Verified both halves: a zero-length interval is not an inversion,
@@ -1396,6 +1681,102 @@ contract table, mobile's D15), gives the replacement wording, and states
 that the defensive null handling in both sibling plans is correct and must
 stay — `category` IS nullable in the contract; only the evidence cited for
 it was wrong.
+
+## Revision 3 — the operator decision and the round-2 findings
+
+### S1 — simplify the non-event rule. **DONE, as an operator decision, not a review fix.**
+
+§0 records the decision verbatim, what it buys, the two boundaries it does
+NOT cross, and a table of exactly what was deleted and why. §1 collapses the
+clause from three paragraphs (~260 input tokens) to one question, two
+bullets and two closing sentences (~130). §1a replaces the 18-row vocabulary
+audit with the four shapes the concession does not cover. §1b states the
+cost and names `Oktoberfest BeerDock` as its one live casualty. §5 drops the
+four food-anchored controls and adds S14 (`todo sábado tem sertanejo, chopp
+em dobro`) because the sertanejo-with-a-price shape is the one the operator
+named by hand and revision 2 had no control for.
+
+**Re-derived acceptance number: N is still 35, and the derivation is now in
+the plan rather than inherited.** The reviewer expected it to move. It does
+not, and the reason is mechanical rather than lucky: this round removes rows
+by exactly two mechanisms — Path A (two handles, already-selectable rows
+only) and a forward-only prompt change that re-types no existing row — and
+the corpus contains exactly one food-anchored row, `Oktoberfest BeerDock`,
+which is non-recurring and sits at a handle neither mechanism touches. 44 −
+6 (`ctradicao`) − 3 (the happy hour) = **35**, with `beerdock_recife`
+unchanged at 1. What the concession actually costs is in the FORWARD steady
+state, so the cost is booked where it is really paid: the deploy + 7 day
+re-read now triages a fall by caption subject instead of treating every fall
+as a revert trigger, and §1b names what will stop arriving.
+
+### N1 [MAJOR] — Path A can inflate the feed through a one-way state change. **CONFIRMED — fixed.**
+
+Verified end to end: `list_events` passes `status` straight through and
+`rds_venue_store.py:1313-1315` adds the clause only when it is not None, so
+Step 0's deliberate `status=None` returns `pending_review`, `rejected`,
+`extraction_failed` and superseded rows; `SELECTABLE_STATUSES = ("accepted",
+"confirmed")` at `event_projection_selection.py:32`, so confirming any of
+them makes it selectable; and `EventPatch` (`admin_events_router.py:327-347`)
+has no `status` field while the router exposes only `confirm` and `reject` —
+the transition really is one-way. Path A as written said "for each row in
+the Step-0 list", which is the whole unfiltered set. Fixed by splitting
+enumeration from action in §4 Step 0: the query stays unfiltered (reading
+the blast radius is the point), the ACTION set is restricted to
+already-selectable rows, the status is re-read immediately before each
+write, the acceptance table gains an above-35 failure mode, and the rollback
+section records that there is no un-confirm through the API and what to do
+if one happens anyway.
+
+### N2 [MINOR] — the eval's expected labels come from the wrong source. **CONFIRMED — fixed.**
+
+Revision 2 built the fixture from raw captions but assigned each expected
+`kind` from the census, which is post-extraction prose — the model's own
+prior output — including the `menu`/`promotion` labels on the two offenders
+that the entire round's prediction rests on. Fixed in the Test Plan: the
+builder emits `expected_kind: null`, a human reads all 21 captions and
+assigns the label from the caption text before check-in, the fixture carries
+`census_kind` alongside `expected_kind` so any divergence shows up in the
+diff, and a caption that does not support its census-derived label is
+recorded as a **FINDING** that re-opens the acceptance table, never quietly
+relabelled.
+
+### N3 [MINOR] — `EVENTS_PROJECTION_CATEGORY_TOTAL{outcome="unchanged"}` is declared but unexercised. **CONFIRMED — fixed by exercising it.**
+
+Confirmed against revision 2: the label appeared in the counter's declared
+set and in no scenario, no Examples row and no unit test, in a plan whose
+stated posture is that a zero-filled label's presence is the evidence — so
+it asserted nothing. **Exercised rather than dropped**, because it carries a
+real distinction the sibling `recurrence_text` counter already draws
+(`normalized` vs `unchanged`): `canonicalized` means the vocabulary rewrote
+the stored spelling, `unchanged` means the two already agreed. All four
+labels are now defined in Error Handling And Observability, a BDD scenario
+and an Examples row cover `unchanged`, and the projector unit test asserts
+it.
+
+### N4 — "the thin food boundary is under-tested". **DISSOLVED, not fixed.**
+
+Under §0 this is not a defect. Suppressing a genuine food-anchored event is
+the accepted cost of the simplest rule that reliably kills the standing-offer
+class. It is recorded as such in §0 and §1b, with the sacrificed shapes named
+and re-admission carried as a follow-up. It is not carried as an open finding
+and no gate defends that boundary any more.
+
+## Follow-ups
+
+- **Re-admit food-anchored events.** §0's concession is deliberate and
+  reversible; this is the work that reverses it. Evidence to gather first:
+  the recorded `Oktoberfest BeerDock` eval answer, and every `event_id` the
+  deploy + 7 day watch rule books as an accepted-cost fall. Cheapest first
+  step, if the cost turns out to be higher than expected: scope §1's
+  food/price test to STANDING cadences only, which restores one-off dated
+  food posts without restoring revision 2's tie-break. The full restoration
+  is revision 2's third paragraph, which remains in this file's history.
+  Reversal per existing row needs no code: `PATCH /admin/events/{id}` with
+  `post_type: "event"` re-projects it on the next 2-minute cycle (pinned by
+  a BDD scenario in the Test Plan).
+- **The events category index** — `events_category_v1:<city_slug>` and
+  `events_city_categories_v1:<city_slug>`, shapes pinned in "The
+  events-filter question", deliberately not built in 1.4.1.
 
 ## Open Questions
 
