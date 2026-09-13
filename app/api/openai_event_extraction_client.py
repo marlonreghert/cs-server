@@ -44,6 +44,36 @@ from app.models.taxonomy import TAXONOMY, validate_category_labels
 logger = logging.getLogger(__name__)
 
 ENDPOINT = "event_extract"
+# plans/260912_events-venue-night-duplication.md §G: title-pick spend must
+# NEVER be conflated with extraction spend — one is a vision call per
+# qualifying post, the other a small text-only call per ambiguous merge
+# GROUP, and a dashboard that adds them together can answer neither
+# "is extraction getting more expensive" nor "is the title pass worth it".
+ENDPOINT_TITLE_PICK = "event_title_pick"
+# A display title is a card headline. 160 output tokens is generous for
+# `{"display_title": "..."}` and small enough that a model answering with a
+# paragraph is truncated into a rejection rather than billed for an essay.
+TITLE_PICK_MAX_COMPLETION_TOKENS = 160
+
+# The prompt's own load-bearing sentence is pinned by a wiring guard
+# (tests/test_event_display_title.py, in the shape of
+# tests/test_event_extraction_prompt_kind.py): the model must choose ONLY
+# from what these posts say. Everything downstream — the validation gate that
+# refuses a distinctive token no source contained — exists because a model
+# asked to "write a good title" will happily invent an act name.
+TITLE_PICK_PROMPT = """You are given several Instagram posts that all announce THE SAME NIGHT at one venue.
+
+Choose ONE short display title for that night, in Portuguese.
+
+Rules:
+- Choose only from what these posts say. Do not invent a name, an act, a
+  performer or a number that does not appear in the titles or line-up below.
+- You may select one of the titles, shorten it, or combine words that appear
+  in them.
+- Keep it under 120 characters. No emoji, no hashtags, no venue address.
+- Do not add the venue's own name if none of the titles used it.
+
+Answer with JSON only: {"display_title": "..."}"""
 DEFAULT_MODEL = "gpt-5.6-luna"
 # Reasoning tokens (gpt-5.6 is a reasoning model) count against
 # max_completion_tokens, so this carries real headroom above a typical
@@ -809,9 +839,79 @@ class OpenAIEventExtractionClient:
             logger.error(f"[OpenAIEventExtraction] multi-event call failed: {e}")
             raise
 
+    async def pick_display_title(
+        self, *, venue_name, local_date, source_titles: list, lineup: Optional[list] = None,
+    ) -> str:
+        """plans/260912_events-venue-night-duplication.md §G: ONE text-only
+        call per ambiguous merge GROUP — never per pair, never per post, and
+        never inside the merge decision (the merge path is synchronous and
+        this is async; see app.services.event_display_title's own docstring
+        for why that separation is architectural rather than a convention).
+
+        Returns the RAW response text. Parsing AND the deterministic
+        validation gate are the caller's, so a malformed or fabricated answer
+        is rejected rather than partially written — the same posture
+        `extract`/`extract_events` already take.
+
+        Counted under its OWN `endpoint` label so title-pick spend can never
+        be confused with extraction spend.
+        """
+        prompt = build_title_pick_prompt(
+            venue_name=venue_name, local_date=local_date,
+            source_titles=source_titles, lineup=lineup or [],
+        )
+        start = time.perf_counter()
+        try:
+            response = await self.client.chat.completions.create(
+                model=self.model,
+                messages=[{"role": "user", "content": prompt}],
+                **sampling_kwargs(self.model, 0.1),
+                max_completion_tokens=TITLE_PICK_MAX_COMPLETION_TOKENS,
+                response_format={"type": "json_object"},
+            )
+            duration = time.perf_counter() - start
+            OPENAI_API_CALL_DURATION_SECONDS.labels(endpoint=ENDPOINT_TITLE_PICK).observe(duration)
+            OPENAI_API_CALLS_TOTAL.labels(endpoint=ENDPOINT_TITLE_PICK, status="success").inc()
+            if response.usage:
+                OPENAI_TOKENS_TOTAL.labels(endpoint=ENDPOINT_TITLE_PICK, direction="input").inc(
+                    response.usage.prompt_tokens or 0
+                )
+                OPENAI_TOKENS_TOTAL.labels(endpoint=ENDPOINT_TITLE_PICK, direction="output").inc(
+                    response.usage.completion_tokens or 0
+                )
+            return response.choices[0].message.content or ""
+        except Exception as e:
+            duration = time.perf_counter() - start
+            OPENAI_API_CALL_DURATION_SECONDS.labels(endpoint=ENDPOINT_TITLE_PICK).observe(duration)
+            OPENAI_API_CALLS_TOTAL.labels(endpoint=ENDPOINT_TITLE_PICK, status="error").inc()
+            logger.error(f"[OpenAIEventExtraction] title-pick call failed: {e}")
+            raise
+
+
+def build_title_pick_prompt(
+    *, venue_name, local_date, source_titles, lineup,
+) -> str:
+    """The whole user message for one title pick — TEXT ONLY: no image, no S3
+    read, no presigned URL. Everything the model needs is already stored."""
+    lines = [TITLE_PICK_PROMPT, ""]
+    lines.append(f"Venue: {venue_name or '(unknown)'}")
+    lines.append(f"Date: {local_date or '(unknown)'}")
+    lines.append("")
+    lines.append("Post titles:")
+    for title in source_titles:
+        lines.append(f"- {title}")
+    if lineup:
+        lines.append("")
+        lines.append("Line-up named across these posts:")
+        for name in lineup:
+            lines.append(f"- {name}")
+    return "\n".join(lines)
+
 
 __all__ = [
     "OpenAIEventExtractionClient", "EventExtractionParseError",
+    "ENDPOINT", "ENDPOINT_TITLE_PICK", "TITLE_PICK_PROMPT",
+    "TITLE_PICK_MAX_COMPLETION_TOKENS", "build_title_pick_prompt",
     "parse_extraction_response", "parse_multi_event_extraction_response",
     "compute_multi_event_max_completion_tokens",
     "DEFAULT_MODEL", "DEFAULT_MAX_COMPLETION_TOKENS",

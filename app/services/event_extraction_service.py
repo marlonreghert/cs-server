@@ -61,6 +61,7 @@ from app.metrics import (
     EVENT_EXTRACTION_POSTS_TOTAL,
     EVENT_EXTRACTION_SUPERSEDED_TOTAL,
     EVENT_EXTRACTION_SUPPRESSED_RECURRING_TOTAL,
+    EVENT_VENUE_LINK_TOTAL,
 )
 from app.models.date_resolution_config import load_date_year_roll_grace_days
 from app.models.event_kind import (
@@ -87,6 +88,8 @@ from app.services.event_date_resolver import (
     select_date_interpretation_for_reuse,
     vote_on_sibling_years,
 )
+from app.services.event_dedup_backlog import publish_dedup_backlog_gauges
+from app.services.event_display_title import EventDisplayTitleService
 from app.services.event_identity import normalize_title
 from app.services.event_merge import merge_touched_events
 from app.services.event_reconciliation import (
@@ -98,11 +101,19 @@ from app.services.event_reconciliation import (
     reconcile_post_events,
     update_events_gauge,
 )
+from app.services.event_attribution_dispute import (
+    REVIEW_REASON_LOCATION_TEXT_DISPUTES_VENUE,
+    evaluate_attribution_dispute,
+    fold_review_reason,
+    load_attribution_dispute_config,
+)
 from app.services.event_venue_resolution import (
     DEFAULT_CONFIDENCE_FLOOR as VENUE_RESOLUTION_DEFAULT_CONFIDENCE_FLOOR,
     DEFAULT_MARGIN as VENUE_RESOLUTION_DEFAULT_MARGIN,
+    RESOLUTION_AUTO,
     build_handle_index,
     build_location_text_attribute_fn,
+    build_venue_catalog,
     candidate_venues_for_ids,
 )
 from app.services.event_venue_targeting import (
@@ -603,6 +614,18 @@ class EventExtractionService:
         self.venue_resolution_confidence_floor = venue_resolution_confidence_floor
         self.venue_resolution_margin = venue_resolution_margin
         self.redis_client = redis_client
+        # plans/260912_events-venue-night-duplication.md §C: the servable
+        # catalog + reverse handle index the attribution-dispute rule runs
+        # its ladder against. Built LAZILY and at most ONCE per run — never
+        # per post — and only when a post actually yields an event with a
+        # non-empty `location_text`, so a handle whose posts never name a
+        # location pays nothing at all for this feature.
+        self._dispute_context = None
+        # plans/260912_events-venue-night-duplication.md §G: every event id
+        # THIS RUN touched, accumulated across posts so the display-title
+        # pass runs ONCE per run over the surviving canonical rows — never
+        # per post, and never inside the (synchronous) merge.
+        self._run_touched_event_ids: list = []
 
     def _resolve_venue_ids(self, cfg: dict) -> list[str]:
         if cfg["eligibility_mode"] == "venue_ids":
@@ -618,10 +641,25 @@ class EventExtractionService:
         handle = getattr(instagram, "instagram_handle", None) if instagram else None
         return handle or venue_id
 
+    def _attribution_dispute_context(self) -> tuple:
+        """`(servable catalog, reverse handle index)`, built once per run.
+        Reset at the top of `run()` so a long-lived service instance never
+        serves a stale catalog to a later run."""
+        if self._dispute_context is None:
+            self._dispute_context = (
+                build_venue_catalog(self.venue_dao), build_handle_index(self.venue_dao),
+            )
+        return self._dispute_context
+
     async def run(self, config: Optional[dict] = None) -> dict:
         cfg = parse_event_extraction_config(config, default_min_confidence=self.min_confidence)
         now = self._now()
         since = now - timedelta(days=cfg["lookback_days"])
+        # A fresh catalog/handle index per run (see
+        # `_attribution_dispute_context`) — a venue added since the last run
+        # must be visible to this one's dispute rule.
+        self._dispute_context = None
+        self._run_touched_event_ids = []
 
         outcome_counts: dict[str, int] = {}
 
@@ -660,7 +698,18 @@ class EventExtractionService:
                     _bump(outcome, kind_label)
 
         if not cfg["dry_run"]:
+            # §G: the display-title pass, LAST — after every post's own merge
+            # has settled, so a title is never chosen for a group that is
+            # about to grow. Gated by `event_display_title_enabled` (false by
+            # default) inside the service itself, and it never raises: an
+            # OpenAI failure here must not fail an otherwise-successful run.
+            await self._run_display_title_pass()
             update_events_gauge(self.venue_dao)
+            # plans/260912_events-venue-night-duplication.md §A: the
+            # duplicate/refusal/attribution backlog, pushed alongside
+            # EVENTS_TOTAL from the same end-of-run point and in the same
+            # shape. Never fails the run — see the function's own docstring.
+            publish_dedup_backlog_gauges(self.venue_dao, redis_like=self.redis_client)
 
         return {
             "qualifying_posts": qualifying_posts,
@@ -671,6 +720,17 @@ class EventExtractionService:
             # Additive, mode="handles" only — see HANDLE_OUTCOME_* above.
             "handles": handle_reports,
         }
+
+    async def _run_display_title_pass(self) -> None:
+        if not self._run_touched_event_ids:
+            return
+        service = EventDisplayTitleService(
+            self.venue_dao, self.openai_client, redis_client=self.redis_client,
+        )
+        try:
+            await service.run_for_events(self._run_touched_event_ids)
+        except Exception as e:  # pragma: no cover - defensive
+            logger.warning(f"[EventExtraction] display-title pass failed: {e}")
 
     async def _run_handles(
         self, cfg: dict, since: datetime, bump, handle_reports: list[dict],
@@ -1209,11 +1269,82 @@ class EventExtractionService:
         # case). `_run_handles`' multi-venue branch passes the SAME
         # resolution-ladder closure PromoterCrawlService._process_post uses
         # instead (plans/260811_extract-by-handle.md).
+        # plans/260912_events-venue-night-duplication.md §C (Defect 2): the
+        # posting venue is still the answer for the overwhelming majority of
+        # rows and STAYS the answer unless this event's OWN text is
+        # identity-grade evidence for a DIFFERENT catalog venue. Both halves
+        # of the new behaviour are gated and ship off-by-default:
+        # `event_attribution_dispute_action` ("flag") leaves `venue_id`
+        # exactly where it was, and `event_attribution_dispute_withhold_
+        # enabled` (false) stops the recorded reason from withdrawing the
+        # row from serving. With neither set, this branch changes no stored
+        # column except adding a review-reason token and a ranked candidate
+        # an operator can act on.
+        dispute_config = load_attribution_dispute_config(self.redis_client)
+
         if attribute_fn is not None:
             _attribute = attribute_fn
         else:
             def _attribute(fields: dict, event_id: str) -> tuple[dict, Optional[Callable[[], None]]]:
-                return {"venue_id": venue_id}, None
+                result_fields: dict = {"venue_id": venue_id}
+                location_text = fields.get("location_text")
+                verdict = None
+                if venue_id and location_text:
+                    venues, handle_index = self._attribution_dispute_context()
+                    verdict = evaluate_attribution_dispute(
+                        mapped_venue_id=venue_id, location_text=location_text,
+                        venues=venues, handle_index=handle_index,
+                        location_tag=post.location_tag, promoter_handle=handle,
+                    )
+                if verdict is None:
+                    return result_fields, None
+
+                if dispute_config.reattributes and verdict.has_target:
+                    # Adopt the ladder's answer, writing the four link
+                    # columns exactly as `build_location_text_attribute_fn`
+                    # already does for the multi-venue path. No review
+                    # reason: the dispute is RESOLVED, not outstanding.
+                    result_fields.update({
+                        "venue_id": verdict.target_venue_id,
+                        "location_resolution": RESOLUTION_AUTO,
+                        "location_confidence": verdict.confidence,
+                        "linked_by": verdict.method,
+                        "linked_at": now,
+                    })
+                else:
+                    result_fields["review_reason"] = fold_review_reason(
+                        fields.get("review_reason"),
+                        REVIEW_REASON_LOCATION_TEXT_DISPUTES_VENUE,
+                    )
+
+                def _on_persisted() -> None:
+                    # The ranked candidate is what makes the default `flag`
+                    # action actionable: the operator accepts it through the
+                    # EXISTING POST /admin/events/{event_id}/link. No new
+                    # admin verb, no new merge path.
+                    if verdict.candidates:
+                        self.venue_dao.replace_event_venue_link_candidates(event_id, [
+                            {
+                                "venue_id": c.venue_id, "rank": rank, "score": c.score,
+                                "method": c.method, "evidence": c.evidence,
+                            }
+                            for rank, c in enumerate(verdict.candidates, start=1)
+                        ])
+                    EVENT_VENUE_LINK_TOTAL.labels(
+                        method=verdict.method, result="disputed",
+                    ).inc()
+
+                # The venue-acquisition backlog, logged the same way
+                # `_venue_not_in_catalog_result` already logs its own: the
+                # most frequently named unknown place is the venue most
+                # worth adding next. Never the raw model payload.
+                logger.info(
+                    "[EventExtraction] attribution disputed: handle=%s mapped_venue=%s "
+                    "location_text=%r method=%s proposed_venue=%s action=%s",
+                    handle, venue_id, verdict.location_text, verdict.method,
+                    verdict.target_venue_id, dispute_config.action,
+                )
+                return result_fields, _on_persisted
 
         touched_event_ids: list[str] = []
         reconcile_post_events(
@@ -1227,6 +1358,14 @@ class EventExtractionService:
             attribute=_attribute,
             touched_event_ids=touched_event_ids,
             min_confidence=cfg["min_confidence"],
+            # §C: with withholding disabled (the shipped default) the
+            # dispute is recorded on the row, in the metric and in the
+            # backlog report, and the row's status is computed EXACTLY as
+            # today — no content is withdrawn by this deploy.
+            non_withholding_reasons=(
+                () if dispute_config.withhold_enabled
+                else (REVIEW_REASON_LOCATION_TEXT_DISPUTES_VENUE,)
+            ),
         )
         # Recognise a countdown campaign — several posts announcing the SAME
         # night — the moment this post's own events are persisted, so a
@@ -1234,6 +1373,7 @@ class EventExtractionService:
         # already established. See plans/260807_one-event-many-posts.md.
         if touched_event_ids:
             merge_touched_events(self.venue_dao, touched_event_ids, now, redis_like=self.redis_client)
+            self._run_touched_event_ids.extend(touched_event_ids)
 
         # plans/260811_extract-by-handle.md §Error Handling: count a row THIS
         # call's own reconciliation moved to superseded, labeled by what

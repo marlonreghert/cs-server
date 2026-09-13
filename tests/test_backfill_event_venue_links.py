@@ -46,6 +46,7 @@ from app.services.event_venue_resolution import (
     VenueLite,
 )
 from scripts.backfill_event_venue_links import (
+    MODE_DISPUTED_LOCATION_TEXT,
     ArithmeticImbalance,
     DependencyNotLanded,
     Report,
@@ -469,3 +470,162 @@ class TestExpectedPostFixShape:
         assert report.repointed == 2
         assert report.detached_venue_not_in_catalog == 3
         assert METHOD_NAME_MATCH not in report.after_linked_by
+
+
+# ── plans/260912_events-venue-night-duplication.md §C: the SECOND selection ──
+class TestDisputedLocationTextMode:
+    """`--mode disputed-location-text` is a second SELECTION over the same
+    repair engine, never a second implementation of the rule. These tests pin
+    the property a BDD scenario cannot show directly: the two modes can never
+    select the same row, and the dispute rule reaching this script is the one
+    the live pipeline uses."""
+
+    def _chain(self):
+        from app.models.venue import Venue as _Venue
+
+        dao = _dao()
+        dao.upsert_venue(_Venue(
+            venue_id="v_bv", venue_name="BeerDock Boa Viagem", venue_lat=-8.12, venue_lng=-34.90,
+            venue_address="Av. Cons. Aguiar, 1000 - Boa Viagem, Recife - PE",
+        ))
+        dao.upsert_venue(_Venue(
+            venue_id="v_cf", venue_name="BeerDock Casa Forte", venue_lat=-8.03, venue_lng=-34.91,
+            venue_address="Av. Rui Barbosa, 500 - Casa Forte, Recife - PE",
+        ))
+        dao.set_venue_instagram(VenueInstagram(
+            venue_id="v_bv", instagram_handle="beerdock_recife", status="found",
+        ))
+        return dao
+
+    def _venue_post_row(self, dao, location_text, **overrides):
+        # Exactly what the fixed venue-post path stores: a venue, and NONE of
+        # the four link columns.
+        return _insert(
+            dao, venue_id="v_bv", location_text=location_text,
+            source_kind="venue_post", source_handle="beerdock_recife",
+            location_resolution=None, location_confidence=None,
+            linked_by=None, linked_at=None, post_type="event", **overrides
+        )
+
+    def test_the_disputed_mode_repoints_a_casa_forte_row_to_the_casa_forte_venue(self):
+        dao = self._chain()
+        event_id = self._venue_post_row(dao, "CASA FORTE")
+
+        report = run_backfill(
+            dao, apply=True, now=_NOW, mode=MODE_DISPUTED_LOCATION_TEXT,
+        )
+
+        assert report.repointed == 1, report.rows
+        assert dao.get_event(event_id)["venue_name"] == "BeerDock Casa Forte"
+
+    def test_the_disputed_mode_never_selects_a_row_any_rung_decided(self):
+        dao = self._chain()
+        # A `linked_by = handle_mention` row is the DEFAULT mode's own
+        # population; the disputed mode must not touch it.
+        _insert(dao, venue_id="v_bv", location_text="CASA FORTE")
+
+        report = run_backfill(dao, apply=False, now=_NOW, mode=MODE_DISPUTED_LOCATION_TEXT)
+        assert report.selected == 0, report.rows
+
+    def test_the_default_mode_never_selects_a_venue_post_row(self):
+        dao = self._chain()
+        self._venue_post_row(dao, "CASA FORTE")
+
+        report = run_backfill(dao, apply=False, now=_NOW)
+        assert report.selected == 0, report.rows
+
+    def test_the_disputed_mode_is_idempotent(self):
+        dao = self._chain()
+        self._venue_post_row(dao, "CASA FORTE")
+
+        run_backfill(dao, apply=True, now=_NOW, mode=MODE_DISPUTED_LOCATION_TEXT)
+        second = run_backfill(dao, apply=True, now=_NOW, mode=MODE_DISPUTED_LOCATION_TEXT)
+
+        assert second.repointed == 0, second.rows
+        assert second.flagged == 0, second.rows
+
+    def test_an_undisputed_row_is_left_alone(self):
+        dao = self._chain()
+        event_id = self._venue_post_row(dao, "Boa Viagem")
+
+        report = run_backfill(dao, apply=True, now=_NOW, mode=MODE_DISPUTED_LOCATION_TEXT)
+
+        assert report.repointed == 0 and report.flagged == 0, report.rows
+        assert dao.get_event(event_id)["venue_id"] == "v_bv"
+
+    def test_an_unknown_branch_is_flagged_and_keeps_its_venue(self):
+        dao = self._chain()
+        event_id = self._venue_post_row(dao, "@beerdock.madalena")
+
+        report = run_backfill(dao, apply=True, now=_NOW, mode=MODE_DISPUTED_LOCATION_TEXT)
+
+        assert report.flagged == 1, report.rows
+        row = dao.get_event(event_id)
+        assert row["venue_id"] == "v_bv", "there is nowhere to move an unknown branch to"
+        assert "location_text_disputes_venue" in (row.get("review_reason") or "")
+        assert dict(report.venue_acquisition_backlog).get("beerdock.madalena") == 1
+
+    def test_a_flagged_row_keeps_its_status_unless_withholding_is_asked_for(self):
+        dao = self._chain()
+        event_id = self._venue_post_row(dao, "@beerdock.madalena")
+
+        run_backfill(dao, apply=True, now=_NOW, mode=MODE_DISPUTED_LOCATION_TEXT)
+        assert dao.get_event(event_id)["status"] == "accepted"
+
+    def test_withhold_disputed_moves_a_flagged_row_out_of_serving(self):
+        dao = self._chain()
+        event_id = self._venue_post_row(dao, "@beerdock.madalena")
+
+        run_backfill(
+            dao, apply=True, now=_NOW, mode=MODE_DISPUTED_LOCATION_TEXT,
+            withhold_disputed=True,
+        )
+        assert dao.get_event(event_id)["status"] == "pending_review"
+
+    def test_an_operator_edited_venue_is_skipped(self):
+        dao = self._chain()
+        event_id = self._venue_post_row(
+            dao, "CASA FORTE", operator_edited_fields=["venue_id"],
+        )
+
+        report = run_backfill(dao, apply=True, now=_NOW, mode=MODE_DISPUTED_LOCATION_TEXT)
+
+        assert report.skipped_by_reason["operator_edited_venue"] == 1
+        assert dao.get_event(event_id)["venue_id"] == "v_bv"
+
+    def test_two_identical_rows_are_both_repointed_and_neither_is_merged(self):
+        dao = self._chain()
+        a = self._venue_post_row(dao, "CASA FORTE", title="SAMBINHA", shortcode="sc_a")
+        b = self._venue_post_row(dao, "CASA FORTE", title="SAMBINHA", shortcode="sc_b")
+
+        run_backfill(dao, apply=True, now=_NOW, mode=MODE_DISPUTED_LOCATION_TEXT)
+
+        # A collision is WRITTEN and REPORTED, never merged — this script
+        # must never call merge_touched_events (its own module docstring).
+        assert dao.get_event(a)["venue_id"] == "v_cf"
+        assert dao.get_event(b)["venue_id"] == "v_cf"
+        assert dao.get_event(a)["status"] != "superseded"
+        assert dao.get_event(b)["status"] != "superseded"
+
+    def test_the_disputed_mode_never_touches_title_or_start_time(self):
+        dao = self._chain()
+        event_id = self._venue_post_row(dao, "CASA FORTE", title="SAMBINHA")
+        before = dao.get_event(event_id)
+
+        run_backfill(dao, apply=True, now=_NOW, mode=MODE_DISPUTED_LOCATION_TEXT)
+
+        after = dao.get_event(event_id)
+        assert after["title"] == before["title"]
+        assert after["starts_at"] == before["starts_at"]
+
+    def test_the_balance_check_accounts_for_flagged_rows(self):
+        dao = self._chain()
+        self._venue_post_row(dao, "CASA FORTE")
+        self._venue_post_row(dao, "@beerdock.madalena")
+        self._venue_post_row(dao, "Boa Viagem")
+
+        report = run_backfill(dao, apply=False, now=_NOW, mode=MODE_DISPUTED_LOCATION_TEXT)
+
+        assert report.balanced is True
+        assert report.selected == 3
+        assert (report.repointed, report.flagged, report.unchanged) == (1, 1, 1)

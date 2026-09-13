@@ -30,10 +30,43 @@ row changes if the per-event attribution fix has not landed, and after
 writing if the outcome arithmetic does not balance or an UPDATE ever
 reports zero rows affected.
 
+## Two selection modes (plans/260912_events-venue-night-duplication.md §C)
+
+`--mode handle-mention` (the DEFAULT, and byte-for-byte the behaviour this
+script shipped with) selects `linked_by = 'handle_mention'` rows and
+re-decides them through the whole ladder, as described above.
+
+`--mode disputed-location-text` is the HISTORICAL half of 260912's Defect 2:
+it selects rows attributed by the fixed VENUE-POST path (a venue's own post,
+so `linked_by IS NULL` — that path writes no link columns at all) whose own
+stored `location_text` triggers `app.services.event_attribution_dispute.
+evaluate_attribution_dispute`, and repairs them:
+  - a dispute naming a DIFFERENT catalog venue REPOINTS the row to it
+    (`linked_by` records which rung said so);
+  - a dispute naming a place we do not carry (`venue_not_in_catalog`) is
+    FLAGGED with `location_text_disputes_venue` and keeps its venue —
+    there is nowhere to move it to, and detaching it would withdraw a row
+    an operator has not been asked about.
+This mode is a second SELECTION, never a second implementation: the dispute
+rule is imported, so the sweep and the live pipeline can never disagree
+about a row. It keeps every property the default mode has — dry-run
+default, `--apply` to write, idempotent, resumable, no network client
+importable, `operator_edited_fields` always wins — and, critically, it
+still NEVER calls `merge_touched_events`: repaired rows are merged by the
+dedup sweep in 260912 §F, as a separate, separately-guarded step.
+
+`--withhold-disputed` (off by default) lets a flagged row's new review
+reason withhold auto-accept. Off, the reason is recorded and the row's
+status is computed as if it were not there — the SAME default the live
+pipeline's `event_attribution_dispute_withhold_enabled` ships with, so this
+repair cannot quietly withdraw content from serving.
+
 Usage:
     python -m scripts.backfill_event_venue_links                        # dry-run: report only
     python -m scripts.backfill_event_venue_links --apply                # write the repaired links
     python -m scripts.backfill_event_venue_links --apply --since-id X   # resume after event_id X
+    python -m scripts.backfill_event_venue_links --mode disputed-location-text
+    python -m scripts.backfill_event_venue_links --mode disputed-location-text --apply
 
 Capture the dry-run report to a file BEFORE running --apply — it is the
 only record of every changed row's previous venue_id. There is no revert
@@ -78,9 +111,20 @@ from app.services.event_venue_resolution import (
     extract_mentions,
     resolve_event_venue,
 )
+from app.services.event_attribution_dispute import (
+    REVIEW_REASON_LOCATION_TEXT_DISPUTES_VENUE,
+    evaluate_attribution_dispute,
+    fold_review_reason,
+)
 from app.services.instagram_handle_sources import normalize_handle
 
 logger = logging.getLogger("backfill_event_venue_links")
+
+# plans/260912_events-venue-night-duplication.md §C: two SELECTIONS, one
+# repair engine. See this module's docstring.
+MODE_HANDLE_MENTION = "handle-mention"
+MODE_DISPUTED_LOCATION_TEXT = "disputed-location-text"
+MODES = (MODE_HANDLE_MENTION, MODE_DISPUTED_LOCATION_TEXT)
 
 # Skip reasons — plan §B's per-status/per-protection table.
 SKIP_CONFIRMED = "confirmed"
@@ -372,11 +416,161 @@ def decide_one(
     )
 
 
+def decide_one_disputed(
+    event: dict, *, venues: list, handle_index: dict, venue_names_by_id: dict,
+    min_confidence: float, now: datetime, withhold_disputed: bool = False,
+) -> Decision:
+    """`--mode disputed-location-text`'s per-row decision — 260912 §C's
+    historical half. Pure, like `decide_one`: takes and returns plain
+    values, makes no DAO call.
+
+    The SAME skip table as `decide_one` applies first (an operator's
+    confirmation, manual link, or `venue_id` edit always wins), then the
+    dispute rule is IMPORTED, never re-derived, so this repair and the live
+    pipeline can never disagree about a row.
+    """
+    event_id = event["event_id"]
+    status = event.get("status")
+    edited = event.get("operator_edited_fields") or []
+    old_venue_id = event.get("venue_id")
+
+    def _skip(reason: str) -> Decision:
+        return Decision(
+            event_id=event_id, action="skip", skip_reason=reason,
+            old_venue_id=old_venue_id, old_status=status,
+            old_linked_by=event.get("linked_by"),
+            old_location_resolution=event.get("location_resolution"),
+            venue_name_before=event.get("venue_name"),
+        )
+
+    if status == STATUS_CONFIRMED:
+        return _skip(SKIP_CONFIRMED)
+    if event.get("location_resolution") == RESOLUTION_MANUAL:
+        return _skip(SKIP_MANUAL_LINK)
+    if status == STATUS_SUPERSEDED:
+        return _skip(SKIP_SUPERSEDED)
+    if status == _STATUS_EXTRACTION_FAILED:
+        return _skip(SKIP_EXTRACTION_FAILED)
+    if status == _STATUS_REJECTED:
+        return _skip(SKIP_REJECTED)
+    if "venue_id" in edited:
+        return _skip(SKIP_OPERATOR_EDITED_VENUE)
+
+    location_text_input = _location_text_input(event)
+    verdict = evaluate_attribution_dispute(
+        mapped_venue_id=old_venue_id, location_text=location_text_input,
+        venues=venues, handle_index=handle_index,
+        # No `location_tag`: this is a re-decision over ALREADY-STORED text,
+        # and the post's own Instagram tag is not stored on the row. Rungs 1
+        # and 3 are what this repair acts on.
+        location_tag=None, promoter_handle=event.get("source_handle"),
+        operator_edited_fields=edited,
+    )
+
+    old_review_reason = event.get("review_reason")
+    if verdict is None:
+        return Decision(
+            event_id=event_id, action="unchanged",
+            old_venue_id=old_venue_id, new_venue_id=old_venue_id,
+            old_linked_by=event.get("linked_by"), new_linked_by=event.get("linked_by"),
+            old_location_resolution=event.get("location_resolution"),
+            new_location_resolution=event.get("location_resolution"),
+            old_location_confidence=event.get("location_confidence"),
+            new_location_confidence=event.get("location_confidence"),
+            old_review_reason=old_review_reason, new_review_reason=old_review_reason,
+            old_status=status, new_status=status,
+            venue_name_before=event.get("venue_name"),
+            venue_name_after=event.get("venue_name"),
+        )
+
+    if verdict.has_target:
+        new_venue_id = verdict.target_venue_id
+        new_location_resolution = RESOLUTION_AUTO
+        new_location_confidence = verdict.confidence
+        new_linked_by = verdict.method
+        new_linked_at: Optional[datetime] = now
+        # The dispute is RESOLVED by the repoint — recording a reason for
+        # something that is no longer true would queue a row nobody needs
+        # to look at.
+        new_review_reason = old_review_reason
+    else:
+        # `venue_not_in_catalog`: nowhere to move it to. Keep the venue,
+        # record the dispute (plan §C: "never re-attribute ... and never
+        # silently keep serving it at a venue we now have evidence is
+        # wrong").
+        new_venue_id = old_venue_id
+        new_location_resolution = event.get("location_resolution")
+        new_location_confidence = event.get("location_confidence")
+        new_linked_by = event.get("linked_by")
+        new_linked_at = None
+        new_review_reason = fold_review_reason(
+            old_review_reason, REVIEW_REASON_LOCATION_TEXT_DISPUTES_VENUE,
+        )
+
+    # Status goes through `is_clean_extraction`, never asserted — the same
+    # rule `decide_one` follows. `withhold_disputed` off (the default, and
+    # the live pipeline's own default) hides the dispute token from the
+    # gate, so this repair records the reason without withdrawing the row
+    # from serving.
+    gate_reason = new_review_reason
+    if not withhold_disputed and gate_reason:
+        remaining = [
+            token for token in gate_reason.split("; ")
+            if token and token != REVIEW_REASON_LOCATION_TEXT_DISPUTES_VENUE
+        ]
+        gate_reason = "; ".join(remaining) if remaining else None
+    clean = is_clean_extraction(
+        review_reason=gate_reason, starts_at=event.get("starts_at"),
+        venue_id=new_venue_id, confidence=event.get("confidence"),
+        min_confidence=min_confidence, post_type=event.get("post_type") or KIND_EVENT,
+    )
+    new_status = STATUS_ACCEPTED if clean else STATUS_PENDING_REVIEW
+    if new_status == STATUS_PENDING_REVIEW and not new_review_reason:
+        new_review_reason = REVIEW_REASON_NEEDS_REVIEW
+
+    unchanged = (
+        new_venue_id == old_venue_id
+        and new_linked_by == event.get("linked_by")
+        and new_review_reason == old_review_reason
+        and new_status == status
+    )
+    if unchanged:
+        action = "unchanged"
+    elif new_venue_id != old_venue_id:
+        action = "repoint"
+    else:
+        action = "flag"
+
+    return Decision(
+        event_id=event_id, action=action,
+        old_venue_id=old_venue_id, new_venue_id=new_venue_id,
+        old_linked_by=event.get("linked_by"), new_linked_by=new_linked_by,
+        old_location_resolution=event.get("location_resolution"),
+        new_location_resolution=new_location_resolution,
+        old_location_confidence=event.get("location_confidence"),
+        new_location_confidence=new_location_confidence,
+        old_review_reason=old_review_reason, new_review_reason=new_review_reason,
+        old_status=status, new_status=new_status,
+        new_linked_at=new_linked_at, resolution_method=verdict.method,
+        unrecognized_handle=(
+            _first_unrecognized_handle(
+                location_text_input, event.get("source_handle"), handle_index,
+            ) if not verdict.has_target else None
+        ),
+        venue_name_before=event.get("venue_name"),
+        venue_name_after=venue_names_by_id.get(new_venue_id) if new_venue_id else None,
+    )
+
+
 @dataclass
 class Report:
     selected: int = 0
     skipped_by_reason: Counter = field(default_factory=Counter)
     repointed: int = 0
+    # 260912 §C: a disputed row with nowhere to go — the review reason is
+    # recorded, `venue_id` is left exactly as it was. Neither a repoint nor
+    # a detach, so it gets its own bucket (and its own term in the balance).
+    flagged: int = 0
     detached: int = 0
     detached_venue_not_in_catalog: int = 0
     detached_unresolved: int = 0
@@ -399,7 +593,7 @@ class Report:
 
     @property
     def changed_count(self) -> int:
-        return self.repointed + self.detached
+        return self.repointed + self.detached + self.flagged
 
 
 def check_balance(report: Report) -> None:
@@ -407,21 +601,53 @@ def check_balance(report: Report) -> None:
     exit ... exit non-zero if the arithmetic does not balance." A separate,
     directly testable function — a fabricated `Report` can be handed to it
     without running a real backfill at all."""
-    total = report.repointed + report.detached + report.unchanged + sum(report.skipped_by_reason.values())
+    total = (
+        report.repointed + report.detached + report.flagged + report.unchanged
+        + sum(report.skipped_by_reason.values())
+    )
     if total != report.selected:
         report.balanced = False
         raise ArithmeticImbalance(
             f"totals did not balance: selected={report.selected} but "
             f"repointed({report.repointed}) + detached({report.detached}) + "
-            f"unchanged({report.unchanged}) + skipped({sum(report.skipped_by_reason.values())}) "
-            f"= {total}",
+            f"flagged({report.flagged}) + unchanged({report.unchanged}) + "
+            f"skipped({sum(report.skipped_by_reason.values())}) = {total}",
             report=report,
         )
     report.balanced = True
 
 
+def _select_candidates(all_events: list, *, mode: str, since_id: Optional[str]) -> list:
+    """The ONE place either mode's selection is expressed.
+
+    `handle-mention` (default): rows the caption-mention precedence bug
+    linked, exactly as this script has always selected them.
+
+    `disputed-location-text`: rows a VENUE POST's own fixed attribution
+    produced — `post_type == "event"`, a venue already attached, and NO
+    `linked_by`, because `EventExtractionService._extract_one`'s fixed-venue
+    closure writes none of the four link columns. That last clause is what
+    keeps this mode off every row any RUNG ever decided (those all carry a
+    `linked_by`), so the two modes can never select the same row.
+    """
+    if mode == MODE_DISPUTED_LOCATION_TEXT:
+        candidates = (
+            e for e in all_events
+            if (e.get("post_type") or KIND_EVENT) == KIND_EVENT
+            and e.get("venue_id")
+            and not e.get("linked_by")
+        )
+    else:
+        candidates = (e for e in all_events if e.get("linked_by") == METHOD_HANDLE_MENTION)
+    return sorted(
+        (e for e in candidates if since_id is None or e["event_id"] > since_id),
+        key=lambda e: e["event_id"],
+    )
+
+
 def run_backfill(
     venue_dao, *, apply: bool, since_id: Optional[str] = None, now: Optional[datetime] = None,
+    mode: str = MODE_HANDLE_MENTION, withhold_disputed: bool = False,
 ) -> Report:
     """The whole backfill in one pass: dependency guard, selection,
     per-row decisions, writes (when `apply`), balance/write-failure
@@ -446,25 +672,26 @@ def run_backfill(
     report.before_linked_by = Counter(e.get("linked_by") for e in all_events if e.get("linked_by"))
     report.before_venue_counts = Counter(e.get("venue_name") for e in all_events if e.get("venue_id"))
 
-    candidates = sorted(
-        (
-            e for e in all_events
-            if e.get("linked_by") == METHOD_HANDLE_MENTION
-            and (since_id is None or e["event_id"] > since_id)
-        ),
-        key=lambda e: e["event_id"],
-    )
+    candidates = _select_candidates(all_events, mode=mode, since_id=since_id)
     report.selected = len(candidates)
 
     decisions_by_id: dict[str, Decision] = {}
     for event in candidates:
-        decision = decide_one(
-            event, venues=venues, handle_index=handle_index, venue_names_by_id=venue_names_by_id,
-            confidence_floor=settings.promoter_link_confidence_floor,
-            margin=settings.promoter_link_margin,
-            min_confidence=settings.event_extraction_min_confidence,
-            now=now,
-        )
+        if mode == MODE_DISPUTED_LOCATION_TEXT:
+            decision = decide_one_disputed(
+                event, venues=venues, handle_index=handle_index,
+                venue_names_by_id=venue_names_by_id,
+                min_confidence=settings.event_extraction_min_confidence,
+                now=now, withhold_disputed=withhold_disputed,
+            )
+        else:
+            decision = decide_one(
+                event, venues=venues, handle_index=handle_index, venue_names_by_id=venue_names_by_id,
+                confidence_floor=settings.promoter_link_confidence_floor,
+                margin=settings.promoter_link_margin,
+                min_confidence=settings.event_extraction_min_confidence,
+                now=now,
+            )
         decisions_by_id[event["event_id"]] = decision
 
         if decision.action == "skip":
@@ -474,7 +701,11 @@ def run_backfill(
         if decision.action == "unchanged":
             report.unchanged += 1
             continue
-        if decision.action == "detach":
+        if decision.action == "flag":
+            report.flagged += 1
+            if decision.unrecognized_handle:
+                report._venue_acquisition_backlog_counter[decision.unrecognized_handle] += 1
+        elif decision.action == "detach":
             report.detached += 1
             if decision.resolution_method == METHOD_VENUE_NOT_IN_CATALOG:
                 report.detached_venue_not_in_catalog += 1
@@ -504,13 +735,15 @@ def run_backfill(
     check_balance(report)
 
     # ── final-state projection, for after-counts and both collision shapes ──
+    _WRITING_ACTIONS = ("repoint", "detach", "flag")
+
     def _final_venue_id(e: dict) -> Optional[str]:
         d = decisions_by_id.get(e["event_id"])
-        return d.new_venue_id if (d and d.action in ("repoint", "detach")) else e.get("venue_id")
+        return d.new_venue_id if (d and d.action in _WRITING_ACTIONS) else e.get("venue_id")
 
     def _final_linked_by(e: dict) -> Optional[str]:
         d = decisions_by_id.get(e["event_id"])
-        return d.new_linked_by if (d and d.action in ("repoint", "detach")) else e.get("linked_by")
+        return d.new_linked_by if (d and d.action in _WRITING_ACTIONS) else e.get("linked_by")
 
     for e in all_events:
         linked_by = _final_linked_by(e)
@@ -570,9 +803,10 @@ def _print_report(report: Report) -> None:
     logger.info("selected (linked_by=handle_mention): %d", report.selected)
     logger.info("skipped: %s", dict(report.skipped_by_reason))
     logger.info(
-        "repointed: %d | detached: %d (venue_not_in_catalog=%d, unresolved=%d) | unchanged: %d",
-        report.repointed, report.detached, report.detached_venue_not_in_catalog,
-        report.detached_unresolved, report.unchanged,
+        "repointed: %d | flagged: %d | detached: %d (venue_not_in_catalog=%d, unresolved=%d) "
+        "| unchanged: %d",
+        report.repointed, report.flagged, report.detached,
+        report.detached_venue_not_in_catalog, report.detached_unresolved, report.unchanged,
     )
     logger.info("linked_by before: %s", dict(report.before_linked_by))
     logger.info("linked_by after : %s", dict(report.after_linked_by))
@@ -619,12 +853,25 @@ def main(argv: Optional[list] = None) -> int:
         "--since-id", default=None,
         help="resume: only process candidates with event_id greater than this id",
     )
+    ap.add_argument(
+        "--mode", choices=MODES, default=MODE_HANDLE_MENTION,
+        help="which rows to re-decide: 'handle-mention' (the default, unchanged) or "
+             "'disputed-location-text' (260912 §C's venue-post attribution repair)",
+    )
+    ap.add_argument(
+        "--withhold-disputed", action="store_true",
+        help="let a flagged row's new review reason withhold auto-accept "
+             "(default: record the reason, leave the row's status as it was)",
+    )
     args = ap.parse_args(argv)
 
     venue_dao = VenueRepository(client=None, rds_store=RdsVenueStore(settings.rds_sqlalchemy_url))
 
     try:
-        report = run_backfill(venue_dao, apply=args.apply, since_id=args.since_id)
+        report = run_backfill(
+            venue_dao, apply=args.apply, since_id=args.since_id,
+            mode=args.mode, withhold_disputed=args.withhold_disputed,
+        )
     except DependencyNotLanded as exc:
         logger.error(str(exc))
         return 2

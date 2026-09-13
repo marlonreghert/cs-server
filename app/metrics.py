@@ -1582,7 +1582,8 @@ EVENT_MERGE_TOTAL = Counter(
     # identity=menu: merged, no_identity, no_match, two_confirmed
     # identity=title (plans/260812_event-dedup-fuzzy-title.md — title
     #                 containment + shared lineup, a SECOND pass over what
-    #                 identity=venue leaves behind): merged, suggested,
+    #                 identity=venue leaves behind): merged,
+    #                 merged_single_night_venue, suggested,
     #                 refused_disjoint, refused_no_distinctive_tokens,
     #                 refused_protected, refused_operator_title. Watch
     #                 refused_no_distinctive_tokens (plan Error Handling: a
@@ -1590,6 +1591,18 @@ EVENT_MERGE_TOTAL = Counter(
     #                 greedy) and the suggested-to-merged ratio (unactioned
     #                 suggestions piling up means the suggest band is
     #                 producing landfill, not decisions).
+    #
+    #                 `merged_single_night_venue` (plans/260912_events-venue-
+    #                 night-duplication.md §E2) is the per-venue
+    #                 `event_dedup_single_night_venues` policy, kept DISTINCT
+    #                 from `merged` so it can be watched on its own — and
+    #                 counted ONLY when that policy is the sole reason the
+    #                 pair reached auto. A pair that also passed title
+    #                 containment or shared lineup would have merged anyway
+    #                 and stays under `merged`, so this series never
+    #                 overstates what the policy itself caused. The list is
+    #                 empty by default: the ABSENCE of this series is the
+    #                 evidence no venue is on it.
 )
 
 # plans/260814_record-what-superseded-a-row.md §B: every RE-EXTRACTION
@@ -1627,6 +1640,57 @@ EVENT_DEDUP_CONFIG_TYPE_FALLBACK_TOTAL = Counter(
     "event_dedup_config_type_fallback_total",
     "Times an event-dedup admin-config value failed its type validator on read and fell back to the shipped default",
     ["key"],
+)
+
+# plans/260912_events-venue-night-duplication.md §A: the duplicate/refusal/
+# attribution backlog, as a STANDING number instead of a one-off hand
+# measurement. Pushed from the end of an extraction run by
+# `app.services.event_dedup_backlog.publish_dedup_backlog_gauges` — the same
+# shape `app.services.event_reconciliation.update_events_gauge` already
+# establishes; there is no collect-on-scrape collector in this repo, so an
+# unpushed gauge stays stale rather than silently wrong-but-fresh.
+#
+# `measure` is a small FIXED set (bounded cardinality, per this module's own
+# rule) — see event_dedup_backlog.BACKLOG_MEASURES:
+#   venue_night_groups                   (venue, Recife local date) holding >1 live row
+#   venue_night_excess_rows              sum(group size - 1) — THE number this plan is judged on
+#   refused_disjoint_pairs               same-night pairs refused as disjoint, as a CURRENT
+#                                        population rather than EVENT_MERGE_TOTAL's cumulative count
+#   refused_no_distinctive_tokens_pairs  the same, for the empty-distinctive-set refusal
+#   pending_suggestions                  event_merge_suggestion rows awaiting an operator
+#   attribution_disputed_rows            live rows whose own location_text is not evidence for the
+#                                        venue they are filed at (the venue-acquisition backlog)
+#
+# `venue_night_excess_rows` must FALL after the historical repair and must
+# not climb back afterwards; if it does, the forward fix is not holding and
+# GET /admin/events/dedup-backlog names the venues to look at.
+# plans/260912_events-venue-night-duplication.md §G: how a merged listing's
+# DISPLAY title was reached.
+#   obvious                  one source title contained the others; NO model call
+#   llm_accepted             one call per merge GROUP, and the answer passed the
+#                            deterministic validation gate
+#   rejected                 the answer failed the gate (blank, over-long, or it
+#                            introduced a word no source post contained) — nothing
+#                            was written and the row keeps its stored title. A
+#                            CLIMBING `rejected` means the gate is doing its job and
+#                            the prompt needs work.
+#   error                    the call failed. An AVAILABILITY problem, never a data
+#                            problem: the fallback writes nothing.
+#   skipped_operator_edited  the operator wrote that title; never overridden.
+#
+# Title-pick SPEND is watched separately from extraction spend through
+# OPENAI_API_CALLS_TOTAL{endpoint="event_title_pick"} and its token siblings
+# — never conflated with `event_extract`.
+EVENT_DISPLAY_TITLE_TOTAL = Counter(
+    "event_display_title_total",
+    "How a merged listing's display title was reached",
+    ["outcome"],
+)
+
+EVENT_DEDUP_BACKLOG = Gauge(
+    "event_dedup_backlog",
+    "Event venue-night duplicate, merge-refusal and attribution-dispute backlog",
+    ["measure"],
 )
 
 # Snapshot of events.post_item (post_type="menu" only) by current-vs-expired

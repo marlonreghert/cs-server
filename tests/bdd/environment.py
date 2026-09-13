@@ -358,8 +358,18 @@ def _build_rds_layer(context) -> None:
         validate_candidate_window_hours_config,
         validate_generic_vocabulary_config,
         validate_lineup_threshold_config,
+        validate_recurring_window_enabled_config,
+        validate_single_night_venues_config,
+        validate_single_night_default_enabled_config,
         validate_stopwords_config,
         validate_undated_window_days_config,
+    )
+    from app.services.event_display_title import (
+        validate_display_title_enabled_config,
+    )
+    from app.services.event_attribution_dispute import (
+        validate_dispute_action_config,
+        validate_dispute_withhold_enabled_config,
     )
     from app.services.venue_city_vocabulary import validate_address_city_vocabulary_config
 
@@ -389,6 +399,30 @@ def _build_rds_layer(context) -> None:
             "event_dedup_candidate_window_hours": validate_candidate_window_hours_config,
             "event_dedup_undated_window_days": validate_undated_window_days_config,
             "event_dedup_auto_merge_enabled": validate_auto_merge_enabled_config,
+            # plans/260912_events-venue-night-duplication.md §D: the
+            # recurring-aware candidate window, false by default (it
+            # strictly WIDENS the candidate set, and auto-merge is already
+            # live in production).
+            "event_dedup_recurring_window_enabled": validate_recurring_window_enabled_config,
+            # plans/260912_events-venue-night-duplication.md §E2: the
+            # per-venue "this venue runs one night rather than a
+            # programme" list, EMPTY by default and never a corpus-wide
+            # rule.
+            "event_dedup_single_night_venues": validate_single_night_venues_config,
+            # The CATALOG-WIDE form of the same policy — every venue treated
+            # as running one night, with no exclusions. False by default; the
+            # operator chose this scope explicitly, accepting that the
+            # Bolinha/JB do Cavaco shape will re-merge wherever it recurs.
+            "event_dedup_single_night_default_enabled": validate_single_night_default_enabled_config,
+            # plans/260912_events-venue-night-duplication.md §G: whether the
+            # post-merge display-title pass runs at all. False by default —
+            # it is the one pass in this plan that WRITES a column.
+            "event_display_title_enabled": validate_display_title_enabled_config,
+            # plans/260912_events-venue-night-duplication.md §C: mirrors
+            # app.container's own registration, for the same reason the six
+            # event_dedup_* keys above do.
+            "event_attribution_dispute_action": validate_dispute_action_config,
+            "event_attribution_dispute_withhold_enabled": validate_dispute_withhold_enabled_config,
             # plans/260906_address-components-backfill.md Phase 1: mirrors
             # app.container's own registration — the SAME generic
             # admin-config CRUD route every key here uses, no dedicated

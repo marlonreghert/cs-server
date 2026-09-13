@@ -1,0 +1,1197 @@
+"""Behave steps for
+tests/bdd/enrichment/events-venue-night-duplication.feature.
+
+See plans/260912_events-venue-night-duplication.md. Three independent defects
+produce one symptom, and this file drives all three apart from each other:
+
+  - Defect 2 (attribution) runs the REAL `EventExtractionService` over the
+    `context.ee_*` harness `instagram_event_extraction_steps.py` already
+    builds — a real `VenueRepository` over the in-memory RDS fake, a fake
+    archived-post source and a programmable fake OpenAI client. That harness
+    is reused as plain function calls, the same reuse pattern
+    `event_ticket_info_and_attractions_steps.py` and
+    `one_event_many_posts_steps.py` already establish for sibling features.
+    Only a REAL extraction can prove where a freshly-extracted row lands.
+
+  - Defects 1 and 3 (the merge bar, the recurring window) run the merge pass
+    over rows seeded directly through the DAO, on the `context.dedup_*`
+    harness `event_dedup_fuzzy_title_steps.py` already builds — those
+    scenarios are about `merge_touched_events`, not about extraction, and
+    re-running a whole extraction for each would test the wrong thing.
+
+Both harnesses are per-scenario and independent; a scenario touches only the
+one its own steps use.
+
+The Background's "the event extraction pipeline is configured for a known
+venue" and "the candidate window is 8 hours" steps are NOT redefined here —
+behave's step registry is global and both texts are already bound (in
+`event_ticket_info_and_attractions_steps.py` and
+`event_dedup_fuzzy_title_steps.py` respectively). Reusing them is this
+repo's own documented convention for a step text two features share.
+"""
+from __future__ import annotations
+
+import json
+import pathlib
+from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
+
+from behave import given, then, when  # type: ignore[import-untyped]
+from prometheus_client import REGISTRY
+
+from app.models.instagram import VenueInstagram
+from app.models.venue import Venue
+from app.services import event_dedup
+from app.services.event_attribution_dispute import (
+    ADMIN_CONFIG_DISPUTE_ACTION_KEY,
+    ADMIN_CONFIG_DISPUTE_WITHHOLD_KEY,
+    REVIEW_REASON_LOCATION_TEXT_DISPUTES_VENUE,
+)
+from app.services.event_reconciliation import new_event_id
+from app.services.event_venue_resolution import (
+    METHOD_HANDLE_MENTION,
+    METHOD_NEIGHBOURHOOD_MATCH,
+)
+from tests.bdd.steps.instagram_event_extraction_steps import (
+    _add_post,
+    _ensure_context as _ensure_ee_context,
+    _run_extraction,
+)
+
+RECIFE = ZoneInfo("America/Recife")
+RECIFE_LAT, RECIFE_LNG = -8.05, -34.88
+
+_POSTING_HANDLE = "beerdock_recife"
+_NOW = datetime(2026, 9, 10, 12, 0, tzinfo=timezone.utc)
+
+_ADDRESSES = {
+    "Boa Viagem": "Av. Cons. Aguiar, 1000 - Boa Viagem, Recife - PE",
+    "Casa Forte": "Av. Rui Barbosa, 500 - Casa Forte, Recife - PE",
+    "an unrelated address": "R. do Sol, 7 - Santo Antônio, Recife - PE",
+}
+
+
+def _venue_id_for(context, name: str) -> str:
+    return context.vnd_venues[name]
+
+
+def _ensure(context) -> None:
+    _ensure_ee_context(context)
+    if not hasattr(context, "vnd_venues"):
+        context.vnd_venues = {}
+        context.vnd_seq = 0
+        context.vnd_metric_before = {}
+        context.vnd_backfill_report = None
+
+
+def _link_metric(method: str, result: str) -> float:
+    return REGISTRY.get_sample_value(
+        "event_venue_link_total", {"method": method, "result": result},
+    ) or 0.0
+
+
+# ── Background: the catalog and the handle ────────────────────────────────
+@given('the venue catalog carries "{name}" at an address in {area}')
+def step_given_catalog_carries_venue_at(context, name, area):
+    _ensure(context)
+    context.vnd_seq += 1
+    venue_id = f"vnd_venue_{context.vnd_seq}"
+    context.ee_dao.upsert_venue(Venue(
+        venue_id=venue_id, venue_name=name,
+        venue_address=_ADDRESSES.get(area, f"{area}, Recife - PE"),
+        venue_lat=RECIFE_LAT, venue_lng=RECIFE_LNG,
+    ))
+    context.vnd_venues[name] = venue_id
+
+
+@given('the venue catalog carries "{name}" at {area}')
+def step_given_catalog_carries_venue_at_bare(context, name, area):
+    step_given_catalog_carries_venue_at(context, name, area)
+
+
+@given('the Instagram handle "{handle}" maps only to "{name}"')
+def step_given_handle_maps_only_to(context, handle, name):
+    _ensure(context)
+    venue_id = _venue_id_for(context, name)
+    context.ee_dao.set_venue_instagram(
+        VenueInstagram(venue_id=venue_id, instagram_handle=handle, status="found")
+    )
+    context.ee_venue_id = venue_id
+    context.ee_handle = handle
+    # `mode: venue_ids` rather than the event-candidate tier walk: this
+    # feature is about WHERE a post's events land, never about which venues
+    # qualify for extraction in the first place.
+    context.ee_run_config = {
+        "eligibility": {"mode": "venue_ids", "venue_ids": venue_id},
+    }
+
+
+@given('"{name}" is reachable by the handle "{handle}"')
+def step_given_venue_reachable_by_handle(context, name, handle):
+    _ensure(context)
+    context.ee_dao.set_venue_instagram(
+        VenueInstagram(venue_id=_venue_id_for(context, name), instagram_handle=handle, status="found")
+    )
+
+
+# ── Defect 2: config ──────────────────────────────────────────────────────
+@given('the attribution dispute action is "{action}"')
+def step_given_dispute_action(context, action):
+    _ensure(context)
+    _dispute_redis(context).set(ADMIN_CONFIG_DISPUTE_ACTION_KEY, json.dumps(action))
+
+
+@given("the attribution dispute withholding is enabled")
+def step_given_dispute_withholding_enabled(context):
+    _ensure(context)
+    _dispute_redis(context).set(ADMIN_CONFIG_DISPUTE_WITHHOLD_KEY, json.dumps(True))
+
+
+def _dispute_redis(context):
+    """The extraction service reads its admin config through the Redis client
+    it was constructed with. `instagram_event_extraction_steps._reset_context`
+    builds the service without one (every scenario there predates admin
+    config), so one is attached here on first use — the SAME `fakeredis`
+    stand-in every other admin-config scenario in this repo uses."""
+    import fakeredis
+
+    if getattr(context.ee_service, "redis_client", None) is None:
+        context.ee_service.redis_client = fakeredis.FakeRedis(decode_responses=True)
+    return context.ee_service.redis_client
+
+
+# ── Defect 2: the post ────────────────────────────────────────────────────
+def _extract_post(context, *, location_text=None, caption=None, shortcode=None, title="SAMBINHA"):
+    from tests.bdd.steps.instagram_event_extraction_steps import _extraction_json
+
+    context.vnd_seq += 1
+    shortcode = shortcode or f"vnd_post_{context.vnd_seq}"
+    _add_post(
+        context, shortcode,
+        caption=caption or "Ingressos abertos! Vem pro role.",
+        timestamp=_NOW - timedelta(days=1),
+    )
+    context.ee_openai.program(_extraction_json(
+        title=title, date_text="12/09", time_text="21h",
+        location_text=location_text, confidence=0.9,
+    ))
+    context.ee_now = _NOW
+    _dispute_redis(context)  # make sure the service reads real config, not None
+    _run_extraction(context)
+    context.vnd_event = context.ee_dao.get_event_by_source(context.ee_handle, shortcode)
+    assert context.vnd_event is not None, f"no event stored for {shortcode}"
+    return context.vnd_event
+
+
+@when('a post from "{handle}" announces an event whose location text is "{location_text}"')
+def step_when_post_announces_with_location_text(context, handle, location_text):
+    context.vnd_metric_before = {
+        (m, "disputed"): _link_metric(m, "disputed")
+        for m in (METHOD_HANDLE_MENTION, METHOD_NEIGHBOURHOOD_MATCH)
+    }
+    _extract_post(context, location_text=location_text)
+
+
+# Registered BEFORE the plain "no location text" variant below: behave's
+# default parser makes `{handle}` greedy, so the shorter pattern would
+# otherwise also match THIS text and the registration is refused as
+# ambiguous. Most specific first.
+@when('a post from "{handle}" whose caption mentions "{mention}" announces an event with no location text')
+def step_when_post_caption_mentions(context, handle, mention):
+    _extract_post(context, location_text=None, caption=f"Hoje tem festa com {mention}!")
+
+
+@when('a post from "{handle}" announces an event with no location text')
+def step_when_post_announces_without_location_text(context, handle):
+    context.vnd_metric_before = {
+        (m, "disputed"): _link_metric(m, "disputed")
+        for m in (METHOD_HANDLE_MENTION, METHOD_NEIGHBOURHOOD_MATCH)
+    }
+    _extract_post(context, location_text=None)
+
+
+# ── Defect 2: the operator's own correction ───────────────────────────────
+@given('an operator has corrected the venue of a stored event to "{name}"')
+def step_given_operator_corrected_venue(context, name):
+    _ensure(context)
+    context.vnd_seq += 1
+    context.vnd_operator_shortcode = f"vnd_operator_{context.vnd_seq}"
+    event = _extract_post(
+        context, location_text=None, shortcode=context.vnd_operator_shortcode,
+    )
+    # Exactly what POST /admin/events/{id}/link writes, plus the
+    # operator_edited_fields a PATCH records — either alone must stop an
+    # automatic path from moving this row.
+    context.ee_dao.update_event(event["event_id"], {
+        "venue_id": _venue_id_for(context, name), "location_resolution": "manual",
+        "linked_by": "manual", "linked_at": _NOW,
+        "operator_edited_fields": ["venue_id"],
+    })
+
+
+@when('that post is re-extracted with the location text "{location_text}"')
+def step_when_that_post_is_re_extracted(context, location_text):
+    _extract_post(
+        context, location_text=location_text, shortcode=context.vnd_operator_shortcode,
+    )
+
+
+# ── Defect 2: assertions ──────────────────────────────────────────────────
+def _reload(context) -> dict:
+    return context.ee_dao.get_event(context.vnd_event["event_id"])
+
+
+@then('the event stays attributed to "{name}"')
+def step_then_event_stays_attributed(context, name):
+    row = _reload(context)
+    assert row["venue_id"] == _venue_id_for(context, name), (row["venue_id"], row["venue_name"])
+
+
+@then('the event is attributed to "{name}"')
+def step_then_event_is_attributed(context, name):
+    step_then_event_stays_attributed(context, name)
+
+
+@then('the event carries the review reason "{reason}"')
+def step_then_event_carries_review_reason(context, reason):
+    row = _reload(context)
+    reasons = (row.get("review_reason") or "").split("; ")
+    assert reason in reasons, row.get("review_reason")
+
+
+@then("the event carries no review reason")
+def step_then_event_carries_no_review_reason(context):
+    row = _reload(context)
+    assert not row.get("review_reason"), row.get("review_reason")
+
+
+@then("the event carries no dispute review reason")
+def step_then_event_carries_no_dispute_reason(context):
+    row = _reload(context)
+    reasons = (row.get("review_reason") or "").split("; ")
+    assert REVIEW_REASON_LOCATION_TEXT_DISPUTES_VENUE not in reasons, row.get("review_reason")
+
+
+@then('the event offers "{name}" as a ranked venue candidate')
+def step_then_event_offers_candidate(context, name):
+    candidates = context.ee_dao.list_event_venue_link_candidates(context.vnd_event["event_id"])
+    venue_ids = [c["venue_id"] for c in candidates]
+    assert _venue_id_for(context, name) in venue_ids, candidates
+
+
+@then("an attribution dispute is counted for the handle-mention method")
+def step_then_dispute_counted_handle_mention(context):
+    before = context.vnd_metric_before.get((METHOD_HANDLE_MENTION, "disputed"), 0.0)
+    assert _link_metric(METHOD_HANDLE_MENTION, "disputed") > before
+
+
+@then("no attribution dispute is counted")
+def step_then_no_dispute_counted(context):
+    for (method, result), before in context.vnd_metric_before.items():
+        assert _link_metric(method, result) == before, (method, result)
+
+
+@then("the event records that its venue came from a neighbourhood match")
+def step_then_event_records_neighbourhood_match(context):
+    row = _reload(context)
+    assert row.get("linked_by") == METHOD_NEIGHBOURHOOD_MATCH, row.get("linked_by")
+    assert row.get("location_resolution") == "auto", row.get("location_resolution")
+
+
+@then("the event is accepted without review")
+def step_then_event_accepted_without_review(context):
+    row = _reload(context)
+    assert row["status"] == "accepted", (row["status"], row.get("review_reason"))
+
+
+# "the event is accepted" is already bound (review_gate_and_date_vocabulary_
+# steps.py), so these two are worded "the disputed event ..." in the feature
+# file — the same distinguishing-wording convention
+# event_ticket_info_and_attractions_steps.py's docstring documents for
+# exactly this situation.
+@then("the disputed event is still accepted")
+def step_then_disputed_event_accepted(context):
+    row = _reload(context)
+    assert row["status"] == "accepted", (row["status"], row.get("review_reason"))
+
+
+@then("the disputed event is awaiting review")
+def step_then_disputed_event_awaiting_review(context):
+    row = _reload(context)
+    assert row["status"] == "pending_review", (row["status"], row.get("review_reason"))
+
+
+def _is_selectable(context) -> bool:
+    from app.services.event_projection_selection import is_selectable
+
+    row = _reload(context)
+    return is_selectable(row, now=_NOW)
+
+
+@then("the event is selectable for the serving projection")
+def step_then_event_selectable(context):
+    assert _is_selectable(context), _reload(context)
+
+
+@then("the event is not selectable for the serving projection")
+def step_then_event_not_selectable(context):
+    assert not _is_selectable(context), _reload(context)
+
+
+@then('the handle "{handle}" appears in the venue-acquisition backlog')
+def step_then_handle_in_acquisition_backlog(context, handle):
+    from app.services.event_dedup_backlog import collect_dedup_backlog
+
+    backlog = collect_dedup_backlog(context.ee_dao)
+    texts = " ".join(d.location_text for d in backlog.attribution_disputes)
+    assert handle in texts, backlog.attribution_disputes
+
+
+# ── Defect 2: the historical repair ───────────────────────────────────────
+def _seed_stored_event(context, venue_name: str, location_text: str, *, title="SAMBINHA") -> str:
+    """A row exactly as the fixed venue-post path stores one: attributed to
+    the posting venue, with NO link columns at all, and the event's own
+    extracted `location_text` frozen on its source's `raw_extraction`."""
+    _ensure(context)
+    context.vnd_seq += 1
+    event_id = new_event_id()
+    context.ee_dao.insert_event({
+        "event_id": event_id, "venue_id": _venue_id_for(context, venue_name),
+        "starts_at": datetime(2026, 9, 12, 21, 0, tzinfo=RECIFE),
+        "title": title, "post_type": "event", "status": "accepted",
+        "confidence": 0.9, "lineup": [],
+        "source_kind": "venue_post", "source_handle": _POSTING_HANDLE,
+        "source_shortcode": f"vnd_stored_{context.vnd_seq}",
+        "first_seen_at": _NOW, "last_seen_at": _NOW,
+        "raw_extraction": {"location_text": location_text},
+    })
+    context.vnd_stored_ids = getattr(context, "vnd_stored_ids", []) + [event_id]
+    context.vnd_event = context.ee_dao.get_event(event_id)
+    return event_id
+
+
+@given('a stored event at "{venue_name}" whose recorded location text is "{location_text}"')
+def step_given_stored_event_with_location_text(context, venue_name, location_text):
+    _seed_stored_event(context, venue_name, location_text)
+
+
+@given('two stored events at "{venue_name}" whose recorded location text is "{location_text}" and whose titles are identical')
+def step_given_two_stored_events_same_title(context, venue_name, location_text):
+    _seed_stored_event(context, venue_name, location_text, title="SAMBINHA")
+    _seed_stored_event(context, venue_name, location_text, title="SAMBINHA")
+
+
+def _run_disputed_backfill(context, *, apply: bool):
+    from scripts.backfill_event_venue_links import (
+        MODE_DISPUTED_LOCATION_TEXT, run_backfill,
+    )
+
+    context.vnd_backfill_report = run_backfill(
+        context.ee_dao, apply=apply, now=_NOW, mode=MODE_DISPUTED_LOCATION_TEXT,
+    )
+    return context.vnd_backfill_report
+
+
+@when("the disputed-location-text backfill runs with apply")
+def step_when_disputed_backfill_apply(context):
+    _run_disputed_backfill(context, apply=True)
+
+
+@when("the disputed-location-text backfill runs without apply")
+def step_when_disputed_backfill_dry_run(context):
+    _run_disputed_backfill(context, apply=False)
+
+
+@when("the disputed-location-text backfill runs with apply twice")
+def step_when_disputed_backfill_apply_twice(context):
+    _run_disputed_backfill(context, apply=True)
+    context.vnd_second_report = _run_disputed_backfill(context, apply=True)
+
+
+@then("the event's title and start time are unchanged")
+def step_then_title_and_start_unchanged(context):
+    before = context.vnd_event
+    after = context.ee_dao.get_event(before["event_id"])
+    assert after["title"] == before["title"], (before["title"], after["title"])
+    assert after["starts_at"] == before["starts_at"], (before["starts_at"], after["starts_at"])
+
+
+@then("the report names the event and its proposed venue")
+def step_then_report_names_event_and_proposed_venue(context):
+    rows = [r for r in context.vnd_backfill_report.rows if r.action == "repoint"]
+    assert rows, context.vnd_backfill_report.rows
+    assert any(r.event_id == context.vnd_event["event_id"] for r in rows), rows
+    assert any(r.venue_name_after for r in rows), rows
+
+
+@then("the event is still attributed to \"{name}\"")
+def step_then_event_still_attributed(context, name):
+    row = context.ee_dao.get_event(context.vnd_event["event_id"])
+    assert row["venue_id"] == _venue_id_for(context, name), row["venue_id"]
+
+
+@then("the second run repairs nothing")
+def step_then_second_run_repairs_nothing(context):
+    report = context.vnd_second_report
+    assert report.repointed == 0, report.rows
+    assert report.flagged == 0, report.rows
+
+
+@then('both events are attributed to "{name}"')
+def step_then_both_events_attributed(context, name):
+    venue_id = _venue_id_for(context, name)
+    for event_id in context.vnd_stored_ids:
+        row = context.ee_dao.get_event(event_id)
+        assert row["venue_id"] == venue_id, (event_id, row["venue_id"])
+
+
+@then("both events still exist as separate rows")
+def step_then_both_events_separate(context):
+    rows = [context.ee_dao.get_event(eid) for eid in context.vnd_stored_ids]
+    assert all(r is not None for r in rows), rows
+    assert all(r.get("status") != "superseded" for r in rows), rows
+    assert len({r["event_id"] for r in rows}) == 2, rows
+
+
+# ══ Defects 1 and 3: the merge pass ══════════════════════════════════════
+# These scenarios run over the `context.dedup_*` harness
+# `event_dedup_fuzzy_title_steps.py` builds (a bare in-memory store + its own
+# fakeredis), reached through that module's own helpers as plain function
+# calls. The Background's "the candidate window is 8 hours" step has already
+# created it by the time any of these run.
+from tests.bdd.steps import event_dedup_fuzzy_title_steps as _dedup_steps  # noqa: E402
+
+_DEDUP_VENUE = "Sala de Reboco"
+_WEEKLY_TIME = "20:00"
+# A Wednesday and the Wednesday three weeks after it — the shape of the two
+# live `Aula de FORRÓ na Sala de Reboco` rows the RCA found (identical title,
+# identical `recurrence_text`, stored 21 days apart, never compared).
+_WEEK_1 = "2026-08-05"
+_WEEK_4 = "2026-08-26"
+
+
+def _dedup_local(date_str: str, time_str: str = _WEEKLY_TIME):
+    return _dedup_steps._local_dt(date_str, time_str)
+
+
+def _seed_recurring(context, title, venue, *, date_str, recurrence_text, **kwargs):
+    event_id = _dedup_steps._seed_item(
+        context, title, venue, starts_at=_dedup_local(date_str), **kwargs
+    )
+    context.dedup_dao.update_event(event_id, {
+        "is_recurring": True, "recurrence_text": recurrence_text,
+    })
+    context.vnd_weekly_ids = getattr(context, "vnd_weekly_ids", []) + [event_id]
+    return event_id
+
+
+@given("the recurring candidate window is enabled")
+def step_given_recurring_window_enabled(context):
+    _dedup_steps._ensure_context(context)
+    context.dedup_redis.set(
+        event_dedup.ADMIN_CONFIG_RECURRING_WINDOW_ENABLED_KEY, json.dumps(True),
+    )
+
+
+@given("auto-merge is enabled")
+def step_given_auto_merge_enabled(context):
+    _dedup_steps._ensure_context(context)
+    context.dedup_redis.set(
+        event_dedup.ADMIN_CONFIG_AUTO_MERGE_ENABLED_KEY, json.dumps(True),
+    )
+
+
+@given('the lineup threshold is {threshold:d}')
+def step_given_lineup_threshold(context, threshold):
+    _dedup_steps._ensure_context(context)
+    context.dedup_redis.set(
+        event_dedup.ADMIN_CONFIG_LINEUP_THRESHOLD_KEY, json.dumps(threshold),
+    )
+
+
+_WEEKDAY_TEXT = {
+    "Wednesday": "Toda QUARTA",
+    "Friday": "Toda SEXTA",
+}
+
+
+@given('a stored weekly event "{title}" recurring every {weekday}, stored for the {day}th')
+def step_given_weekly_event_stored_for_day(context, title, weekday, day):
+    date_str = f"2026-08-{int(day):02d}"
+    _seed_recurring(
+        context, title, _DEDUP_VENUE, date_str=date_str,
+        recurrence_text=_WEEKDAY_TEXT[weekday],
+    )
+
+
+@given('a stored weekly event "{title}" recurring on Wednesdays and Fridays')
+def step_given_weekly_event_two_weekdays(context, title):
+    _seed_recurring(
+        context, title, _DEDUP_VENUE, date_str=_WEEK_4,
+        recurrence_text="Quartas e sextas",
+    )
+
+
+@given('a stored weekly event "{title}" recurring every {weekday}')
+def step_given_weekly_event(context, title, weekday):
+    # The two one-weekday scenarios ("every Wednesday" / "every Friday")
+    # deliberately store their rows THREE WEEKS apart, so the plain
+    # `in_candidate_window` can never be what pairs them — only the weekday
+    # rule can, which is what those scenarios are about.
+    date_str = _WEEK_1 if weekday == "Wednesday" else _WEEK_4
+    _seed_recurring(
+        context, title, _DEDUP_VENUE, date_str=date_str,
+        recurrence_text=_WEEKDAY_TEXT[weekday],
+    )
+
+
+@given('a stored one-off event "{title}" on a Wednesday three weeks later')
+def step_given_one_off_event_three_weeks_later(context, title):
+    context.vnd_one_off_id = _dedup_steps._seed_item(
+        context, title, _DEDUP_VENUE, starts_at=_dedup_local(_WEEK_4),
+    )
+
+
+@given('two stored weekly events "{title}" recurring every Wednesday, stored three weeks apart')
+def step_given_two_weekly_events_three_weeks_apart(context, title):
+    _seed_recurring(
+        context, title, _DEDUP_VENUE, date_str=_WEEK_1, recurrence_text="Toda QUARTA",
+    )
+    _seed_recurring(
+        context, title, _DEDUP_VENUE, date_str=_WEEK_4, recurrence_text="Toda QUARTA",
+    )
+
+
+@when("the merge pass runs for that venue")
+def step_when_merge_pass_runs_for_venue(context):
+    context.vnd_rows_before = _snapshot_rows(context)
+    _dedup_steps._run_merge_pass(context)
+
+
+@when("the merge pass runs for every venue")
+def step_when_merge_pass_runs_for_every_venue(context):
+    context.vnd_rows_before = _snapshot_rows(context)
+    _dedup_steps._run_merge_pass(context)
+
+
+def _dedup_survivors(context, ids=None):
+    return _dedup_steps._survivors(context, ids)
+
+
+@then('one weekly event survives titled "{title}"')
+def step_then_one_weekly_survives(context, title):
+    survivors = _dedup_survivors(context, context.vnd_weekly_ids)
+    assert len(survivors) == 1, survivors
+    row = context.dedup_dao.get_event(survivors[0])
+    assert row["title"] == title, row["title"]
+    context.vnd_survivor_id = survivors[0]
+    context.vnd_absorbed_ids = [
+        eid for eid in context.vnd_weekly_ids if eid not in survivors
+    ]
+
+
+@then("both weekly events survive")
+def step_then_both_weekly_survive(context):
+    survivors = _dedup_survivors(context, context.vnd_weekly_ids)
+    assert len(survivors) == 2, survivors
+
+
+def _scenario_event_ids(context) -> list:
+    """Every row THIS scenario seeded into the dedup harness, whichever
+    fixture shape it used — the venue-night cluster (Defect 1), the weekly
+    pair plus any one-off (Defect 3), or both. One accessor, so a shared
+    Then step never has to know which Given ran."""
+    if getattr(context, "vnd_night_ids", None):
+        return list(context.vnd_night_ids)
+    ids = list(getattr(context, "vnd_weekly_ids", []) or [])
+    one_off = getattr(context, "vnd_one_off_id", None)
+    if one_off:
+        ids.append(one_off)
+    return ids
+
+
+@then("both events survive")
+def step_then_both_events_survive(context):
+    ids = _scenario_event_ids(context)
+    assert len(ids) == 2, ids
+    survivors = _dedup_survivors(context, ids)
+    assert len(survivors) == 2, survivors
+
+
+@then("the absorbed weekly event is superseded rather than deleted")
+def step_then_absorbed_weekly_superseded(context):
+    assert context.vnd_absorbed_ids, "nothing was absorbed"
+    for event_id in context.vnd_absorbed_ids:
+        row = context.dedup_dao.get_event(event_id)
+        assert row is not None, f"{event_id} was deleted, not superseded"
+        assert row["status"] == "superseded", row
+        assert row.get("superseded_by") == context.vnd_survivor_id, row
+
+
+@then("the surviving event still recurs every {weekday}")
+def step_then_surviving_event_still_recurs(context, weekday):
+    from app.services.event_date_resolver import weekdays_from_recurrence_text
+
+    row = context.dedup_dao.get_event(context.vnd_survivor_id)
+    assert row.get("is_recurring") is True, row
+    weekdays = weekdays_from_recurrence_text(row.get("recurrence_text"))
+    expected = weekdays_from_recurrence_text(_WEEKDAY_TEXT[weekday])
+    assert weekdays == expected, (row.get("recurrence_text"), weekdays, expected)
+
+
+def _expanded_dates(context, event_id) -> list:
+    from app.services.event_occurrences import expand_occurrences
+
+    row = context.dedup_dao.get_event(event_id)
+    return [
+        occ.occurrence_date
+        for occ in expand_occurrences(
+            row, horizon_days=21, reference_time=_dedup_local(_WEEK_1, "12:00"),
+        )
+    ]
+
+
+@then("the surviving event is served on every Wednesday inside the projection horizon")
+def step_then_surviving_event_served_every_wednesday(context):
+    from datetime import date as _date
+
+    survivors = _dedup_survivors(context, context.vnd_weekly_ids)
+    assert len(survivors) == 1, survivors
+    context.vnd_survivor_id = survivors[0]
+    dates = _expanded_dates(context, context.vnd_survivor_id)
+    assert dates, "the surviving weekly event serves no night at all"
+    assert all(_date.fromisoformat(d).weekday() == 2 for d in dates), dates
+    # 22 calendar days from the 5th at noon: the 5th, 12th, 19th and 26th.
+    assert len(dates) == 4, dates
+
+
+@then("no Wednesday inside the horizon serves two listings for that venue")
+def step_then_no_wednesday_serves_two(context):
+    seen: dict = {}
+    for event_id in context.vnd_weekly_ids:
+        if not _dedup_steps._alive(context, event_id):
+            continue
+        for day in _expanded_dates(context, event_id):
+            seen[day] = seen.get(day, 0) + 1
+    doubled = {day: count for day, count in seen.items() if count > 1}
+    assert not doubled, doubled
+
+
+# ══ Defect 1: the bar for collapsing a venue-night ═══════════════════════
+_SINGLE_NIGHT_VENUE = "Club Metrópole"
+_PROGRAMME_VENUE = "Entre Amigos O Bode"
+_SATURDAY = "2026-09-12"
+# Club Metrópole's five real posts for Saturday 12/09, from the RCA: five
+# different acts, nine of the ten pairs with DISJOINT distinctive-token sets,
+# and the three that share a performer sharing exactly one — one below the
+# auto floor. No threshold on either existing signal reaches ROWKA or
+# VITINHO POLÊMICO, which is precisely why §E2's per-venue policy exists.
+_FIVE_ACTS = (
+    ("ROWKA", ["ROWKA"]),
+    ("VITINHO POLÊMICO", ["VITINHO POLÊMICO"]),
+    ("SÁBADO VAI FERVER", ["MC Baixinho"]),
+    ("SECRET CLUB com @neguindabasersv", ["@neguindabasersv"]),
+    ("estreia de @neguindabasersv", ["@neguindabasersv"]),
+)
+_WORKSHOPS = ("Oficina Vida de Inseto", "Oficina Cobra Gigante", "Oficina de Sorvete")
+
+
+@given('"{venue}" runs one night rather than a programme')
+def step_given_venue_runs_one_night(context, venue):
+    """ONE definition for all three of this plan's feature files — behave's
+    step registry is global and every one of them legitimately states this
+    same precondition. It dispatches to whichever harness the running
+    scenario actually built: the `dedup_*` one (the enrichment and
+    display-title features, whose Backgrounds create it), otherwise the
+    `backlog_*` one (the observability feature, which reaches this step
+    before any other)."""
+    if hasattr(context, "dedup_dao"):
+        venue_id = _dedup_steps._ensure_venue(context, venue)
+        context.dedup_redis.set(
+            event_dedup.ADMIN_CONFIG_SINGLE_NIGHT_VENUES_KEY, json.dumps([venue_id]),
+        )
+        context.vnd_single_night_venue_ids = [venue_id]
+        return
+    from tests.bdd.steps.events_venue_night_duplication_backlog_steps import (
+        set_backlog_single_night_venue,
+    )
+
+    set_backlog_single_night_venue(context, venue)
+
+
+def _seed_five_acts(context, venue):
+    context.vnd_night_ids = []
+    for title, lineup in _FIVE_ACTS:
+        context.vnd_night_ids.append(_dedup_steps._seed_item(
+            context, title, venue, starts_at=_dedup_local(_SATURDAY, "22:00"),
+            lineup=list(lineup),
+            # `accepted`, the status a clean extraction actually lands on —
+            # and the one `is_selectable` serves, which the display-title
+            # feature reuses this same fixture to prove.
+            status="accepted",
+            # One shared crawl moment for the whole cluster: these are five
+            # separate posts discovered together, with no stated relative
+            # order, so a content disagreement between two absorbed rows is
+            # broken in the canonical's own favour rather than by whichever
+            # fixture line happened to come last.
+            first_seen_at=_dedup_steps._NOW,
+        ))
+    return context.vnd_night_ids
+
+
+@given('five stored events at "{venue}" on one Saturday, each naming a different act')
+def step_given_five_acts(context, venue):
+    _seed_five_acts(context, venue)
+
+
+@given('stored events "{a}", "{b}" and "{c}" at "{venue}" on one day')
+def step_given_three_workshops(context, a, b, c, venue):
+    context.vnd_night_ids = [
+        _dedup_steps._seed_item(
+            context, title, venue, starts_at=_dedup_local(_SATURDAY, "15:00"),
+            first_seen_at=_dedup_steps._NOW,
+        )
+        for title in (a, b, c)
+    ]
+
+
+@given('two stored events at "{venue}" on one Saturday, both confirmed by an operator')
+def step_given_two_confirmed_events(context, venue):
+    context.vnd_night_ids = [
+        _dedup_steps._seed_item(
+            context, title, venue, starts_at=_dedup_local(_SATURDAY, "22:00"),
+            status="confirmed", first_seen_at=_dedup_steps._NOW,
+        )
+        for title, _lineup in _FIVE_ACTS[:2]
+    ]
+
+
+@given('two stored events at "{venue}" on one Saturday, one of whose titles an operator edited')
+def step_given_two_events_one_title_edited(context, venue):
+    context.vnd_night_ids = [
+        _dedup_steps._seed_item(
+            context, _FIVE_ACTS[0][0], venue, starts_at=_dedup_local(_SATURDAY, "22:00"),
+            first_seen_at=_dedup_steps._NOW,
+        ),
+        _dedup_steps._seed_item(
+            context, _FIVE_ACTS[1][0], venue, starts_at=_dedup_local(_SATURDAY, "22:00"),
+            title_edited=True, first_seen_at=_dedup_steps._NOW,
+        ),
+    ]
+
+
+@given('a stored event and a stored birthday greeting at "{venue}" on one Saturday')
+def step_given_event_and_greeting(context, venue):
+    context.vnd_night_ids = [_dedup_steps._seed_item(
+        context, _FIVE_ACTS[0][0], venue, starts_at=_dedup_local(_SATURDAY, "22:00"),
+        first_seen_at=_dedup_steps._NOW,
+    )]
+    context.vnd_greeting_id = _dedup_steps._seed_item(
+        context, "31 Anos", venue, starts_at=_dedup_local(_SATURDAY, "22:00"),
+        post_type="other", first_seen_at=_dedup_steps._NOW,
+    )
+
+
+@given('two stored events at "{venue}" on one Saturday sharing exactly one performer')
+def step_given_two_events_one_shared_performer(context, venue):
+    # Two DIFFERENT all-generic titles, so ONLY the lineup signal can decide
+    # the band (identical normalized titles would collide on the EXACT
+    # identity first, which runs before the fuzzy pass).
+    context.vnd_night_ids = [
+        _dedup_steps._seed_item(
+            context, "Sextou", venue, starts_at=_dedup_local(_SATURDAY, "22:00"),
+            lineup=["@neguindabasersv"], first_seen_at=_dedup_steps._NOW,
+        ),
+        _dedup_steps._seed_item(
+            context, "Festa", venue, starts_at=_dedup_local(_SATURDAY, "22:00"),
+            lineup=["@neguindabasersv"], first_seen_at=_dedup_steps._NOW,
+        ),
+    ]
+
+
+@given('two stored events at "{venue}" on one Saturday with the same title and the same date')
+def step_given_two_exact_identity_events(context, venue):
+    context.vnd_night_ids = [
+        _dedup_steps._seed_item(
+            context, "NOITE DA PATROA", venue, starts_at=_dedup_local(_SATURDAY, "22:00"),
+            first_seen_at=_dedup_steps._NOW,
+        ),
+        _dedup_steps._seed_item(
+            context, "noite da patroa", venue, starts_at=_dedup_local(_SATURDAY, "22:00"),
+            first_seen_at=_dedup_steps._NOW,
+        ),
+    ]
+
+
+_WORD_COUNTS = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5}
+
+
+@then("{count_word} event survives for that Saturday")
+@then("{count_word} events survive for that Saturday")
+def step_then_n_events_survive_for_saturday(context, count_word):
+    expected = _WORD_COUNTS[count_word]
+    survivors = _dedup_survivors(context, context.vnd_night_ids)
+    assert len(survivors) == expected, [
+        context.dedup_dao.get_event(e)["title"] for e in survivors
+    ]
+    context.vnd_survivor_id = survivors[0] if survivors else None
+    context.vnd_absorbed_ids = [
+        eid for eid in context.vnd_night_ids if eid not in survivors
+    ]
+
+
+@then("{count_word} events survive")
+def step_then_n_events_survive(context, count_word):
+    expected = _WORD_COUNTS[count_word]
+    survivors = _dedup_survivors(context, _scenario_event_ids(context))
+    assert len(survivors) == expected, survivors
+
+
+@then("the surviving event names every one of the five acts in its lineup")
+def step_then_surviving_event_names_five_acts(context):
+    row = context.dedup_dao.get_event(context.vnd_survivor_id)
+    lineup = set(row.get("lineup") or [])
+    for _title, acts in _FIVE_ACTS:
+        for act in acts:
+            assert act in lineup, (act, lineup)
+
+
+@then("every absorbed event is superseded rather than deleted")
+def step_then_every_absorbed_superseded(context):
+    assert context.vnd_absorbed_ids, "nothing was absorbed"
+    for event_id in context.vnd_absorbed_ids:
+        row = context.dedup_dao.get_event(event_id)
+        assert row is not None, f"{event_id} was deleted, not superseded"
+        assert row["status"] == "superseded", row
+        assert row.get("superseded_by") == context.vnd_survivor_id, row
+
+
+@then("no merge suggestion is recorded for any pair of them")
+def step_then_no_suggestion_for_any_pair(context):
+    for event_id in context.vnd_night_ids:
+        assert context.dedup_dao.list_event_merge_suggestions(
+            event_id=event_id, decision="pending",
+        ) == [], event_id
+
+
+@then("no merge suggestion is recorded for the pair")
+def step_then_no_suggestion_for_the_pair(context):
+    """plan §C2: "Only the auto band sweeps ... a historical backlog of
+    suggestions nobody asked for is queue landfill." The sweep runs with
+    `record_suggestions=False`, so a suggest-band pair it walks past must
+    leave no row behind at all."""
+    for event_id in _scenario_event_ids(context):
+        assert context.dedup_dao.list_event_merge_suggestions(event_id=event_id) == [], (
+            event_id
+        )
+
+
+@then("a merge suggestion is recorded for the pair")
+def step_then_suggestion_recorded_for_pair(context):
+    a, b = context.vnd_night_ids
+    pending = [
+        s for s in context.dedup_dao.list_event_merge_suggestions(event_id=a, decision="pending")
+        if b in (s["event_id"], s["candidate_event_id"])
+    ]
+    assert len(pending) == 1, pending
+
+
+@then("the greeting survives as its own row")
+def step_then_greeting_survives(context):
+    assert _dedup_steps._alive(context, context.vnd_greeting_id)
+    row = context.dedup_dao.get_event(context.vnd_greeting_id)
+    assert row["title"] == "31 Anos", row
+    assert row.get("superseded_by") is None, row
+
+
+@then("the absorbed event is deleted rather than superseded")
+def step_then_absorbed_event_deleted(context):
+    assert context.vnd_absorbed_ids, "nothing was absorbed"
+    for event_id in context.vnd_absorbed_ids:
+        assert context.dedup_dao.get_event(event_id) is None, (
+            f"{event_id} was superseded; the exact-identity merge must still DELETE"
+        )
+
+
+# ══ Phase F: the one-off historical sweep ════════════════════════════════
+# Driven through the REAL CLI (`scripts.measure_event_dedup.main`), not
+# through `sweep()` directly: the blast-radius guard, the exit codes and the
+# report are the CLI's own contract, and an operator running this off-peak
+# runs exactly this. Its two production constructors are patched out so it
+# reads the scenario's in-memory store instead of RDS — the same seam
+# `tests/test_measure_event_dedup.py` uses.
+def _sweep_dao(context):
+    """Whichever harness the running scenario built — the `dedup_*` one for
+    the enrichment feature, the `backlog_*` one for the observability
+    feature. One sweep step, driven against the scenario's own store."""
+    if hasattr(context, "dedup_dao"):
+        return context.dedup_dao
+    return context.backlog_dao
+
+
+def _run_sweep_cli(context, *argv):
+    import tempfile
+    from unittest.mock import patch
+
+    import scripts.measure_event_dedup as med
+
+    dao = _sweep_dao(context)
+    report_path = f"{tempfile.mkdtemp()}/sweep.json"
+    context.vnd_rows_before = _snapshot_rows(context)
+    with patch.object(med, "RdsVenueStore", lambda url: dao), \
+            patch.object(med, "VenueRepository", lambda client=None, rds_store=None: rds_store):
+        context.vnd_sweep_exit = med.main([*argv, "--report-json", report_path])
+    context.vnd_sweep_report = json.loads(pathlib.Path(report_path).read_text())
+    return context.vnd_sweep_report
+
+
+def _single_night_args(context):
+    venue_ids = (
+        getattr(context, "vnd_single_night_venue_ids", None)
+        or getattr(context, "backlog_single_night_venue_ids", None)
+        or []
+    )
+    return [arg for venue_id in venue_ids for arg in ("--single-night-venue", venue_id)]
+
+
+@when("the dedup sweep runs with apply for that single-night venue")
+def step_when_sweep_apply_single_night(context):
+    _run_sweep_cli(context, "--apply", *_single_night_args(context))
+
+
+@given("the dedup sweep has run with apply for that single-night venue")
+def step_given_sweep_has_run(context):
+    context.vnd_status_before = {
+        eid: context.dedup_dao.get_event(eid)["status"] for eid in context.vnd_night_ids
+    }
+    _run_sweep_cli(context, "--apply", *_single_night_args(context))
+    survivors = _dedup_survivors(context, context.vnd_night_ids)
+    assert len(survivors) == 1, survivors
+    context.vnd_survivor_id = survivors[0]
+    context.vnd_absorbed_ids = [
+        eid for eid in context.vnd_night_ids if eid != context.vnd_survivor_id
+    ]
+
+
+@when("the dedup sweep runs with apply and an auto-pair ceiling of {ceiling:d}")
+def step_when_sweep_apply_with_ceiling(context, ceiling):
+    _run_sweep_cli(
+        context, "--apply", *_single_night_args(context),
+        "--max-auto-pairs", str(ceiling),
+    )
+
+
+@when("the dedup sweep runs with apply twice for that single-night venue")
+def step_when_sweep_apply_twice(context):
+    _run_sweep_cli(context, "--apply", *_single_night_args(context))
+    context.vnd_second_sweep_report = _run_sweep_cli(
+        context, "--apply", *_single_night_args(context),
+    )
+
+
+@when("the dedup sweep runs without apply for that single-night venue")
+def step_when_sweep_dry_run(context):
+    _run_sweep_cli(context, *_single_night_args(context))
+
+
+@when("the dedup sweep runs with apply")
+def step_when_sweep_apply(context):
+    _run_sweep_cli(context, "--apply")
+
+
+@when("an operator reverses the merge that absorbed one of those events")
+def step_when_operator_reverses_swept_merge(context):
+    from app.services.event_merge import reverse_title_similarity_merge
+
+    absorbed_id = context.vnd_absorbed_ids[0]
+    context.vnd_reversed_id = absorbed_id
+    context.vnd_moved_source_ids = [
+        s["id"] for s in context.dedup_dao.list_event_sources(context.vnd_survivor_id)
+    ]
+    reverse_title_similarity_merge(context.dedup_dao, absorbed_id, _dedup_steps._NOW)
+
+
+@then("the sweep writes nothing")
+def step_then_sweep_writes_nothing(context):
+    assert _snapshot_rows(context) == context.vnd_rows_before, "the sweep wrote a row"
+
+
+@then("the sweep reports failure")
+def step_then_sweep_reports_failure(context):
+    assert context.vnd_sweep_exit != 0, context.vnd_sweep_exit
+
+
+def _report_titles(report) -> set:
+    titles = set()
+    for pair in report.get("auto_pairs", []):
+        titles.add(pair["surviving_title"])
+        titles.add(pair["absorbed_title"])
+    return titles
+
+
+@then("the report names the surviving title and every absorbed title")
+def step_then_report_names_every_title(context):
+    # Assertions name the TITLES, never the row count: a count-based
+    # assertion has already stayed green here against a deliberately
+    # reintroduced bug, because both passes computed the same wrong number.
+    named = _report_titles(context.vnd_sweep_report)
+    for title, _acts in _FIVE_ACTS:
+        assert title in named, (title, named)
+
+
+@then("the report names every pair it would merge")
+def step_then_report_names_every_pair(context):
+    assert context.vnd_sweep_report["counts"]["auto_pairs"] > 0, context.vnd_sweep_report
+    step_then_report_names_every_title(context)
+
+
+@then("the second sweep merges nothing")
+def step_then_second_sweep_merges_nothing(context):
+    report = context.vnd_second_sweep_report
+    assert report["counts"]["auto_pairs"] == 0, report["auto_pairs"]
+
+
+@then("that event is readable again with its original status")
+def step_then_reversed_event_readable(context):
+    row = context.dedup_dao.get_event(context.vnd_reversed_id)
+    assert row is not None, "the absorbed row was destroyed, not superseded"
+    # The status it had BEFORE the sweep absorbed it — `_absorb_title_
+    # similarity` records `absorbed_status_before` precisely so a reversal
+    # restores it rather than guessing `pending_review`.
+    assert row["status"] == context.vnd_status_before[context.vnd_reversed_id], row["status"]
+    assert row.get("superseded_by") is None, row
+
+
+@then("the sources that moved to the survivor are attached to it again")
+def step_then_moved_sources_reattached(context):
+    restored = context.dedup_dao.list_event_sources(context.vnd_reversed_id)
+    assert len(restored) == 1, restored
+    survivor_source_ids = {
+        s["id"] for s in context.dedup_dao.list_event_sources(context.vnd_survivor_id)
+    }
+    assert restored[0]["id"] not in survivor_source_ids, restored
+
+
+@given('two stored events at "{venue}" on one day whose titles differ only in the speaker\'s name')
+def step_given_two_suggest_band_events(context, venue):
+    # `260812`'s own measured SUGGEST-band pair: the distinctive sets
+    # intersect but neither contains the other, so the sweep must leave both
+    # rows standing AND write no suggestion row (plan §C2: a historical
+    # backlog of suggestions nobody asked for is queue landfill).
+    #
+    # ONE definition for both feature files that state it, dispatching to
+    # whichever harness the running scenario built.
+    if not hasattr(context, "dedup_dao"):
+        from tests.bdd.steps.events_venue_night_duplication_backlog_steps import (
+            seed_backlog_suggest_band_pair,
+        )
+
+        seed_backlog_suggest_band_pair(context, venue)
+        return
+    context.vnd_night_ids = [
+        _dedup_steps._seed_item(
+            context, title, venue, starts_at=_dedup_local(_SATURDAY, "19:00"),
+            first_seen_at=_dedup_steps._NOW,
+        )
+        for title in (
+            "Ação Leitura: Bate-papo com Marcelino Freire",
+            "Ação Leitura: Bate-papo com Jeferson Tenório",
+        )
+    ]
+
+
+# ══ the deploy must change nothing ═══════════════════════════════════════
+def _snapshot_rows(context) -> dict:
+    """Every stored row in EVERY harness this scenario built, so "unchanged"
+    means unchanged everywhere — not just in the one the When step happened
+    to touch."""
+    snapshot: dict = {}
+    if hasattr(context, "dedup_dao"):
+        for row in context.dedup_dao.list_events():
+            snapshot[("dedup", row["event_id"])] = dict(row)
+    if getattr(context, "ee_dao", None) is not None:
+        for row in context.ee_dao.list_events():
+            snapshot[("ee", row["event_id"])] = dict(row)
+    if hasattr(context, "backlog_dao"):
+        for row in context.backlog_dao.list_events():
+            snapshot[("backlog", row["event_id"])] = dict(row)
+    return snapshot
+
+
+@then("every stored event is unchanged")
+def step_then_every_stored_event_unchanged(context):
+    """ONE definition for both feature files that state it (behave's registry
+    is global). The observability feature's own steps snapshot into
+    `context.backlog_rows_before`; everything else snapshots through
+    `_snapshot_rows` at the moment the When step runs."""
+    if getattr(context, "backlog_rows_before", None) is not None:
+        for event_id, before in context.backlog_rows_before.items():
+            after = context.backlog_dao.get_event(event_id)
+            assert after == before, (event_id, before, after)
+        return
+    assert getattr(context, "vnd_rows_before", None) is not None, (
+        "no before-snapshot was taken; the When step must call _snapshot_rows"
+    )
+    assert _snapshot_rows(context) == context.vnd_rows_before
+
+
+# ══ Defect 1, catalog-wide ═══════════════════════════════════════════════
+# The scope the operator chose after reviewing the per-venue list: every
+# venue treated as running one night, no exclusions. `260812`'s own measured
+# false positive (`Bolinha do Cavaco` / `JB do Cavaco` at Casanova Ecobar)
+# now merges — the scenarios below assert that NEW behaviour deliberately,
+# and pin that it still refuses while the flag is off.
+@given("the catalog-wide single-night default is enabled")
+def step_given_catalog_wide_single_night(context):
+    _dedup_steps._ensure_context(context)
+    context.dedup_redis.set(
+        event_dedup.ADMIN_CONFIG_SINGLE_NIGHT_DEFAULT_ENABLED_KEY, json.dumps(True),
+    )
+
+
+@given('two stored events at "{venue}" on one Saturday whose titles share no distinctive word')
+def step_given_two_disjoint_events(context, venue):
+    # ONE definition for both feature files that state it, dispatching to
+    # whichever harness the running scenario built.
+    if not hasattr(context, "dedup_dao"):
+        from tests.bdd.steps.events_venue_night_duplication_backlog_steps import (
+            seed_backlog_disjoint_pair,
+        )
+
+        seed_backlog_disjoint_pair(context, venue)
+        return
+    context.vnd_night_ids = [
+        _dedup_steps._seed_item(
+            context, title, venue, starts_at=_dedup_local(_SATURDAY, "22:00"),
+            status="accepted", first_seen_at=_dedup_steps._NOW,
+        )
+        for title in ("ROWKA", "VITINHO POLÊMICO")
+    ]
+
+
+@given('two stored events at "{venue}" on two different Saturdays')
+def step_given_two_events_two_saturdays(context, venue):
+    context.vnd_night_ids = [
+        _dedup_steps._seed_item(
+            context, "ROWKA", venue, starts_at=_dedup_local(_SATURDAY, "22:00"),
+            status="accepted", first_seen_at=_dedup_steps._NOW,
+        ),
+        _dedup_steps._seed_item(
+            context, "VITINHO POLÊMICO", venue, starts_at=_dedup_local("2026-09-19", "22:00"),
+            status="accepted", first_seen_at=_dedup_steps._NOW,
+        ),
+    ]
+
+
+@given('the two acts "{a}" and "{b}" at "{venue}" on one night')
+def step_given_the_casanova_pair(context, a, b, venue):
+    # Verbatim from `260812_event-dedup-fuzzy-title.md`'s Evidence section —
+    # the pair that set the bar, and the one the operator has now explicitly
+    # accepted will merge.
+    context.vnd_night_ids = [
+        _dedup_steps._seed_item(
+            context, title, venue, starts_at=_dedup_local(_SATURDAY, "21:00"),
+            status="accepted", first_seen_at=_dedup_steps._NOW,
+        )
+        for title in (a, b)
+    ]
