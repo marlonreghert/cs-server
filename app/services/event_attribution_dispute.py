@@ -280,6 +280,15 @@ def evaluate_attribution_dispute(
             mapped_venue_id, venues,
             generic_vocabulary=generic_vocabulary, stopwords=stopwords,
         ),
+        # This rule acts on `DISPUTE_METHODS` (rungs 1-3) plus the
+        # `venue_not_in_catalog` sentinel, and on NOTHING else — rung 4's
+        # `name_match` and rung 5's caption mention are excluded by name,
+        # above. That is exactly the declaration `identity_methods_only`
+        # asks for, so the ladder may skip its one superlinear rung wherever
+        # that rung's result is unobservable here. See `resolve_event_venue`'s
+        # rung-4 block for the proof; `tests/test_event_attribution_dispute.py`
+        # pins it by differential-testing both settings against each other.
+        identity_methods_only=True,
     )
 
     if (

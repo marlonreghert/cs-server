@@ -19,6 +19,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
+from app.models.venue import Venue
 from app.services import event_dedup
 from app.services.event_attribution_dispute import evaluate_attribution_dispute
 from app.services.event_venue_resolution import VenueLite
@@ -30,10 +31,13 @@ from app.services.event_dedup_backlog import (
     MEASURE_REFUSED_NO_DISTINCTIVE_TOKENS_PAIRS,
     MEASURE_VENUE_NIGHT_EXCESS_ROWS,
     MEASURE_VENUE_NIGHT_GROUPS,
+    collect_dedup_backlog,
     compute_dedup_backlog,
     is_live_event_row,
     row_location_text,
 )
+from app.services.event_reconciliation import new_event_id
+from tests.rds_fake import InMemoryRdsVenueStore
 
 RECIFE = ZoneInfo("America/Recife")
 
@@ -51,6 +55,10 @@ _VENUE_ADDRESSES = {
     "v1": "R. das Ninfas, 125 - Boa Vista, Recife - PE",
     "v2": "Av. Cons. Aguiar, 1000 - Boa Viagem, Recife - PE",
 }
+
+# The crawl moment every seeded source shares — these fixtures are about
+# grouping and grading, never about recency.
+_NOW = datetime(2026, 9, 10, 12, 0, tzinfo=timezone.utc)
 
 _SEQ = {"n": 0}
 # A sentinel, never `None`: `starts_at=None` is a REAL fixture shape here
@@ -485,3 +493,184 @@ class TestTheRefusalScanAsksTheMergeLayerSQuestion:
         rows = [_row("ROWKA"), _row("VITINHO POLÊMICO")]
         assert _backlog(rows).venue_night_excess_rows == 1
         assert _backlog(rows, config=self._catalog_wide()).venue_night_excess_rows == 1
+
+
+class TestTheDisputeScanIsNotQuadratic:
+    """`collect_dedup_backlog` runs the resolution ladder over the WHOLE live
+    corpus — at the end of every extraction run, and on every
+    `GET /admin/events/dedup-backlog` hit. One ladder run per ROW over a
+    ~3,600-venue catalog made that take 277s at prod scale, at 85% CPU, and
+    it starved the Redis-projection job ("maximum number of running
+    instances reached").
+
+    Two things fix it, and this class pins both by COUNT rather than by
+    clock, so it cannot rot into a flaky timing test:
+      - the verdict is memoised on the full set of inputs it depends on, so
+        the ladder runs once per DISTINCT question, not once per row;
+      - the ladder's one superlinear rung is skipped where its answer is
+        unobservable (pinned in `tests/test_event_attribution_dispute.py`).
+    """
+
+    def _store(self, *, n_venues, n_rows, distinct_texts):
+        store = InMemoryRdsVenueStore()
+        for i in range(n_venues):
+            store.upsert_venue(Venue(
+                venue_id=f"pv_{i:04d}", venue_name=f"Bar Exemplo {i}",
+                venue_address=f"Rua {i}, {i} - Boa Viagem, Recife - PE",
+                venue_lat=-8.05, venue_lng=-34.88,
+            ))
+        texts = [f"Rua {i} do Exemplo, {i} - Recife - PE" for i in range(distinct_texts)]
+        for i in range(n_rows):
+            store.insert_event({
+                "event_id": new_event_id(), "venue_id": "pv_0000",
+                "starts_at": _local("2026-09-12"), "title": f"Show {i}",
+                "post_type": "event", "status": "accepted", "lineup": [],
+                "source_kind": "venue_post", "source_handle": "one_handle",
+                "source_shortcode": f"perf_sc_{i}",
+                "first_seen_at": _NOW, "last_seen_at": _NOW,
+                "raw_extraction": {"location_text": texts[i % distinct_texts]},
+            })
+        return store
+
+    def test_the_ladder_runs_once_per_distinct_question_not_once_per_row(self, monkeypatch):
+        import app.services.event_dedup_backlog as backlog_mod
+
+        calls = []
+        real = backlog_mod.__dict__.get("evaluate_attribution_dispute")
+
+        import app.services.event_attribution_dispute as dispute_mod
+
+        real_fn = dispute_mod.evaluate_attribution_dispute
+
+        def _counted(**kwargs):
+            calls.append(kwargs.get("location_text"))
+            return real_fn(**kwargs)
+
+        monkeypatch.setattr(dispute_mod, "evaluate_attribution_dispute", _counted)
+
+        store = self._store(n_venues=40, n_rows=120, distinct_texts=8)
+        collect_dedup_backlog(store)
+
+        assert len(calls) == 8, (
+            f"120 rows with 8 distinct location texts should cost 8 ladder runs, "
+            f"not {len(calls)}"
+        )
+        assert len(set(calls)) == 8
+
+    def test_the_cache_key_separates_rows_that_ask_different_questions(self, monkeypatch):
+        """The memo is only sound if the key carries everything the verdict
+        depends on. Same text, DIFFERENT mapped venue / posting handle /
+        operator pin must each be asked separately."""
+        import app.services.event_attribution_dispute as dispute_mod
+
+        calls = []
+        real_fn = dispute_mod.evaluate_attribution_dispute
+
+        def _counted(**kwargs):
+            calls.append((
+                kwargs.get("mapped_venue_id"), kwargs.get("location_text"),
+                kwargs.get("promoter_handle"),
+            ))
+            return real_fn(**kwargs)
+
+        monkeypatch.setattr(dispute_mod, "evaluate_attribution_dispute", _counted)
+
+        store = InMemoryRdsVenueStore()
+        for vid, name in (("pv_a", "Bar A"), ("pv_b", "Bar B")):
+            store.upsert_venue(Venue(
+                venue_id=vid, venue_name=name, venue_address=f"Rua {name}, 1 - Recife",
+                venue_lat=-8.05, venue_lng=-34.88,
+            ))
+        variants = [
+            ("pv_a", "handle_one", None),
+            ("pv_a", "handle_one", None),      # identical -> cached
+            ("pv_b", "handle_one", None),      # other venue
+            ("pv_a", "handle_two", None),      # other handle
+            ("pv_a", "handle_one", ["venue_id"]),  # operator pinned the venue
+        ]
+        for i, (vid, handle, edited) in enumerate(variants):
+            store.insert_event({
+                "event_id": new_event_id(), "venue_id": vid,
+                "starts_at": _local("2026-09-12"), "title": f"Show {i}",
+                "post_type": "event", "status": "accepted", "lineup": [],
+                "operator_edited_fields": edited,
+                "source_kind": "venue_post", "source_handle": handle,
+                "source_shortcode": f"key_sc_{i}",
+                "first_seen_at": _NOW, "last_seen_at": _NOW,
+                "raw_extraction": {"location_text": "CASA FORTE"},
+            })
+        collect_dedup_backlog(store)
+        assert len(calls) == 4, f"expected 4 distinct questions, got {len(calls)}: {calls}"
+
+    def test_the_fuzzy_scan_does_not_grow_with_the_corpus(self, monkeypatch):
+        """The complexity claim itself: `name_similarity` is the ladder's
+        superlinear step, and for a corpus whose texts name no unrecognized
+        handle it must not run at all — so the cost stops being
+        rows x catalog."""
+        import app.services.event_venue_resolution as evr
+
+        calls = []
+        real = evr.name_similarity
+        monkeypatch.setattr(
+            evr, "name_similarity",
+            lambda *a, **kw: (calls.append(a), real(*a, **kw))[1],
+        )
+        store = self._store(n_venues=200, n_rows=200, distinct_texts=20)
+        collect_dedup_backlog(store)
+        assert calls == [], (
+            f"{len(calls)} fuzzy comparisons ran for a corpus that needs none"
+        )
+
+    def test_the_report_is_identical_with_and_without_the_cache(self):
+        """A performance fix must change no answer. Same corpus, once
+        through `collect_dedup_backlog` (memoised) and once through
+        `compute_dedup_backlog` with an evaluator that refuses to cache."""
+        from app.services.event_attribution_dispute import evaluate_attribution_dispute
+        from app.services.event_venue_resolution import (
+            build_handle_index, build_venue_catalog,
+        )
+
+        store = InMemoryRdsVenueStore()
+        for vid, name, addr in (
+            ("v_bv", "BeerDock Boa Viagem", "Av. Cons. Aguiar, 1000 - Boa Viagem, Recife"),
+            ("v_cf", "BeerDock Casa Forte", "Av. Rui Barbosa, 500 - Casa Forte, Recife"),
+            ("v_mc", "Maria Café", "R. do Sol, 7 - Santo Antônio, Recife"),
+        ):
+            store.upsert_venue(Venue(
+                venue_id=vid, venue_name=name, venue_address=addr,
+                venue_lat=-8.05, venue_lng=-34.88,
+            ))
+        for i, text in enumerate([
+            "CASA FORTE", "CASA FORTE", "@beerdock.madalena", "nossa unidade de Boa Viagem",
+            "Maria Café", "@naoexiste Maria Café", None,
+        ]):
+            store.insert_event({
+                "event_id": new_event_id(), "venue_id": "v_bv",
+                "starts_at": _local("2026-09-12"), "title": f"Show {i}",
+                "post_type": "event", "status": "accepted", "lineup": [],
+                "source_kind": "venue_post", "source_handle": "beerdock_recife",
+                "source_shortcode": f"cmp_sc_{i}",
+                "first_seen_at": _NOW, "last_seen_at": _NOW,
+                "raw_extraction": {"location_text": text} if text else {},
+            })
+
+        cached = collect_dedup_backlog(store)
+
+        catalog = build_venue_catalog(store)
+        handle_index = build_handle_index(store)
+        uncached = compute_dedup_backlog(
+            store.list_events(),
+            venue_names={v.venue_id: v.venue_name for v in catalog},
+            config=event_dedup.load_dedup_config(None),
+            dispute_evaluator=lambda row: evaluate_attribution_dispute(
+                mapped_venue_id=row.get("venue_id"),
+                location_text=row_location_text(row),
+                venues=catalog, handle_index=handle_index,
+                promoter_handle=row.get("source_handle"),
+                operator_edited_fields=row.get("operator_edited_fields"),
+            ),
+        )
+        assert cached.measures() == uncached.measures()
+        assert [d.to_dict() for d in cached.attribution_disputes] == [
+            d.to_dict() for d in uncached.attribution_disputes
+        ]

@@ -394,16 +394,34 @@ def collect_dedup_backlog(venue_dao, *, redis_like=None) -> DedupBacklog:
     catalog = build_venue_catalog(venue_dao)
     handle_index = build_handle_index(venue_dao)
 
+    # Memoised on the FULL set of inputs the verdict actually depends on, so
+    # it is a pure cache and not an approximation: the catalog, handle index
+    # and vocabularies are fixed for this scan, which leaves the mapped
+    # venue, the text itself, the posting handle (it decides which mentions
+    # are self-links) and whether an operator pinned `venue_id`. Rows
+    # repeat those heavily — BeerDock alone has 20 rows all saying "CASA
+    # FORTE", and `oquetemhojeemnatal` posts the same handful of handles
+    # hundreds of times — so this collapses one ladder run per ROW into one
+    # per DISTINCT question.
+    verdict_cache: dict = {}
+
     def _evaluate(row):
-        return evaluate_attribution_dispute(
-            mapped_venue_id=row.get("venue_id"),
-            location_text=row_location_text(row),
-            venues=catalog, handle_index=handle_index,
-            promoter_handle=row.get("source_handle"),
-            operator_edited_fields=row.get("operator_edited_fields"),
-            generic_vocabulary=config.generic_vocabulary,
-            stopwords=config.stopwords,
+        location_text = row_location_text(row)
+        key = (
+            row.get("venue_id"), location_text, row.get("source_handle"),
+            "venue_id" in (row.get("operator_edited_fields") or []),
         )
+        if key not in verdict_cache:
+            verdict_cache[key] = evaluate_attribution_dispute(
+                mapped_venue_id=row.get("venue_id"),
+                location_text=location_text,
+                venues=catalog, handle_index=handle_index,
+                promoter_handle=row.get("source_handle"),
+                operator_edited_fields=row.get("operator_edited_fields"),
+                generic_vocabulary=config.generic_vocabulary,
+                stopwords=config.stopwords,
+            )
+        return verdict_cache[key]
 
     pending = len(venue_dao.list_event_merge_suggestions(decision="pending"))
     return compute_dedup_backlog(
