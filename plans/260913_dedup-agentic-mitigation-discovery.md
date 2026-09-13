@@ -738,3 +738,78 @@ scoped) ever re-opens a `BAND_REFUSE` pair.
   test-unit`: 4,473 passed / 7 pre-existing skips / 0 failed; `make
   test-bdd`: 124 features / 1,564 scenarios / 10,066 steps, all passed)
   running unmodified against this branch.
+
+## Live Validation Against Fresh Crawl Data (post-merge)
+
+After merge and deploy, 40 new `kind='venue'` crawl targets were added
+(30 Recife, 5 Natal, 5 Salvador — deliberately excluding venues already
+entangled in the 260912 incident decisions, for a clean read) and each run
+immediately rather than waiting for its weekly cron. This produced 146 real
+events from previously-uncrawled venues, independent of every case already
+in the Phase 1 corpus — a genuine out-of-sample check of whether this
+plan's framing holds up, not a replay of known cases.
+
+**Correction to this plan's own framing, caught during the check:** live
+`DedupConfig` right now has `auto_merge_enabled=True` and
+`recurring_window_enabled=True` — not off by default as earlier language in
+this plan assumed. `single_night_default_enabled` is still `False`, with 19
+explicit entries on `single_night_venues` (the 260912 allowlist).
+
+**Cross-post fragmentation — same shape, plus one new wrinkle.** An initial
+scan found 19 venue+night groups with more than one event among the fresh
+batch — but most do not hold up under careful re-check: many of the 40
+handles returned zero posts or only non-event post types, and the most
+promising worked example (Tatu Bola / "Mira Raynne", Arena Pernambuco) is
+already on `single_night_venues` and already resolves `BAND_AUTO` live, so
+it is a case already fixed by the 260912 sweep, not a fresh one. Two
+groups stand as genuinely live, currently-unresolved fragmentation, both
+independently re-verified with the real `evaluate_pair`:
+- **Boteco Nem A Pau Juvenal, 2026-09-13** — "Domingo é dia de Boteco!" /
+  "Show de @alexcarrerasoficial" / "ALEX CARRERAS E BANDA" — all three
+  pairs `REFUSE`. Two pairs share exactly one lineup name (below
+  `DEFAULT_LINEUP_THRESHOLD=2`, the known, already-documented shape). The
+  third pair is a **new** blind spot this fresh data surfaced: the glued
+  Instagram handle token `"alexcarrerasoficial"` never token-intersects
+  with `{alex, carreras, banda}` from the space-separated title, even
+  though a person reads them as the same act instantly. Not previously
+  documented in `plans/260812_event-dedup-fuzzy-title.md` or the 260912
+  fix — a real, narrow tokenization gap worth a follow-up look
+  (normalizing/splitting a caption's own `@handle` mentions before
+  distinctive-set comparison, the same signal `extract_mentions` already
+  pulls out for promoter-discovery elsewhere).
+- **Casa de Jorge Amado, 2026-09-13** — "CHAPEUZINHO VERMELHO" vs "PETER
+  PAN" — `REFUSE`, and correctly so: two distinct plays, exactly the
+  programme-venue pattern `plans/260912_events-venue-night-duplication.md`
+  protects. A true negative, not a gap.
+
+**Misattribution — the documented "zero" genuinely reproduces, but a
+different, real defect surfaced alongside it.** 130/146 fresh events carry
+`location_text`; `evaluate_attribution_dispute` returned zero verdicts for
+all of them — not a measurement artifact, the real ladder was called
+directly. But all 14 `real.botequim` events came back
+`venue_id=NULL`/`location_resolution='unresolved'`/
+`review_reason='unresolved_venue'`: its crawl target's mapped venue in the
+catalog, "Real Bar e Lanches," is in São Paulo — roughly 2,000km from the
+handle's actual stated address ("Real Botequim — Av. 17 de Agosto, 1761,
+Casa Forte, Recife"). The resolver correctly refuses to pin to the wrong
+venue rather than silently misattributing, but has no correct one to
+offer instead. This is a **venue-onboarding/linking defect**, not a
+dedup- or attribution-ladder defect, and it sits in `RESOLUTION_UNRESOLVED`
+— a different enum value than `RESOLUTION_QUEUED`
+(`event_venue_resolution.py`), so it is invisible to both the dedup/
+attribution counters this plan measures AND to Phase 4's advisor trigger.
+Two more flagged-but-unconfirmed candidates for the same pattern: Casa da
+Cultura de Pernambuco's "Torre Malakoff" and Theater Luís Mendonça's
+"Teatro Nacional" — not yet independently confirmed as bad links, worth an
+operator look.
+
+**Net read:** the fragmentation gap this plan measured against old
+incident data is the same shape in brand-new data, plus one genuinely new
+narrow tokenization case. The attribution-dispute "zero" is real, not a
+blind spot in the measurement itself — but this batch's own onboarding
+surfaced an adjacent, real defect (mis-linked crawl target → venue
+mapping) that neither this plan nor Phase 4 was built to catch, because it
+occupies a different resolution state entirely. None of this is acted on
+in this session — it is recorded here as input to whichever follow-up
+plan picks up the embedding-candidate-widening or venue-linking-audit
+threads this plan already named as deferred, not assumed solved.
