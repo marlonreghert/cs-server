@@ -146,6 +146,62 @@ def load_attribution_dispute_config(redis_like) -> AttributionDisputeConfig:
 
 
 # ── the brand root (rung 3's bounded candidate set) ─────────────────────────
+# Words that are generic in a VENUE NAME. Deliberately NOT added to
+# `event_dedup.DEFAULT_GENERIC_VOCABULARY`, which is a different question
+# with a different blast radius: that list feeds `distinctive_set`, the
+# TITLE dedup bar, which is live in production with auto-merge on and pinned
+# by `260812`'s measured false-positive corpus. Adding "casa" there would
+# change which EVENT TITLES are distinctive — `{casa, bacurau}` against
+# `{casa}` is a subset today and auto-merges, and would become `{bacurau}`
+# against `{}`, an empty-set refusal. "Generic in an event title" (sextou,
+# aniversario, oficina) and "generic in a venue name" (restaurante, boteco,
+# casa) are genuinely different sets, and conflating them would ship an
+# unrelated merge-behaviour change.
+#
+# Measured against the real catalog (2,694 venues, 1,467 distinct leading
+# tokens) rather than guessed. Every token below leads 4+ unrelated venues;
+# the worst offenders are `restaurante` (203), `boteco` (102), `the` (45),
+# `casa` (34) and `villa` (12) — the last two are what made
+# `brand_root_venues("Casa Bacurau")` return a 33-member "sibling" set
+# spanning six cities. `bar` (215) was already caught, which is why the gap
+# went unnoticed: the guard worked for the one word it knew.
+#
+# Over-inclusion is CHEAP and under-inclusion is not: a word listed here
+# merely disables rung 3 for that family (which is the status quo — rung 3
+# matches nothing in production today), whereas a missing word hands rung 3
+# an unbounded candidate set of unrelated venues.
+DEFAULT_BRAND_ROOT_STOPWORDS: tuple[str, ...] = (
+    # venue types
+    "restaurante", "boteco", "botequim", "buteco", "budega", "cervejaria",
+    "choperia", "chopperia", "boate", "cafe", "casa", "villa", "vila",
+    "espaco", "armazem", "barraca", "quiosque", "quintal", "recanto",
+    "padaria", "clube", "club", "pub", "house", "cantina", "adega",
+    "churrascaria", "teatro", "centro", "praca", "emporio", "terraco",
+    "lanchonete", "pizzaria", "sorveteria", "hamburgueria", "petiscaria",
+    "taberna", "taverna", "bistro", "lounge", "hostel", "pousada", "hotel",
+    "mercado", "feira", "galeria", "coffee", "ilha", "toca", "portal",
+    "square", "point", "ponto", "tempero", "sabor",
+    # articles, possessives and generic qualifiers used as name filler
+    "the", "la", "le", "o", "a", "os", "as", "na", "no", "seu", "sua",
+    "nosso", "nossa", "meu", "minha", "dona", "dom", "novo", "nova",
+    "big", "grande", "maria", "sao", "santa", "santo", "blue", "sky",
+    "fogo", "trilha", "camarada", "oficina", "pe",
+)
+
+# Defense in depth, independent of the list above: a hand-maintained
+# vocabulary is always incomplete for whatever the next unforeseen generic
+# word turns out to be, and the SAFETY ARGUMENT for rung 3 is that its
+# candidate set is small and genuinely related — not that the list is
+# perfect. If a leading token would produce more than this many venues, that
+# is itself evidence it is not a brand, and the brand root collapses to the
+# mapped venue alone (which disables rung 3 entirely, its own `>= 2` gate).
+#
+# 8, chosen against the catalog rather than picked: the largest GENUINE
+# chain in it is Coco Bambu at 6 (Deltaexpresso 5, Sal e Brasa 5, Coffee
+# Shop São Braz 5), so 8 clears the observed maximum with headroom while
+# still catching every bogus family the vocabulary might miss — the 9- and
+# 10-member `barraca`/`botequim`/`quintal`/`vila` groups all fail it.
+MAX_BRAND_ROOT_VENUES = 8
 def _ordered_tokens(name: Optional[str]) -> list:
     """The venue name's tokens IN ORDER, through the SAME
     `normalize_title` + non-alphanumeric split `event_dedup.venue_name_tokens`
@@ -157,18 +213,28 @@ def _ordered_tokens(name: Optional[str]) -> list:
     return _tokenize(normalize_title(name))
 
 
-def _is_distinctive_brand_token(token: str, *, generic_vocabulary, stopwords) -> bool:
+def _is_distinctive_brand_token(
+    token: str, *, generic_vocabulary, stopwords,
+    brand_root_stopwords=DEFAULT_BRAND_ROOT_STOPWORDS,
+) -> bool:
     """A leading token only counts toward a brand root when it is
-    distinctive by the SAME rules `event_dedup.distinctive_set` applies.
-    Without this, "Bar do Zé" and "Bar Central" would be siblings on the
-    strength of the word `bar` — and rung 3 would then be free to drag an
-    event to a completely unrelated venue that merely shares a
-    neighbourhood name, which is the exact failure `_neighbourhood_match_
-    candidates`' own docstring says the bounded candidate set exists to
-    prevent."""
+    distinctive. Without this, "Bar do Zé" and "Bar Central" would be
+    siblings on the strength of the word `bar` — and rung 3 would then be
+    free to drag an event to a completely unrelated venue that merely shares
+    a neighbourhood name, which is the exact failure
+    `_neighbourhood_match_candidates`' own docstring says the bounded
+    candidate set exists to prevent.
+
+    THREE lists, not one, because they answer different questions: the title
+    vocabularies (`generic_vocabulary`/`stopwords`, shared with the live
+    merge bar) plus `DEFAULT_BRAND_ROOT_STOPWORDS`, the venue-name words
+    measured from the real catalog. See that constant for why the two are
+    kept apart."""
     if token in {normalize_title(w) for w in stopwords}:
         return False
     if token in {normalize_title(w) for w in generic_vocabulary}:
+        return False
+    if token in {normalize_title(w) for w in brand_root_stopwords}:
         return False
     if len(token) < 2 and not token.isdigit():
         return False
@@ -209,6 +275,21 @@ def brand_root_venues(
         tokens = _ordered_tokens(venue.venue_name)
         if tokens and tokens[0] == lead:
             out.append(venue)
+
+    # The defensive bound (see `MAX_BRAND_ROOT_VENUES`): an oversized set is
+    # itself evidence the leading token is a common word rather than a
+    # brand, whatever the vocabulary happens to know. Collapsing to the
+    # mapped venue alone disables rung 3 through its own `>= 2` gate, which
+    # is the conservative answer — it returns that family to today's
+    # behaviour rather than handing the rung an unbounded candidate set.
+    if len(out) > MAX_BRAND_ROOT_VENUES:
+        logger.info(
+            "[EventAttributionDispute] leading token %r would yield %d "
+            "'siblings' for %s — above the %d ceiling, so it is not treated "
+            "as a brand root",
+            lead, len(out), mapped.venue_id, MAX_BRAND_ROOT_VENUES,
+        )
+        return [mapped]
     return out
 
 
@@ -337,5 +418,6 @@ __all__ = [
     "validate_dispute_action_config", "validate_dispute_withhold_enabled_config",
     "AttributionDisputeConfig", "load_attribution_dispute_config",
     "brand_root_venues", "DisputeVerdict", "evaluate_attribution_dispute",
+    "DEFAULT_BRAND_ROOT_STOPWORDS", "MAX_BRAND_ROOT_VENUES",
     "fold_review_reason",
 ]

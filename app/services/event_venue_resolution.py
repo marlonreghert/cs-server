@@ -417,27 +417,67 @@ def _fold_for_containment(text: Optional[str]) -> str:
 def _neighbourhood_match_candidates(
     location_text: Optional[str], same_account_venues: list[VenueLite],
 ) -> list[LinkCandidate]:
-    """§B: `location_text` against each SIBLING candidate's own ADDRESS
-    (never its name — `_name_match_candidates` already owns that), by
-    substring containment on folded text — "CASA FORTE" names no venue by
-    NAME but is decisive against an address. Deliberately restricted to a
-    caller-bounded `same_account_venues` set (never the whole servable
-    catalog, and never called at all unless the caller has one — see
-    `resolve_event_venue`): an address-substring match is generous enough
-    that running it city-wide would drag an event to an unrelated venue that
-    merely happens to share a neighbourhood name."""
+    """§B: `location_text` against each SIBLING candidate's own ADDRESS —
+    and, failing that, its own NAME — by substring containment on folded
+    text. Deliberately restricted to a caller-bounded `same_account_venues`
+    set (never the whole servable catalog, and never called at all unless
+    the caller has one — see `resolve_event_venue`): substring containment
+    is generous enough that running it city-wide would drag an event to an
+    unrelated venue that merely happens to share a neighbourhood name.
+
+    ## Why the NAME check exists, and why it is not rung 4 in disguise
+
+    The address half alone misses the case this rung was built for. Measured
+    on real data: `Beerdock Casa Forte`'s stored address is "R. dos Arcos
+    1745 - Poço da Panela Recife - PE" — its official geocoded neighbourhood
+    is Poço da Panela, while the branch is commercially known as Casa Forte
+    (adjacent neighbourhoods, not a data error). So the 20 live rows at
+    BeerDock Boa Viagem whose own text says "CASA FORTE" matched NOTHING,
+    and the attribution repair proposed zero changes for the very case it
+    was built around. Rung 3 matched nothing at all in production.
+
+    Checking the sibling's NAME fixes it, and is categorically different
+    from rung 4's risk:
+      - rung 4 scores `location_text` against ~2,700 UNRELATED venue names
+        with a fuzzy ratio, which is how `@mahalilacafe` scored 0.76 against
+        "Maria Café" (`260813`);
+      - this is EXACT substring containment against a handful of venues that
+        already share a distinctive brand root, bounded by
+        `MAX_BRAND_ROOT_VENUES` and gated on that root having more than one
+        member.
+    It never runs against the catalog, and it never scores anything.
+
+    The shared brand prefix cannot cause a false attribution on its own: a
+    `location_text` of "BeerDock" matches EVERY branch's name, so the caller
+    sees more than one candidate and refuses rather than guessing
+    (`resolve_event_venue`'s `len(...) == 1` rule). Only text that
+    distinguishes ONE branch can resolve.
+
+    Address is tried first so an address hit keeps its existing evidence
+    shape; `matched_on` records which half fired, because an operator
+    auditing a link needs to tell "its address says so" from "its name says
+    so"."""
     folded_location = _fold_for_containment(location_text)
     if len(folded_location) < _MIN_NEIGHBOURHOOD_TEXT_LEN:
         return []
     out = []
     for venue in same_account_venues:
         folded_address = _fold_for_containment(venue.address)
+        folded_name = _fold_for_containment(venue.venue_name)
         if folded_address and folded_location in folded_address:
-            out.append(LinkCandidate(
-                venue_id=venue.venue_id, venue_name=venue.venue_name,
-                method=METHOD_NEIGHBOURHOOD_MATCH, score=1.0,
-                evidence={"location_text": location_text, "address": venue.address},
-            ))
+            matched_on = "address"
+        elif folded_name and folded_location in folded_name:
+            matched_on = "venue_name"
+        else:
+            continue
+        out.append(LinkCandidate(
+            venue_id=venue.venue_id, venue_name=venue.venue_name,
+            method=METHOD_NEIGHBOURHOOD_MATCH, score=1.0,
+            evidence={
+                "location_text": location_text, "address": venue.address,
+                "matched_on": matched_on,
+            },
+        ))
     return out
 
 

@@ -83,6 +83,30 @@ Feature: Stop one venue-night producing several listings
     Then the event stays attributed to "BeerDock Boa Viagem"
     And the event carries no dispute review reason
 
+  # ── Defect 2: the branch a sibling's NAME identifies ──────────────────────
+  # "Beerdock Casa Forte"'s geocoded neighbourhood is Poço da Panela while
+  # the branch is commercially Casa Forte, so address-only matching found
+  # nothing and the repair proposed zero changes for its own motivating case.
+
+  Scenario: Flag an event whose location text names a sibling branch by name alone
+    Given "BeerDock Casa Forte" is recorded at an address that never mentions Casa Forte
+    When a post from "beerdock_recife" announces an event whose location text is "CASA FORTE"
+    Then the event stays attributed to "BeerDock Boa Viagem"
+    And the event carries the review reason "location_text_disputes_venue"
+    And the event offers "BeerDock Casa Forte" as a ranked venue candidate
+
+  Scenario: Never re-attribute on the brand name every branch shares
+    Given "BeerDock Casa Forte" is recorded at an address that never mentions Casa Forte
+    When a post from "beerdock_recife" announces an event whose location text is "BeerDock"
+    Then the event stays attributed to "BeerDock Boa Viagem"
+    And the event carries no review reason
+
+  Scenario: Never treat a generic venue word as a chain
+    Given the venue catalog carries nine unrelated venues whose names all begin with "Casa"
+    When a post from "casabacurau" announces an event whose location text is "Salvador"
+    Then the event stays attributed to "Casa Bacurau"
+    And the event carries no review reason
+
   # ── Defect 2: repairing what is already stored ────────────────────────────
 
   Scenario: Repair a stored mis-attribution through the disputed-location-text backfill
