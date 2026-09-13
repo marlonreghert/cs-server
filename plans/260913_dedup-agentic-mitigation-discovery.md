@@ -232,11 +232,22 @@ prose) and confirmed them:
   OTHER already-crawled venues' captions `@mention` this handle, not how
   often this handle's own posts name other venues) — stays invisible to
   promoter-discovery too, for as long as nobody else happens to mention it.
-  A live catalog/handle search for a literal "barchef" match (venue name or
-  Instagram handle, case-insensitive, run against production during this
-  session) returned zero results, so it is used here as an illustrative
-  pattern name, not a citable existing row — Phase 1 must find or construct
-  a real representative case, not assume this exact handle exists.
+  **Correction (post-merge):** an earlier pass this session searched for a
+  literal "barchef" venue/handle match via `VenueRepository.list_all_venues()`
+  and found nothing, leading this paragraph to originally claim no such
+  venue exists. That search method was wrong, not the underlying fact — a
+  direct SQL query later in this same session found two real, active,
+  catalogued venues, `barchef.riomar` ("Barchef Shopping Riomar") and
+  `barchef.boteco` ("Barchef Boteco"), both well-reviewed Recife bars. Phase
+  2's own execution (see the Execution Report below) independently
+  confirmed both exist and have **zero live events** — consistent with
+  neither having a `crawl_target` row yet, not with the handles being
+  fictional. "barchef" was still correctly treated as illustrative rather
+  than citable in Phase 1 (zero events means no real misattribution
+  instance to cite yet), but for the right reason — no crawl history — not
+  because the handle doesn't exist. Both handles are now included in the
+  crawl-target expansion this plan's execution enables, which should turn
+  this from illustrative into a real, checkable case going forward.
 
 This means the two heavier candidates (A's classifier, C's clustering) risk
 building parallel infrastructure for a problem this codebase has
