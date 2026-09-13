@@ -620,6 +620,7 @@ class Container:
             validate_candidate_window_hours_config,
             validate_generic_vocabulary_config,
             validate_lineup_threshold_config,
+            validate_recurring_window_enabled_config,
             validate_stopwords_config,
             validate_undated_window_days_config,
         )
@@ -698,6 +699,11 @@ class Container:
                 "event_dedup_candidate_window_hours": validate_candidate_window_hours_config,
                 "event_dedup_undated_window_days": validate_undated_window_days_config,
                 "event_dedup_auto_merge_enabled": validate_auto_merge_enabled_config,
+                # plans/260912_events-venue-night-duplication.md §D: the
+                # recurring-aware candidate window, false by default (it
+                # strictly WIDENS the candidate set, and auto-merge is already
+                # live in production).
+                "event_dedup_recurring_window_enabled": validate_recurring_window_enabled_config,
                 # plans/260912_events-venue-night-duplication.md §C: what a
                 # disputed attribution DOES ("flag", the shipped default, or
                 # "reattribute"), and whether the review reason it records is

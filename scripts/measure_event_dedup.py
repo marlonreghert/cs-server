@@ -254,8 +254,9 @@ def measure(venue_dao, *, config: Optional[event_dedup.DedupConfig] = None) -> R
         venue_name = venue_name_cache.setdefault(venue_id, _venue_name_of(venue_dao, venue_id))
 
         for a, b in combinations(rows, 2):
-            if not event_dedup.in_candidate_window(
-                a.get("starts_at"), b.get("starts_at"), window_hours=config.candidate_window_hours,
+            if not event_dedup.in_candidate_window_for_rows(
+                a, b, window_hours=config.candidate_window_hours,
+                recurring_window_enabled=config.recurring_window_enabled,
             ):
                 continue
             decision = event_dedup.evaluate_pair(a, b, venue_name=venue_name, config=config)

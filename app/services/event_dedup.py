@@ -41,7 +41,7 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from app.metrics import EVENT_DEDUP_CONFIG_TYPE_FALLBACK_TOTAL
-from app.services.event_date_resolver import RECIFE_TZ
+from app.services.event_date_resolver import RECIFE_TZ, weekdays_from_recurrence_text
 from app.services.event_identity import normalize_title
 
 logger = logging.getLogger(__name__)
@@ -86,6 +86,16 @@ DEFAULT_CANDIDATE_WINDOW_HOURS = 8
 
 ADMIN_CONFIG_UNDATED_WINDOW_DAYS_KEY = "admin_config:event_dedup_undated_window_days"
 DEFAULT_UNDATED_WINDOW_DAYS = 14
+
+ADMIN_CONFIG_RECURRING_WINDOW_ENABLED_KEY = "admin_config:event_dedup_recurring_window_enabled"
+# plans/260912_events-venue-night-duplication.md §D, Defect 3. OFF by
+# default: it strictly WIDENS the candidate set, and auto-merge is already
+# `true` in production, so a deploy that widened it would begin merging on
+# the very next crawl, unattended. Turning it on is an operator's deliberate
+# act AFTER §F's attribution repair (a widened window over a mis-attributed
+# corpus is how a Casa Forte weekly night gets absorbed into a Boa Viagem
+# one).
+DEFAULT_RECURRING_WINDOW_ENABLED = False
 
 ADMIN_CONFIG_AUTO_MERGE_ENABLED_KEY = "admin_config:event_dedup_auto_merge_enabled"
 # Plan §C, "the six things most likely to go wrong" #1: OFF by default.
@@ -156,6 +166,12 @@ def validate_undated_window_days_config(value) -> int:
 def validate_auto_merge_enabled_config(value) -> bool:
     if not isinstance(value, bool):
         raise TypeError("event dedup auto-merge flag must be a boolean")
+    return value
+
+
+def validate_recurring_window_enabled_config(value) -> bool:
+    if not isinstance(value, bool):
+        raise TypeError("event dedup recurring-window flag must be a boolean")
     return value
 
 
@@ -256,10 +272,15 @@ def load_dedup_config(redis_like) -> DedupConfig:
         redis_like, ADMIN_CONFIG_AUTO_MERGE_ENABLED_KEY, DEFAULT_AUTO_MERGE_ENABLED,
         validator=validate_auto_merge_enabled_config, module_tag="event_dedup",
     )
+    recurring_window = _load_validated_config(
+        redis_like, ADMIN_CONFIG_RECURRING_WINDOW_ENABLED_KEY, DEFAULT_RECURRING_WINDOW_ENABLED,
+        validator=validate_recurring_window_enabled_config, module_tag="event_dedup",
+    )
     return DedupConfig(
         generic_vocabulary=tuple(generic), stopwords=tuple(stopwords),
         lineup_threshold=threshold, candidate_window_hours=window_hours,
         undated_window_days=undated_days, auto_merge_enabled=auto_enabled,
+        recurring_window_enabled=recurring_window,
     )
 
 
@@ -382,6 +403,77 @@ def in_candidate_window(
     return delta_hours <= window_hours
 
 
+def _recurring_weekdays(row: dict) -> frozenset:
+    """The nights this row actually SERVES, from
+    `event_date_resolver.weekdays_from_recurrence_text` — the SAME function
+    `event_occurrences.expand_occurrences` uses, IMPORTED rather than
+    re-parsed. If this window and the expansion could ever disagree about
+    which nights a row serves, the window would stop being evidence (the
+    identical argument this module's own docstring makes about
+    `evaluate_pair` having one caller for measurement and one for merging).
+
+    Empty for a non-recurring row and for recurrence prose this repo does
+    not parse ("toda semana", "sempre") — an empty set intersects nothing,
+    so both cases simply never widen the window, which is the conservative
+    answer in each.
+    """
+    if not row.get("is_recurring"):
+        return frozenset()
+    return frozenset(weekdays_from_recurrence_text(row.get("recurrence_text")) or ())
+
+
+def in_candidate_window_for_rows(
+    a: dict, b: dict, *, window_hours: int, recurring_window_enabled: bool,
+) -> bool:
+    """plans/260912_events-venue-night-duplication.md §D (Defect 3), the
+    candidate window over two ROWS rather than two instants.
+
+    `in_candidate_window` above stays EXACTLY as it is — signature and
+    behaviour — so its existing unit tests keep meaning what they mean; this
+    is a sibling that calls it, never a replacement that redefines it.
+
+    `expand_occurrences` re-derives a RECURRING row's served days from its
+    weekday pattern and DISCARDS its stored date entirely
+    (`event_occurrences.py`'s own docstring says so, and that is deliberate
+    and load-bearing). Both merge gates, however, key on that same stored
+    date — so two posts about the same weekly night stored three weeks apart
+    are never compared, yet expand onto the same served dates. Confirmed on
+    real data: two live rows, identical title `Aula de FORRÓ na Sala de
+    Reboco`, identical `recurrence_text = 'Toda QUARTA'`, stored 21 days
+    apart, expanding onto three shared future dates each.
+
+    Three deliberate choices a future reader will want to undo:
+
+    - **Both sides must be recurring.** A weekly row and a one-off row that
+      collide on one expanded date are a real but UNMEASURED case, and
+      pairing them risks a one-off being absorbed into a weekly identity.
+      Out of scope on purpose (the plan's own Non-goals).
+    - **INTERSECTION, not equality, of weekday sets.** `Toda QUARTA` and
+      `Quartas e sextas` collide on every Wednesday they both serve;
+      requiring equal sets would miss exactly the collision this exists to
+      catch. It is also the faithful analogue of the existing rule, whose
+      same-local-date branch already admits two rows on one date regardless
+      of their clock times.
+    - **No clock-time condition.** Same reason: the `window_hours` half
+      exists to bridge a LOCAL-DATE BOUNDARY, not to separate a 19:00 show
+      from a 23:00 party on one date. The distinctive-set predicate is what
+      separates those.
+
+    A merged pair of recurring rows cannot move a weekly night: because
+    `expand_occurrences` ignores a recurring row's stored date entirely, the
+    survivor's `starts_at` DATE has no effect on which nights it serves —
+    only its clock time does, and `merge_event_fields` already carries
+    `time_known` alongside whichever `starts_at` wins.
+    """
+    if in_candidate_window(
+        a.get("starts_at"), b.get("starts_at"), window_hours=window_hours,
+    ):
+        return True
+    if not recurring_window_enabled:
+        return False
+    return bool(_recurring_weekdays(a) & _recurring_weekdays(b))
+
+
 # ── the combined pairwise verdict ───────────────────────────────────────────
 @dataclass(frozen=True)
 class PairDecision:
@@ -446,11 +538,13 @@ __all__ = [
     "ADMIN_CONFIG_CANDIDATE_WINDOW_HOURS_KEY", "DEFAULT_CANDIDATE_WINDOW_HOURS",
     "ADMIN_CONFIG_UNDATED_WINDOW_DAYS_KEY", "DEFAULT_UNDATED_WINDOW_DAYS",
     "ADMIN_CONFIG_AUTO_MERGE_ENABLED_KEY", "DEFAULT_AUTO_MERGE_ENABLED",
+    "ADMIN_CONFIG_RECURRING_WINDOW_ENABLED_KEY", "DEFAULT_RECURRING_WINDOW_ENABLED",
     "validate_generic_vocabulary_config", "validate_stopwords_config",
     "validate_lineup_threshold_config", "validate_candidate_window_hours_config",
     "validate_undated_window_days_config", "validate_auto_merge_enabled_config",
+    "validate_recurring_window_enabled_config",
     "DedupConfig", "load_dedup_config",
     "venue_name_tokens", "distinctive_set", "band_for_distinctive_sets",
     "lineup_name_set", "shared_lineup_names", "lineup_reaches_auto",
-    "in_candidate_window", "PairDecision", "evaluate_pair",
+    "in_candidate_window", "in_candidate_window_for_rows", "PairDecision", "evaluate_pair",
 ]

@@ -450,3 +450,210 @@ def step_then_both_events_separate(context):
     assert all(r is not None for r in rows), rows
     assert all(r.get("status") != "superseded" for r in rows), rows
     assert len({r["event_id"] for r in rows}) == 2, rows
+
+
+# ══ Defects 1 and 3: the merge pass ══════════════════════════════════════
+# These scenarios run over the `context.dedup_*` harness
+# `event_dedup_fuzzy_title_steps.py` builds (a bare in-memory store + its own
+# fakeredis), reached through that module's own helpers as plain function
+# calls. The Background's "the candidate window is 8 hours" step has already
+# created it by the time any of these run.
+from tests.bdd.steps import event_dedup_fuzzy_title_steps as _dedup_steps  # noqa: E402
+
+_DEDUP_VENUE = "Sala de Reboco"
+_WEEKLY_TIME = "20:00"
+# A Wednesday and the Wednesday three weeks after it — the shape of the two
+# live `Aula de FORRÓ na Sala de Reboco` rows the RCA found (identical title,
+# identical `recurrence_text`, stored 21 days apart, never compared).
+_WEEK_1 = "2026-08-05"
+_WEEK_4 = "2026-08-26"
+
+
+def _dedup_local(date_str: str, time_str: str = _WEEKLY_TIME):
+    return _dedup_steps._local_dt(date_str, time_str)
+
+
+def _seed_recurring(context, title, venue, *, date_str, recurrence_text, **kwargs):
+    event_id = _dedup_steps._seed_item(
+        context, title, venue, starts_at=_dedup_local(date_str), **kwargs
+    )
+    context.dedup_dao.update_event(event_id, {
+        "is_recurring": True, "recurrence_text": recurrence_text,
+    })
+    context.vnd_weekly_ids = getattr(context, "vnd_weekly_ids", []) + [event_id]
+    return event_id
+
+
+@given("the recurring candidate window is enabled")
+def step_given_recurring_window_enabled(context):
+    _dedup_steps._ensure_context(context)
+    context.dedup_redis.set(
+        event_dedup.ADMIN_CONFIG_RECURRING_WINDOW_ENABLED_KEY, json.dumps(True),
+    )
+
+
+@given("auto-merge is enabled")
+def step_given_auto_merge_enabled(context):
+    _dedup_steps._ensure_context(context)
+    context.dedup_redis.set(
+        event_dedup.ADMIN_CONFIG_AUTO_MERGE_ENABLED_KEY, json.dumps(True),
+    )
+
+
+@given('the lineup threshold is {threshold:d}')
+def step_given_lineup_threshold(context, threshold):
+    _dedup_steps._ensure_context(context)
+    context.dedup_redis.set(
+        event_dedup.ADMIN_CONFIG_LINEUP_THRESHOLD_KEY, json.dumps(threshold),
+    )
+
+
+_WEEKDAY_TEXT = {
+    "Wednesday": "Toda QUARTA",
+    "Friday": "Toda SEXTA",
+}
+
+
+@given('a stored weekly event "{title}" recurring every {weekday}, stored for the {day}th')
+def step_given_weekly_event_stored_for_day(context, title, weekday, day):
+    date_str = f"2026-08-{int(day):02d}"
+    _seed_recurring(
+        context, title, _DEDUP_VENUE, date_str=date_str,
+        recurrence_text=_WEEKDAY_TEXT[weekday],
+    )
+
+
+@given('a stored weekly event "{title}" recurring on Wednesdays and Fridays')
+def step_given_weekly_event_two_weekdays(context, title):
+    _seed_recurring(
+        context, title, _DEDUP_VENUE, date_str=_WEEK_4,
+        recurrence_text="Quartas e sextas",
+    )
+
+
+@given('a stored weekly event "{title}" recurring every {weekday}')
+def step_given_weekly_event(context, title, weekday):
+    # The two one-weekday scenarios ("every Wednesday" / "every Friday")
+    # deliberately store their rows THREE WEEKS apart, so the plain
+    # `in_candidate_window` can never be what pairs them — only the weekday
+    # rule can, which is what those scenarios are about.
+    date_str = _WEEK_1 if weekday == "Wednesday" else _WEEK_4
+    _seed_recurring(
+        context, title, _DEDUP_VENUE, date_str=date_str,
+        recurrence_text=_WEEKDAY_TEXT[weekday],
+    )
+
+
+@given('a stored one-off event "{title}" on a Wednesday three weeks later')
+def step_given_one_off_event_three_weeks_later(context, title):
+    context.vnd_one_off_id = _dedup_steps._seed_item(
+        context, title, _DEDUP_VENUE, starts_at=_dedup_local(_WEEK_4),
+    )
+
+
+@given('two stored weekly events "{title}" recurring every Wednesday, stored three weeks apart')
+def step_given_two_weekly_events_three_weeks_apart(context, title):
+    _seed_recurring(
+        context, title, _DEDUP_VENUE, date_str=_WEEK_1, recurrence_text="Toda QUARTA",
+    )
+    _seed_recurring(
+        context, title, _DEDUP_VENUE, date_str=_WEEK_4, recurrence_text="Toda QUARTA",
+    )
+
+
+@when("the merge pass runs for that venue")
+def step_when_merge_pass_runs_for_venue(context):
+    _dedup_steps._run_merge_pass(context)
+
+
+@when("the merge pass runs for every venue")
+def step_when_merge_pass_runs_for_every_venue(context):
+    _dedup_steps._run_merge_pass(context)
+
+
+def _dedup_survivors(context, ids=None):
+    return _dedup_steps._survivors(context, ids)
+
+
+@then('one weekly event survives titled "{title}"')
+def step_then_one_weekly_survives(context, title):
+    survivors = _dedup_survivors(context, context.vnd_weekly_ids)
+    assert len(survivors) == 1, survivors
+    row = context.dedup_dao.get_event(survivors[0])
+    assert row["title"] == title, row["title"]
+    context.vnd_survivor_id = survivors[0]
+    context.vnd_absorbed_ids = [
+        eid for eid in context.vnd_weekly_ids if eid not in survivors
+    ]
+
+
+@then("both weekly events survive")
+def step_then_both_weekly_survive(context):
+    survivors = _dedup_survivors(context, context.vnd_weekly_ids)
+    assert len(survivors) == 2, survivors
+
+
+@then("both events survive")
+def step_then_both_events_survive(context):
+    ids = list(context.vnd_weekly_ids) + [context.vnd_one_off_id]
+    survivors = _dedup_survivors(context, ids)
+    assert len(survivors) == len(ids), survivors
+
+
+@then("the absorbed weekly event is superseded rather than deleted")
+def step_then_absorbed_weekly_superseded(context):
+    assert context.vnd_absorbed_ids, "nothing was absorbed"
+    for event_id in context.vnd_absorbed_ids:
+        row = context.dedup_dao.get_event(event_id)
+        assert row is not None, f"{event_id} was deleted, not superseded"
+        assert row["status"] == "superseded", row
+        assert row.get("superseded_by") == context.vnd_survivor_id, row
+
+
+@then("the surviving event still recurs every {weekday}")
+def step_then_surviving_event_still_recurs(context, weekday):
+    from app.services.event_date_resolver import weekdays_from_recurrence_text
+
+    row = context.dedup_dao.get_event(context.vnd_survivor_id)
+    assert row.get("is_recurring") is True, row
+    weekdays = weekdays_from_recurrence_text(row.get("recurrence_text"))
+    expected = weekdays_from_recurrence_text(_WEEKDAY_TEXT[weekday])
+    assert weekdays == expected, (row.get("recurrence_text"), weekdays, expected)
+
+
+def _expanded_dates(context, event_id) -> list:
+    from app.services.event_occurrences import expand_occurrences
+
+    row = context.dedup_dao.get_event(event_id)
+    return [
+        occ.occurrence_date
+        for occ in expand_occurrences(
+            row, horizon_days=21, reference_time=_dedup_local(_WEEK_1, "12:00"),
+        )
+    ]
+
+
+@then("the surviving event is served on every Wednesday inside the projection horizon")
+def step_then_surviving_event_served_every_wednesday(context):
+    from datetime import date as _date
+
+    survivors = _dedup_survivors(context, context.vnd_weekly_ids)
+    assert len(survivors) == 1, survivors
+    context.vnd_survivor_id = survivors[0]
+    dates = _expanded_dates(context, context.vnd_survivor_id)
+    assert dates, "the surviving weekly event serves no night at all"
+    assert all(_date.fromisoformat(d).weekday() == 2 for d in dates), dates
+    # 22 calendar days from the 5th at noon: the 5th, 12th, 19th and 26th.
+    assert len(dates) == 4, dates
+
+
+@then("no Wednesday inside the horizon serves two listings for that venue")
+def step_then_no_wednesday_serves_two(context):
+    seen: dict = {}
+    for event_id in context.vnd_weekly_ids:
+        if not _dedup_steps._alive(context, event_id):
+            continue
+        for day in _expanded_dates(context, event_id):
+            seen[day] = seen.get(day, 0) + 1
+    doubled = {day: count for day, count in seen.items() if count > 1}
+    assert not doubled, doubled

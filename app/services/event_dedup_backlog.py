@@ -254,9 +254,9 @@ def compute_dedup_backlog(
         venue_name = venue_names.get(venue_id)
         venue_tokens = event_dedup.venue_name_tokens(venue_name)
         for a, b in combinations(members, 2):
-            if not event_dedup.in_candidate_window(
-                a.get("starts_at"), b.get("starts_at"),
-                window_hours=config.candidate_window_hours,
+            if not event_dedup.in_candidate_window_for_rows(
+                a, b, window_hours=config.candidate_window_hours,
+                recurring_window_enabled=config.recurring_window_enabled,
             ):
                 continue
             if event_dedup.evaluate_pair(a, b, venue_name=venue_name, config=config) is not None:
