@@ -18,8 +18,18 @@ The three failure classes, all confirmed real by the 260912 incident:
    that should merge into one listing (Club Metrópole: 5 posts → 5 rows).
 2. **Multi-location misattribution** — one crawled handle whose posts
    actually cover several physical venues, so pinning every post to the
-   handle's single mapped venue mis-attributes events (BeerDock: 15 of 44
-   rows belonged to a sibling branch).
+   handle's single mapped venue mis-attributes events. Two materially
+   different shapes, confirmed by tracing the actual call sites (see
+   Evidence): **sibling-brand** (BeerDock: 15 of 44 rows belonged to a
+   same-brand sister branch — partially caught today by
+   `evaluate_attribution_dispute`'s bounded name/neighbourhood matching) and
+   **unrelated-venue** (a handle whose posts name a completely different,
+   non-sibling venue by plain text — e.g. a curation-style account like the
+   user-named "barchef" example, or a "hidden promoter": a handle that
+   behaves like a promoter but was never registered as one and is invisible
+   to the inbound-mention discovery that finds registered promoters).
+   Unrelated-venue misattribution is NOT caught by anything shipped last
+   night — see Evidence — and is the harder half of this failure class.
 3. **Multi-post-for-the-same-event** — the same real event promoted across
    multiple posts, potentially by different accounts, that should collapse
    to one listing.
@@ -33,7 +43,18 @@ The three failure classes, all confirmed real by the 260912 incident:
   `langchain` (`create_agent`/`AgentExecutor`/`@tool`), `langgraph`,
   `langchain-community`, and `faiss-cpu` are deliberately NOT installed
   anywhere in either repo. A multi-step tool-calling agent is unjustified for
-  a bounded, closed-candidate classification task — see Evidence.
+  a bounded, closed-candidate classification task — see Evidence. This is a
+  scoping judgment call for THIS task, not a claim that the dependency is
+  unavailable: `langchain`/`langgraph` can be installed in either repo if a
+  future design genuinely needs a multi-step tool loop (the
+  `vibes_bot/.claude/skills/langchain-fundamentals` skill and its siblings
+  already document the patterns), and this plan's Acceptance Criteria should
+  be revisited, not silently reinterpreted, if Phase 4 or a follow-up plan
+  finds a case a single structured-output call cannot handle — the leading
+  candidate for that being open-ended search over the full venue catalog for
+  an unrelated-venue match (see the new Evidence bullet on that gap), which
+  none of the three compared designs actually needed a tool loop for either,
+  since each bounded its own candidate generation to data already fetched.
 - Not building a from-scratch handle-scope classifier or a from-scratch
   embedding-plus-clustering drift-scan service without first measuring
   whether the already-shipped promoter-account registry, discovery pass, and
@@ -179,6 +200,43 @@ prose) and confirmed them:
   open question is how much of tonight's incident was really about handles
   that had only ONE venue mapped (so this check never fired) versus handles
   the check should have caught but didn't.
+- **Multi-event posts already resolve each event's venue independently —
+  but only within a bounded set of methods.** Traced directly:
+  `EventExtractionService._extract_one` (`app/services/
+  event_extraction_service.py:1285-1347`) calls its `_attribute` closure once
+  PER EVENT via `reconcile_post_events(..., attribute=_attribute, ...)`
+  (line 1350), never once per post — so a single post naming several
+  different events already gets each event's own `location_text` checked
+  independently, for both the fixed-single-venue case (via
+  `evaluate_attribution_dispute`) and the already-known-multi-venue case
+  (via the full `build_location_text_attribute_fn` ladder, also called per
+  event by the same `reconcile_post_events` call). The failure class 3
+  concern this raised ("one handle post can point to many venues") is
+  therefore not a missing per-event granularity bug — it already has one.
+  The real gap is which METHODS `evaluate_attribution_dispute` is willing to
+  trust: `DISPUTE_METHODS` (`app/services/event_attribution_dispute.py:86`)
+  is exactly `{handle_mention, location_tag, neighbourhood_match}` —
+  `METHOD_NAME_MATCH` is deliberately excluded (comment at line 82-85,
+  citing the 260813 handle-attribution-hardening incident, and
+  `brand_root_venues` only fires on a SHARED distinctive name token between
+  the mapped venue and the candidate). A post whose `location_text` names a
+  real, catalogued, but UNRELATED venue in plain prose — no `@mention`, no
+  Instagram `location_tag`, no shared brand-root token with the handle's own
+  mapped venue — produces no dispute, no candidate, no review reason: it
+  silently misattributes exactly as if the safety net shipped last night
+  did not exist. This is the shape of the "barchef" example and of a
+  "hidden promoter": a handle that behaves like a promoter (posts about
+  venues other than its own) but was never registered in
+  `promoter_registry_service.py`, and — because that registry's own
+  discovery is INBOUND-mention-based (`run_discovery` counts how often
+  OTHER already-crawled venues' captions `@mention` this handle, not how
+  often this handle's own posts name other venues) — stays invisible to
+  promoter-discovery too, for as long as nobody else happens to mention it.
+  A live catalog/handle search for a literal "barchef" match (venue name or
+  Instagram handle, case-insensitive, run against production during this
+  session) returned zero results, so it is used here as an illustrative
+  pattern name, not a citable existing row — Phase 1 must find or construct
+  a real representative case, not assume this exact handle exists.
 
 This means the two heavier candidates (A's classifier, C's clustering) risk
 building parallel infrastructure for a problem this codebase has
@@ -254,6 +312,30 @@ risk, not just recall) drawn from the existing dedup false-positive corpus
 in `plans/260812_event-dedup-fuzzy-title.md`. Pure data, reviewed for PII
 before commit (Instagram captions may name individuals).
 
+The corpus must also include at least one **unrelated-venue** case (the
+"barchef"/hidden-promoter pattern named in Evidence): a handle mapped to
+exactly one venue whose posts' `location_text` names a different, real,
+catalogued venue in plain prose — no `@mention`, no `location_tag`, no
+shared brand-root token. None was found searching production for a literal
+"barchef" handle or venue name this session, so this case must be either
+(a) found by a new, purpose-built scan — sample crawled handles' recent
+`location_text`/caption values, extract venue-name-shaped substrings (not
+just the existing `@handle`-mention regex `scripts/`-adjacent tooling from
+the 260912 sweep used, which only finds `@mentions`), and check each against
+the venue catalog by name for a NON-brand-root match — or (b) constructed
+as a synthetic fixture from a real venue pair if no live example turns up,
+clearly labeled synthetic in the fixture metadata so Phase 2's report never
+conflates a constructed case with a measured production rate.
+
+This corpus-building pass is explicitly scoped to run WITHOUT exercising or
+depending on `PromoterRegistryService`/`PromoterCrawlService` — build and
+label cases using only the plain venue-handle post data (the same archived
+manifests `EventPostSource` already reads), and treat "would the promoter
+registry eventually catch this" as a separate, later question Phase 2
+measures rather than assumes. If a candidate case happens to already be a
+registered promoter account, exclude it from this corpus and note why, so
+the corpus stays a clean test of the non-promoter path specifically.
+
 **Phase 2 — Baseline measurement (unconditional).**
 `scripts/measure_agentic_mitigation_baseline.py`, read-only, mirroring
 `scripts/measure_event_dedup.py`'s structure (a `measure()` function
@@ -261,11 +343,21 @@ callable directly, a thin CLI wrapper, no writes). It replays, against both
 the Phase 1 corpus and live prod data:
 - `PromoterRegistryService.run_discovery`'s mention-counting logic against
   the corpus's captions — would `DEFAULT_MENTION_THRESHOLD = 3` have
-  proposed the right handles?
+  proposed the right handles? Run for completeness and comparison ONLY —
+  per Phase 1, the corpus itself is built and labeled without assuming this
+  mechanism catches anything, so this line item measures the promoter path
+  as an independent, optional finding, not a load-bearing part of the
+  baseline this plan's Phase 4 decision rests on.
 - `group_venue_ids_by_handle` across the current catalog — how many handles
   today already resolve to >1 `venue_id`, and does
   `EventExtractionService`'s existing branch on that already route them
   through the full ladder correctly?
+- `evaluate_attribution_dispute`'s real hit rate on the corpus's
+  sibling-brand cases (BeerDock-shaped: caught by `DISPUTE_METHODS`) versus
+  its unrelated-venue cases (barchef-shaped: expected near-zero, since
+  `DISPUTE_METHODS` structurally excludes generic name matching) — reported
+  as two SEPARATE numbers, never blended into one "attribution coverage"
+  percentage, since the two sub-cases need different fixes if a gap remains.
 - Current `BAND_SUGGEST` / `RESOLUTION_QUEUED` / attribution-dispute volume
   as a fraction of extracted events, to replace every assumed percentage in
   the three designs' cost models with a measured one.
@@ -385,6 +477,16 @@ Scenarios:
 - The promoter-discovery mention-threshold replay correctly proposes (or
   correctly does NOT propose, with a documented reason) each handle in the
   labeled corpus as a candidate.
+- A multi-event post's events each resolve their venue independently — a
+  post naming two different events at two different venues in its own text
+  must not have both events pinned to the same venue (documents the
+  already-working per-event behavior traced in Evidence, as a regression
+  guard, not a new capability).
+- The unrelated-venue corpus case (no `@mention`, no `location_tag`, no
+  shared brand-root token) is measured and reported as currently
+  UNDETECTED by `evaluate_attribution_dispute` — this scenario is expected
+  to be red/documenting-a-gap today, and its purpose is to make that gap
+  visible and regression-tested going forward, not to fix it in this plan.
 - The closed-candidate-set + verbatim-evidence validator accepts a
   recommendation whose venue is in the candidate set and whose evidence
   quote is a real substring of the source text.
