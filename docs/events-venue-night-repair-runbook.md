@@ -113,13 +113,30 @@ python -m scripts.measure_event_dedup --recurring-window \
 ```
 
 `--single-night-all` measures the CATALOG-WIDE scope without writing the
-admin-config key. **Read its auto-pair count before you flip anything.** The
-venue-night backlog is ~55 groups / ~93 excess rows, so an auto-pair count in
-the low hundreds is the expected order (a group of *n* rows yields *n(n-1)/2*
-pairs, so a handful of large groups dominates). A count **wildly** larger than
-that means something is evaluating pairs it should not — across dates, across
-venues, or over non-event rows — which is a **bug, not the intended scope**.
-Stop and report rather than applying.
+admin-config key. **Read its auto-pair count before you flip anything.**
+
+**Pre-computed against the live corpus, 2026-09-13, read-only** (so you have
+the expected order of magnitude before the first run): **526 auto pairs, 136
+rows absorbed**, across 55 venues holding 2+ rows. That is the low-hundreds
+band — a group of *n* rows yields *n(n-1)/2* pairs, so a handful of large
+groups dominates. A count in the **thousands** would mean pairs are being
+evaluated that should not be — across dates, across venues, or over non-event
+rows — which is a **bug, not the intended scope**. Stop and report.
+
+**Why the order matters, with numbers.** Of those 136 absorbed rows, roughly
+**65 are at venues whose problem is Defect 2, not Defect 1**:
+
+| Venue | pairs | rows absorbed | what it actually is |
+|---|---:|---:|---|
+| zef'as bar | 330 | 35 | a Natal roundup account (`oquetemhojeemnatal`); its 16-row group names **13 different `@handles`** — 13 venues filed at one |
+| Seu Chico Botequim | 55 | 10 | same account, same shape |
+| BeerDock Boa Viagem | 20 | 20 | 20 of 44 rows carry `location_text = 'CASA FORTE'` |
+
+Sweeping before step 3 would merge **13 different venues' events into one
+listing** at zef'as bar alone, and a Casa Forte party into a Boa Viagem one.
+Step 3 dissolves those groups first, which is the whole reason the sequence is
+ordered this way. Re-measure after the repair; the catalog-wide count should
+fall substantially.
 
 This is the corpus §E1's decision is made against **and** the "before" for
 step 5.
