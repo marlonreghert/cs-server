@@ -1,4 +1,3 @@
-@wip
 Feature: Show an operator the duplicate and refusal backlog they cannot see today
   A refused merge pair records nothing at all — no row, no queue entry, nothing
   an operator can act on — so a backlog of thousands of refusals accumulated in

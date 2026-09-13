@@ -1629,6 +1629,34 @@ EVENT_DEDUP_CONFIG_TYPE_FALLBACK_TOTAL = Counter(
     ["key"],
 )
 
+# plans/260912_events-venue-night-duplication.md §A: the duplicate/refusal/
+# attribution backlog, as a STANDING number instead of a one-off hand
+# measurement. Pushed from the end of an extraction run by
+# `app.services.event_dedup_backlog.publish_dedup_backlog_gauges` — the same
+# shape `app.services.event_reconciliation.update_events_gauge` already
+# establishes; there is no collect-on-scrape collector in this repo, so an
+# unpushed gauge stays stale rather than silently wrong-but-fresh.
+#
+# `measure` is a small FIXED set (bounded cardinality, per this module's own
+# rule) — see event_dedup_backlog.BACKLOG_MEASURES:
+#   venue_night_groups                   (venue, Recife local date) holding >1 live row
+#   venue_night_excess_rows              sum(group size - 1) — THE number this plan is judged on
+#   refused_disjoint_pairs               same-night pairs refused as disjoint, as a CURRENT
+#                                        population rather than EVENT_MERGE_TOTAL's cumulative count
+#   refused_no_distinctive_tokens_pairs  the same, for the empty-distinctive-set refusal
+#   pending_suggestions                  event_merge_suggestion rows awaiting an operator
+#   attribution_disputed_rows            live rows whose own location_text is not evidence for the
+#                                        venue they are filed at (the venue-acquisition backlog)
+#
+# `venue_night_excess_rows` must FALL after the historical repair and must
+# not climb back afterwards; if it does, the forward fix is not holding and
+# GET /admin/events/dedup-backlog names the venues to look at.
+EVENT_DEDUP_BACKLOG = Gauge(
+    "event_dedup_backlog",
+    "Event venue-night duplicate, merge-refusal and attribution-dispute backlog",
+    ["measure"],
+)
+
 # Snapshot of events.post_item (post_type="menu" only) by current-vs-expired
 # state, using the DEFAULT expiry window (app.models.menu_lifecycle.
 # DEFAULT_MENU_EXPIRY_DAYS) as an approximation — deliberately NOT the live

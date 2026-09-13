@@ -26,6 +26,7 @@ from app.metrics import (
 from app.models.event_kind import KIND_MENU
 from app.models.menu_lifecycle import is_menu_item_current, load_menu_expiry_days
 from app.models.promoter_event_visibility import is_promoter_only_item, load_hide_promoter_events
+from app.services.event_dedup_backlog import collect_dedup_backlog
 from app.services.event_merge import apply_merge_suggestion, reject_merge_suggestion, reverse_title_similarity_merge
 from app.services.event_reconciliation import event_unread_time
 from app.services.event_source_media import resolve_event_media
@@ -583,6 +584,79 @@ def reject_merge_suggestion_route(suggestion_id: str, decided_by: Optional[str] 
 def get_events_config():
     hide_promoter, _fallback_reason = load_hide_promoter_events(_admin_config_redis())
     return PromoterVisibilityConfigOut(hide_promoter_events=hide_promoter)
+
+
+# ── the duplicate / refusal / attribution backlog (plans/260912_events-venue-
+# night-duplication.md §A) — modelled on GET /admin/events/targeting
+# (app.routers.admin_trigger_router): a REPORT-ONLY aggregate with
+# limit/offset. Additive; nothing existing changes, and reading it writes
+# nothing — it is a report over what is already stored. Registered before
+# "/{event_id}" for the same reason as /promoters, /review and /config
+# above. ────────────────────────────────────────────────────────────────────
+class DedupBacklogVenueNightOut(BaseModel):
+    venue_id: str
+    venue_name: Optional[str] = None
+    local_date: str
+    row_count: int
+    excess_rows: int
+    event_ids: list[str] = Field(default_factory=list)
+    titles: list[Optional[str]] = Field(default_factory=list)
+    location_texts: list[str] = Field(default_factory=list)
+
+
+class DedupBacklogDisputeOut(BaseModel):
+    source_handle: Optional[str] = None
+    location_text: str
+    row_count: int
+    event_ids: list[str] = Field(default_factory=list)
+    venue_ids: list[str] = Field(default_factory=list)
+    resolves_to_venue_id: Optional[str] = None
+    resolves_to_venue_name: Optional[str] = None
+
+
+class DedupBacklogOut(BaseModel):
+    """Every measure `event_dedup_backlog{measure}` publishes, plus the group
+    and dispute detail an operator needs to decide which venues belong on
+    `event_dedup_single_night_venues` and which branches to add to the
+    catalog. `venue_night_group_total`/`attribution_dispute_total` are the
+    WHOLE-corpus counts; the two lists are the paged slice."""
+
+    live_rows: int
+    venue_night_group_total: int
+    venue_night_excess_rows: int
+    refused_disjoint_pairs: int
+    refused_no_distinctive_tokens_pairs: int
+    pending_suggestions: int
+    attribution_disputed_rows: int
+    attribution_dispute_total: int
+    limit: int
+    offset: int
+    venue_night_groups: list[DedupBacklogVenueNightOut] = Field(default_factory=list)
+    attribution_disputes: list[DedupBacklogDisputeOut] = Field(default_factory=list)
+
+
+@router.get("/dedup-backlog", response_model=DedupBacklogOut)
+def get_dedup_backlog(
+    limit: int = Query(50, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+):
+    dao = _dao()
+    backlog = collect_dedup_backlog(dao, redis_like=_admin_config_redis())
+    groups = backlog.venue_night_groups[offset: offset + limit]
+    disputes = backlog.attribution_disputes[offset: offset + limit]
+    return DedupBacklogOut(
+        live_rows=backlog.live_rows,
+        venue_night_group_total=backlog.venue_night_group_count,
+        venue_night_excess_rows=backlog.venue_night_excess_rows,
+        refused_disjoint_pairs=backlog.refused_disjoint_pairs,
+        refused_no_distinctive_tokens_pairs=backlog.refused_no_distinctive_tokens_pairs,
+        pending_suggestions=backlog.pending_suggestions,
+        attribution_disputed_rows=backlog.attribution_disputed_rows,
+        attribution_dispute_total=len(backlog.attribution_disputes),
+        limit=limit, offset=offset,
+        venue_night_groups=[DedupBacklogVenueNightOut(**g.to_dict()) for g in groups],
+        attribution_disputes=[DedupBacklogDisputeOut(**d.to_dict()) for d in disputes],
+    )
 
 
 class EventCoverOut(BaseModel):

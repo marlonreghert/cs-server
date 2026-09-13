@@ -87,6 +87,7 @@ from app.services.event_date_resolver import (
     select_date_interpretation_for_reuse,
     vote_on_sibling_years,
 )
+from app.services.event_dedup_backlog import publish_dedup_backlog_gauges
 from app.services.event_identity import normalize_title
 from app.services.event_merge import merge_touched_events
 from app.services.event_reconciliation import (
@@ -661,6 +662,11 @@ class EventExtractionService:
 
         if not cfg["dry_run"]:
             update_events_gauge(self.venue_dao)
+            # plans/260912_events-venue-night-duplication.md §A: the
+            # duplicate/refusal/attribution backlog, pushed alongside
+            # EVENTS_TOTAL from the same end-of-run point and in the same
+            # shape. Never fails the run — see the function's own docstring.
+            publish_dedup_backlog_gauges(self.venue_dao, redis_like=self.redis_client)
 
         return {
             "qualifying_posts": qualifying_posts,
