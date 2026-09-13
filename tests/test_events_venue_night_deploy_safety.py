@@ -43,7 +43,9 @@ from app.models.venue import Venue
 from app.services import event_dedup
 from app.services.event_dedup_backlog import collect_dedup_backlog
 from app.services.event_identity import compute_source_event_key
-from app.services.event_merge import compute_event_identity, merge_touched_events
+from app.services.event_merge import (
+    compute_event_identity, merge_touched_events, run_title_similarity_pass,
+)
 from app.services.event_reconciliation import new_event_id
 from tests.rds_fake import InMemoryRdsVenueStore
 
@@ -190,6 +192,11 @@ class TestTheDeployChangesNoStoredRow:
         config = event_dedup.load_dedup_config(None)
         assert config.recurring_window_enabled is False
         assert config.single_night_venues == ()
+        # The CATALOG-WIDE single-night scope the operator chose. Off by
+        # default like every other flag here, so the deploy-safety property
+        # is unaffected by how broad the chosen scope is.
+        assert config.single_night_default_enabled is False
+        assert config.is_single_night_venue("any_venue_at_all") is False
         # The shipped lineup threshold is NOT changed by this branch; §E1's
         # decision is an admin-config edit made after a measurement.
         assert config.lineup_threshold == 2
@@ -227,6 +234,45 @@ class TestTheDeployChangesNoStoredRow:
         # action only flags it.
         assert verdict is not None and verdict.target_venue_id == "v_bd_cf"
         assert load_attribution_dispute_config(production_redis).reattributes is False
+
+
+def test_the_safety_guarantee_is_a_real_check_not_a_tautology(production_redis):
+    """A positive control for the byte-identical guard above.
+
+    "Every flag defaults to today's behaviour" is only a safety property if
+    the test that asserts it would NOTICE a flag defaulting the other way.
+    This drives the SAME corpus and the SAME pipeline with the catalog-wide
+    single-night scope forced on — the broadest thing this branch can do —
+    and requires the rows to change. If this test ever passes with rows
+    unchanged, the byte-identical test above has stopped testing anything.
+    """
+    store = _store()
+    ids = _seed_corpus(store)
+    before = _snapshot(store)
+
+    forced = event_dedup.DedupConfig(
+        generic_vocabulary=event_dedup.DEFAULT_GENERIC_VOCABULARY,
+        stopwords=event_dedup.DEFAULT_STOPWORDS,
+        lineup_threshold=event_dedup.DEFAULT_LINEUP_THRESHOLD,
+        candidate_window_hours=event_dedup.DEFAULT_CANDIDATE_WINDOW_HOURS,
+        undated_window_days=event_dedup.DEFAULT_UNDATED_WINDOW_DAYS,
+        auto_merge_enabled=True, single_night_default_enabled=True,
+    )
+    for venue_id in ("v_club", "v_casanova", "v_bode", "v_reboco"):
+        run_title_similarity_pass(store, venue_id, _NOW, config=forced)
+
+    assert _snapshot(store) != before, (
+        "the catalog-wide scope changed nothing — the byte-identical guard "
+        "above would not have caught a flag defaulting on"
+    )
+    # And, specifically, the cost the operator accepted:
+    surviving_titles = {
+        store.get_event(e)["title"] for e in ids
+        if store.get_event(e) and store.get_event(e)["status"] != "superseded"
+    }
+    assert not {"Bolinha do Cavaco", "JB do Cavaco"} <= surviving_titles, (
+        "the 260812 false-positive pair should merge under the catalog-wide scope"
+    )
 
 
 # ── guard 2: identity is untouched ─────────────────────────────────────────

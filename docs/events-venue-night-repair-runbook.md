@@ -13,6 +13,7 @@ behaviour is behind an admin-config key that defaults to today's behaviour:
 | `event_attribution_dispute_withhold_enabled` | `false` | `true` lets the dispute's review reason withhold auto-accept (removes the row from serving) |
 | `event_dedup_recurring_window_enabled` | `false` | `true` makes two recurring rows with intersecting weekday patterns candidates for one night |
 | `event_dedup_single_night_venues` | `[]` | a listed venue's same-night rows collapse into one listing |
+| `event_dedup_single_night_default_enabled` | `false` | **every** venue's same-night rows collapse — the chosen scope, see below |
 | `event_dedup_lineup_threshold` | `2` | **unchanged by this branch** — §E1's decision procedure below |
 
 `event_dedup_auto_merge_enabled` is **already `true` in production** (set
@@ -107,9 +108,18 @@ can repair until the venue is added.
 
 ```
 python -m scripts.measure_event_dedup --recurring-window \
-    --lineup-threshold <chosen> --single-night-venue <id> ... \
+    --lineup-threshold <chosen> --single-night-all \
     --report-json /app/reports/dedup_after_repair.json
 ```
+
+`--single-night-all` measures the CATALOG-WIDE scope without writing the
+admin-config key. **Read its auto-pair count before you flip anything.** The
+venue-night backlog is ~55 groups / ~93 excess rows, so an auto-pair count in
+the low hundreds is the expected order (a group of *n* rows yields *n(n-1)/2*
+pairs, so a handful of large groups dominates). A count **wildly** larger than
+that means something is evaluating pairs it should not — across dates, across
+venues, or over non-event rows — which is a **bug, not the intended scope**.
+Stop and report rather than applying.
 
 This is the corpus §E1's decision is made against **and** the "before" for
 step 5.
@@ -118,7 +128,7 @@ step 5.
 
 ```
 python -m scripts.measure_event_dedup --apply --recurring-window \
-    --lineup-threshold <chosen> --single-night-venue <id> ... \
+    --lineup-threshold <chosen> --single-night-all \
     --max-auto-pairs <ceiling> \
     --report-json /app/reports/dedup_sweep.json
 ```
@@ -132,6 +142,16 @@ The sweep re-measures itself afterwards and exits `1` if any auto pair
 remains. It is idempotent, resumable (`--since-venue-id`), and every merge it
 performs is reversible per pair through
 `POST /admin/events/{absorbed_event_id}/reverse-merge`.
+
+## 5b. Turn the single-night scope on
+
+```
+PUT /admin/config/event_dedup_single_night_default_enabled   body: true
+```
+
+Do this AFTER step 3's attribution repair, never before: collapsing a
+venue-night at a venue that is still holding another venue's rows merges two
+different bars into one listing.
 
 ## 6. After-picture
 
@@ -150,17 +170,62 @@ names the venues to look at.
 
 ---
 
+## The single-night scope: catalog-wide, decided and why
+
+**The operator chose the catalog-wide flag, not the per-venue list.** Set
+`event_dedup_single_night_default_enabled = true`; leave
+`event_dedup_single_night_venues` empty.
+
+This was put to them with the tradeoff stated, and accepted explicitly. Record
+of the decision, so nobody has to reconstruct it later:
+
+- **What was proposed first:** adding Club Metrópole alone to
+  `event_dedup_single_night_venues`.
+- **The counter-example that made it a real question:**
+  `260812_event-dedup-fuzzy-title.md`'s own measured false-positive corpus
+  contains `Bolinha do Cavaco` / `JB do Cavaco` at **Casanova Ecobar** — two
+  different acts, one venue, one night, deliberately kept apart by that
+  review. Club Metrópole's five acts on one Saturday are the **same shape**.
+  Nothing in the rows distinguishes them; the difference is a fact about the
+  venue — a club runs one night, a theatre runs a programme.
+- **What the operator accepted, knowingly:**
+  1. the `Bolinha do Cavaco` / `JB do Cavaco` shape **will re-merge wherever
+     it recurs** — this is the decision, not a defect, and
+     `tests/test_event_dedup_single_night.py` asserts it as such;
+  2. any **undiscovered "programme" venue** running genuinely separate
+     same-night events will have one silently absorbed into another, until
+     someone notices it in `GET /admin/events/dedup-backlog`.
+
+Two operational consequences worth knowing before you turn it on:
+
+- **The reversal of an individual bad merge is per-pair and cheap:**
+  `POST /admin/events/{absorbed_event_id}/reverse-merge` restores the row and
+  exactly the sources that moved.
+- **Dialling the SCOPE back is not cheap, and there is no exclusion list.**
+  The only way to narrow it is to set the flag `false` and enumerate, in
+  `event_dedup_single_night_venues`, every venue you still DO want collapsed
+  — the whole catalog minus the exception. If this is ever dialled back in
+  anger, adding an explicit exclusion key is the obvious follow-up; it was
+  deliberately not built ahead of a need for it.
+
+`260812`'s measured evidence puts **Teatro Riachuelo**, **Sempre Rock Bar**
+and **Entre Amigos O Bode** in the programme group. They are the first places
+to look when auditing the backlog report after the sweep.
+
 ## What this does NOT fix on its own
 
-Until `event_dedup_single_night_venues` is populated, the Club Metrópole
-cluster shrinks — from five rows toward three, if the threshold measurement
-supports moving to 1 — but does **not** become one row: no threshold on
-either existing signal reaches `ROWKA` or `VITINHO POLÊMICO`. Do not read a
-green pipeline as "the reported symptom is gone".
+Until the single-night scope is turned on, the Club Metrópole cluster
+shrinks — from five rows toward three, if the threshold measurement supports
+moving to 1 — but does **not** become one row: no threshold on either
+existing signal reaches `ROWKA` or `VITINHO POLÊMICO`. Do not read a green
+pipeline as "the reported symptom is gone".
 
-Which venues belong on that list is a product judgement, not a measurement.
-A club runs one night; a theatre and a bookshop run a programme. `260812`'s
-own measured evidence puts Teatro Riachuelo, Sempre Rock Bar and Entre Amigos
-O Bode firmly in the second group — and `Bolinha do Cavaco` / `JB do Cavaco`
-at Casanova Ecobar is the same shape as Club Metrópole's five acts, which is
-exactly why this is a per-venue list and not a rule.
+Nor does the single-night scope touch the three worst venues by excess rows.
+Measured on the live corpus 2026-09-13: **BeerDock Boa Viagem (19 excess),
+zef'as bar (15) and Seu Chico Botequim (10) are attribution problems, not
+dedup problems** — 20 of BeerDock's 44 rows carry `location_text = 'CASA
+FORTE'`, and zef'as bar's 16-row group is a Natal roundup account
+(`oquetemhojeemnatal`) whose rows name 13 different `@handles`, i.e. 13
+different venues filed at one. Step 3 is what moves those; collapsing them as
+"one venue-night" would be actively wrong. That is the whole reason the
+sequence puts the attribution repair first.

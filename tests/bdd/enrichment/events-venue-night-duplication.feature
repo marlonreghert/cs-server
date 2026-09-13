@@ -226,6 +226,67 @@ Feature: Stop one venue-night producing several listings
     Then one event survives for that Saturday
     And the absorbed event is deleted rather than superseded
 
+  # ── Defect 1: the catalog-wide scope the operator chose ───────────────────
+  # Reviewed and chosen deliberately over the per-venue list, with the
+  # tradeoff stated: every venue is treated as running one night, with no
+  # exclusions. The Casanova Ecobar pair below is `260812`'s own measured
+  # false positive — it now merges, and that is the decision, not a defect.
+
+  Scenario: Collapse any venue's night once the catalog-wide default is on
+    Given the catalog-wide single-night default is enabled
+    And auto-merge is enabled
+    And two stored events at "Xepa Bar" on one Saturday whose titles share no distinctive word
+    When the merge pass runs for that venue
+    Then one event survives for that Saturday
+
+  Scenario: Leave every venue-night alone while the catalog-wide default is off
+    Given auto-merge is enabled
+    And two stored events at "Xepa Bar" on one Saturday whose titles share no distinctive word
+    When the merge pass runs for that venue
+    Then two events survive for that Saturday
+
+  Scenario: Collapse a five-act night at a venue on no list once the catalog-wide default is on
+    Given the catalog-wide single-night default is enabled
+    And auto-merge is enabled
+    And five stored events at "Casa Bacurau" on one Saturday, each naming a different act
+    When the merge pass runs for that venue
+    Then one event survives for that Saturday
+    And the surviving event names every one of the five acts in its lineup
+
+  Scenario: Merge two different acts on one night once the catalog-wide default is on
+    Given the catalog-wide single-night default is enabled
+    And auto-merge is enabled
+    And the two acts "Bolinha do Cavaco" and "JB do Cavaco" at "Casanova Ecobar" on one night
+    When the merge pass runs for that venue
+    Then one event survives for that Saturday
+
+  Scenario: Keep those two acts apart while the catalog-wide default is off
+    Given auto-merge is enabled
+    And the two acts "Bolinha do Cavaco" and "JB do Cavaco" at "Casanova Ecobar" on one night
+    When the merge pass runs for that venue
+    Then two events survive for that Saturday
+
+  Scenario: Never absorb a confirmed event once the catalog-wide default is on
+    Given the catalog-wide single-night default is enabled
+    And auto-merge is enabled
+    And two stored events at "Club Metrópole" on one Saturday, both confirmed by an operator
+    When the merge pass runs for that venue
+    Then both events survive
+
+  Scenario: Never absorb a non-event post once the catalog-wide default is on
+    Given the catalog-wide single-night default is enabled
+    And auto-merge is enabled
+    And a stored event and a stored birthday greeting at "Club Metrópole" on one Saturday
+    When the merge pass runs for that venue
+    Then the greeting survives as its own row
+
+  Scenario: Keep two different nights apart once the catalog-wide default is on
+    Given the catalog-wide single-night default is enabled
+    And auto-merge is enabled
+    And two stored events at "Xepa Bar" on two different Saturdays
+    When the merge pass runs for that venue
+    Then two events survive for that Saturday
+
   # ── the one-off historical sweep ──────────────────────────────────────────
 
   Scenario: Sweep an existing cluster that no crawl has touched

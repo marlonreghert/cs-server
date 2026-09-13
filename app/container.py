@@ -622,6 +622,7 @@ class Container:
             validate_lineup_threshold_config,
             validate_recurring_window_enabled_config,
             validate_single_night_venues_config,
+            validate_single_night_default_enabled_config,
             validate_stopwords_config,
             validate_undated_window_days_config,
         )
@@ -713,6 +714,11 @@ class Container:
                 # programme" list, EMPTY by default and never a corpus-wide
                 # rule.
                 "event_dedup_single_night_venues": validate_single_night_venues_config,
+                # The CATALOG-WIDE form of the same policy — every venue treated
+                # as running one night, with no exclusions. False by default; the
+                # operator chose this scope explicitly, accepting that the
+                # Bolinha/JB do Cavaco shape will re-merge wherever it recurs.
+                "event_dedup_single_night_default_enabled": validate_single_night_default_enabled_config,
                 # plans/260912_events-venue-night-duplication.md §G: whether the
                 # post-merge display-title pass runs at all. False by default —
                 # it is the one pass in this plan that WRITES a column.

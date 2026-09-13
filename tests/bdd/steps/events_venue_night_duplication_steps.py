@@ -1133,3 +1133,65 @@ def step_then_every_stored_event_unchanged(context):
         "no before-snapshot was taken; the When step must call _snapshot_rows"
     )
     assert _snapshot_rows(context) == context.vnd_rows_before
+
+
+# ══ Defect 1, catalog-wide ═══════════════════════════════════════════════
+# The scope the operator chose after reviewing the per-venue list: every
+# venue treated as running one night, no exclusions. `260812`'s own measured
+# false positive (`Bolinha do Cavaco` / `JB do Cavaco` at Casanova Ecobar)
+# now merges — the scenarios below assert that NEW behaviour deliberately,
+# and pin that it still refuses while the flag is off.
+@given("the catalog-wide single-night default is enabled")
+def step_given_catalog_wide_single_night(context):
+    _dedup_steps._ensure_context(context)
+    context.dedup_redis.set(
+        event_dedup.ADMIN_CONFIG_SINGLE_NIGHT_DEFAULT_ENABLED_KEY, json.dumps(True),
+    )
+
+
+@given('two stored events at "{venue}" on one Saturday whose titles share no distinctive word')
+def step_given_two_disjoint_events(context, venue):
+    # ONE definition for both feature files that state it, dispatching to
+    # whichever harness the running scenario built.
+    if not hasattr(context, "dedup_dao"):
+        from tests.bdd.steps.events_venue_night_duplication_backlog_steps import (
+            seed_backlog_disjoint_pair,
+        )
+
+        seed_backlog_disjoint_pair(context, venue)
+        return
+    context.vnd_night_ids = [
+        _dedup_steps._seed_item(
+            context, title, venue, starts_at=_dedup_local(_SATURDAY, "22:00"),
+            status="accepted", first_seen_at=_dedup_steps._NOW,
+        )
+        for title in ("ROWKA", "VITINHO POLÊMICO")
+    ]
+
+
+@given('two stored events at "{venue}" on two different Saturdays')
+def step_given_two_events_two_saturdays(context, venue):
+    context.vnd_night_ids = [
+        _dedup_steps._seed_item(
+            context, "ROWKA", venue, starts_at=_dedup_local(_SATURDAY, "22:00"),
+            status="accepted", first_seen_at=_dedup_steps._NOW,
+        ),
+        _dedup_steps._seed_item(
+            context, "VITINHO POLÊMICO", venue, starts_at=_dedup_local("2026-09-19", "22:00"),
+            status="accepted", first_seen_at=_dedup_steps._NOW,
+        ),
+    ]
+
+
+@given('the two acts "{a}" and "{b}" at "{venue}" on one night')
+def step_given_the_casanova_pair(context, a, b, venue):
+    # Verbatim from `260812_event-dedup-fuzzy-title.md`'s Evidence section —
+    # the pair that set the bar, and the one the operator has now explicitly
+    # accepted will merge.
+    context.vnd_night_ids = [
+        _dedup_steps._seed_item(
+            context, title, venue, starts_at=_dedup_local(_SATURDAY, "21:00"),
+            status="accepted", first_seen_at=_dedup_steps._NOW,
+        )
+        for title in (a, b)
+    ]

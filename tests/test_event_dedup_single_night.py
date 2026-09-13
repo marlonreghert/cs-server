@@ -370,3 +370,222 @@ class TestConfigPlumbing:
         ids = _seed_cluster(store)
         merge_touched_events(store, list(ids), _NOW, redis_like=redis)
         assert len(_alive(store, ids)) == 1
+
+
+# ── the CATALOG-WIDE scope the operator chose ──────────────────────────────
+class TestTheCatalogWideDefault:
+    """`event_dedup_single_night_default_enabled`: every venue treated as
+    running one night, with NO exclusions.
+
+    Chosen deliberately over the per-venue list, after the tradeoff was put
+    to the operator explicitly. What it accepts, and what these tests pin as
+    the DECISION rather than as a regression: `260812`'s own measured
+    false-positive pair (`Bolinha do Cavaco` / `JB do Cavaco` at Casanova
+    Ecobar — two different acts, one venue, one night) now merges, and any
+    undiscovered "programme" venue will have one same-night event absorbed
+    into another until an operator sees it in the backlog report.
+
+    What it does NOT relax is every protection the auto band already
+    applies; that half is asserted here just as hard.
+    """
+
+    def _catalog_wide(self, *, lineup_threshold=None):
+        return event_dedup.DedupConfig(
+            generic_vocabulary=event_dedup.DEFAULT_GENERIC_VOCABULARY,
+            stopwords=event_dedup.DEFAULT_STOPWORDS,
+            lineup_threshold=lineup_threshold or event_dedup.DEFAULT_LINEUP_THRESHOLD,
+            candidate_window_hours=event_dedup.DEFAULT_CANDIDATE_WINDOW_HOURS,
+            undated_window_days=event_dedup.DEFAULT_UNDATED_WINDOW_DAYS,
+            auto_merge_enabled=True,
+            single_night_default_enabled=True,
+        )
+
+    def test_it_ships_off(self):
+        assert event_dedup.DEFAULT_SINGLE_NIGHT_DEFAULT_ENABLED is False
+        assert event_dedup.load_dedup_config(None).single_night_default_enabled is False
+
+    def test_the_validator_rejects_a_non_boolean(self):
+        import pytest
+
+        with pytest.raises(TypeError):
+            event_dedup.validate_single_night_default_enabled_config("true")
+        assert event_dedup.validate_single_night_default_enabled_config(True) is True
+
+    def test_a_stored_string_never_coerces_it_on(self):
+        class _FakeRedis:
+            def get(self, key):
+                if key == event_dedup.ADMIN_CONFIG_SINGLE_NIGHT_DEFAULT_ENABLED_KEY:
+                    return '"true"'
+                return None
+
+        assert event_dedup.load_dedup_config(_FakeRedis()).single_night_default_enabled is False
+
+    def test_a_real_stored_true_enables_it(self):
+        class _FakeRedis:
+            def get(self, key):
+                if key == event_dedup.ADMIN_CONFIG_SINGLE_NIGHT_DEFAULT_ENABLED_KEY:
+                    return json.dumps(True)
+                return None
+
+        config = event_dedup.load_dedup_config(_FakeRedis())
+        assert config.single_night_default_enabled is True
+        assert config.is_single_night_venue("any_venue_at_all") is True
+
+    def test_the_predicate_is_ored_and_the_flag_is_the_broader_half(self):
+        off_empty = _config()
+        assert off_empty.is_single_night_venue("v_club") is False
+        assert off_empty.is_single_night_venue(None) is False
+
+        listed = _config("v_club")
+        assert listed.is_single_night_venue("v_club") is True
+        assert listed.is_single_night_venue("v_bode") is False
+
+        wide = self._catalog_wide()
+        assert wide.is_single_night_venue("v_club") is True
+        assert wide.is_single_night_venue("v_bode") is True
+        assert wide.is_single_night_venue(None) is True
+
+    def test_a_list_never_narrows_the_flag(self):
+        """The intuitive reading — "the list restricts the default" — is
+        WRONG, and this pins it. There is no exclusion semantics: a venue
+        cannot be taken off the catalog-wide behaviour by leaving it out of
+        the list. Dialling back means setting the flag false."""
+        both = event_dedup.DedupConfig(
+            generic_vocabulary=event_dedup.DEFAULT_GENERIC_VOCABULARY,
+            stopwords=event_dedup.DEFAULT_STOPWORDS,
+            lineup_threshold=2, candidate_window_hours=8, undated_window_days=14,
+            auto_merge_enabled=True,
+            single_night_venues=("v_club",), single_night_default_enabled=True,
+        )
+        assert both.is_single_night_venue("v_bode") is True
+
+    def test_an_unlisted_venue_s_night_collapses(self):
+        store = _store()
+        ids = _seed_cluster(store, "v_bode")
+        _merge(store, "v_bode", self._catalog_wide())
+        assert len(_alive(store, ids)) == 1
+
+    def test_the_260812_false_positive_pair_now_merges(self):
+        # The operator's explicit, informed choice. Asserted as the NEW
+        # behaviour, not as a regression.
+        store = _store()
+        ids = [_seed(store, title, "v_casanova") for title in _CASANOVA]
+        _merge(store, "v_casanova", self._catalog_wide())
+        survivors = _alive(store, ids)
+        assert len(survivors) == 1, [store.get_event(e)["title"] for e in survivors]
+        assert store.get_event(survivors[0])["title"] in _CASANOVA
+
+    def test_that_same_pair_still_refuses_while_the_flag_is_off(self):
+        store = _store()
+        ids = [_seed(store, title, "v_casanova") for title in _CASANOVA]
+        _merge(store, "v_casanova", _config())
+        assert len(_alive(store, ids)) == 2
+
+    def test_a_programme_venue_s_workshops_now_merge_too(self):
+        # The cost the operator accepted, stated as a test so nobody reads
+        # this as an accident later.
+        store = _store()
+        ids = [_seed(store, title, "v_bode") for title in _WORKSHOPS]
+        _merge(store, "v_bode", self._catalog_wide())
+        assert len(_alive(store, ids)) == 1
+
+    def test_two_different_nights_are_still_two_nights(self):
+        # The bypass changes the BAND for an already-windowed pair; it never
+        # widens the candidate window itself.
+        store = _store()
+        saturday = _seed(store, _FIVE_ACTS[0][0], "v_bode")
+        next_week = _seed(
+            store, _FIVE_ACTS[1][0], "v_bode",
+            starts_at=datetime(2026, 9, 19, 22, 0, tzinfo=RECIFE),
+        )
+        _merge(store, "v_bode", self._catalog_wide())
+        assert len(_alive(store, [saturday, next_week])) == 2
+
+    def test_two_venues_are_still_two_venues(self):
+        store = _store()
+        club = _seed(store, _FIVE_ACTS[0][0], "v_club")
+        bode = _seed(store, _FIVE_ACTS[1][0], "v_bode")
+        config = self._catalog_wide()
+        _merge(store, "v_club", config)
+        _merge(store, "v_bode", config)
+        assert len(_alive(store, [club, bode])) == 2
+
+    def test_every_protection_still_holds(self):
+        config = self._catalog_wide()
+
+        confirmed = _store()
+        confirmed_ids = [
+            _seed(confirmed, title, "v_bode", status="confirmed")
+            for title, _acts in _FIVE_ACTS[:2]
+        ]
+        _merge(confirmed, "v_bode", config)
+        assert len(_alive(confirmed, confirmed_ids)) == 2
+
+        edited = _store()
+        a = _seed(edited, _FIVE_ACTS[0][0], "v_bode")
+        b = _seed(edited, _FIVE_ACTS[1][0], "v_bode", operator_edited_fields=["title"])
+        _merge(edited, "v_bode", config)
+        assert len(_alive(edited, [a, b])) == 2
+
+        venue_edited = _store()
+        c = _seed(venue_edited, _FIVE_ACTS[0][0], "v_bode")
+        d = _seed(venue_edited, _FIVE_ACTS[1][0], "v_bode", operator_edited_fields=["venue_id"])
+        _merge(venue_edited, "v_bode", config)
+        assert len(_alive(venue_edited, [c, d])) == 2
+
+        non_event = _store()
+        event_id = _seed(non_event, _FIVE_ACTS[0][0], "v_bode")
+        greeting = _seed(non_event, "31 Anos", "v_bode", post_type="other")
+        _merge(non_event, "v_bode", config)
+        assert _alive(non_event, [greeting]) == [greeting]
+        assert _alive(non_event, [event_id]) == [event_id]
+
+    def test_it_does_nothing_while_auto_merge_is_off(self):
+        store = _store()
+        ids = _seed_cluster(store, "v_bode")
+        config = event_dedup.DedupConfig(
+            generic_vocabulary=event_dedup.DEFAULT_GENERIC_VOCABULARY,
+            stopwords=event_dedup.DEFAULT_STOPWORDS,
+            lineup_threshold=2, candidate_window_hours=8, undated_window_days=14,
+            auto_merge_enabled=False, single_night_default_enabled=True,
+        )
+        _merge(store, "v_bode", config)
+        assert len(_alive(store, ids)) == 5
+
+    def test_absorbed_rows_are_still_superseded_and_reversible(self):
+        store = _store()
+        ids = _seed_cluster(store, "v_bode")
+        _merge(store, "v_bode", self._catalog_wide())
+        survivor = _alive(store, ids)[0]
+        for event_id in ids:
+            if event_id == survivor:
+                continue
+            row = store.get_event(event_id)
+            assert row is not None, "a catalog-wide merge must still be reversible"
+            assert row["superseded_by"] == survivor
+
+    def test_the_merge_pass_reads_the_flag_through_redis(self):
+        import fakeredis
+
+        redis = fakeredis.FakeRedis(decode_responses=True)
+        redis.set(event_dedup.ADMIN_CONFIG_AUTO_MERGE_ENABLED_KEY, json.dumps(True))
+        redis.set(
+            event_dedup.ADMIN_CONFIG_SINGLE_NIGHT_DEFAULT_ENABLED_KEY, json.dumps(True),
+        )
+        store = _store()
+        ids = _seed_cluster(store, "v_bode")  # a venue on NO list
+        merge_touched_events(store, list(ids), _NOW, redis_like=redis)
+        assert len(_alive(store, ids)) == 1
+
+    def test_the_measurement_sees_the_catalog_wide_scope(self):
+        """`--single-night-all` is what step 7's `--max-auto-pairs` is sized
+        from, so the report must reflect the same bar the sweep will use —
+        the property `260812` §C2 makes structural."""
+        import scripts.measure_event_dedup as med
+
+        store = _store()
+        _seed_cluster(store, "v_bode")
+        narrow = med.measure(store, config=med.build_config())
+        wide = med.measure(store, config=med.build_config(single_night_default_enabled=True))
+        assert narrow.auto_count == 0
+        assert wide.auto_count == 10  # five rows, ten pairs

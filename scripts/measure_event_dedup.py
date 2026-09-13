@@ -62,6 +62,17 @@ before they existed, and NONE of them reads or writes any admin-config key:
   --single-night-venue ID     measure §E2's per-venue policy for named
                               venues WITHOUT writing the admin-config key
                               (repeatable)
+  --single-night-all          measure §E2's CATALOG-WIDE form — every venue
+                              treated as running one night, the scope the
+                              operator chose — again WITHOUT writing the
+                              admin-config key. Run this BEFORE flipping
+                              `event_dedup_single_night_default_enabled`:
+                              its auto-pair count is what `--max-auto-pairs`
+                              should be sized from, and a count wildly
+                              larger than the venue-night backlog would
+                              suggest means something is evaluating pairs it
+                              should not, which is a bug, not the intended
+                              scope.
   --max-auto-pairs N          THE BLAST-RADIUS GUARD. In --apply mode, write
                               nothing and exit non-zero when the dry-run
                               report's auto-pair count exceeds N. This is
@@ -132,6 +143,7 @@ def build_config(
     lineup_threshold: Optional[int] = None,
     recurring_window_enabled: bool = False,
     single_night_venue_ids=(),
+    single_night_default_enabled: bool = False,
     auto_merge_enabled: bool = True,
 ) -> event_dedup.DedupConfig:
     """The config every path in this script measures/sweeps with, built from
@@ -153,6 +165,7 @@ def build_config(
         auto_merge_enabled=auto_merge_enabled,
         recurring_window_enabled=recurring_window_enabled,
         single_night_venues=tuple(single_night_venue_ids or ()),
+        single_night_default_enabled=single_night_default_enabled,
     )
 
 
@@ -259,7 +272,7 @@ def measure(venue_dao, *, config: Optional[event_dedup.DedupConfig] = None) -> R
         # exactly what plan §C2 forbids, and which would also make
         # `--max-auto-pairs` guard against a number that does not describe
         # the run it is guarding.
-        single_night_venue = venue_id in (config.single_night_venues or ())
+        single_night_venue = config.is_single_night_venue(venue_id)
 
         for a, b in combinations(rows, 2):
             if not event_dedup.in_candidate_window_for_rows(
@@ -317,6 +330,7 @@ def report_to_dict(report: Report, *, config: event_dedup.DedupConfig, applied: 
             "undated_window_days": config.undated_window_days,
             "recurring_window_enabled": config.recurring_window_enabled,
             "single_night_venues": list(config.single_night_venues),
+            "single_night_default_enabled": config.single_night_default_enabled,
         },
         "counts": {
             "venues_considered": report.venues_considered,
@@ -388,6 +402,7 @@ def sweep(
     lineup_threshold: Optional[int] = None,
     recurring_window_enabled: bool = False,
     single_night_venue_ids=(),
+    single_night_default_enabled: bool = False,
 ) -> dict:
     """`--apply`: calls `app.services.event_merge.run_title_similarity_pass`
     for every venue with 2+ `post_type == KIND_EVENT` rows, forcing
@@ -410,6 +425,7 @@ def sweep(
             lineup_threshold=lineup_threshold,
             recurring_window_enabled=recurring_window_enabled,
             single_night_venue_ids=single_night_venue_ids,
+            single_night_default_enabled=single_night_default_enabled,
         )
     all_events = [e for e in venue_dao.list_events() if e.get("post_type") == KIND_EVENT and e.get("status") != "superseded"]
     venue_counts: Counter = Counter(e["venue_id"] for e in all_events if e.get("venue_id"))
@@ -452,6 +468,11 @@ def main(argv: Optional[list] = None) -> int:
              "only (repeatable); never writes the admin-config key",
     )
     ap.add_argument(
+        "--single-night-all", action="store_true", default=False,
+        help="treat EVERY venue as running one night for THIS run only (the "
+             "catalog-wide scope); never writes the admin-config key",
+    )
+    ap.add_argument(
         "--max-auto-pairs", type=int, default=None, metavar="N",
         help="blast-radius guard: with --apply, write NOTHING and exit non-zero when the "
              "dry-run report finds more than N auto pairs",
@@ -469,10 +490,13 @@ def main(argv: Optional[list] = None) -> int:
         lineup_threshold=args.lineup_threshold,
         recurring_window_enabled=args.recurring_window,
         single_night_venue_ids=args.single_night_venue,
+        single_night_default_enabled=args.single_night_all,
     )
     logger.info(
-        "config: lineup_threshold=%d recurring_window=%s single_night_venues=%s",
+        "config: lineup_threshold=%d recurring_window=%s single_night_all=%s "
+        "single_night_venues=%s",
         config.lineup_threshold, config.recurring_window_enabled,
+        config.single_night_default_enabled,
         list(config.single_night_venues) or "[]",
     )
 

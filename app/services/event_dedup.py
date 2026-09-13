@@ -105,6 +105,34 @@ ADMIN_CONFIG_SINGLE_NIGHT_VENUES_KEY = "admin_config:event_dedup_single_night_ve
 # unit-testable.
 DEFAULT_SINGLE_NIGHT_VENUES: tuple[str, ...] = ()
 
+ADMIN_CONFIG_SINGLE_NIGHT_DEFAULT_ENABLED_KEY = (
+    "admin_config:event_dedup_single_night_default_enabled"
+)
+# The CATALOG-WIDE form of §E2, added after the operator reviewed the
+# per-venue list and chose the broader scope EXPLICITLY, with the tradeoff
+# stated: every venue is treated as running one night, with NO exclusions.
+#
+# What that accepts, in the operator's own words: the `Bolinha do Cavaco` /
+# `JB do Cavaco` shape (`260812`'s measured false-positive corpus — two
+# different acts, one night, one venue, deliberately kept apart by a prior
+# review) WILL now re-merge wherever it recurs, and any undiscovered
+# "programme" venue running genuinely separate same-night events will have
+# one silently absorbed into another until an operator notices it in
+# `GET /admin/events/dedup-backlog` and dials the scope back.
+#
+# OFF by default, like every other flag in this plan: the deploy still
+# provably changes no stored row, and turning this on is a separate,
+# deliberate operator act.
+#
+# **Dialling back is not an exclusion list.** There is deliberately no
+# "except these venues" key: the remedy is to set this flag FALSE and name
+# the venues you DO want in `event_dedup_single_night_venues`. That is
+# awkward once the catalog-wide behaviour has been on for a while (it means
+# enumerating the whole catalog minus the exception), and an exclusion list
+# is the obvious follow-up if this is ever dialled back in anger — recorded
+# here so the next reader does not think the gap was missed.
+DEFAULT_SINGLE_NIGHT_DEFAULT_ENABLED = False
+
 ADMIN_CONFIG_RECURRING_WINDOW_ENABLED_KEY = "admin_config:event_dedup_recurring_window_enabled"
 # plans/260912_events-venue-night-duplication.md §D, Defect 3. OFF by
 # default: it strictly WIDENS the candidate set, and auto-merge is already
@@ -193,6 +221,12 @@ def validate_recurring_window_enabled_config(value) -> bool:
     return value
 
 
+def validate_single_night_default_enabled_config(value) -> bool:
+    if not isinstance(value, bool):
+        raise TypeError("event dedup single-night default flag must be a boolean")
+    return value
+
+
 def validate_single_night_venues_config(value) -> list[str]:
     """A list of venue_ids — NEVER normalised, lowercased or otherwise
     massaged: a venue_id is an opaque key, and "helpfully" transforming it
@@ -222,9 +256,35 @@ class DedupConfig:
     # `in_candidate_window_for_rows`.
     recurring_window_enabled: bool = False
     # §E2: venue_ids an operator has declared run ONE night rather than a
-    # programme. Empty by default, and never a corpus-wide rule — see
-    # `evaluate_pair`'s `single_night_venue` argument.
+    # programme. Empty by default — see `evaluate_pair`'s
+    # `single_night_venue` argument, and `is_single_night_venue` below for
+    # how this combines with the catalog-wide flag.
     single_night_venues: tuple[str, ...] = ()
+    # §E2, catalog-wide: treat EVERY venue as running one night. Strictly
+    # broader than the list above, and OFF by default.
+    single_night_default_enabled: bool = False
+
+    def is_single_night_venue(self, venue_id: Optional[str]) -> bool:
+        """Whether §E2's single-night bypass applies to `venue_id`.
+
+        The two keys are ORed, and the catalog-wide flag is strictly the
+        broader of the two — so when both are somehow set, the flag decides
+        and the list is simply redundant, never restrictive. Stated
+        explicitly because the opposite reading ("the list narrows the
+        default") is the intuitive one and is WRONG: there is no exclusion
+        semantics here at all, and a venue cannot be taken off the
+        catalog-wide behaviour by omitting it from the list. Dialling the
+        scope back means setting the flag false and naming the venues you DO
+        want.
+
+        No catalog lookup, no membership check, no I/O: with the flag on this
+        is a constant `True`, so turning it on cannot change which rows are
+        even CONSIDERED — only which of the already-windowed same-venue pairs
+        reach the auto band.
+        """
+        if self.single_night_default_enabled:
+            return True
+        return bool(venue_id) and venue_id in (self.single_night_venues or ())
 
 
 def _load_validated_config(redis_like, key: str, default, *, validator, module_tag: str):
@@ -308,12 +368,18 @@ def load_dedup_config(redis_like) -> DedupConfig:
         redis_like, ADMIN_CONFIG_SINGLE_NIGHT_VENUES_KEY, list(DEFAULT_SINGLE_NIGHT_VENUES),
         validator=validate_single_night_venues_config, module_tag="event_dedup",
     )
+    single_night_default = _load_validated_config(
+        redis_like, ADMIN_CONFIG_SINGLE_NIGHT_DEFAULT_ENABLED_KEY,
+        DEFAULT_SINGLE_NIGHT_DEFAULT_ENABLED,
+        validator=validate_single_night_default_enabled_config, module_tag="event_dedup",
+    )
     return DedupConfig(
         generic_vocabulary=tuple(generic), stopwords=tuple(stopwords),
         lineup_threshold=threshold, candidate_window_hours=window_hours,
         undated_window_days=undated_days, auto_merge_enabled=auto_enabled,
         recurring_window_enabled=recurring_window,
         single_night_venues=tuple(single_night),
+        single_night_default_enabled=single_night_default,
     )
 
 
@@ -589,10 +655,12 @@ __all__ = [
     "ADMIN_CONFIG_AUTO_MERGE_ENABLED_KEY", "DEFAULT_AUTO_MERGE_ENABLED",
     "ADMIN_CONFIG_RECURRING_WINDOW_ENABLED_KEY", "DEFAULT_RECURRING_WINDOW_ENABLED",
     "ADMIN_CONFIG_SINGLE_NIGHT_VENUES_KEY", "DEFAULT_SINGLE_NIGHT_VENUES",
+    "ADMIN_CONFIG_SINGLE_NIGHT_DEFAULT_ENABLED_KEY", "DEFAULT_SINGLE_NIGHT_DEFAULT_ENABLED",
     "validate_generic_vocabulary_config", "validate_stopwords_config",
     "validate_lineup_threshold_config", "validate_candidate_window_hours_config",
     "validate_undated_window_days_config", "validate_auto_merge_enabled_config",
     "validate_recurring_window_enabled_config", "validate_single_night_venues_config",
+    "validate_single_night_default_enabled_config",
     "DedupConfig", "load_dedup_config",
     "venue_name_tokens", "distinctive_set", "band_for_distinctive_sets",
     "lineup_name_set", "shared_lineup_names", "lineup_reaches_auto",

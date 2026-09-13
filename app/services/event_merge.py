@@ -1226,10 +1226,11 @@ def run_title_similarity_pass(
     venue_name = _venue_name_of(venue_dao, venue_id)
 
     # §E2: a fact about THIS venue, resolved once here rather than re-derived
-    # per pair — the list is an admin-config list of venue_ids, empty by
-    # default, so an unlisted venue behaves exactly as it did before this
-    # feature existed.
-    single_night_venue = venue_id in (config.single_night_venues or ())
+    # per pair. `is_single_night_venue` ORs the per-venue list with the
+    # catalog-wide `event_dedup_single_night_default_enabled` flag — BOTH
+    # empty/false by default, so an unlisted venue with the flag off behaves
+    # exactly as it did before this feature existed.
+    single_night_venue = config.is_single_night_venue(venue_id)
 
     if len(events) >= 2:
         _run_pairwise_pass(

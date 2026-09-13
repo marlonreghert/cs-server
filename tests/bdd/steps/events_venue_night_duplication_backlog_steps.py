@@ -209,8 +209,11 @@ def step_given_two_events_no_venue(context):
         _seed(context, title, None, starts_at=_local_dt(_SATURDAY))
 
 
-@given('two stored events at "{venue}" on one Saturday whose titles share no distinctive word')
-def step_given_two_disjoint(context, venue):
+def seed_backlog_disjoint_pair(context, venue: str) -> None:
+    """The backlog harness's half of the shared "titles share no distinctive
+    word" Given. The STEP is defined once, in
+    `events_venue_night_duplication_steps.py`, which dispatches to whichever
+    harness the running scenario built."""
     for title in ("ROWKA", "VITINHO POLÊMICO"):
         _seed(context, title, venue, starts_at=_local_dt(_SATURDAY))
 
