@@ -42,6 +42,33 @@ Feature: Measure before building — ground the agentic mitigation decision in r
     Then the report states the fraction of extracted events currently landing in the suggest band, the queued resolution state, or an attribution dispute
     And the report does not state any fraction that was not computed from real data
 
+  # ── one post naming several venues resolves each event independently ───
+  # Already true today (see the plan's Evidence trace); pinned here as a
+  # regression guard, not a new capability this plan adds.
+
+  Scenario: Resolve two events from one post to two different venues independently
+    Given a single post from a corpus handle announces two events whose location texts each name a different venue
+    When that post is reconciled
+    Then each event's venue attribution is evaluated against its own location text alone
+    And the two events are not forced to share one venue attribution
+
+  # ── the unrelated-venue gap: undetected today, by design of no existing signal ──
+  # Documents a real, currently-open gap (the "barchef" / hidden-promoter
+  # pattern): a handle mapped to one venue whose post names a different,
+  # unrelated, catalogued venue in plain text, with no handle mention, no
+  # location tag, and no shared brand-root token. Expected to stay
+  # undetected until a future phase closes it; this scenario exists so the
+  # gap is measured and visible, not silently assumed away.
+
+  Scenario: Leave an unrelated-venue misattribution undisputed today
+    Given a corpus handle mapped to one venue
+    And a post from that handle names a different, unrelated, catalogued venue in its location text alone, with no handle mention, no location tag, and no shared brand-root token with the mapped venue
+    When that post is reconciled
+    Then the event stays attributed to the handle's mapped venue
+    And the event carries no review reason
+    And no attribution dispute is counted
+    And the baseline measurement report records this corpus case as undetected by every existing signal
+
   # ── the closed-candidate-set advisory validator ────────────────────────
 
   Scenario: Accept a recommendation whose venue and evidence are both real
