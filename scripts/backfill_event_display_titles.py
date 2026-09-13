@@ -100,6 +100,9 @@ def plan_backfill(
     already truncated to `max_calls`. Makes no model call itself, so the dry
     run costs nothing at all."""
     config = load_dedup_config(None)
+    # ONE service for the whole pass, deliberately: its `_venue_name` cache
+    # is per-instance, and a corpus-wide sweep is mostly several events
+    # sharing one venue.
     service = EventDisplayTitleService(venue_dao, None)
     report = Report()
     needs_call: list = []
@@ -151,6 +154,7 @@ async def run_backfill(
         return report
 
     config = load_dedup_config(None)
+    # One instance for the whole run — see `plan_backfill`'s own note.
     service = EventDisplayTitleService(venue_dao, openai_client)
 
     # The OBVIOUS picks first: deterministic, free, and they need no client

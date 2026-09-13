@@ -56,6 +56,15 @@ class VenueRepository(RedisVenueDAO):
             return None
         return model_cls.model_validate(rec["payload"])
 
+    def get_venues_by_ids(self, venue_ids):
+        """The bulk counterpart of `get_venue`, proxied straight through —
+        rows as DICTS (never `Venue` models), exactly as the store returns
+        them. `app.services.event_venue_resolution.build_venue_catalog` and
+        `app.services.event_dedup_backlog.collect_dedup_backlog` use it to
+        avoid an N+1 over a ~3,600-venue catalog on a per-run/per-request
+        path."""
+        return self.rds_store.get_venues_by_ids(venue_ids)
+
     def get_venue(self, venue_id):
         row = self.rds_store.get_venue(venue_id)
         return venue_from_row(row) if row else None

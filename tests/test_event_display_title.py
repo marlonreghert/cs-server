@@ -405,6 +405,55 @@ class TestTheOneCall:
         assert store.get_event(event_id)["display_title"] is None
 
 
+class TestVenueNameIsReadOncePerVenue:
+    """A merge-group pass is by definition several events sharing one venue.
+    Without memoisation the same `get_venue` ran once per GROUP — and
+    `scripts/backfill_event_display_titles.py`, which walks the whole corpus
+    through one service instance, inherited it."""
+
+    def _counting_store(self):
+        store = _store()
+        calls = []
+        original = store.get_venue
+
+        def _counted(venue_id):
+            calls.append(venue_id)
+            return original(venue_id)
+
+        store.get_venue = _counted
+        return store, calls
+
+    def test_one_read_per_venue_across_many_groups(self, enabled_redis):
+        store, calls = self._counting_store()
+        ids = [
+            _seed_merged(store, ["Rodolpho", "Rodolpho Produções"]) for _ in range(4)
+        ]
+        service = EventDisplayTitleService(store, _FakeOpenAI(), redis_client=enabled_redis)
+        _run(service, ids)
+        assert calls == ["v_club"], calls
+
+    def test_a_dangling_venue_id_is_not_retried_per_event(self, enabled_redis):
+        store, calls = self._counting_store()
+        ids = [
+            _seed_merged(store, ["Rodolpho", "Rodolpho Produções"]) for _ in range(3)
+        ]
+        for event_id in ids:
+            store.update_event(event_id, {"venue_id": "v_gone"})
+        service = EventDisplayTitleService(store, _FakeOpenAI(), redis_client=enabled_redis)
+        _run(service, ids)
+        assert calls == ["v_gone"], calls
+
+    def test_the_cache_never_changes_the_answer(self, enabled_redis):
+        store = _store()
+        event_id = _seed_merged(store, ["Rodolpho", "Rodolpho Produções"])
+        service = EventDisplayTitleService(store, _FakeOpenAI(), redis_client=enabled_redis)
+        assert service._venue_name("v_club") == "Club Metrópole"
+        assert service._venue_name("v_club") == "Club Metrópole"
+        assert service._venue_name(None) is None
+        _run(service, [event_id])
+        assert store.get_event(event_id)["display_title"] == "Rodolpho Produções"
+
+
 class TestConfig:
     def test_the_pass_ships_disabled(self):
         assert DEFAULT_DISPLAY_TITLE_ENABLED is False

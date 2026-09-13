@@ -231,16 +231,29 @@ class EventDisplayTitleService:
         self.venue_dao = venue_dao
         self.openai_client = openai_client
         self.redis_client = redis_client
+        # One `get_venue` per VENUE, not per event. A merge-group pass is by
+        # definition several events sharing one venue — a five-act Saturday
+        # at one club is five events and one venue — so the unmemoized
+        # version re-read the same row once per group. The same
+        # `venue_name_cache.setdefault(...)` shape
+        # `scripts/measure_event_dedup.measure` already uses. `None` is
+        # cached too (a dangling venue_id must not be retried per event).
+        self._venue_name_cache: dict = {}
 
     def _venue_name(self, venue_id: Optional[str]) -> Optional[str]:
         if not venue_id:
             return None
+        if venue_id in self._venue_name_cache:
+            return self._venue_name_cache[venue_id]
         venue = self.venue_dao.get_venue(venue_id)
         if venue is None:
-            return None
-        if isinstance(venue, dict):
-            return venue.get("venue_name")
-        return getattr(venue, "venue_name", None)
+            name = None
+        elif isinstance(venue, dict):
+            name = venue.get("venue_name")
+        else:
+            name = getattr(venue, "venue_name", None)
+        self._venue_name_cache[venue_id] = name
+        return name
 
     def _source_titles(self, event_id: str) -> list:
         """Each announcing post's OWN extracted title, oldest first. The

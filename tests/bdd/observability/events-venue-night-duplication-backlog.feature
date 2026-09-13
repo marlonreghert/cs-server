@@ -77,11 +77,18 @@ Feature: Show an operator the duplicate and refusal backlog they cannot see toda
     And the backlog names "@beerdock.madalena" and the two events it would recover
 
   Scenario: Report an account's distinct location texts separately
-    Given two stored events at "BeerDock Boa Viagem" whose recorded location text is "CASA FORTE"
+    Given the venue catalog also carries the BeerDock branches in Casa Forte and Madalena
+    And two stored events at "BeerDock Boa Viagem" whose recorded location text is "CASA FORTE"
     And one stored event at "BeerDock Boa Viagem" whose recorded location text is "MADALENA"
     When the dedup backlog is read
     Then the backlog reports two distinct location texts for "beerdock_recife"
     And each location text carries its own row count
+    And each disputed location text names the branch it points at
+
+  Scenario: Never report a venue describing itself as a disputed attribution
+    Given three stored events at "BeerDock Boa Viagem" describing the venue's own address in different words
+    When the dedup backlog is read
+    Then the backlog reports no disputed attributions
 
   # ── the standing number ───────────────────────────────────────────────────
 

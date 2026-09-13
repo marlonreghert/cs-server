@@ -616,6 +616,10 @@ class DedupBacklogDisputeOut(BaseModel):
     row_count: int
     event_ids: list[str] = Field(default_factory=list)
     venue_ids: list[str] = Field(default_factory=list)
+    # Which rung of the resolution ladder graded this dispute — the first
+    # three name a venue we carry (accept the row's candidate), while
+    # `venue_not_in_catalog` is the venue-acquisition backlog.
+    method: Optional[str] = None
     resolves_to_venue_id: Optional[str] = None
     resolves_to_venue_name: Optional[str] = None
 

@@ -103,6 +103,12 @@ class AttributionDispute:
     row_count: int
     event_ids: tuple
     venue_ids: tuple
+    # Which RUNG of the ladder graded this — `handle_mention`,
+    # `location_tag`, `neighbourhood_match`, or `venue_not_in_catalog`. An
+    # operator reading the report needs it: the first three name a venue we
+    # DO carry (accept the candidate on the row), the last is the
+    # venue-acquisition backlog (add the venue first).
+    method: Optional[str] = None
     resolves_to_venue_id: Optional[str] = None
     resolves_to_venue_name: Optional[str] = None
 
@@ -110,7 +116,7 @@ class AttributionDispute:
         return {
             "source_handle": self.source_handle, "location_text": self.location_text,
             "row_count": self.row_count, "event_ids": list(self.event_ids),
-            "venue_ids": list(self.venue_ids),
+            "venue_ids": list(self.venue_ids), "method": self.method,
             "resolves_to_venue_id": self.resolves_to_venue_id,
             "resolves_to_venue_name": self.resolves_to_venue_name,
         }
@@ -200,21 +206,24 @@ def compute_dedup_backlog(
     venue_names: dict,
     config: "event_dedup.DedupConfig",
     pending_suggestions: int = 0,
-    venue_addresses: Optional[dict] = None,
-    location_text_resolver=None,
+    dispute_evaluator=None,
 ) -> DedupBacklog:
     """The whole backlog over `rows` (every `events.post_item` row the
     caller fetched — this function filters to the live event corpus itself
     via `is_live_event_row`, so a caller never has to remember the rule).
 
-    `venue_names`/`venue_addresses` map `venue_id` -> the venue's own name
-    and address. `location_text_resolver(location_text, venue_id)` is an
-    optional callable returning `(venue_id, venue_name)` for a location text
-    that names a DIFFERENT catalog venue, or `None` — supplied by the caller
-    (Phase C's dispute rule) so this module never grows a second notion of
-    "which venue does this text name".
+    `venue_names` maps `venue_id` -> the venue's own name (the refusal scan
+    needs it to strip a venue's own words out of a title's distinctive set).
+
+    `dispute_evaluator(row) -> Optional[DisputeVerdict]` grades one row's
+    attribution, and is `app.services.event_attribution_dispute.
+    evaluate_attribution_dispute` bound to the catalog — injected rather than
+    imported so this module stays pure and so there is exactly ONE definition
+    of what a dispute is. `None` (a caller with no catalog to hand) reports
+    NO disputes rather than guessing: grading a dispute is the resolution
+    ladder's job, and the whole lesson of `260806` §D and `260813` is that a
+    cheaper local heuristic gets it confidently wrong.
     """
-    venue_addresses = venue_addresses or {}
     live = [row for row in rows if is_live_event_row(row)]
 
     backlog = DedupBacklog(pending_suggestions=pending_suggestions, live_rows=len(live))
@@ -253,13 +262,30 @@ def compute_dedup_backlog(
             continue
         venue_name = venue_names.get(venue_id)
         venue_tokens = event_dedup.venue_name_tokens(venue_name)
+        # §E2, resolved once per venue — the SAME way
+        # `event_merge.run_title_similarity_pass` and
+        # `scripts.measure_event_dedup.measure` resolve it. Without this the
+        # backlog asks a DIFFERENT question from the merge layer: with the
+        # catalog-wide single-night scope on, every same-night pair at every
+        # venue reaches the auto band via REASON_SINGLE_NIGHT_VENUE, and a
+        # scan that omitted the flag would keep filing those under
+        # `refused_disjoint_pairs` — reporting as an unactioned backlog the
+        # very pairs the pipeline had just merged, in the one gauge the
+        # before/after verification and the week-long standing watch are
+        # read from. This module's docstring promises it "can never disagree
+        # with what the merge layer would actually do about a pair"; this
+        # line is most of that promise.
+        single_night_venue = config.is_single_night_venue(venue_id)
         for a, b in combinations(members, 2):
             if not event_dedup.in_candidate_window_for_rows(
                 a, b, window_hours=config.candidate_window_hours,
                 recurring_window_enabled=config.recurring_window_enabled,
             ):
                 continue
-            if event_dedup.evaluate_pair(a, b, venue_name=venue_name, config=config) is not None:
+            if event_dedup.evaluate_pair(
+                a, b, venue_name=venue_name, config=config,
+                single_night_venue=single_night_venue,
+            ) is not None:
                 continue
             set_a = event_dedup.distinctive_set(
                 a.get("title"), venue_tokens=venue_tokens,
@@ -275,47 +301,49 @@ def compute_dedup_backlog(
                 backlog.refused_disjoint_pairs += 1
 
     # ── attribution disputes, keyed by account ───────────────────────────
-    from app.services.event_venue_resolution import _fold_for_containment
-
+    # Graded by `event_attribution_dispute.evaluate_attribution_dispute` —
+    # THE resolution ladder — and never by a second, cruder notion of
+    # disagreement living here.
+    #
+    # This module previously compared `location_text` against the venue's own
+    # name and address by substring containment, and that was wrong in both
+    # directions of the very failure `event_attribution_dispute`'s docstring
+    # warns about: `"nossa unidade de Boa Viagem"` is not a substring of
+    # `"BeerDock Boa Viagem"`, so a venue describing ITSELF in ordinary prose
+    # was reported as disputing its own attribution. Measured against the
+    # live corpus that is most of the index — Conchittas Bar alone carries 14
+    # distinct self-referential spellings of its own address — which is
+    # exactly the noise that would bury the real chain mis-attribution
+    # (BeerDock's 20 `CASA FORTE` rows) this report exists to surface.
     disputes: dict = {}
-    for row in live:
-        location_text = row_location_text(row)
-        if not location_text:
-            continue
-        venue_id = row["venue_id"]
-        folded = _fold_for_containment(location_text)
-        if not folded:
-            continue
-        # A location text that IS the venue it is filed at — its own name or
-        # a fragment of its own address — is evidence FOR the attribution,
-        # never against it, and must not be reported as a dispute (the
-        # majority of correct rows would otherwise "mismatch" — plan §C's own
-        # warning about naive string comparison).
-        own_name = _fold_for_containment(venue_names.get(venue_id))
-        own_address = _fold_for_containment(venue_addresses.get(venue_id))
-        if (own_name and folded in own_name) or (own_address and folded in own_address):
-            continue
-        key = (row.get("source_handle"), location_text)
-        disputes.setdefault(key, []).append(row)
+    verdicts: dict = {}
+    if dispute_evaluator is not None:
+        for row in live:
+            if not row_location_text(row):
+                continue
+            try:
+                verdict = dispute_evaluator(row)
+            except Exception as e:  # pragma: no cover - defensive
+                logger.warning(f"[EventDedupBacklog] dispute evaluation failed: {e}")
+                continue
+            if verdict is None:
+                continue
+            key = (row.get("source_handle"), verdict.location_text)
+            disputes.setdefault(key, []).append(row)
+            verdicts.setdefault(key, verdict)
 
     for (source_handle, location_text), members in sorted(
         disputes.items(), key=lambda kv: (-len(kv[1]), str(kv[0][0]), kv[0][1]),
     ):
-        resolved_id = resolved_name = None
-        if location_text_resolver is not None:
-            try:
-                resolved = location_text_resolver(location_text, members[0]["venue_id"])
-            except Exception as e:  # pragma: no cover - defensive
-                logger.warning(f"[EventDedupBacklog] location_text resolver failed: {e}")
-                resolved = None
-            if resolved:
-                resolved_id, resolved_name = resolved
+        verdict = verdicts[(source_handle, location_text)]
         backlog.attribution_disputes.append(AttributionDispute(
             source_handle=source_handle, location_text=location_text,
             row_count=len(members),
             event_ids=tuple(r["event_id"] for r in members),
             venue_ids=tuple(sorted({r["venue_id"] for r in members})),
-            resolves_to_venue_id=resolved_id, resolves_to_venue_name=resolved_name,
+            method=verdict.method,
+            resolves_to_venue_id=verdict.target_venue_id,
+            resolves_to_venue_name=verdict.target_venue_name,
         ))
 
     return backlog
@@ -323,28 +351,64 @@ def compute_dedup_backlog(
 
 # ── the one adapter (see this module's docstring) ───────────────────────────
 def collect_dedup_backlog(venue_dao, *, redis_like=None) -> DedupBacklog:
-    """Fetch and delegate. Holds no rules: the corpus filter, the grouping
-    and the refusal split all live in `compute_dedup_backlog` above, which is
-    what every test drives."""
+    """Fetch and delegate. Holds no rules: the corpus filter, the grouping,
+    the refusal split and the dispute grading all live above (or, for the
+    grading, in `app.services.event_attribution_dispute`), which is what
+    every test drives.
+
+    TWO bulk reads, never a `get_venue` per venue: this runs at the end of
+    every extraction run AND on every `GET /admin/events/dedup-backlog` hit,
+    against a ~3,600-venue catalog — the same reason
+    `redis_projection_service.project_events` prefetches with
+    `get_venues_by_ids` rather than querying per row.
+    """
+    from app.services.event_attribution_dispute import evaluate_attribution_dispute
+    from app.services.event_venue_resolution import (
+        _venue_field, build_handle_index, build_venue_catalog,
+    )
+
     rows = venue_dao.list_events()
     config = event_dedup.load_dedup_config(redis_like)
-    venue_ids = {row["venue_id"] for row in rows if row.get("venue_id")}
-    venue_names: dict = {}
-    venue_addresses: dict = {}
-    for venue_id in venue_ids:
-        venue = venue_dao.get_venue(venue_id)
-        if venue is None:
-            continue
-        if isinstance(venue, dict):
-            venue_names[venue_id] = venue.get("venue_name")
-            venue_addresses[venue_id] = venue.get("venue_address")
-        else:
-            venue_names[venue_id] = getattr(venue, "venue_name", None)
-            venue_addresses[venue_id] = getattr(venue, "venue_address", None)
+
+    venue_ids = sorted({row["venue_id"] for row in rows if row.get("venue_id")})
+    bulk = getattr(venue_dao, "get_venues_by_ids", None)
+    if bulk is not None:
+        venue_rows = bulk(venue_ids) or {}
+    else:  # pragma: no cover - every DAO in this repo has the bulk read
+        venue_rows = {
+            venue_id: venue for venue_id, venue in (
+                (vid, venue_dao.get_venue(vid)) for vid in venue_ids
+            ) if venue is not None
+        }
+    venue_names = {
+        venue_id: _venue_field(venue, "venue_name")
+        for venue_id, venue in venue_rows.items()
+    }
+
+    # The dispute rule, bound to the catalog once — the SAME ladder the live
+    # extraction path and the disputed-location-text backfill both use, so
+    # the report can never grade a row differently from the pipeline. No
+    # `location_tag`: a post's Instagram tag is not stored on the row, which
+    # is the identical limitation `scripts.backfill_event_venue_links`
+    # records for its own re-decision over stored text.
+    catalog = build_venue_catalog(venue_dao)
+    handle_index = build_handle_index(venue_dao)
+
+    def _evaluate(row):
+        return evaluate_attribution_dispute(
+            mapped_venue_id=row.get("venue_id"),
+            location_text=row_location_text(row),
+            venues=catalog, handle_index=handle_index,
+            promoter_handle=row.get("source_handle"),
+            operator_edited_fields=row.get("operator_edited_fields"),
+            generic_vocabulary=config.generic_vocabulary,
+            stopwords=config.stopwords,
+        )
+
     pending = len(venue_dao.list_event_merge_suggestions(decision="pending"))
     return compute_dedup_backlog(
-        rows, venue_names=venue_names, venue_addresses=venue_addresses,
-        config=config, pending_suggestions=pending,
+        rows, venue_names=venue_names, config=config,
+        pending_suggestions=pending, dispute_evaluator=_evaluate,
     )
 
 

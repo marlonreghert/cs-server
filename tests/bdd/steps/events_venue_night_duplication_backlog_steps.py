@@ -49,6 +49,7 @@ _VENUE_ADDRESSES = {
     "Club Metrópole": "R. das Ninfas, 125 - Boa Vista, Recife - PE",
     "BeerDock Boa Viagem": "Av. Cons. Aguiar, 1000 - Boa Viagem, Recife - PE",
     "BeerDock Casa Forte": "Av. Rui Barbosa, 500 - Casa Forte, Recife - PE",
+    "BeerDock Madalena": "R. José Bonifácio, 20 - Madalena, Recife - PE",
     "Sempre Rock Bar": "R. do Futuro, 50 - Graças, Recife - PE",
 }
 
@@ -185,6 +186,30 @@ def step_given_two_events_sunday(context, venue):
 @given('one stored event at "{venue}" on one Sunday')
 def step_given_one_event_sunday(context, venue):
     _seed(context, "DOMINGO DA LUA", venue, starts_at=_local_dt(_SUNDAY))
+
+
+@given("the venue catalog also carries the BeerDock branches in Casa Forte and Madalena")
+def step_given_beerdock_branches(context):
+    """Rung 3 — the neighbourhood match — is gated on the brand root having
+    more than one member, so a bare `CASA FORTE` only grades as a dispute
+    when the sibling branch it names actually exists in the catalog. That is
+    the real BeerDock shape (three physical branches, one catalog handle),
+    and it is what makes `resolves_to_venue_id` answerable at all."""
+    _ensure_venue(context, "BeerDock Casa Forte")
+    _ensure_venue(context, "BeerDock Madalena")
+
+
+@given('three stored events at "{venue}" describing the venue\'s own address in different words')
+def step_given_self_referential_rows(context, venue):
+    # Three of the spellings production actually carries. None is a
+    # substring of the venue's own name, which is exactly how the earlier
+    # heuristic reported all three as disputes.
+    for title, text in (
+        ("SAMBINHA", "nossa unidade de Boa Viagem"),
+        ("ROCK NIGHT", "BeerDock Boa Viagem — Av. Cons. Aguiar, 1000"),
+        ("PAGODE", "Av. Cons. Aguiar, 1000 — Boa Viagem, Recife"),
+    ):
+        _seed(context, title, venue, starts_at=_local_dt(_SATURDAY), location_text=text)
 
 
 @given("one of them has been superseded by a merge")
@@ -456,6 +481,22 @@ def step_then_each_text_has_row_count(context):
     by_text = {d.location_text: d.row_count for d in context.backlog.attribution_disputes}
     assert by_text.get("CASA FORTE") == 2, by_text
     assert by_text.get("MADALENA") == 1, by_text
+
+
+@then("each disputed location text names the branch it points at")
+def step_then_each_dispute_names_its_branch(context):
+    by_text = {
+        d.location_text: d.resolves_to_venue_name
+        for d in context.backlog.attribution_disputes
+    }
+    assert by_text.get("CASA FORTE") == "BeerDock Casa Forte", by_text
+    assert by_text.get("MADALENA") == "BeerDock Madalena", by_text
+
+
+@then("the backlog reports no disputed attributions")
+def step_then_no_disputed_attributions(context):
+    assert context.backlog.attribution_disputes == [], context.backlog.attribution_disputes
+    assert context.backlog.attribution_disputed_rows == 0
 
 
 @then("the venue-night group gauge reports one")

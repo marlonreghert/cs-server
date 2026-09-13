@@ -230,17 +230,51 @@ def gate_auto_link(
     return True, "auto"
 
 
+def _venue_field(venue, name: str):
+    """One venue row, two shapes. `VenueRepository.get_venue` returns a
+    `Venue` PYDANTIC MODEL; the bulk `get_venues_by_ids` (on either store)
+    returns a plain dict. Both carry the same field names, and this reads
+    either — the same posture `app.services.event_merge._venue_name_of`
+    already takes for exactly this pair of shapes."""
+    if isinstance(venue, dict):
+        return venue.get(name)
+    return getattr(venue, name, None)
+
+
 def build_venue_catalog(venue_dao) -> list[VenueLite]:
     """The servable catalog, sliced to what the ladder needs. Servable, not
-    every venue: a deprecated venue should not attract a new promoter link."""
+    every venue: a deprecated venue should not attract a new promoter link.
+
+    ONE bulk read, never a `get_venue` per id. This used to be an N+1 and it
+    was affordable while the only callers were one-off repair scripts; it
+    stopped being affordable the moment
+    `app.services.event_dedup_backlog.collect_dedup_backlog` started calling
+    it on every extraction run and every `GET /admin/events/dedup-backlog`
+    hit, against a ~3,600-venue catalog. Falls back to the per-id path only
+    for a DAO that exposes no bulk read at all."""
+    venue_ids = list(venue_dao.list_servable_venue_ids() or [])
+    if not venue_ids:
+        return []
+
+    bulk = getattr(venue_dao, "get_venues_by_ids", None)
+    if bulk is None:
+        rows = {}
+        for venue_id in venue_ids:
+            venue = venue_dao.get_venue(venue_id)
+            if venue is not None:
+                rows[venue_id] = venue
+    else:
+        rows = bulk(venue_ids) or {}
+
     out = []
-    for venue_id in venue_dao.list_servable_venue_ids() or []:
-        venue = venue_dao.get_venue(venue_id)
+    for venue_id in venue_ids:
+        venue = rows.get(venue_id)
         if venue is None:
             continue
         out.append(VenueLite(
-            venue_id=venue_id, venue_name=venue.venue_name,
-            lat=venue.venue_lat, lng=venue.venue_lng, address=venue.venue_address,
+            venue_id=venue_id, venue_name=_venue_field(venue, "venue_name"),
+            lat=_venue_field(venue, "venue_lat"), lng=_venue_field(venue, "venue_lng"),
+            address=_venue_field(venue, "venue_address"),
         ))
     return out
 
@@ -779,5 +813,6 @@ __all__ = [
     "DEFAULT_CONFIDENCE_FLOOR", "DEFAULT_MARGIN", "LOCATION_TAG_MATCH_FLOOR",
     "VenueLite", "LinkCandidate", "ResolutionResult", "RESULT_LABEL", "AttributeFn",
     "extract_mentions", "gate_auto_link", "build_venue_catalog", "candidate_venues_for_ids",
+    "_venue_field",
     "build_handle_index", "resolve_event_venue", "build_location_text_attribute_fn",
 ]
