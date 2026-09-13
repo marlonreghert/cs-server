@@ -359,6 +359,7 @@ def _build_rds_layer(context) -> None:
         validate_generic_vocabulary_config,
         validate_lineup_threshold_config,
         validate_recurring_window_enabled_config,
+        validate_single_night_venues_config,
         validate_stopwords_config,
         validate_undated_window_days_config,
     )
@@ -399,6 +400,11 @@ def _build_rds_layer(context) -> None:
             # strictly WIDENS the candidate set, and auto-merge is already
             # live in production).
             "event_dedup_recurring_window_enabled": validate_recurring_window_enabled_config,
+            # plans/260912_events-venue-night-duplication.md §E2: the
+            # per-venue "this venue runs one night rather than a
+            # programme" list, EMPTY by default and never a corpus-wide
+            # rule.
+            "event_dedup_single_night_venues": validate_single_night_venues_config,
             # plans/260912_events-venue-night-duplication.md §C: mirrors
             # app.container's own registration, for the same reason the six
             # event_dedup_* keys above do.

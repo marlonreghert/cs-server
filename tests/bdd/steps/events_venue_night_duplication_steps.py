@@ -593,11 +593,26 @@ def step_then_both_weekly_survive(context):
     assert len(survivors) == 2, survivors
 
 
+def _scenario_event_ids(context) -> list:
+    """Every row THIS scenario seeded into the dedup harness, whichever
+    fixture shape it used — the venue-night cluster (Defect 1), the weekly
+    pair plus any one-off (Defect 3), or both. One accessor, so a shared
+    Then step never has to know which Given ran."""
+    if getattr(context, "vnd_night_ids", None):
+        return list(context.vnd_night_ids)
+    ids = list(getattr(context, "vnd_weekly_ids", []) or [])
+    one_off = getattr(context, "vnd_one_off_id", None)
+    if one_off:
+        ids.append(one_off)
+    return ids
+
+
 @then("both events survive")
 def step_then_both_events_survive(context):
-    ids = list(context.vnd_weekly_ids) + [context.vnd_one_off_id]
+    ids = _scenario_event_ids(context)
+    assert len(ids) == 2, ids
     survivors = _dedup_survivors(context, ids)
-    assert len(survivors) == len(ids), survivors
+    assert len(survivors) == 2, survivors
 
 
 @then("the absorbed weekly event is superseded rather than deleted")
@@ -657,3 +672,223 @@ def step_then_no_wednesday_serves_two(context):
             seen[day] = seen.get(day, 0) + 1
     doubled = {day: count for day, count in seen.items() if count > 1}
     assert not doubled, doubled
+
+
+# ══ Defect 1: the bar for collapsing a venue-night ═══════════════════════
+_SINGLE_NIGHT_VENUE = "Club Metrópole"
+_PROGRAMME_VENUE = "Entre Amigos O Bode"
+_SATURDAY = "2026-09-12"
+# Club Metrópole's five real posts for Saturday 12/09, from the RCA: five
+# different acts, nine of the ten pairs with DISJOINT distinctive-token sets,
+# and the three that share a performer sharing exactly one — one below the
+# auto floor. No threshold on either existing signal reaches ROWKA or
+# VITINHO POLÊMICO, which is precisely why §E2's per-venue policy exists.
+_FIVE_ACTS = (
+    ("ROWKA", ["ROWKA"]),
+    ("VITINHO POLÊMICO", ["VITINHO POLÊMICO"]),
+    ("SÁBADO VAI FERVER", ["MC Baixinho"]),
+    ("SECRET CLUB com @neguindabasersv", ["@neguindabasersv"]),
+    ("estreia de @neguindabasersv", ["@neguindabasersv"]),
+)
+_WORKSHOPS = ("Oficina Vida de Inseto", "Oficina Cobra Gigante", "Oficina de Sorvete")
+
+
+@given('"{venue}" runs one night rather than a programme')
+def step_given_venue_runs_one_night(context, venue):
+    """ONE definition for all three of this plan's feature files — behave's
+    step registry is global and every one of them legitimately states this
+    same precondition. It dispatches to whichever harness the running
+    scenario actually built: the `dedup_*` one (the enrichment and
+    display-title features, whose Backgrounds create it), otherwise the
+    `backlog_*` one (the observability feature, which reaches this step
+    before any other)."""
+    if hasattr(context, "dedup_dao"):
+        venue_id = _dedup_steps._ensure_venue(context, venue)
+        context.dedup_redis.set(
+            event_dedup.ADMIN_CONFIG_SINGLE_NIGHT_VENUES_KEY, json.dumps([venue_id]),
+        )
+        context.vnd_single_night_venue_ids = [venue_id]
+        return
+    from tests.bdd.steps.events_venue_night_duplication_backlog_steps import (
+        set_backlog_single_night_venue,
+    )
+
+    set_backlog_single_night_venue(context, venue)
+
+
+def _seed_five_acts(context, venue):
+    context.vnd_night_ids = []
+    for title, lineup in _FIVE_ACTS:
+        context.vnd_night_ids.append(_dedup_steps._seed_item(
+            context, title, venue, starts_at=_dedup_local(_SATURDAY, "22:00"),
+            lineup=list(lineup),
+            # One shared crawl moment for the whole cluster: these are five
+            # separate posts discovered together, with no stated relative
+            # order, so a content disagreement between two absorbed rows is
+            # broken in the canonical's own favour rather than by whichever
+            # fixture line happened to come last.
+            first_seen_at=_dedup_steps._NOW,
+        ))
+    return context.vnd_night_ids
+
+
+@given('five stored events at "{venue}" on one Saturday, each naming a different act')
+def step_given_five_acts(context, venue):
+    _seed_five_acts(context, venue)
+
+
+@given('stored events "{a}", "{b}" and "{c}" at "{venue}" on one day')
+def step_given_three_workshops(context, a, b, c, venue):
+    context.vnd_night_ids = [
+        _dedup_steps._seed_item(
+            context, title, venue, starts_at=_dedup_local(_SATURDAY, "15:00"),
+            first_seen_at=_dedup_steps._NOW,
+        )
+        for title in (a, b, c)
+    ]
+
+
+@given('two stored events at "{venue}" on one Saturday, both confirmed by an operator')
+def step_given_two_confirmed_events(context, venue):
+    context.vnd_night_ids = [
+        _dedup_steps._seed_item(
+            context, title, venue, starts_at=_dedup_local(_SATURDAY, "22:00"),
+            status="confirmed", first_seen_at=_dedup_steps._NOW,
+        )
+        for title, _lineup in _FIVE_ACTS[:2]
+    ]
+
+
+@given('two stored events at "{venue}" on one Saturday, one of whose titles an operator edited')
+def step_given_two_events_one_title_edited(context, venue):
+    context.vnd_night_ids = [
+        _dedup_steps._seed_item(
+            context, _FIVE_ACTS[0][0], venue, starts_at=_dedup_local(_SATURDAY, "22:00"),
+            first_seen_at=_dedup_steps._NOW,
+        ),
+        _dedup_steps._seed_item(
+            context, _FIVE_ACTS[1][0], venue, starts_at=_dedup_local(_SATURDAY, "22:00"),
+            title_edited=True, first_seen_at=_dedup_steps._NOW,
+        ),
+    ]
+
+
+@given('a stored event and a stored birthday greeting at "{venue}" on one Saturday')
+def step_given_event_and_greeting(context, venue):
+    context.vnd_night_ids = [_dedup_steps._seed_item(
+        context, _FIVE_ACTS[0][0], venue, starts_at=_dedup_local(_SATURDAY, "22:00"),
+        first_seen_at=_dedup_steps._NOW,
+    )]
+    context.vnd_greeting_id = _dedup_steps._seed_item(
+        context, "31 Anos", venue, starts_at=_dedup_local(_SATURDAY, "22:00"),
+        post_type="other", first_seen_at=_dedup_steps._NOW,
+    )
+
+
+@given('two stored events at "{venue}" on one Saturday sharing exactly one performer')
+def step_given_two_events_one_shared_performer(context, venue):
+    # Two DIFFERENT all-generic titles, so ONLY the lineup signal can decide
+    # the band (identical normalized titles would collide on the EXACT
+    # identity first, which runs before the fuzzy pass).
+    context.vnd_night_ids = [
+        _dedup_steps._seed_item(
+            context, "Sextou", venue, starts_at=_dedup_local(_SATURDAY, "22:00"),
+            lineup=["@neguindabasersv"], first_seen_at=_dedup_steps._NOW,
+        ),
+        _dedup_steps._seed_item(
+            context, "Festa", venue, starts_at=_dedup_local(_SATURDAY, "22:00"),
+            lineup=["@neguindabasersv"], first_seen_at=_dedup_steps._NOW,
+        ),
+    ]
+
+
+@given('two stored events at "{venue}" on one Saturday with the same title and the same date')
+def step_given_two_exact_identity_events(context, venue):
+    context.vnd_night_ids = [
+        _dedup_steps._seed_item(
+            context, "NOITE DA PATROA", venue, starts_at=_dedup_local(_SATURDAY, "22:00"),
+            first_seen_at=_dedup_steps._NOW,
+        ),
+        _dedup_steps._seed_item(
+            context, "noite da patroa", venue, starts_at=_dedup_local(_SATURDAY, "22:00"),
+            first_seen_at=_dedup_steps._NOW,
+        ),
+    ]
+
+
+_WORD_COUNTS = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5}
+
+
+@then("{count_word} event survives for that Saturday")
+@then("{count_word} events survive for that Saturday")
+def step_then_n_events_survive_for_saturday(context, count_word):
+    expected = _WORD_COUNTS[count_word]
+    survivors = _dedup_survivors(context, context.vnd_night_ids)
+    assert len(survivors) == expected, [
+        context.dedup_dao.get_event(e)["title"] for e in survivors
+    ]
+    context.vnd_survivor_id = survivors[0] if survivors else None
+    context.vnd_absorbed_ids = [
+        eid for eid in context.vnd_night_ids if eid not in survivors
+    ]
+
+
+@then("{count_word} events survive")
+def step_then_n_events_survive(context, count_word):
+    expected = _WORD_COUNTS[count_word]
+    survivors = _dedup_survivors(context, _scenario_event_ids(context))
+    assert len(survivors) == expected, survivors
+
+
+@then("the surviving event names every one of the five acts in its lineup")
+def step_then_surviving_event_names_five_acts(context):
+    row = context.dedup_dao.get_event(context.vnd_survivor_id)
+    lineup = set(row.get("lineup") or [])
+    for _title, acts in _FIVE_ACTS:
+        for act in acts:
+            assert act in lineup, (act, lineup)
+
+
+@then("every absorbed event is superseded rather than deleted")
+def step_then_every_absorbed_superseded(context):
+    assert context.vnd_absorbed_ids, "nothing was absorbed"
+    for event_id in context.vnd_absorbed_ids:
+        row = context.dedup_dao.get_event(event_id)
+        assert row is not None, f"{event_id} was deleted, not superseded"
+        assert row["status"] == "superseded", row
+        assert row.get("superseded_by") == context.vnd_survivor_id, row
+
+
+@then("no merge suggestion is recorded for any pair of them")
+def step_then_no_suggestion_for_any_pair(context):
+    for event_id in context.vnd_night_ids:
+        assert context.dedup_dao.list_event_merge_suggestions(
+            event_id=event_id, decision="pending",
+        ) == [], event_id
+
+
+@then("a merge suggestion is recorded for the pair")
+def step_then_suggestion_recorded_for_pair(context):
+    a, b = context.vnd_night_ids
+    pending = [
+        s for s in context.dedup_dao.list_event_merge_suggestions(event_id=a, decision="pending")
+        if b in (s["event_id"], s["candidate_event_id"])
+    ]
+    assert len(pending) == 1, pending
+
+
+@then("the greeting survives as its own row")
+def step_then_greeting_survives(context):
+    assert _dedup_steps._alive(context, context.vnd_greeting_id)
+    row = context.dedup_dao.get_event(context.vnd_greeting_id)
+    assert row["title"] == "31 Anos", row
+    assert row.get("superseded_by") is None, row
+
+
+@then("the absorbed event is deleted rather than superseded")
+def step_then_absorbed_event_deleted(context):
+    assert context.vnd_absorbed_ids, "nothing was absorbed"
+    for event_id in context.vnd_absorbed_ids:
+        assert context.dedup_dao.get_event(event_id) is None, (
+            f"{event_id} was superseded; the exact-identity merge must still DELETE"
+        )

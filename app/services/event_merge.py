@@ -846,12 +846,25 @@ def _edge_blocked_for_absorption(canonical: dict, other: dict, reasons: tuple) -
     the operator corrected — using their edit as leverage for a merge they
     never asked for, exactly what this guard exists to prevent, regardless
     of which side happens to keep the row. The venue_id guard blocks
-    absorption via EITHER signal; the title guard blocks absorption ONLY
-    when title-containment is the ONLY reason this edge reached auto — a
-    lineup-backed edge is untouched by an operator's title correction."""
+    absorption via EITHER signal; the title guard blocks absorption on any
+    auto edge that is NOT lineup-backed — a lineup-backed edge is untouched
+    by an operator's title correction, because the evidence for it never came
+    from a title in the first place.
+
+    plans/260912_events-venue-night-duplication.md §E2 widened the second
+    clause from "title containment is the ONLY reason" to "no lineup
+    reason": a `single_night_venue` edge is decided by a fact about the
+    VENUE, not by evidence in the rows, so an operator's own title
+    correction must still stop it — using their edit as leverage for a merge
+    they never asked for is exactly what this guard exists to prevent,
+    whichever rule reached auto. Behaviour for every PRE-EXISTING reason
+    combination is identical: `(REASON_TITLE,)` still blocks;
+    `(REASON_LINEUP,)` and `(REASON_LINEUP, REASON_TITLE)` still do not."""
     if _venue_edited(other) or _venue_edited(canonical):
         return True
-    if reasons == (event_dedup.REASON_TITLE,) and (_title_edited(other) or _title_edited(canonical)):
+    if event_dedup.REASON_LINEUP not in reasons and (
+        _title_edited(other) or _title_edited(canonical)
+    ):
         return True
     return False
 
@@ -948,7 +961,18 @@ def _absorb_title_similarity(
     })
 
     canonical = venue_dao.get_event(canonical["event_id"])
-    EVENT_MERGE_TOTAL.labels(identity="title", outcome="merged").inc()
+    # plans/260912_events-venue-night-duplication.md §E2 / Error Handling:
+    # `merged_single_night_venue` is kept DISTINCT from `merged` so the
+    # per-venue policy can be watched separately — and it counts only a merge
+    # the policy ALONE reached. A pair that ALSO passed title containment or
+    # the shared-lineup rule would have merged anyway, so counting it here
+    # would overstate what the policy actually caused.
+    outcome = (
+        "merged_single_night_venue"
+        if decision.reasons == (event_dedup.REASON_SINGLE_NIGHT_VENUE,)
+        else "merged"
+    )
+    EVENT_MERGE_TOTAL.labels(identity="title", outcome=outcome).inc()
     EVENT_SOURCES_PER_EVENT.observe(len(venue_dao.list_event_sources(canonical["event_id"])))
     logger.info(
         "[EventMerge] title-similarity merge: canonical=%s title=%r <- absorbed=%s title=%r "
@@ -962,7 +986,7 @@ def _absorb_title_similarity(
 
 def _run_pairwise_pass(
     venue_dao, events: list[dict], venue_name, config: "event_dedup.DedupConfig", now: datetime,
-    *, record_suggestions: bool = True,
+    *, record_suggestions: bool = True, single_night_venue: bool = False,
 ) -> None:
     """§B/§B2/§D over ONE venue's live `post_type == "event"` rows: build
     the auto-band graph (union-find), always surface every suggest-band
@@ -1001,7 +1025,10 @@ def _run_pairwise_pass(
             recurring_window_enabled=config.recurring_window_enabled,
         ):
             continue
-        decision = event_dedup.evaluate_pair(a, b, venue_name=venue_name, config=config)
+        decision = event_dedup.evaluate_pair(
+            a, b, venue_name=venue_name, config=config,
+            single_night_venue=single_night_venue,
+        )
         if decision is None:
             _observe_title_refusal(a, b, venue_name, config)
             continue
@@ -1077,7 +1104,7 @@ def _absorb_component(
                     _upsert_pending_suggestion(venue_dao, canonical, other, decision, now)
                 outcome = (
                     "refused_operator_title"
-                    if decision.reasons == (event_dedup.REASON_TITLE,) and _title_edited(other)
+                    if event_dedup.REASON_LINEUP not in decision.reasons and _title_edited(other)
                     else "refused_protected"
                 )
                 EVENT_MERGE_TOTAL.labels(identity="title", outcome=outcome).inc()
@@ -1188,8 +1215,17 @@ def run_title_similarity_pass(
     events = _dedup_candidate_events(venue_dao, venue_id)
     venue_name = _venue_name_of(venue_dao, venue_id)
 
+    # §E2: a fact about THIS venue, resolved once here rather than re-derived
+    # per pair — the list is an admin-config list of venue_ids, empty by
+    # default, so an unlisted venue behaves exactly as it did before this
+    # feature existed.
+    single_night_venue = venue_id in (config.single_night_venues or ())
+
     if len(events) >= 2:
-        _run_pairwise_pass(venue_dao, events, venue_name, config, now, record_suggestions=record_suggestions)
+        _run_pairwise_pass(
+            venue_dao, events, venue_name, config, now,
+            record_suggestions=record_suggestions, single_night_venue=single_night_venue,
+        )
 
     if config.auto_merge_enabled:
         _undated_absorption_pass(venue_dao, venue_id, now, config)

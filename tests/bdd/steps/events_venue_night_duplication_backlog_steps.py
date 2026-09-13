@@ -259,13 +259,19 @@ def step_given_twelve_venue_nights(context):
             _seed(context, title, venue, starts_at=_local_dt(_SATURDAY))
 
 
-@given('"{venue}" runs one night rather than a programme')
-def step_given_single_night_venue(context, venue):
+def set_backlog_single_night_venue(context, venue: str) -> str:
+    """The backlog harness's half of the shared `"X" runs one night rather
+    than a programme` step. The STEP itself is defined once, in
+    `events_venue_night_duplication_steps.py`, because behave's registry is
+    global and all three of this plan's feature files state the same
+    precondition — that one definition dispatches to whichever harness the
+    running scenario actually built, and calls this for the backlog one."""
     venue_id = _ensure_venue(context, venue)
     context.backlog_redis.set(
         event_dedup.ADMIN_CONFIG_SINGLE_NIGHT_VENUES_KEY, json.dumps([venue_id]),
     )
     context.backlog_single_night_venue_ids = [venue_id]
+    return venue_id
 
 
 @given("the excess row gauge has been recorded")

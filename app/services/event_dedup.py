@@ -56,6 +56,11 @@ BAND_REFUSE = "refuse"
 
 REASON_TITLE = "title_containment"
 REASON_LINEUP = "shared_lineup"
+# plans/260912_events-venue-night-duplication.md §E2: a THIRD reason token,
+# carried on the existing `PairDecision` so the per-venue policy flows
+# through the existing audit row, the existing metric labels and the
+# existing reversal path with no new machinery.
+REASON_SINGLE_NIGHT_VENUE = "single_night_venue"
 
 # ── admin config: generic-event vocabulary (plan §B, "runtime-configurable,
 # matching menu_expiry_days, the post-category vocabulary and the busyness
@@ -86,6 +91,19 @@ DEFAULT_CANDIDATE_WINDOW_HOURS = 8
 
 ADMIN_CONFIG_UNDATED_WINDOW_DAYS_KEY = "admin_config:event_dedup_undated_window_days"
 DEFAULT_UNDATED_WINDOW_DAYS = 14
+
+ADMIN_CONFIG_SINGLE_NIGHT_VENUES_KEY = "admin_config:event_dedup_single_night_venues"
+# plans/260912_events-venue-night-duplication.md §E2. EMPTY by default, and
+# never a corpus-wide rule: `260812`'s own measured false-positive corpus
+# contains `Bolinha do Cavaco` / `JB do Cavaco` at Casanova Ecobar — two
+# different acts, one night, same venue, deliberately kept apart — which is
+# the SAME SHAPE as Club Metrópole's five acts on one Saturday. Nothing in
+# the rows tells the two situations apart; the difference is a fact about the
+# VENUE (a club runs one night, a theatre runs a programme). A per-venue list
+# is the only mechanism that respects both the operator's ask and the
+# evidence that previously refused it, and it is fully deterministic and
+# unit-testable.
+DEFAULT_SINGLE_NIGHT_VENUES: tuple[str, ...] = ()
 
 ADMIN_CONFIG_RECURRING_WINDOW_ENABLED_KEY = "admin_config:event_dedup_recurring_window_enabled"
 # plans/260912_events-venue-night-duplication.md §D, Defect 3. OFF by
@@ -173,6 +191,16 @@ def validate_recurring_window_enabled_config(value) -> bool:
     if not isinstance(value, bool):
         raise TypeError("event dedup recurring-window flag must be a boolean")
     return value
+
+
+def validate_single_night_venues_config(value) -> list[str]:
+    """A list of venue_ids — NEVER normalised, lowercased or otherwise
+    massaged: a venue_id is an opaque key, and "helpfully" transforming it
+    here would silently stop matching the ids the merge pass compares
+    against."""
+    if not isinstance(value, list) or not all(isinstance(v, str) and v.strip() for v in value):
+        raise TypeError("event dedup single-night venues must be a list of non-empty venue ids")
+    return [v.strip() for v in value]
 
 
 @dataclass(frozen=True)
@@ -276,11 +304,16 @@ def load_dedup_config(redis_like) -> DedupConfig:
         redis_like, ADMIN_CONFIG_RECURRING_WINDOW_ENABLED_KEY, DEFAULT_RECURRING_WINDOW_ENABLED,
         validator=validate_recurring_window_enabled_config, module_tag="event_dedup",
     )
+    single_night = _load_validated_config(
+        redis_like, ADMIN_CONFIG_SINGLE_NIGHT_VENUES_KEY, list(DEFAULT_SINGLE_NIGHT_VENUES),
+        validator=validate_single_night_venues_config, module_tag="event_dedup",
+    )
     return DedupConfig(
         generic_vocabulary=tuple(generic), stopwords=tuple(stopwords),
         lineup_threshold=threshold, candidate_window_hours=window_hours,
         undated_window_days=undated_days, auto_merge_enabled=auto_enabled,
         recurring_window_enabled=recurring_window,
+        single_night_venues=tuple(single_night),
     )
 
 
@@ -484,7 +517,10 @@ class PairDecision:
     shared_lineup_names: tuple
 
 
-def evaluate_pair(event_a: dict, event_b: dict, *, venue_name, config: DedupConfig) -> Optional[PairDecision]:
+def evaluate_pair(
+    event_a: dict, event_b: dict, *, venue_name, config: DedupConfig,
+    single_night_venue: bool = False,
+) -> Optional[PairDecision]:
     """The pairwise verdict for two ALREADY-CANDIDATE-WINDOWED events at one
     venue (the caller applies `in_candidate_window` and the same-`venue_id`
     restriction BEFORE calling this — this function does not re-check
@@ -513,6 +549,19 @@ def evaluate_pair(event_a: dict, event_b: dict, *, venue_name, config: DedupConf
         reasons.append(REASON_LINEUP)
     if title_band == BAND_AUTO:
         reasons.append(REASON_TITLE)
+    # §E2: at a venue an operator has said runs ONE NIGHT rather than a
+    # programme, two live event rows in the same candidate window are the
+    # same night regardless of what their titles or lineups say. An
+    # INDEPENDENT sufficient condition, exactly like the shared-lineup rule
+    # — never a tie-break on either of the other two, and never a
+    # corpus-wide rule (the caller decides, per venue, from a list that is
+    # empty by default). It changes only the BAND: every absorption guard
+    # (`_is_protected`, `_edge_blocked_for_absorption`, `choose_canonical`
+    # returning None for two protected members, the non-event guard) still
+    # applies unchanged in `app.services.event_merge`, which is the only
+    # thing that turns a band into a write.
+    if single_night_venue:
+        reasons.append(REASON_SINGLE_NIGHT_VENUE)
 
     if reasons:
         band = BAND_AUTO
@@ -531,7 +580,7 @@ def evaluate_pair(event_a: dict, event_b: dict, *, venue_name, config: DedupConf
 
 
 __all__ = [
-    "BAND_AUTO", "BAND_SUGGEST", "BAND_REFUSE", "REASON_TITLE", "REASON_LINEUP",
+    "BAND_AUTO", "BAND_SUGGEST", "BAND_REFUSE", "REASON_TITLE", "REASON_LINEUP", "REASON_SINGLE_NIGHT_VENUE",
     "ADMIN_CONFIG_GENERIC_VOCABULARY_KEY", "DEFAULT_GENERIC_VOCABULARY",
     "ADMIN_CONFIG_STOPWORDS_KEY", "DEFAULT_STOPWORDS",
     "ADMIN_CONFIG_LINEUP_THRESHOLD_KEY", "DEFAULT_LINEUP_THRESHOLD",
@@ -539,10 +588,11 @@ __all__ = [
     "ADMIN_CONFIG_UNDATED_WINDOW_DAYS_KEY", "DEFAULT_UNDATED_WINDOW_DAYS",
     "ADMIN_CONFIG_AUTO_MERGE_ENABLED_KEY", "DEFAULT_AUTO_MERGE_ENABLED",
     "ADMIN_CONFIG_RECURRING_WINDOW_ENABLED_KEY", "DEFAULT_RECURRING_WINDOW_ENABLED",
+    "ADMIN_CONFIG_SINGLE_NIGHT_VENUES_KEY", "DEFAULT_SINGLE_NIGHT_VENUES",
     "validate_generic_vocabulary_config", "validate_stopwords_config",
     "validate_lineup_threshold_config", "validate_candidate_window_hours_config",
     "validate_undated_window_days_config", "validate_auto_merge_enabled_config",
-    "validate_recurring_window_enabled_config",
+    "validate_recurring_window_enabled_config", "validate_single_night_venues_config",
     "DedupConfig", "load_dedup_config",
     "venue_name_tokens", "distinctive_set", "band_for_distinctive_sets",
     "lineup_name_set", "shared_lineup_names", "lineup_reaches_auto",

@@ -1582,7 +1582,8 @@ EVENT_MERGE_TOTAL = Counter(
     # identity=menu: merged, no_identity, no_match, two_confirmed
     # identity=title (plans/260812_event-dedup-fuzzy-title.md — title
     #                 containment + shared lineup, a SECOND pass over what
-    #                 identity=venue leaves behind): merged, suggested,
+    #                 identity=venue leaves behind): merged,
+    #                 merged_single_night_venue, suggested,
     #                 refused_disjoint, refused_no_distinctive_tokens,
     #                 refused_protected, refused_operator_title. Watch
     #                 refused_no_distinctive_tokens (plan Error Handling: a
@@ -1590,6 +1591,18 @@ EVENT_MERGE_TOTAL = Counter(
     #                 greedy) and the suggested-to-merged ratio (unactioned
     #                 suggestions piling up means the suggest band is
     #                 producing landfill, not decisions).
+    #
+    #                 `merged_single_night_venue` (plans/260912_events-venue-
+    #                 night-duplication.md §E2) is the per-venue
+    #                 `event_dedup_single_night_venues` policy, kept DISTINCT
+    #                 from `merged` so it can be watched on its own — and
+    #                 counted ONLY when that policy is the sole reason the
+    #                 pair reached auto. A pair that also passed title
+    #                 containment or shared lineup would have merged anyway
+    #                 and stays under `merged`, so this series never
+    #                 overstates what the policy itself caused. The list is
+    #                 empty by default: the ABSENCE of this series is the
+    #                 evidence no venue is on it.
 )
 
 # plans/260814_record-what-superseded-a-row.md §B: every RE-EXTRACTION
