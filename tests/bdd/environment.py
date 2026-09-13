@@ -363,6 +363,9 @@ def _build_rds_layer(context) -> None:
         validate_stopwords_config,
         validate_undated_window_days_config,
     )
+    from app.services.event_display_title import (
+        validate_display_title_enabled_config,
+    )
     from app.services.event_attribution_dispute import (
         validate_dispute_action_config,
         validate_dispute_withhold_enabled_config,
@@ -405,6 +408,10 @@ def _build_rds_layer(context) -> None:
             # programme" list, EMPTY by default and never a corpus-wide
             # rule.
             "event_dedup_single_night_venues": validate_single_night_venues_config,
+            # plans/260912_events-venue-night-duplication.md §G: whether the
+            # post-merge display-title pass runs at all. False by default —
+            # it is the one pass in this plan that WRITES a column.
+            "event_display_title_enabled": validate_display_title_enabled_config,
             # plans/260912_events-venue-night-duplication.md §C: mirrors
             # app.container's own registration, for the same reason the six
             # event_dedup_* keys above do.

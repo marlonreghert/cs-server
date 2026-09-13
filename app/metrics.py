@@ -1664,6 +1664,29 @@ EVENT_DEDUP_CONFIG_TYPE_FALLBACK_TOTAL = Counter(
 # `venue_night_excess_rows` must FALL after the historical repair and must
 # not climb back afterwards; if it does, the forward fix is not holding and
 # GET /admin/events/dedup-backlog names the venues to look at.
+# plans/260912_events-venue-night-duplication.md §G: how a merged listing's
+# DISPLAY title was reached.
+#   obvious                  one source title contained the others; NO model call
+#   llm_accepted             one call per merge GROUP, and the answer passed the
+#                            deterministic validation gate
+#   rejected                 the answer failed the gate (blank, over-long, or it
+#                            introduced a word no source post contained) — nothing
+#                            was written and the row keeps its stored title. A
+#                            CLIMBING `rejected` means the gate is doing its job and
+#                            the prompt needs work.
+#   error                    the call failed. An AVAILABILITY problem, never a data
+#                            problem: the fallback writes nothing.
+#   skipped_operator_edited  the operator wrote that title; never overridden.
+#
+# Title-pick SPEND is watched separately from extraction spend through
+# OPENAI_API_CALLS_TOTAL{endpoint="event_title_pick"} and its token siblings
+# — never conflated with `event_extract`.
+EVENT_DISPLAY_TITLE_TOTAL = Counter(
+    "event_display_title_total",
+    "How a merged listing's display title was reached",
+    ["outcome"],
+)
+
 EVENT_DEDUP_BACKLOG = Gauge(
     "event_dedup_backlog",
     "Event venue-night duplicate, merge-refusal and attribution-dispute backlog",

@@ -1,4 +1,3 @@
-@wip
 Feature: Give a merged venue-night one display title the app can read
   When five posts about five acts collapse into one listing, the surviving title
   is whichever source was last seen — an arbitrary pick for something a reader
@@ -24,25 +23,25 @@ Feature: Give a merged venue-night one display title the app can read
     Given stored events at "Club Metrópole" on one Saturday titled "Rodolpho" and "Rodolpho Produções"
     When the merge pass and the display-title pass run for that venue
     Then the display title is "Rodolpho Produções"
-    And no model call is made
+    And no title model call is made
 
   Scenario: Choose the single title of a group whose titles differ only in case
     Given stored events at "Club Metrópole" on one Saturday titled "NOITE DA PATROA" and "Noite da Patroa"
     When the merge pass and the display-title pass run for that venue
     Then the display title is one of the two stored titles
-    And no model call is made
+    And no title model call is made
 
   Scenario: Never call the model for an event with a single source
-    Given one stored event at "Club Metrópole" on one Saturday
+    Given a single-source stored event at "Club Metrópole" on one Saturday
     When the display-title pass runs for that venue
-    Then no model call is made
+    Then no title model call is made
     And the event has no display title
 
   Scenario: Never call the model for a group whose operator edited its title
     Given stored events at "Club Metrópole" on one Saturday, each naming a different act
     And an operator has edited the title of the surviving event
     When the merge pass and the display-title pass run for that venue
-    Then no model call is made
+    Then no title model call is made
     And the display title is the operator's title
 
   # ── the one narrow model call ─────────────────────────────────────────────
@@ -86,17 +85,17 @@ Feature: Give a merged venue-night one display title the app can read
 
   Scenario: Serve the chosen display title in the projection's title field
     Given a stored event at "Club Metrópole" carrying a chosen display title
-    When the events projection runs
+    When the events projection runs over the stored events
     Then the projected occurrence's title is the chosen display title
 
   Scenario: Serve the stored title when no display title was chosen
     Given a stored event at "Club Metrópole" carrying no display title
-    When the events projection runs
+    When the events projection runs over the stored events
     Then the projected occurrence's title is the stored title
 
   Scenario: Serve the merged listing's full lineup alongside its display title
     Given five stored events at "Club Metrópole" on one Saturday, each naming a different act
-    When the merge pass, the display-title pass and the events projection run
+    When the merge pass, the display-title pass and the events projection run over the stored events
     Then one occurrence is projected for that Saturday
     And the projected occurrence names every one of the five acts
 
@@ -118,6 +117,6 @@ Feature: Give a merged venue-night one display title the app can read
     Given display-title selection is disabled
     And five stored events at "Club Metrópole" on one Saturday, each naming a different act
     When the merge pass and the display-title pass run for that venue
-    Then no model call is made
+    Then no title model call is made
     And the surviving event has no display title
     And the projected occurrence's title is the surviving event's stored title

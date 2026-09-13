@@ -461,6 +461,16 @@ def _finish_absorption(
     not smuggled in here (see the plan's own §E)."""
     venue_dao.reattach_event_sources(duplicate_id, canonical_id)
     venue_dao.replace_event_venue_link_candidates(duplicate_id, [])
+    # plans/260912_events-venue-night-duplication.md §G: the canonical's
+    # source membership just changed, so any DISPLAY title chosen for its
+    # previous membership is stale by definition — a listing that named
+    # three acts must not keep naming three once it names five. Cleared to
+    # NULL (never recomputed here: this path is synchronous and a title pick
+    # may need a model call), which makes the row serve its own `title`
+    # again until the next display-title pass chooses one. Applies to BOTH
+    # modes: an exact-identity merge grows the group exactly as a
+    # title-similarity one does.
+    venue_dao.update_event(canonical_id, {"display_title": None})
     if mode == MERGE_MODE_DELETE:
         venue_dao.delete_event(duplicate_id)
     elif mode == MERGE_MODE_SUPERSEDE:

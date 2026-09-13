@@ -113,6 +113,9 @@ test-unit:
 		tests/test_event_attribution_dispute.py \
 		tests/test_event_dedup_recurring_window.py \
 		tests/test_event_dedup_single_night.py \
+		tests/test_event_display_title.py \
+		tests/test_event_display_title_migration.py \
+		tests/test_events_venue_night_deploy_safety.py \
 		tests/test_backfill_event_venue_links.py \
 		tests/test_backfill_source_provenance.py \
 		tests/test_backfill_reels_seeded.py \

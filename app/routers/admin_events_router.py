@@ -157,6 +157,12 @@ class EventOut(BaseModel):
     is_recurring: bool = False
     recurrence_text: Optional[str] = None
     title: Optional[str] = None
+    # plans/260912_events-venue-night-duplication.md §G: the CHOSEN display
+    # string for a merged listing, or None when none was chosen (in which
+    # case `title` is what the app sees). ADDITIVE — the console is a
+    # released client and nothing may be removed; exposing both lets an
+    # operator see what was chosen AND what the posts actually said.
+    display_title: Optional[str] = None
     description: Optional[str] = None
     lineup: list = Field(default_factory=list)
     ticket_url: Optional[str] = None

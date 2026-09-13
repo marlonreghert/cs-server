@@ -725,6 +725,10 @@ def _seed_five_acts(context, venue):
         context.vnd_night_ids.append(_dedup_steps._seed_item(
             context, title, venue, starts_at=_dedup_local(_SATURDAY, "22:00"),
             lineup=list(lineup),
+            # `accepted`, the status a clean extraction actually lands on —
+            # and the one `is_selectable` serves, which the display-title
+            # feature reuses this same fixture to prove.
+            status="accepted",
             # One shared crawl moment for the whole cluster: these are five
             # separate posts discovered together, with no stated relative
             # order, so a content disagreement between two absorbed rows is
@@ -957,6 +961,9 @@ def step_when_sweep_apply_single_night(context):
 
 @given("the dedup sweep has run with apply for that single-night venue")
 def step_given_sweep_has_run(context):
+    context.vnd_status_before = {
+        eid: context.dedup_dao.get_event(eid)["status"] for eid in context.vnd_night_ids
+    }
     _run_sweep_cli(context, "--apply", *_single_night_args(context))
     survivors = _dedup_survivors(context, context.vnd_night_ids)
     assert len(survivors) == 1, survivors
@@ -1048,7 +1055,10 @@ def step_then_second_sweep_merges_nothing(context):
 def step_then_reversed_event_readable(context):
     row = context.dedup_dao.get_event(context.vnd_reversed_id)
     assert row is not None, "the absorbed row was destroyed, not superseded"
-    assert row["status"] == "pending_review", row["status"]
+    # The status it had BEFORE the sweep absorbed it — `_absorb_title_
+    # similarity` records `absorbed_status_before` precisely so a reversal
+    # restores it rather than guessing `pending_review`.
+    assert row["status"] == context.vnd_status_before[context.vnd_reversed_id], row["status"]
     assert row.get("superseded_by") is None, row
 
 

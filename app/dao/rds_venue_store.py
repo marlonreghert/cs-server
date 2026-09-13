@@ -824,6 +824,15 @@ class RdsVenueStore:
         # that passes every BDD/pytest scenario and fails only in prod.
         "flyer_url", "flyer_s3_key", "flyer_content_hash", "flyer_copied_at",
         "flyer_byte_size",
+        # plans/260912_events-venue-night-duplication.md §G (migration
+        # 0046) — the CHOSEN display string for a merged listing, written
+        # ONLY by app.services.event_display_title and its backfill script,
+        # and cleared to NULL by event_merge._finish_absorption whenever a
+        # merge changes a canonical's source membership. NULL means "serve
+        # `title`" (the projection writes `display_title or title`).
+        # Listed here for the reason the flyer_* block above records: this
+        # allowlist is what lets `update_event` reach the column at all.
+        "display_title",
     )
     _EVENT_JSONB_COLUMNS = ("lineup", "operator_edited_fields", "attractions")
     # Python dict key -> real SQL column name, for the one column whose

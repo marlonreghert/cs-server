@@ -89,6 +89,7 @@ from app.services.event_date_resolver import (
     vote_on_sibling_years,
 )
 from app.services.event_dedup_backlog import publish_dedup_backlog_gauges
+from app.services.event_display_title import EventDisplayTitleService
 from app.services.event_identity import normalize_title
 from app.services.event_merge import merge_touched_events
 from app.services.event_reconciliation import (
@@ -620,6 +621,11 @@ class EventExtractionService:
         # non-empty `location_text`, so a handle whose posts never name a
         # location pays nothing at all for this feature.
         self._dispute_context = None
+        # plans/260912_events-venue-night-duplication.md §G: every event id
+        # THIS RUN touched, accumulated across posts so the display-title
+        # pass runs ONCE per run over the surviving canonical rows — never
+        # per post, and never inside the (synchronous) merge.
+        self._run_touched_event_ids: list = []
 
     def _resolve_venue_ids(self, cfg: dict) -> list[str]:
         if cfg["eligibility_mode"] == "venue_ids":
@@ -653,6 +659,7 @@ class EventExtractionService:
         # `_attribution_dispute_context`) — a venue added since the last run
         # must be visible to this one's dispute rule.
         self._dispute_context = None
+        self._run_touched_event_ids = []
 
         outcome_counts: dict[str, int] = {}
 
@@ -691,6 +698,12 @@ class EventExtractionService:
                     _bump(outcome, kind_label)
 
         if not cfg["dry_run"]:
+            # §G: the display-title pass, LAST — after every post's own merge
+            # has settled, so a title is never chosen for a group that is
+            # about to grow. Gated by `event_display_title_enabled` (false by
+            # default) inside the service itself, and it never raises: an
+            # OpenAI failure here must not fail an otherwise-successful run.
+            await self._run_display_title_pass()
             update_events_gauge(self.venue_dao)
             # plans/260912_events-venue-night-duplication.md §A: the
             # duplicate/refusal/attribution backlog, pushed alongside
@@ -707,6 +720,17 @@ class EventExtractionService:
             # Additive, mode="handles" only — see HANDLE_OUTCOME_* above.
             "handles": handle_reports,
         }
+
+    async def _run_display_title_pass(self) -> None:
+        if not self._run_touched_event_ids:
+            return
+        service = EventDisplayTitleService(
+            self.venue_dao, self.openai_client, redis_client=self.redis_client,
+        )
+        try:
+            await service.run_for_events(self._run_touched_event_ids)
+        except Exception as e:  # pragma: no cover - defensive
+            logger.warning(f"[EventExtraction] display-title pass failed: {e}")
 
     async def _run_handles(
         self, cfg: dict, since: datetime, bump, handle_reports: list[dict],
@@ -1349,6 +1373,7 @@ class EventExtractionService:
         # already established. See plans/260807_one-event-many-posts.md.
         if touched_event_ids:
             merge_touched_events(self.venue_dao, touched_event_ids, now, redis_like=self.redis_client)
+            self._run_touched_event_ids.extend(touched_event_ids)
 
         # plans/260811_extract-by-handle.md §Error Handling: count a row THIS
         # call's own reconciliation moved to superseded, labeled by what
