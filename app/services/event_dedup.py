@@ -167,6 +167,20 @@ class DedupConfig:
     candidate_window_hours: int
     undated_window_days: int
     auto_merge_enabled: bool
+    # plans/260912_events-venue-night-duplication.md §D/§E. Both DEFAULT to
+    # today's behaviour and are declared with defaults deliberately: every
+    # existing construction of this dataclass (tests, the measurement
+    # script, `load_dedup_config` before §D/§E wire their loaders) keeps
+    # working unchanged, and a deploy that sets neither key widens nothing.
+    #
+    # §D: whether two RECURRING rows whose weekday patterns intersect are
+    # candidates for the same night whatever their stored dates say. See
+    # `in_candidate_window_for_rows`.
+    recurring_window_enabled: bool = False
+    # §E2: venue_ids an operator has declared run ONE night rather than a
+    # programme. Empty by default, and never a corpus-wide rule — see
+    # `evaluate_pair`'s `single_night_venue` argument.
+    single_night_venues: tuple[str, ...] = ()
 
 
 def _load_validated_config(redis_like, key: str, default, *, validator, module_tag: str):

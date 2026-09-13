@@ -109,6 +109,7 @@ test-unit:
 		tests/test_event_dedup.py \
 		tests/test_event_dedup_merge.py \
 		tests/test_event_dedup_backlog.py \
+		tests/test_measure_event_dedup.py \
 		tests/test_backfill_event_venue_links.py \
 		tests/test_backfill_source_provenance.py \
 		tests/test_backfill_reels_seeded.py \
