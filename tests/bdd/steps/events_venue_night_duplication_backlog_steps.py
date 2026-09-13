@@ -221,14 +221,17 @@ def step_given_two_generic(context, venue):
         _seed(context, title, venue, starts_at=_local_dt(_SUNDAY))
 
 
-@given('two stored events at "{venue}" on one day whose titles differ only in the speaker\'s name')
-def step_given_two_suggest_band(context, venue):
+def seed_backlog_suggest_band_pair(context, venue: str) -> list:
+    """The backlog harness's half of the shared "titles differ only in the
+    speaker's name" Given — `260812`'s own measured SUGGEST-band pair. The
+    STEP is defined once, in `events_venue_night_duplication_steps.py`."""
     context.backlog_suggest_ids = [
         _seed(context, "Ação Leitura: Bate-papo com Marcelino Freire", venue,
               starts_at=_local_dt(_SATURDAY, "19:00")),
         _seed(context, "Ação Leitura: Bate-papo com Jeferson Tenório", venue,
               starts_at=_local_dt(_SATURDAY, "19:00")),
     ]
+    return context.backlog_suggest_ids
 
 
 @given("the merge pass has run for that venue")
@@ -334,14 +337,11 @@ def step_when_extraction_run_completes(context):
     }))
 
 
-@when("the dedup sweep runs with apply for that single-night venue")
-def step_when_sweep_runs_with_apply(context):
-    from scripts.measure_event_dedup import sweep
-
-    sweep(
-        context.backlog_dao, now=_NOW,
-        single_night_venue_ids=context.backlog_single_night_venue_ids,
-    )
+# "the dedup sweep runs with apply for that single-night venue" is defined
+# ONCE, in `events_venue_night_duplication_steps.py` (behave's registry is
+# global and both features state it). That definition dispatches to whichever
+# harness the running scenario built and drives the REAL CLI, so this feature
+# observes the same sweep an operator would run.
 
 
 @when("an operator reads the dedup backlog report")
@@ -506,11 +506,11 @@ def step_then_response_reports_total(context, count_word):
     assert context.backlog_response["venue_night_group_total"] == count, context.backlog_response
 
 
-@then("every stored event is unchanged")
-def step_then_every_event_unchanged(context):
-    for event_id, before in context.backlog_rows_before.items():
-        after = context.backlog_dao.get_event(event_id)
-        assert after == before, (event_id, before, after)
+# "every stored event is unchanged" is defined ONCE, in
+# `events_venue_night_duplication_steps.py`, because behave's registry is
+# global and both this feature and the enrichment one state it. That one
+# definition reads whichever before-snapshot the running scenario took; this
+# feature's steps take theirs into `context.backlog_rows_before`.
 
 
 @then("no merge suggestion is recorded")

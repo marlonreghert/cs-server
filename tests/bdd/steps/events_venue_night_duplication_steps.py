@@ -32,6 +32,7 @@ repo's own documented convention for a step text two features share.
 from __future__ import annotations
 
 import json
+import pathlib
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
@@ -563,11 +564,13 @@ def step_given_two_weekly_events_three_weeks_apart(context, title):
 
 @when("the merge pass runs for that venue")
 def step_when_merge_pass_runs_for_venue(context):
+    context.vnd_rows_before = _snapshot_rows(context)
     _dedup_steps._run_merge_pass(context)
 
 
 @when("the merge pass runs for every venue")
 def step_when_merge_pass_runs_for_every_venue(context):
+    context.vnd_rows_before = _snapshot_rows(context)
     _dedup_steps._run_merge_pass(context)
 
 
@@ -867,6 +870,18 @@ def step_then_no_suggestion_for_any_pair(context):
         ) == [], event_id
 
 
+@then("no merge suggestion is recorded for the pair")
+def step_then_no_suggestion_for_the_pair(context):
+    """plan §C2: "Only the auto band sweeps ... a historical backlog of
+    suggestions nobody asked for is queue landfill." The sweep runs with
+    `record_suggestions=False`, so a suggest-band pair it walks past must
+    leave no row behind at all."""
+    for event_id in _scenario_event_ids(context):
+        assert context.dedup_dao.list_event_merge_suggestions(event_id=event_id) == [], (
+            event_id
+        )
+
+
 @then("a merge suggestion is recorded for the pair")
 def step_then_suggestion_recorded_for_pair(context):
     a, b = context.vnd_night_ids
@@ -892,3 +907,219 @@ def step_then_absorbed_event_deleted(context):
         assert context.dedup_dao.get_event(event_id) is None, (
             f"{event_id} was superseded; the exact-identity merge must still DELETE"
         )
+
+
+# ══ Phase F: the one-off historical sweep ════════════════════════════════
+# Driven through the REAL CLI (`scripts.measure_event_dedup.main`), not
+# through `sweep()` directly: the blast-radius guard, the exit codes and the
+# report are the CLI's own contract, and an operator running this off-peak
+# runs exactly this. Its two production constructors are patched out so it
+# reads the scenario's in-memory store instead of RDS — the same seam
+# `tests/test_measure_event_dedup.py` uses.
+def _sweep_dao(context):
+    """Whichever harness the running scenario built — the `dedup_*` one for
+    the enrichment feature, the `backlog_*` one for the observability
+    feature. One sweep step, driven against the scenario's own store."""
+    if hasattr(context, "dedup_dao"):
+        return context.dedup_dao
+    return context.backlog_dao
+
+
+def _run_sweep_cli(context, *argv):
+    import tempfile
+    from unittest.mock import patch
+
+    import scripts.measure_event_dedup as med
+
+    dao = _sweep_dao(context)
+    report_path = f"{tempfile.mkdtemp()}/sweep.json"
+    context.vnd_rows_before = _snapshot_rows(context)
+    with patch.object(med, "RdsVenueStore", lambda url: dao), \
+            patch.object(med, "VenueRepository", lambda client=None, rds_store=None: rds_store):
+        context.vnd_sweep_exit = med.main([*argv, "--report-json", report_path])
+    context.vnd_sweep_report = json.loads(pathlib.Path(report_path).read_text())
+    return context.vnd_sweep_report
+
+
+def _single_night_args(context):
+    venue_ids = (
+        getattr(context, "vnd_single_night_venue_ids", None)
+        or getattr(context, "backlog_single_night_venue_ids", None)
+        or []
+    )
+    return [arg for venue_id in venue_ids for arg in ("--single-night-venue", venue_id)]
+
+
+@when("the dedup sweep runs with apply for that single-night venue")
+def step_when_sweep_apply_single_night(context):
+    _run_sweep_cli(context, "--apply", *_single_night_args(context))
+
+
+@given("the dedup sweep has run with apply for that single-night venue")
+def step_given_sweep_has_run(context):
+    _run_sweep_cli(context, "--apply", *_single_night_args(context))
+    survivors = _dedup_survivors(context, context.vnd_night_ids)
+    assert len(survivors) == 1, survivors
+    context.vnd_survivor_id = survivors[0]
+    context.vnd_absorbed_ids = [
+        eid for eid in context.vnd_night_ids if eid != context.vnd_survivor_id
+    ]
+
+
+@when("the dedup sweep runs with apply and an auto-pair ceiling of {ceiling:d}")
+def step_when_sweep_apply_with_ceiling(context, ceiling):
+    _run_sweep_cli(
+        context, "--apply", *_single_night_args(context),
+        "--max-auto-pairs", str(ceiling),
+    )
+
+
+@when("the dedup sweep runs with apply twice for that single-night venue")
+def step_when_sweep_apply_twice(context):
+    _run_sweep_cli(context, "--apply", *_single_night_args(context))
+    context.vnd_second_sweep_report = _run_sweep_cli(
+        context, "--apply", *_single_night_args(context),
+    )
+
+
+@when("the dedup sweep runs without apply for that single-night venue")
+def step_when_sweep_dry_run(context):
+    _run_sweep_cli(context, *_single_night_args(context))
+
+
+@when("the dedup sweep runs with apply")
+def step_when_sweep_apply(context):
+    _run_sweep_cli(context, "--apply")
+
+
+@when("an operator reverses the merge that absorbed one of those events")
+def step_when_operator_reverses_swept_merge(context):
+    from app.services.event_merge import reverse_title_similarity_merge
+
+    absorbed_id = context.vnd_absorbed_ids[0]
+    context.vnd_reversed_id = absorbed_id
+    context.vnd_moved_source_ids = [
+        s["id"] for s in context.dedup_dao.list_event_sources(context.vnd_survivor_id)
+    ]
+    reverse_title_similarity_merge(context.dedup_dao, absorbed_id, _dedup_steps._NOW)
+
+
+@then("the sweep writes nothing")
+def step_then_sweep_writes_nothing(context):
+    assert _snapshot_rows(context) == context.vnd_rows_before, "the sweep wrote a row"
+
+
+@then("the sweep reports failure")
+def step_then_sweep_reports_failure(context):
+    assert context.vnd_sweep_exit != 0, context.vnd_sweep_exit
+
+
+def _report_titles(report) -> set:
+    titles = set()
+    for pair in report.get("auto_pairs", []):
+        titles.add(pair["surviving_title"])
+        titles.add(pair["absorbed_title"])
+    return titles
+
+
+@then("the report names the surviving title and every absorbed title")
+def step_then_report_names_every_title(context):
+    # Assertions name the TITLES, never the row count: a count-based
+    # assertion has already stayed green here against a deliberately
+    # reintroduced bug, because both passes computed the same wrong number.
+    named = _report_titles(context.vnd_sweep_report)
+    for title, _acts in _FIVE_ACTS:
+        assert title in named, (title, named)
+
+
+@then("the report names every pair it would merge")
+def step_then_report_names_every_pair(context):
+    assert context.vnd_sweep_report["counts"]["auto_pairs"] > 0, context.vnd_sweep_report
+    step_then_report_names_every_title(context)
+
+
+@then("the second sweep merges nothing")
+def step_then_second_sweep_merges_nothing(context):
+    report = context.vnd_second_sweep_report
+    assert report["counts"]["auto_pairs"] == 0, report["auto_pairs"]
+
+
+@then("that event is readable again with its original status")
+def step_then_reversed_event_readable(context):
+    row = context.dedup_dao.get_event(context.vnd_reversed_id)
+    assert row is not None, "the absorbed row was destroyed, not superseded"
+    assert row["status"] == "pending_review", row["status"]
+    assert row.get("superseded_by") is None, row
+
+
+@then("the sources that moved to the survivor are attached to it again")
+def step_then_moved_sources_reattached(context):
+    restored = context.dedup_dao.list_event_sources(context.vnd_reversed_id)
+    assert len(restored) == 1, restored
+    survivor_source_ids = {
+        s["id"] for s in context.dedup_dao.list_event_sources(context.vnd_survivor_id)
+    }
+    assert restored[0]["id"] not in survivor_source_ids, restored
+
+
+@given('two stored events at "{venue}" on one day whose titles differ only in the speaker\'s name')
+def step_given_two_suggest_band_events(context, venue):
+    # `260812`'s own measured SUGGEST-band pair: the distinctive sets
+    # intersect but neither contains the other, so the sweep must leave both
+    # rows standing AND write no suggestion row (plan §C2: a historical
+    # backlog of suggestions nobody asked for is queue landfill).
+    #
+    # ONE definition for both feature files that state it, dispatching to
+    # whichever harness the running scenario built.
+    if not hasattr(context, "dedup_dao"):
+        from tests.bdd.steps.events_venue_night_duplication_backlog_steps import (
+            seed_backlog_suggest_band_pair,
+        )
+
+        seed_backlog_suggest_band_pair(context, venue)
+        return
+    context.vnd_night_ids = [
+        _dedup_steps._seed_item(
+            context, title, venue, starts_at=_dedup_local(_SATURDAY, "19:00"),
+            first_seen_at=_dedup_steps._NOW,
+        )
+        for title in (
+            "Ação Leitura: Bate-papo com Marcelino Freire",
+            "Ação Leitura: Bate-papo com Jeferson Tenório",
+        )
+    ]
+
+
+# ══ the deploy must change nothing ═══════════════════════════════════════
+def _snapshot_rows(context) -> dict:
+    """Every stored row in EVERY harness this scenario built, so "unchanged"
+    means unchanged everywhere — not just in the one the When step happened
+    to touch."""
+    snapshot: dict = {}
+    if hasattr(context, "dedup_dao"):
+        for row in context.dedup_dao.list_events():
+            snapshot[("dedup", row["event_id"])] = dict(row)
+    if getattr(context, "ee_dao", None) is not None:
+        for row in context.ee_dao.list_events():
+            snapshot[("ee", row["event_id"])] = dict(row)
+    if hasattr(context, "backlog_dao"):
+        for row in context.backlog_dao.list_events():
+            snapshot[("backlog", row["event_id"])] = dict(row)
+    return snapshot
+
+
+@then("every stored event is unchanged")
+def step_then_every_stored_event_unchanged(context):
+    """ONE definition for both feature files that state it (behave's registry
+    is global). The observability feature's own steps snapshot into
+    `context.backlog_rows_before`; everything else snapshots through
+    `_snapshot_rows` at the moment the When step runs."""
+    if getattr(context, "backlog_rows_before", None) is not None:
+        for event_id, before in context.backlog_rows_before.items():
+            after = context.backlog_dao.get_event(event_id)
+            assert after == before, (event_id, before, after)
+        return
+    assert getattr(context, "vnd_rows_before", None) is not None, (
+        "no before-snapshot was taken; the When step must call _snapshot_rows"
+    )
+    assert _snapshot_rows(context) == context.vnd_rows_before

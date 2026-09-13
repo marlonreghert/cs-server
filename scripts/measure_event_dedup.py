@@ -252,6 +252,14 @@ def measure(venue_dao, *, config: Optional[event_dedup.DedupConfig] = None) -> R
         report.venues_considered += 1
         report.candidate_rows += len(rows)
         venue_name = venue_name_cache.setdefault(venue_id, _venue_name_of(venue_dao, venue_id))
+        # §E2, resolved here for the SAME reason `run_title_similarity_pass`
+        # resolves it: without this the dry-run report would say "0 auto
+        # pairs" for a listed venue whose night the sweep then collapses —
+        # the measurement and the sweep disagreeing about a pair, which is
+        # exactly what plan §C2 forbids, and which would also make
+        # `--max-auto-pairs` guard against a number that does not describe
+        # the run it is guarding.
+        single_night_venue = venue_id in (config.single_night_venues or ())
 
         for a, b in combinations(rows, 2):
             if not event_dedup.in_candidate_window_for_rows(
@@ -259,7 +267,10 @@ def measure(venue_dao, *, config: Optional[event_dedup.DedupConfig] = None) -> R
                 recurring_window_enabled=config.recurring_window_enabled,
             ):
                 continue
-            decision = event_dedup.evaluate_pair(a, b, venue_name=venue_name, config=config)
+            decision = event_dedup.evaluate_pair(
+                a, b, venue_name=venue_name, config=config,
+                single_night_venue=single_night_venue,
+            )
             if decision is None:
                 venue_tokens = event_dedup.venue_name_tokens(venue_name)
                 set_a = event_dedup.distinctive_set(

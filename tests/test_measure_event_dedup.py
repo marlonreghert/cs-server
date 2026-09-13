@@ -226,3 +226,115 @@ class TestTheDefaultInvocationIsUnchanged:
         survivors = {row["event_id"] for row in _live(dao)}
         assert med.main(["--apply"]) == 0
         assert {row["event_id"] for row in _live(dao)} == survivors
+
+
+class TestSingleNightVenueFlag:
+    """plans/260912_events-venue-night-duplication.md §E2 through the CLI.
+
+    The regression this class exists for was real and was caught by a BDD
+    scenario, not by reading the code: `measure()` originally did not pass
+    `single_night_venue` into `evaluate_pair`, so the dry-run report said "0
+    auto pairs" for a listed venue whose night `--apply` then collapsed. That
+    is the measurement and the sweep disagreeing about a pair — the one thing
+    §C2 says must be structurally impossible — and it also made
+    `--max-auto-pairs` guard against a number that did not describe the run
+    it was guarding.
+    """
+
+    def _five_acts(self, dao):
+        return [
+            _seed(dao, title)
+            for title in (
+                "ROWKA", "VITINHO POLÊMICO", "SÁBADO VAI FERVER",
+                "SECRET CLUB com @neguindabasersv", "estreia de @neguindabasersv",
+            )
+        ]
+
+    def test_the_dry_run_report_sees_what_the_sweep_would_do(self, dao):
+        self._five_acts(dao)
+        report = med.measure(dao, config=med.build_config(single_night_venue_ids=["v1"]))
+        # Five rows, ten pairs, every one of them an auto pair at a
+        # single-night venue.
+        assert report.auto_count == 10, report.auto_pairs
+
+    def test_an_unlisted_venue_reports_no_auto_pair(self, dao):
+        self._five_acts(dao)
+        assert med.measure(dao, config=med.build_config()).auto_count == 0
+
+    def test_the_cli_flag_reaches_the_sweep(self, dao):
+        ids = self._five_acts(dao)
+        assert med.main(["--apply", "--single-night-venue", "v1"]) == 0
+        survivors = [row["event_id"] for row in _live(dao)]
+        assert len(survivors) == 1, survivors
+        assert set(survivors) <= set(ids)
+
+    def test_the_ceiling_is_measured_against_the_same_bar_the_sweep_uses(self, dao):
+        self._five_acts(dao)
+        before = {row["event_id"]: dict(row) for row in dao.list_events()}
+
+        assert med.main([
+            "--apply", "--single-night-venue", "v1", "--max-auto-pairs", "3",
+        ]) == med.EXIT_CEILING_EXCEEDED
+
+        assert {row["event_id"]: dict(row) for row in dao.list_events()} == before
+
+    def test_the_script_never_reads_or_writes_an_admin_config_key(self, dao):
+        # The whole point of the flag: measure §E2's policy for named venues
+        # WITHOUT committing to it. The script builds its config from the
+        # shipped defaults plus this invocation's overrides and never reads
+        # the live keys — structural, not a promise, so a future edit that
+        # reaches for one has to break this test first.
+        import ast
+        import inspect
+
+        tree = ast.parse(inspect.getsource(med))
+        called = {
+            node.func.attr if isinstance(node.func, ast.Attribute) else getattr(node.func, "id", "")
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+        }
+        assert "load_dedup_config" not in called
+        assert "load_attribution_dispute_config" not in called
+        # No Redis client of any kind is constructed or imported.
+        assert "redis" not in inspect.getsource(med).lower().replace("fakeredis", "")
+
+
+class TestRecurringWindowFlag:
+    def _weekly_pair(self, dao):
+        return [
+            _seed(dao, "Aula de FORRÓ na Sala de Reboco",
+                  starts_at=datetime(2026, 8, 5, 20, 0, tzinfo=RECIFE)),
+            _seed(dao, "Aula de FORRÓ na Sala de Reboco",
+                  starts_at=datetime(2026, 8, 26, 20, 0, tzinfo=RECIFE)),
+        ]
+
+    def _make_recurring(self, dao, ids):
+        for event_id in ids:
+            dao.update_event(event_id, {
+                "is_recurring": True, "recurrence_text": "Toda QUARTA",
+            })
+
+    def test_the_two_live_forro_rows_are_invisible_without_the_flag(self, dao):
+        self._make_recurring(dao, self._weekly_pair(dao))
+        assert med.measure(dao, config=med.build_config()).auto_count == 0
+
+    def test_the_flag_makes_them_a_candidate_pair(self, dao):
+        self._make_recurring(dao, self._weekly_pair(dao))
+        report = med.measure(dao, config=med.build_config(recurring_window_enabled=True))
+        assert report.auto_count == 1, report.auto_pairs
+
+    def test_the_cli_flag_reaches_the_measurement(self, dao, tmp_path):
+        self._make_recurring(dao, self._weekly_pair(dao))
+        target = tmp_path / "recurring.json"
+        assert med.main(["--recurring-window", "--report-json", str(target)]) == 0
+        payload = json.loads(target.read_text())
+        assert payload["config"]["recurring_window_enabled"] is True
+        assert payload["counts"]["auto_pairs"] == 1
+
+    def test_no_recurring_window_is_the_default(self, dao, tmp_path):
+        self._make_recurring(dao, self._weekly_pair(dao))
+        target = tmp_path / "default.json"
+        assert med.main(["--report-json", str(target)]) == 0
+        payload = json.loads(target.read_text())
+        assert payload["config"]["recurring_window_enabled"] is False
+        assert payload["counts"]["auto_pairs"] == 0
