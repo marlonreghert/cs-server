@@ -24,7 +24,9 @@ from __future__ import annotations
 import pytest
 
 from app.services.event_attribution_dispute import (
+    DEFAULT_BRAND_ROOT_STOPWORDS,
     DEFAULT_DISPUTE_ACTION,
+    MAX_BRAND_ROOT_VENUES,
     DEFAULT_DISPUTE_WITHHOLD_ENABLED,
     DISPUTE_ACTION_FLAG,
     DISPUTE_ACTION_REATTRIBUTE,
@@ -371,3 +373,188 @@ def test_the_full_ladder_is_still_the_default_for_every_other_caller(monkeypatch
     )
     assert calls, "the default path must still score every venue"
     assert result.candidates, "and must still return its ranked candidates"
+
+
+# ── the brand root must stay a BRAND root ──────────────────────────────────
+# Real catalog strings throughout. `brand_root_venues` is rung 3's entire
+# safety argument — the rung does bounded substring matching against
+# "this account's own branches", and that is only safe if the set really is
+# a handful of branches. Measured against the live catalog (2,694 venues),
+# it was not: `bar` was caught by the vocabulary, but `casa` gave "Casa
+# Bacurau" 33 "siblings" across six cities and `villa` gave 12 including
+# Berlin and Munich.
+_CASA_FAMILY = [
+    VenueLite(venue_id=f"v_casa_{i}", venue_name=name, address=addr)
+    for i, (name, addr) in enumerate([
+        ("Casa Bacurau", "Rua Capitão Lima, 100 - Santo Amaro, Recife - PE"),
+        ("Casa de Jorge Amado", "Largo do Pelourinho - Salvador - BA"),
+        ("Casa da Felicidade Arte & Música & Gastronomia", "Fortaleza - CE"),
+        ("Casa Teresa&Jorge", "Rio de Janeiro - RJ"),
+        ("Casa de Show Lugar Comum", "Olinda - PE"),
+        ("Casa Rosa", "São Paulo - SP"),
+        ("Casa Amarela", "Teresina - PI"),
+        ("Casa Verde", "João Pessoa - PB"),
+        ("Casa Azul", "Natal - RN"),
+    ])
+]
+_VILLA_FAMILY = [
+    VenueLite(venue_id=f"v_villa_{i}", venue_name=name, address=addr)
+    for i, (name, addr) in enumerate([
+        ("Villa Setúbal Botequim", "Setúbal, Recife - PE"),
+        ("Villa Neukölln", "Berlin, Germany"),
+        ("Villa Country", "São Paulo - SP"),
+        ("Villa Blué Restaurante no recreio", "Rio de Janeiro - RJ"),
+    ])
+]
+# A real national chain, at the size the live catalog actually holds.
+_COCO_BAMBU = [
+    VenueLite(venue_id=f"v_coco_{i}", venue_name=name, address=addr)
+    for i, (name, addr) in enumerate([
+        ("Coco Bambu", "Av. Boa Viagem, Recife - PE"),
+        ("Coco Bambu Dom Pastel", "Dom Pastel, Recife - PE"),
+        ("Coco Bambu Shopping Recife", "Shopping Recife, Boa Viagem - PE"),
+        ("Coco Bambu Derby", "Derby, Recife - PE"),
+        ("Coco Bambu Teresina", "Teresina - PI"),
+        ("Coco Bambu Fortaleza", "Fortaleza - CE"),
+    ])
+]
+
+
+class TestTheBrandRootStaysBounded:
+    def test_casa_bacurau_has_no_siblings(self):
+        """The live bug: 33 "siblings" across six cities, and Casa Bacurau is
+        one of the venues in scope for the attribution repair."""
+        root = brand_root_venues("v_casa_0", _CASA_FAMILY)
+        assert [v.venue_name for v in root] == ["Casa Bacurau"]
+
+    def test_villa_has_no_siblings(self):
+        root = brand_root_venues("v_villa_0", _VILLA_FAMILY)
+        assert [v.venue_name for v in root] == ["Villa Setúbal Botequim"]
+
+    def test_the_beerdock_chain_is_untouched(self):
+        root = brand_root_venues("v_bv", CATALOG)
+        assert {v.venue_name for v in root} == {
+            "BeerDock Boa Viagem", "BeerDock Casa Forte", "BeerDock Madalena",
+        }
+
+    def test_a_real_six_branch_chain_is_not_clipped_by_the_ceiling(self):
+        """The ceiling has to clear the largest GENUINE chain in the catalog,
+        which is Coco Bambu at 6 — measured, not assumed."""
+        root = brand_root_venues("v_coco_0", _COCO_BAMBU)
+        assert len(root) == 6
+
+    def test_the_ceiling_collapses_an_oversized_root_whatever_the_vocabulary_knows(self):
+        """Defense in depth: a hand-maintained word list is always incomplete
+        for the NEXT unforeseen generic word, so size alone must also be
+        evidence. `zzz` is in no vocabulary."""
+        big = [
+            VenueLite(venue_id=f"v_z_{i}", venue_name=f"Zzz Lugar {i}", address=f"Rua {i}")
+            for i in range(MAX_BRAND_ROOT_VENUES + 1)
+        ]
+        assert len(brand_root_venues("v_z_0", big)) == 1
+
+    def test_a_root_exactly_at_the_ceiling_survives(self):
+        big = [
+            VenueLite(venue_id=f"v_z_{i}", venue_name=f"Zzz Lugar {i}", address=f"Rua {i}")
+            for i in range(MAX_BRAND_ROOT_VENUES)
+        ]
+        assert len(brand_root_venues("v_z_0", big)) == MAX_BRAND_ROOT_VENUES
+
+    def test_the_measured_generic_venue_words_never_form_a_root(self):
+        """Every one of these leads 4+ unrelated venues in the live catalog."""
+        for word in ("restaurante", "boteco", "casa", "villa", "the", "cervejaria",
+                     "teatro", "praca", "boate", "cafe", "espaco", "quintal"):
+            family = [
+                VenueLite(venue_id=f"v_{word}_{i}",
+                          venue_name=f"{word.title()} Exemplo {i}", address=f"Rua {i}")
+                for i in range(3)
+            ]
+            assert len(brand_root_venues(f"v_{word}_0", family)) == 1, word
+
+    def test_the_title_dedup_vocabulary_is_deliberately_untouched(self):
+        """`DEFAULT_GENERIC_VOCABULARY` feeds `distinctive_set`, the TITLE
+        merge bar — live with auto-merge on and pinned by 260812's
+        false-positive corpus. Venue-name words belong in their own list;
+        adding "casa" there would change which EVENT TITLES merge."""
+        from app.services.event_dedup import DEFAULT_GENERIC_VOCABULARY
+
+        for word in ("casa", "villa", "restaurante", "boteco"):
+            assert word not in DEFAULT_GENERIC_VOCABULARY, word
+        assert "casa" in DEFAULT_BRAND_ROOT_STOPWORDS
+        assert "villa" in DEFAULT_BRAND_ROOT_STOPWORDS
+
+    def test_an_unbounded_root_cannot_produce_a_dispute(self):
+        """The point of all of it: with no sibling set, rung 3 cannot fire,
+        so a generic leading word can never re-attribute anything."""
+        assert evaluate_attribution_dispute(
+            mapped_venue_id="v_casa_0", location_text="Salvador",
+            venues=_CASA_FAMILY, handle_index={}, promoter_handle="casabacurau",
+        ) is None
+
+
+class TestRungThreeMatchesASiblingsName:
+    """`Beerdock Casa Forte`'s stored address is "R. dos Arcos 1745 - Poço da
+    Panela Recife - PE" — its geocoded neighbourhood is Poço da Panela while
+    the branch is commercially Casa Forte. Address-only matching therefore
+    found NOTHING, and the repair proposed zero changes for the case it was
+    built around."""
+
+    def test_the_beerdock_case_resolves_on_the_sibling_s_name(self):
+        verdict = _dispute("CASA FORTE")
+        assert verdict is not None
+        assert verdict.method == METHOD_NEIGHBOURHOOD_MATCH
+        assert verdict.target_venue_name == "BeerDock Casa Forte"
+
+    def test_it_works_even_when_no_address_mentions_the_neighbourhood(self):
+        catalog = [
+            VenueLite(venue_id="v_a", venue_name="BeerDock Boa Viagem",
+                      address="Rua Professor Eduardo Wanderley Filho, 242 - Boa Viagem"),
+            VenueLite(venue_id="v_b", venue_name="Beerdock Casa Forte",
+                      address="R. dos Arcos 1745 - Poço da Panela Recife - PE"),
+        ]
+        verdict = evaluate_attribution_dispute(
+            mapped_venue_id="v_a", location_text="CASA FORTE",
+            venues=catalog, handle_index={}, promoter_handle="beerdock_recife",
+        )
+        assert verdict is not None and verdict.target_venue_id == "v_b"
+        assert verdict.candidates[0].evidence["matched_on"] == "venue_name"
+
+    def test_an_address_hit_still_reports_itself_as_an_address_hit(self):
+        verdict = _dispute("Rui Barbosa")
+        assert verdict is not None
+        assert verdict.candidates[0].evidence["matched_on"] == "address"
+
+    def test_the_shared_brand_prefix_can_never_resolve_a_branch(self):
+        """"BeerDock" matches EVERY branch's name, so the ladder sees more
+        than one candidate and refuses rather than guessing. This is what
+        stops the brand word itself from re-attributing anything."""
+        assert _dispute("BeerDock") is None
+        assert _dispute("Casa BeerDock") is None
+
+    def test_matching_the_mapped_venue_s_own_name_is_not_a_dispute(self):
+        assert _dispute("BOA VIAGEM") is None
+        assert _dispute("BeerDock Boa Viagem") is None
+
+    def test_two_unrelated_venues_sharing_a_word_still_never_dispute(self):
+        """The §D guarantee, restated for the name check: this must not
+        become fuzzy cross-brand name matching by another door. "Maria Café"
+        and "Maria Antonieta" share a leading word, and `maria` is a measured
+        generic — so they are not siblings and cannot match each other."""
+        family = [
+            VenueLite(venue_id="v_m1", venue_name="Maria Café", address="R. do Sol, 7"),
+            VenueLite(venue_id="v_m2", venue_name="Maria Antonieta", address="R. Nova, 3"),
+        ]
+        assert evaluate_attribution_dispute(
+            mapped_venue_id="v_m1", location_text="Antonieta",
+            venues=family, handle_index={}, promoter_handle="mariacafe",
+        ) is None
+
+    def test_a_name_match_across_the_whole_catalog_is_still_never_a_dispute(self):
+        """Rung 4 remains excluded. "Maria Café" is a real catalog venue and
+        is NOT a BeerDock sibling, so no amount of name resemblance reaches
+        a verdict."""
+        assert _dispute("Maria Café") is None
+        assert _dispute("nosso cafe") is None
+
+    def test_a_too_short_text_never_matches_a_name(self):
+        assert _dispute("BV") is None

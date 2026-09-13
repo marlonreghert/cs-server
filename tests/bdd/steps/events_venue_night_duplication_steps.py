@@ -1195,3 +1195,51 @@ def step_given_the_casanova_pair(context, a, b, venue):
         )
         for title in (a, b)
     ]
+
+
+# ══ Defect 2: rung 3 matching a sibling's NAME ═══════════════════════════
+@given('"{name}" is recorded at an address that never mentions {area}')
+def step_given_sibling_address_omits_neighbourhood(context, name, area):
+    """The real shape: `Beerdock Casa Forte`'s geocoded neighbourhood is Poço
+    da Panela, so its stored address contains no "Casa Forte" at all."""
+    _ensure(context)
+    context.ee_dao.upsert_venue(Venue(
+        venue_id=_venue_id_for(context, name), venue_name=name,
+        venue_address="R. dos Arcos 1745 - Poço da Panela Recife - PE 52061-180",
+        venue_lat=RECIFE_LAT, venue_lng=RECIFE_LNG,
+    ))
+
+
+@given('the venue catalog carries nine unrelated venues whose names all begin with "{word}"')
+def step_given_nine_generic_prefixed_venues(context, word):
+    """Measured on the live catalog: `casa` led 34 venues across six cities,
+    and `brand_root_venues` handed every one of them to rung 3 as a
+    "sibling". Casa Bacurau is in scope for the attribution repair."""
+    _ensure(context)
+    cities = ["Salvador", "Fortaleza", "Rio de Janeiro", "São Paulo", "Teresina",
+              "João Pessoa", "Natal", "Olinda"]
+    context.vnd_seq += 1
+    bacurau = f"vnd_venue_casa_{context.vnd_seq}"
+    context.ee_dao.upsert_venue(Venue(
+        venue_id=bacurau, venue_name=f"{word} Bacurau",
+        venue_address="Rua Capitão Lima, 100 - Santo Amaro, Recife - PE",
+        venue_lat=RECIFE_LAT, venue_lng=RECIFE_LNG,
+    ))
+    context.vnd_venues[f"{word} Bacurau"] = bacurau
+    for i, city in enumerate(cities):
+        context.vnd_seq += 1
+        vid = f"vnd_venue_casa_other_{context.vnd_seq}"
+        context.ee_dao.upsert_venue(Venue(
+            venue_id=vid, venue_name=f"{word} {city} {i}",
+            venue_address=f"Rua {i}, {i} - Centro, {city}",
+            venue_lat=RECIFE_LAT, venue_lng=RECIFE_LNG,
+        ))
+        context.vnd_venues[f"{word} {city} {i}"] = vid
+    context.ee_dao.set_venue_instagram(VenueInstagram(
+        venue_id=bacurau, instagram_handle="casabacurau", status="found",
+    ))
+    context.ee_venue_id = bacurau
+    context.ee_handle = "casabacurau"
+    context.ee_run_config = {
+        "eligibility": {"mode": "venue_ids", "venue_ids": bacurau},
+    }
