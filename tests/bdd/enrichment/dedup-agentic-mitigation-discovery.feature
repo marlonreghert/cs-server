@@ -64,8 +64,8 @@ Feature: Measure before building — ground the agentic mitigation decision in r
     And a post from that handle names a different, unrelated, catalogued venue in its location text alone, with no handle mention, no location tag, and no shared brand-root token with the mapped venue
     When that post is reconciled
     Then the event stays attributed to the handle's mapped venue
-    And the event carries no review reason
-    And no attribution dispute is counted
+    And the gap event carries no review reason
+    And no attribution dispute is counted for the gap event
     And the baseline measurement report records this corpus case as undetected by every existing signal
 
   # ── the closed-candidate-set advisory validator ────────────────────────
@@ -104,7 +104,7 @@ Feature: Measure before building — ground the agentic mitigation decision in r
   Scenario: Leave production untouched while the advisor is disabled
     Given the event venue advisor is disabled
     And an event resolves to the queued state with ranked venue candidates
-    When the post is reconciled
+    When the post is reconciled through the advisor pass
     Then no advisor call is made
     And the event's venue and resolution state are exactly what the deterministic ladder produced
 
@@ -112,7 +112,7 @@ Feature: Measure before building — ground the agentic mitigation decision in r
     Given the event venue advisor is enabled
     And an event resolves to the queued state with ranked venue candidates
     And the advisor's recommendation validates
-    When the post is reconciled
+    When the post is reconciled through the advisor pass
     Then the event's venue candidate row carries the validated recommendation
     And the event's venue remains unset
     And the event's resolution state remains queued
@@ -120,7 +120,7 @@ Feature: Measure before building — ground the agentic mitigation decision in r
   Scenario: Never call the advisor for an event the ladder already resolved automatically
     Given the event venue advisor is enabled
     And an event resolves automatically through the handle-mention method
-    When the post is reconciled
+    When the post is reconciled through the advisor pass
     Then no advisor call is made
 
   Scenario: Surface the validated recommendation on the existing review queue

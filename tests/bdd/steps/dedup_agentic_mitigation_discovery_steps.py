@@ -385,33 +385,14 @@ def step_then_event_stays_attributed_to_mapped_venue(context):
     assert context.agentic_gap_event_row["venue_id"] == case["venue"]["venue_id"]
 
 
-def agentic_check_gap_event_carries_no_review_reason(context) -> bool:
-    """Dispatch target for the step text `"the event carries no review
-    reason"`, already bound by `events_venue_night_duplication_steps.
-    step_then_event_carries_no_review_reason` over its OWN `context.ee_dao`/
-    `context.vnd_event` fixture. Behave allows only ONE registration of an
-    identical step pattern across the whole `tests/bdd/steps/` directory
-    (the same constraint `record_what_superseded_a_row_steps.py`'s own
-    docstring documents for `"the event is read from the admin API"`), so
-    that module's implementation is EXTENDED with a dispatch to this
-    function when `context.agentic_gap_event_row` is present, rather than
-    redefined here. Returns whether it handled the check (True) so the
-    caller knows not to fall through to its own original behaviour."""
-    if getattr(context, "agentic_gap_event_row", None) is None:
-        return False
+@then("the gap event carries no review reason")
+def step_then_gap_event_carries_no_review_reason(context):
     assert context.agentic_gap_event_row.get("review_reason") is None
-    return True
 
 
-def agentic_check_no_dispute_counted(context) -> bool:
-    """Dispatch target for `"no attribution dispute is counted"` — see
-    `agentic_check_gap_event_carries_no_review_reason`'s own docstring for
-    why this is a dispatch target rather than a second `@then`
-    registration."""
-    if getattr(context, "agentic_dispute_verdict", "unset") == "unset":
-        return False
+@then("no attribution dispute is counted for the gap event")
+def step_then_no_dispute_counted_for_gap_event(context):
     assert context.agentic_dispute_verdict is None
-    return True
 
 
 @then("the baseline measurement report records this corpus case as undetected by every existing signal")
@@ -622,14 +603,8 @@ class _FakeAdvisorOpenAI:
         self._answers.append(answer)
 
 
-def agentic_reconcile_the_post(context) -> bool:
-    """Dispatch target for `"the post is reconciled"`, already bound by
-    `record_what_superseded_a_row_steps.step_when_post_is_reconciled` over
-    its OWN `context.rws_*` fixture — see
-    `agentic_check_gap_event_carries_no_review_reason`'s docstring for why
-    this is a dispatch target rather than a second `@when` registration."""
-    if getattr(context, "agentic_queued_event_id", None) is None:
-        return False
+@when("the post is reconciled through the advisor pass")
+def step_when_post_is_reconciled_through_advisor_pass(context):
     event_id = context.agentic_queued_event_id
     context.agentic_row_before = dict(context.agentic_dao.rds_store.get_event(event_id))
     asyncio.run(
@@ -638,7 +613,6 @@ def agentic_reconcile_the_post(context) -> bool:
             redis_client=context.agentic_redis,
         ).run_for_events([event_id]),
     )
-    return True
 
 
 @then("no advisor call is made")
