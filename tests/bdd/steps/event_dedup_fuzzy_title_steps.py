@@ -110,6 +110,12 @@ def _seed_item(
         "source_shortcode": f"dedup_sc_{context.dedup_seq}",
         "first_seen_at": seen_at, "last_seen_at": seen_at,
         "operator_edited_fields": edited or None,
+        # Each announcing post's OWN extracted title, frozen on its source —
+        # exactly where the real pipeline puts it, and what
+        # plans/260912_events-venue-night-duplication.md §G's display-title
+        # pass reads (never the single surviving `title`, which a merge picks
+        # arbitrarily).
+        "raw_extraction": {"title": title},
     }
     context.dedup_dao.insert_event(fields)
     context.dedup_event_ids.append(fields["event_id"])

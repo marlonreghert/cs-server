@@ -824,6 +824,15 @@ class RdsVenueStore:
         # that passes every BDD/pytest scenario and fails only in prod.
         "flyer_url", "flyer_s3_key", "flyer_content_hash", "flyer_copied_at",
         "flyer_byte_size",
+        # plans/260912_events-venue-night-duplication.md §G (migration
+        # 0046) — the CHOSEN display string for a merged listing, written
+        # ONLY by app.services.event_display_title and its backfill script,
+        # and cleared to NULL by event_merge._finish_absorption whenever a
+        # merge changes a canonical's source membership. NULL means "serve
+        # `title`" (the projection writes `display_title or title`).
+        # Listed here for the reason the flyer_* block above records: this
+        # allowlist is what lets `update_event` reach the column at all.
+        "display_title",
     )
     _EVENT_JSONB_COLUMNS = ("lineup", "operator_edited_fields", "attractions")
     # Python dict key -> real SQL column name, for the one column whose
@@ -890,6 +899,14 @@ class RdsVenueStore:
         "e.post_type, e.category, e.time_known, e.superseded_by, "
         "e.flyer_url, e.flyer_s3_key, e.flyer_content_hash, e.flyer_copied_at, "
         "e.flyer_byte_size, "
+        # plans/260912_events-venue-night-duplication.md §G (migration
+        # 0046). Selected here, not only listed in `_EVENT_COLUMNS`: that
+        # allowlist governs WRITES, and a column written but never read back
+        # is the same class of silent drift — `update_event` would succeed,
+        # every offline test would pass against the fake (whose `_merged_view`
+        # copies whatever `insert_event` stored), and the serving projection
+        # would keep writing the stored `title` forever in production.
+        "e.display_title, "
         "e.updated_at, v.venue_name, "
         "ps.source_kind, ps.source_handle, ps.source_shortcode, ps.source_permalink, "
         "ps.source_event_key, ps.source_event_index, ps.cover_photo_key, ps.raw_extraction, "
@@ -925,6 +942,14 @@ class RdsVenueStore:
         "e.post_type, e.category, e.time_known, e.superseded_by, "
         "e.flyer_url, e.flyer_s3_key, e.flyer_content_hash, e.flyer_copied_at, "
         "e.flyer_byte_size, "
+        # plans/260912_events-venue-night-duplication.md §G (migration
+        # 0046). Selected here, not only listed in `_EVENT_COLUMNS`: that
+        # allowlist governs WRITES, and a column written but never read back
+        # is the same class of silent drift — `update_event` would succeed,
+        # every offline test would pass against the fake (whose `_merged_view`
+        # copies whatever `insert_event` stored), and the serving projection
+        # would keep writing the stored `title` forever in production.
+        "e.display_title, "
         "e.updated_at, v.venue_name, "
         "es.source_kind, es.source_handle, es.source_shortcode, es.source_permalink, "
         "es.source_event_key, es.source_event_index, es.cover_photo_key, "

@@ -41,7 +41,7 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from app.metrics import EVENT_DEDUP_CONFIG_TYPE_FALLBACK_TOTAL
-from app.services.event_date_resolver import RECIFE_TZ
+from app.services.event_date_resolver import RECIFE_TZ, weekdays_from_recurrence_text
 from app.services.event_identity import normalize_title
 
 logger = logging.getLogger(__name__)
@@ -56,6 +56,11 @@ BAND_REFUSE = "refuse"
 
 REASON_TITLE = "title_containment"
 REASON_LINEUP = "shared_lineup"
+# plans/260912_events-venue-night-duplication.md §E2: a THIRD reason token,
+# carried on the existing `PairDecision` so the per-venue policy flows
+# through the existing audit row, the existing metric labels and the
+# existing reversal path with no new machinery.
+REASON_SINGLE_NIGHT_VENUE = "single_night_venue"
 
 # ── admin config: generic-event vocabulary (plan §B, "runtime-configurable,
 # matching menu_expiry_days, the post-category vocabulary and the busyness
@@ -86,6 +91,57 @@ DEFAULT_CANDIDATE_WINDOW_HOURS = 8
 
 ADMIN_CONFIG_UNDATED_WINDOW_DAYS_KEY = "admin_config:event_dedup_undated_window_days"
 DEFAULT_UNDATED_WINDOW_DAYS = 14
+
+ADMIN_CONFIG_SINGLE_NIGHT_VENUES_KEY = "admin_config:event_dedup_single_night_venues"
+# plans/260912_events-venue-night-duplication.md §E2. EMPTY by default, and
+# never a corpus-wide rule: `260812`'s own measured false-positive corpus
+# contains `Bolinha do Cavaco` / `JB do Cavaco` at Casanova Ecobar — two
+# different acts, one night, same venue, deliberately kept apart — which is
+# the SAME SHAPE as Club Metrópole's five acts on one Saturday. Nothing in
+# the rows tells the two situations apart; the difference is a fact about the
+# VENUE (a club runs one night, a theatre runs a programme). A per-venue list
+# is the only mechanism that respects both the operator's ask and the
+# evidence that previously refused it, and it is fully deterministic and
+# unit-testable.
+DEFAULT_SINGLE_NIGHT_VENUES: tuple[str, ...] = ()
+
+ADMIN_CONFIG_SINGLE_NIGHT_DEFAULT_ENABLED_KEY = (
+    "admin_config:event_dedup_single_night_default_enabled"
+)
+# The CATALOG-WIDE form of §E2, added after the operator reviewed the
+# per-venue list and chose the broader scope EXPLICITLY, with the tradeoff
+# stated: every venue is treated as running one night, with NO exclusions.
+#
+# What that accepts, in the operator's own words: the `Bolinha do Cavaco` /
+# `JB do Cavaco` shape (`260812`'s measured false-positive corpus — two
+# different acts, one night, one venue, deliberately kept apart by a prior
+# review) WILL now re-merge wherever it recurs, and any undiscovered
+# "programme" venue running genuinely separate same-night events will have
+# one silently absorbed into another until an operator notices it in
+# `GET /admin/events/dedup-backlog` and dials the scope back.
+#
+# OFF by default, like every other flag in this plan: the deploy still
+# provably changes no stored row, and turning this on is a separate,
+# deliberate operator act.
+#
+# **Dialling back is not an exclusion list.** There is deliberately no
+# "except these venues" key: the remedy is to set this flag FALSE and name
+# the venues you DO want in `event_dedup_single_night_venues`. That is
+# awkward once the catalog-wide behaviour has been on for a while (it means
+# enumerating the whole catalog minus the exception), and an exclusion list
+# is the obvious follow-up if this is ever dialled back in anger — recorded
+# here so the next reader does not think the gap was missed.
+DEFAULT_SINGLE_NIGHT_DEFAULT_ENABLED = False
+
+ADMIN_CONFIG_RECURRING_WINDOW_ENABLED_KEY = "admin_config:event_dedup_recurring_window_enabled"
+# plans/260912_events-venue-night-duplication.md §D, Defect 3. OFF by
+# default: it strictly WIDENS the candidate set, and auto-merge is already
+# `true` in production, so a deploy that widened it would begin merging on
+# the very next crawl, unattended. Turning it on is an operator's deliberate
+# act AFTER §F's attribution repair (a widened window over a mis-attributed
+# corpus is how a Casa Forte weekly night gets absorbed into a Boa Viagem
+# one).
+DEFAULT_RECURRING_WINDOW_ENABLED = False
 
 ADMIN_CONFIG_AUTO_MERGE_ENABLED_KEY = "admin_config:event_dedup_auto_merge_enabled"
 # Plan §C, "the six things most likely to go wrong" #1: OFF by default.
@@ -159,6 +215,28 @@ def validate_auto_merge_enabled_config(value) -> bool:
     return value
 
 
+def validate_recurring_window_enabled_config(value) -> bool:
+    if not isinstance(value, bool):
+        raise TypeError("event dedup recurring-window flag must be a boolean")
+    return value
+
+
+def validate_single_night_default_enabled_config(value) -> bool:
+    if not isinstance(value, bool):
+        raise TypeError("event dedup single-night default flag must be a boolean")
+    return value
+
+
+def validate_single_night_venues_config(value) -> list[str]:
+    """A list of venue_ids — NEVER normalised, lowercased or otherwise
+    massaged: a venue_id is an opaque key, and "helpfully" transforming it
+    here would silently stop matching the ids the merge pass compares
+    against."""
+    if not isinstance(value, list) or not all(isinstance(v, str) and v.strip() for v in value):
+        raise TypeError("event dedup single-night venues must be a list of non-empty venue ids")
+    return [v.strip() for v in value]
+
+
 @dataclass(frozen=True)
 class DedupConfig:
     generic_vocabulary: tuple[str, ...]
@@ -167,6 +245,46 @@ class DedupConfig:
     candidate_window_hours: int
     undated_window_days: int
     auto_merge_enabled: bool
+    # plans/260912_events-venue-night-duplication.md §D/§E. Both DEFAULT to
+    # today's behaviour and are declared with defaults deliberately: every
+    # existing construction of this dataclass (tests, the measurement
+    # script, `load_dedup_config` before §D/§E wire their loaders) keeps
+    # working unchanged, and a deploy that sets neither key widens nothing.
+    #
+    # §D: whether two RECURRING rows whose weekday patterns intersect are
+    # candidates for the same night whatever their stored dates say. See
+    # `in_candidate_window_for_rows`.
+    recurring_window_enabled: bool = False
+    # §E2: venue_ids an operator has declared run ONE night rather than a
+    # programme. Empty by default — see `evaluate_pair`'s
+    # `single_night_venue` argument, and `is_single_night_venue` below for
+    # how this combines with the catalog-wide flag.
+    single_night_venues: tuple[str, ...] = ()
+    # §E2, catalog-wide: treat EVERY venue as running one night. Strictly
+    # broader than the list above, and OFF by default.
+    single_night_default_enabled: bool = False
+
+    def is_single_night_venue(self, venue_id: Optional[str]) -> bool:
+        """Whether §E2's single-night bypass applies to `venue_id`.
+
+        The two keys are ORed, and the catalog-wide flag is strictly the
+        broader of the two — so when both are somehow set, the flag decides
+        and the list is simply redundant, never restrictive. Stated
+        explicitly because the opposite reading ("the list narrows the
+        default") is the intuitive one and is WRONG: there is no exclusion
+        semantics here at all, and a venue cannot be taken off the
+        catalog-wide behaviour by omitting it from the list. Dialling the
+        scope back means setting the flag false and naming the venues you DO
+        want.
+
+        No catalog lookup, no membership check, no I/O: with the flag on this
+        is a constant `True`, so turning it on cannot change which rows are
+        even CONSIDERED — only which of the already-windowed same-venue pairs
+        reach the auto band.
+        """
+        if self.single_night_default_enabled:
+            return True
+        return bool(venue_id) and venue_id in (self.single_night_venues or ())
 
 
 def _load_validated_config(redis_like, key: str, default, *, validator, module_tag: str):
@@ -242,10 +360,26 @@ def load_dedup_config(redis_like) -> DedupConfig:
         redis_like, ADMIN_CONFIG_AUTO_MERGE_ENABLED_KEY, DEFAULT_AUTO_MERGE_ENABLED,
         validator=validate_auto_merge_enabled_config, module_tag="event_dedup",
     )
+    recurring_window = _load_validated_config(
+        redis_like, ADMIN_CONFIG_RECURRING_WINDOW_ENABLED_KEY, DEFAULT_RECURRING_WINDOW_ENABLED,
+        validator=validate_recurring_window_enabled_config, module_tag="event_dedup",
+    )
+    single_night = _load_validated_config(
+        redis_like, ADMIN_CONFIG_SINGLE_NIGHT_VENUES_KEY, list(DEFAULT_SINGLE_NIGHT_VENUES),
+        validator=validate_single_night_venues_config, module_tag="event_dedup",
+    )
+    single_night_default = _load_validated_config(
+        redis_like, ADMIN_CONFIG_SINGLE_NIGHT_DEFAULT_ENABLED_KEY,
+        DEFAULT_SINGLE_NIGHT_DEFAULT_ENABLED,
+        validator=validate_single_night_default_enabled_config, module_tag="event_dedup",
+    )
     return DedupConfig(
         generic_vocabulary=tuple(generic), stopwords=tuple(stopwords),
         lineup_threshold=threshold, candidate_window_hours=window_hours,
         undated_window_days=undated_days, auto_merge_enabled=auto_enabled,
+        recurring_window_enabled=recurring_window,
+        single_night_venues=tuple(single_night),
+        single_night_default_enabled=single_night_default,
     )
 
 
@@ -368,6 +502,77 @@ def in_candidate_window(
     return delta_hours <= window_hours
 
 
+def _recurring_weekdays(row: dict) -> frozenset:
+    """The nights this row actually SERVES, from
+    `event_date_resolver.weekdays_from_recurrence_text` — the SAME function
+    `event_occurrences.expand_occurrences` uses, IMPORTED rather than
+    re-parsed. If this window and the expansion could ever disagree about
+    which nights a row serves, the window would stop being evidence (the
+    identical argument this module's own docstring makes about
+    `evaluate_pair` having one caller for measurement and one for merging).
+
+    Empty for a non-recurring row and for recurrence prose this repo does
+    not parse ("toda semana", "sempre") — an empty set intersects nothing,
+    so both cases simply never widen the window, which is the conservative
+    answer in each.
+    """
+    if not row.get("is_recurring"):
+        return frozenset()
+    return frozenset(weekdays_from_recurrence_text(row.get("recurrence_text")) or ())
+
+
+def in_candidate_window_for_rows(
+    a: dict, b: dict, *, window_hours: int, recurring_window_enabled: bool,
+) -> bool:
+    """plans/260912_events-venue-night-duplication.md §D (Defect 3), the
+    candidate window over two ROWS rather than two instants.
+
+    `in_candidate_window` above stays EXACTLY as it is — signature and
+    behaviour — so its existing unit tests keep meaning what they mean; this
+    is a sibling that calls it, never a replacement that redefines it.
+
+    `expand_occurrences` re-derives a RECURRING row's served days from its
+    weekday pattern and DISCARDS its stored date entirely
+    (`event_occurrences.py`'s own docstring says so, and that is deliberate
+    and load-bearing). Both merge gates, however, key on that same stored
+    date — so two posts about the same weekly night stored three weeks apart
+    are never compared, yet expand onto the same served dates. Confirmed on
+    real data: two live rows, identical title `Aula de FORRÓ na Sala de
+    Reboco`, identical `recurrence_text = 'Toda QUARTA'`, stored 21 days
+    apart, expanding onto three shared future dates each.
+
+    Three deliberate choices a future reader will want to undo:
+
+    - **Both sides must be recurring.** A weekly row and a one-off row that
+      collide on one expanded date are a real but UNMEASURED case, and
+      pairing them risks a one-off being absorbed into a weekly identity.
+      Out of scope on purpose (the plan's own Non-goals).
+    - **INTERSECTION, not equality, of weekday sets.** `Toda QUARTA` and
+      `Quartas e sextas` collide on every Wednesday they both serve;
+      requiring equal sets would miss exactly the collision this exists to
+      catch. It is also the faithful analogue of the existing rule, whose
+      same-local-date branch already admits two rows on one date regardless
+      of their clock times.
+    - **No clock-time condition.** Same reason: the `window_hours` half
+      exists to bridge a LOCAL-DATE BOUNDARY, not to separate a 19:00 show
+      from a 23:00 party on one date. The distinctive-set predicate is what
+      separates those.
+
+    A merged pair of recurring rows cannot move a weekly night: because
+    `expand_occurrences` ignores a recurring row's stored date entirely, the
+    survivor's `starts_at` DATE has no effect on which nights it serves —
+    only its clock time does, and `merge_event_fields` already carries
+    `time_known` alongside whichever `starts_at` wins.
+    """
+    if in_candidate_window(
+        a.get("starts_at"), b.get("starts_at"), window_hours=window_hours,
+    ):
+        return True
+    if not recurring_window_enabled:
+        return False
+    return bool(_recurring_weekdays(a) & _recurring_weekdays(b))
+
+
 # ── the combined pairwise verdict ───────────────────────────────────────────
 @dataclass(frozen=True)
 class PairDecision:
@@ -378,7 +583,10 @@ class PairDecision:
     shared_lineup_names: tuple
 
 
-def evaluate_pair(event_a: dict, event_b: dict, *, venue_name, config: DedupConfig) -> Optional[PairDecision]:
+def evaluate_pair(
+    event_a: dict, event_b: dict, *, venue_name, config: DedupConfig,
+    single_night_venue: bool = False,
+) -> Optional[PairDecision]:
     """The pairwise verdict for two ALREADY-CANDIDATE-WINDOWED events at one
     venue (the caller applies `in_candidate_window` and the same-`venue_id`
     restriction BEFORE calling this — this function does not re-check
@@ -407,6 +615,19 @@ def evaluate_pair(event_a: dict, event_b: dict, *, venue_name, config: DedupConf
         reasons.append(REASON_LINEUP)
     if title_band == BAND_AUTO:
         reasons.append(REASON_TITLE)
+    # §E2: at a venue an operator has said runs ONE NIGHT rather than a
+    # programme, two live event rows in the same candidate window are the
+    # same night regardless of what their titles or lineups say. An
+    # INDEPENDENT sufficient condition, exactly like the shared-lineup rule
+    # — never a tie-break on either of the other two, and never a
+    # corpus-wide rule (the caller decides, per venue, from a list that is
+    # empty by default). It changes only the BAND: every absorption guard
+    # (`_is_protected`, `_edge_blocked_for_absorption`, `choose_canonical`
+    # returning None for two protected members, the non-event guard) still
+    # applies unchanged in `app.services.event_merge`, which is the only
+    # thing that turns a band into a write.
+    if single_night_venue:
+        reasons.append(REASON_SINGLE_NIGHT_VENUE)
 
     if reasons:
         band = BAND_AUTO
@@ -425,18 +646,23 @@ def evaluate_pair(event_a: dict, event_b: dict, *, venue_name, config: DedupConf
 
 
 __all__ = [
-    "BAND_AUTO", "BAND_SUGGEST", "BAND_REFUSE", "REASON_TITLE", "REASON_LINEUP",
+    "BAND_AUTO", "BAND_SUGGEST", "BAND_REFUSE", "REASON_TITLE", "REASON_LINEUP", "REASON_SINGLE_NIGHT_VENUE",
     "ADMIN_CONFIG_GENERIC_VOCABULARY_KEY", "DEFAULT_GENERIC_VOCABULARY",
     "ADMIN_CONFIG_STOPWORDS_KEY", "DEFAULT_STOPWORDS",
     "ADMIN_CONFIG_LINEUP_THRESHOLD_KEY", "DEFAULT_LINEUP_THRESHOLD",
     "ADMIN_CONFIG_CANDIDATE_WINDOW_HOURS_KEY", "DEFAULT_CANDIDATE_WINDOW_HOURS",
     "ADMIN_CONFIG_UNDATED_WINDOW_DAYS_KEY", "DEFAULT_UNDATED_WINDOW_DAYS",
     "ADMIN_CONFIG_AUTO_MERGE_ENABLED_KEY", "DEFAULT_AUTO_MERGE_ENABLED",
+    "ADMIN_CONFIG_RECURRING_WINDOW_ENABLED_KEY", "DEFAULT_RECURRING_WINDOW_ENABLED",
+    "ADMIN_CONFIG_SINGLE_NIGHT_VENUES_KEY", "DEFAULT_SINGLE_NIGHT_VENUES",
+    "ADMIN_CONFIG_SINGLE_NIGHT_DEFAULT_ENABLED_KEY", "DEFAULT_SINGLE_NIGHT_DEFAULT_ENABLED",
     "validate_generic_vocabulary_config", "validate_stopwords_config",
     "validate_lineup_threshold_config", "validate_candidate_window_hours_config",
     "validate_undated_window_days_config", "validate_auto_merge_enabled_config",
+    "validate_recurring_window_enabled_config", "validate_single_night_venues_config",
+    "validate_single_night_default_enabled_config",
     "DedupConfig", "load_dedup_config",
     "venue_name_tokens", "distinctive_set", "band_for_distinctive_sets",
     "lineup_name_set", "shared_lineup_names", "lineup_reaches_auto",
-    "in_candidate_window", "PairDecision", "evaluate_pair",
+    "in_candidate_window", "in_candidate_window_for_rows", "PairDecision", "evaluate_pair",
 ]

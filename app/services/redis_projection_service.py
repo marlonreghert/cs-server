@@ -543,7 +543,14 @@ class RedisProjectionService:
                         time_known=bool(row.get("time_known")),
                         is_recurring=bool(row.get("is_recurring")),
                         recurrence_text=recurrence_text,
-                        title=row.get("title"),
+                        # plans/260912_events-venue-night-duplication.md §G:
+                        # the chosen display title reaches the app through
+                        # the EXISTING `title` field — no new app-facing
+                        # field, nothing removed, released clients see a
+                        # better title in the field they already read. NULL
+                        # `display_title` means "serve the stored title",
+                        # which is every row until a pass chooses one.
+                        title=row.get("display_title") or row.get("title"),
                         description=row.get("description"),
                         category=category,
                         price_text=row.get("price_text"),
