@@ -465,6 +465,13 @@ class LinkCandidateOut(BaseModel):
     score: Optional[float] = None
     method: str
     evidence: dict = Field(default_factory=dict)
+    # plans/260913_dedup-agentic-mitigation-discovery.md Phase 4 (migration
+    # 0047). Additive — the console is a released client and nothing may be
+    # removed. `None` for every candidate row unless and until the
+    # `event_venue_advisor_enabled`-gated pass (default OFF) validates and
+    # attaches a recommendation to this SPECIFIC candidate. Never set by the
+    # deterministic resolution ladder itself.
+    llm_recommendation: Optional[dict] = None
 
 
 # plans/260812_event-dedup-fuzzy-title.md §C/§Data-Config-And-API-Impact:
@@ -490,6 +497,14 @@ class MergeSuggestionOut(BaseModel):
 class ReviewQueueItemOut(EventOut):
     candidates: list[LinkCandidateOut] = Field(default_factory=list)
     merge_suggestions: list[MergeSuggestionOut] = Field(default_factory=list)
+    # plans/260913_dedup-agentic-mitigation-discovery.md Phase 4: additive,
+    # optional — no new endpoint needed (`_review_llm_recommendation` below
+    # simply reads it off whichever of this item's OWN `candidates` rows
+    # carries one). `None` whenever the advisor is disabled (the default) or
+    # has not (yet, or ever) produced a validated recommendation for this
+    # event — an operator sees exactly what they see today until this is
+    # populated.
+    llm_recommendation: Optional[dict] = None
 
 
 class LinkRequest(BaseModel):
@@ -517,6 +532,23 @@ def _merge_suggestions_for(dao, event_id: str) -> list[MergeSuggestionOut]:
     return out
 
 
+def _review_llm_recommendation(candidates: list) -> Optional[dict]:
+    """plans/260913_dedup-agentic-mitigation-discovery.md Phase 4: the
+    top-level `ReviewQueueItemOut.llm_recommendation` the plan calls for,
+    DERIVED from the event's own candidate rows rather than stored twice —
+    one row carries the validated recommendation
+    (`app.dao.venue_repository.VenueRepository.
+    set_event_venue_link_candidate_recommendation` writes exactly one, if
+    any), and this simply surfaces it. `None` whenever no candidate carries
+    one, which is every event today (the advisor ships disabled by
+    default)."""
+    for c in candidates:
+        rec = c.llm_recommendation if isinstance(c, LinkCandidateOut) else c.get("llm_recommendation")
+        if rec:
+            return rec
+    return None
+
+
 @router.get("/review", response_model=list[ReviewQueueItemOut])
 def review_queue():
     """Every event awaiting a human decision, with ranked venue candidates
@@ -541,6 +573,7 @@ def review_queue():
             },
             candidates=candidates, sources=source_outs,
             merge_suggestions=_merge_suggestions_for(dao, row["event_id"]),
+            llm_recommendation=_review_llm_recommendation(candidates),
         ))
     return out
 

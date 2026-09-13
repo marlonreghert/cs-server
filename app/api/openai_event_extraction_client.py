@@ -50,6 +50,12 @@ ENDPOINT = "event_extract"
 # GROUP, and a dashboard that adds them together can answer neither
 # "is extraction getting more expensive" nor "is the title pass worth it".
 ENDPOINT_TITLE_PICK = "event_title_pick"
+# plans/260913_dedup-agentic-mitigation-discovery.md Phase 4: a third,
+# separately-counted endpoint. Same reasoning as ENDPOINT_TITLE_PICK above —
+# a small text-only call per already-ambiguous event (RESOLUTION_QUEUED),
+# never per extraction, so its spend is never confused with either of the
+# other two.
+ENDPOINT_EVENT_VENUE_ADVISOR = "event_venue_advisor"
 # A display title is a card headline. 160 output tokens is generous for
 # `{"display_title": "..."}` and small enough that a model answering with a
 # paragraph is truncated into a rejection rather than billed for an essay.
@@ -74,6 +80,29 @@ Rules:
 - Do not add the venue's own name if none of the titles used it.
 
 Answer with JSON only: {"display_title": "..."}"""
+
+# plans/260913_dedup-agentic-mitigation-discovery.md Phase 4. Same posture as
+# TITLE_PICK_PROMPT above: the model may only CHOOSE among candidates the
+# deterministic ladder already ranked, and must quote its evidence VERBATIM
+# from the event's own text — `app.services.event_venue_advisor_validator.
+# validate_event_venue_recommendation` is the hard gate that actually
+# enforces both, but the prompt states the same rule up front so a
+# non-compliant answer is the exception, not the norm the validator has to
+# catch every time.
+EVENT_VENUE_ADVISOR_PROMPT = """You are given one event's own stated location text (and, if present, its post caption), plus a CLOSED list of candidate venues a separate, deterministic matching step already ranked for it.
+
+Pick the candidate venue this event most likely belongs to, and quote the EXACT text from the location text or caption that supports your answer.
+
+Rules:
+- Choose ONLY a venue_id from the candidate list below. Never propose a venue that is not listed.
+- The evidence_quote must be copied VERBATIM (character for character) from the location text or caption given below. Never paraphrase, summarise or invent it.
+- If no candidate is clearly supported by the text, answer with venue_id set to null.
+
+Answer with JSON only: {"venue_id": "...", "evidence_quote": "..."}"""
+# A recommendation is one venue_id plus a short quoted span — generous
+# headroom for a quote of a few sentences without inviting an essay.
+EVENT_VENUE_ADVISOR_MAX_COMPLETION_TOKENS = 200
+
 DEFAULT_MODEL = "gpt-5.6-luna"
 # Reasoning tokens (gpt-5.6 is a reasoning model) count against
 # max_completion_tokens, so this carries real headroom above a typical
@@ -887,6 +916,58 @@ class OpenAIEventExtractionClient:
             logger.error(f"[OpenAIEventExtraction] title-pick call failed: {e}")
             raise
 
+    async def recommend_event_venue(
+        self, *, location_text: Optional[str], caption: Optional[str], candidates: list,
+    ) -> str:
+        """plans/260913_dedup-agentic-mitigation-discovery.md Phase 4: ONE
+        text-only call for an event already sitting at `RESOLUTION_QUEUED` —
+        never inside `resolve_event_venue`/`evaluate_pair` themselves, which
+        stay synchronous and untouched (see `app.services.
+        event_venue_advisor`'s own docstring). `candidates` is the event's
+        own CLOSED candidate set (the same `event_venue_link_candidate` rows
+        the deterministic ladder already ranked) — `[{"venue_id": ...,
+        "venue_name": ...}, ...]`.
+
+        Returns the RAW response text. Parsing AND the deterministic
+        validation gate (`app.services.event_venue_advisor_validator.
+        validate_event_venue_recommendation`) are the caller's — the same
+        posture every other method on this client takes: this call never
+        decides whether an answer is trustworthy, it only makes the call and
+        counts it.
+
+        Counted under its OWN `endpoint` label so advisor spend can never be
+        confused with extraction or title-pick spend.
+        """
+        prompt = build_event_venue_advisor_prompt(
+            location_text=location_text, caption=caption, candidates=candidates,
+        )
+        start = time.perf_counter()
+        try:
+            response = await self.client.chat.completions.create(
+                model=self.model,
+                messages=[{"role": "user", "content": prompt}],
+                **sampling_kwargs(self.model, 0.1),
+                max_completion_tokens=EVENT_VENUE_ADVISOR_MAX_COMPLETION_TOKENS,
+                response_format={"type": "json_object"},
+            )
+            duration = time.perf_counter() - start
+            OPENAI_API_CALL_DURATION_SECONDS.labels(endpoint=ENDPOINT_EVENT_VENUE_ADVISOR).observe(duration)
+            OPENAI_API_CALLS_TOTAL.labels(endpoint=ENDPOINT_EVENT_VENUE_ADVISOR, status="success").inc()
+            if response.usage:
+                OPENAI_TOKENS_TOTAL.labels(endpoint=ENDPOINT_EVENT_VENUE_ADVISOR, direction="input").inc(
+                    response.usage.prompt_tokens or 0
+                )
+                OPENAI_TOKENS_TOTAL.labels(endpoint=ENDPOINT_EVENT_VENUE_ADVISOR, direction="output").inc(
+                    response.usage.completion_tokens or 0
+                )
+            return response.choices[0].message.content or ""
+        except Exception as e:
+            duration = time.perf_counter() - start
+            OPENAI_API_CALL_DURATION_SECONDS.labels(endpoint=ENDPOINT_EVENT_VENUE_ADVISOR).observe(duration)
+            OPENAI_API_CALLS_TOTAL.labels(endpoint=ENDPOINT_EVENT_VENUE_ADVISOR, status="error").inc()
+            logger.error(f"[OpenAIEventExtraction] event-venue-advisor call failed: {e}")
+            raise
+
 
 def build_title_pick_prompt(
     *, venue_name, local_date, source_titles, lineup,
@@ -908,10 +989,30 @@ def build_title_pick_prompt(
     return "\n".join(lines)
 
 
+def build_event_venue_advisor_prompt(
+    *, location_text: Optional[str], caption: Optional[str], candidates: list,
+) -> str:
+    """The whole user message for one recommendation — TEXT ONLY, same
+    posture as `build_title_pick_prompt`: no image, no S3 read. Everything
+    the model needs is already stored on the event and its candidate rows."""
+    lines = [EVENT_VENUE_ADVISOR_PROMPT, ""]
+    lines.append(f"Location text: {location_text or '(none)'}")
+    lines.append(f"Caption: {caption or '(none)'}")
+    lines.append("")
+    lines.append("Candidate venues:")
+    for c in candidates:
+        venue_id = c.get("venue_id") if isinstance(c, dict) else getattr(c, "venue_id", None)
+        venue_name = c.get("venue_name") if isinstance(c, dict) else getattr(c, "venue_name", None)
+        lines.append(f"- venue_id={venue_id} name={venue_name or '(unknown)'}")
+    return "\n".join(lines)
+
+
 __all__ = [
     "OpenAIEventExtractionClient", "EventExtractionParseError",
-    "ENDPOINT", "ENDPOINT_TITLE_PICK", "TITLE_PICK_PROMPT",
-    "TITLE_PICK_MAX_COMPLETION_TOKENS", "build_title_pick_prompt",
+    "ENDPOINT", "ENDPOINT_TITLE_PICK", "ENDPOINT_EVENT_VENUE_ADVISOR",
+    "TITLE_PICK_PROMPT", "TITLE_PICK_MAX_COMPLETION_TOKENS", "build_title_pick_prompt",
+    "EVENT_VENUE_ADVISOR_PROMPT", "EVENT_VENUE_ADVISOR_MAX_COMPLETION_TOKENS",
+    "build_event_venue_advisor_prompt",
     "parse_extraction_response", "parse_multi_event_extraction_response",
     "compute_multi_event_max_completion_tokens",
     "DEFAULT_MODEL", "DEFAULT_MAX_COMPLETION_TOKENS",

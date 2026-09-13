@@ -554,3 +554,176 @@ on those answers rather than decided in advance. `/execute-feature` should
 proceed through Phases 1-3 unconditionally, then treat Phase 2's report as
 the gate for Phase 4, per the Implementation Approach and Acceptance
 Criteria above.
+
+## Execution Report (2026-09-13, `feature/dedup-agentic-mitigation-discovery`)
+
+Every number below that is labelled "production" was read live, read-only,
+from `i-0893fb6d283243480` (`vibes_bot-cs-server-1`) via AWS SSM against
+`origin/main` at `33ff939` (PRs #227-#229, merged, predating this branch) —
+not against this branch's own new code, which did not exist on that host.
+Two separate read-only scans were run; see `tests/fixtures/
+dedup_agentic_discovery/MANIFEST.md` for the full per-case provenance audit
+and the raw scan figures it quotes.
+
+### What shipped
+
+- **Phase 1 — corpus.** `tests/fixtures/dedup_agentic_discovery/corpus.json`
+  (8 labeled cases: Club Metrópole fragmentation; BeerDock misattribution;
+  the `oquetemhojeemnatal` Xepa Bar roundup case; the REAL, live,
+  currently-undetected Casa Bacurau unrelated-venue gap a production scan
+  found; and four non-duplicate controls reused verbatim from
+  `plans/260812_event-dedup-fuzzy-title.md`'s own false-positive corpus) +
+  `MANIFEST.md` (full provenance/PII audit).
+- **Phase 2 — measurement.** `scripts/measure_agentic_mitigation_baseline.py`
+  (`measure()` for production, `measure_corpus()`/`replay_case()` for the
+  corpus, zero writes anywhere — verified by direct code inspection, a
+  structural unit-test guard, and the fact that its own BDD scenario proves
+  a real, untouched DAO standing by stays untouched) +
+  `tests/test_measure_agentic_mitigation_baseline.py` (22 tests).
+- **Phase 3 — validator.** `app/services/event_venue_advisor_validator.py`
+  (`validate_event_venue_recommendation`: closed-candidate-set membership +
+  verbatim-evidence-substring, zero production callers) +
+  `tests/test_event_venue_advisor_validator.py` (17 tests, including the
+  venue-outside-set, invented-quote, and cross-contaminated-quote
+  hallucination shapes).
+- **Phase 4 — the conditional hook, built and shipped INERT.** See the
+  Decision below for why it ships disabled and is not recommended for
+  enablement this cycle.
+  - Migration `0047_event_venue_link_candidate_llm_recommendation` (one
+    nullable `jsonb` column on the EXISTING `event_venue_link_candidate`
+    table).
+  - `app/services/event_venue_advisor.py` (`EventVenueAdvisorService`,
+    gated by new admin-config key `event_venue_advisor_enabled`, default
+    `False`) + `app/services/event_venue_advisor_validator.py` (reused).
+  - `app/api/openai_event_extraction_client.py` gains
+    `recommend_event_venue`/`ENDPOINT_EVENT_VENUE_ADVISOR`, mirroring
+    `pick_display_title`'s exact pattern (separately-counted spend, loose
+    `response_format={"type":"json_object"}`, no new SDK).
+  - `app/dao/rds_venue_store.py` /
+    `app/dao/venue_repository.py` gain
+    `set_event_venue_link_candidate_recommendation` (writes ONLY the new
+    column, on an EXISTING candidate row, never `venue_id`/
+    `location_resolution`); `tests/rds_fake.py`'s in-memory store mirrors the
+    same contract, including clearing the column on every fresh
+    `replace_event_venue_link_candidates` call.
+  - `app/routers/admin_events_router.py`: `ReviewQueueItemOut` and
+    `LinkCandidateOut` gain an optional `llm_recommendation` field,
+    additive, surfaced through the EXISTING `GET /admin/events/review` — no
+    new endpoint.
+  - Wired into exactly ONE real call site,
+    `EventExtractionService._run_event_venue_advisor_pass`, immediately
+    after the existing display-title pass — same shape, same
+    never-raises/degrade-gracefully contract. Deliberately NOT wired into
+    `PromoterCrawlService` in this pass, to keep the change's blast radius
+    minimal given the Decision below; a straightforward follow-up if the
+    recommendation ever changes.
+  - `tests/test_event_venue_advisor.py` (17 tests),
+    `tests/test_event_venue_advisor_migration.py` (10 tests).
+- **BDD.** `tests/bdd/enrichment/dedup-agentic-mitigation-discovery.feature`
+  — `@wip` removed, all 14 scenarios green (91 steps), including the two
+  that pin CURRENT behaviour (independent per-event resolution; the
+  unrelated-venue gap staying undisputed) and the four Phase-4 scenarios,
+  which exercise the real `EventVenueAdvisorService` end to end (the
+  disabled kill-switch, a validated recommendation attached without
+  touching `venue_id`/`location_resolution`, the never-fires-on-
+  already-auto-resolved guard, and the existing review queue surfacing it)
+  — never a stub that would pass regardless of whether the code works.
+
+### Phase 2 — real numbers
+
+**Corpus replay** (`python -m scripts.measure_agentic_mitigation_baseline --corpus-only`):
+
+| case | failure class | caught by an existing signal? |
+|---|---|---|
+| `club_metropole_fragmentation` | cross-post fragmentation | **No** — nine of ten pairs refused disjoint; the three sharing one performer sit at exactly one shared name, below `DEFAULT_LINEUP_THRESHOLD=2` |
+| `beerdock_multi_location_misattribution` | multi-location misattribution | **Yes** — `event_attribution_dispute.evaluate_attribution_dispute` (`neighbourhood_match`) catches the real `'CASA FORTE'` row. (A second, real, currently-live row reading `'Beer Rock - Casa Forte'` does NOT trip the same check — a narrower residual gap in the SAME existing signal, named explicitly rather than hidden) |
+| `oquetemhojeemnatal_xepa_bar_roundup` | multi-location misattribution | **No**, for an unexpected reason found by running the real ladder rather than assumed: after the `@handle` is stripped for rung 4, the near-empty leftover (`"PA •"`) fuzzy-matches the MAPPED venue's own short name and self-confirms — a narrower, previously-undocumented existing-ladder weakness, not the "not in catalog" gap this case was built to demonstrate |
+| `casa_bacurau_unrelated_venue_gap` | **unrelated-venue gap** | **No** — confirmed REAL and currently live in production (see below); `METHOD_NAME_MATCH` is deliberately outside `DISPUTE_METHODS` |
+| 4 non-duplicate controls (`260812`'s own false-positive corpus) | — | N/A — **zero false positives**: every control correctly lands at `BAND_SUGGEST`/`BAND_REFUSE`, never `BAND_AUTO` |
+
+**Production** (read-only scan, 2026-09-13, against `origin/main` at `33ff939`):
+
+| measure | value |
+|---|---|
+| live, non-superseded `post_type=event` rows | **1,043** |
+| `RESOLUTION_QUEUED` events (`location_resolution IS NULL AND venue_id IS NULL`) | **44** (4.2%) |
+| `BAND_SUGGEST` pairs, whole-catalog fresh re-evaluation (`scripts.measure_event_dedup.measure`) | **8** |
+| `BAND_AUTO` pairs remaining (whole-catalog, shipped defaults) | **0** |
+| pending merge suggestions (`event_merge_suggestion`, `decision='pending'`) | **29** |
+| attribution-disputed rows / distinct dispute groups | **14 rows / 12 groups** — 11 groups are `venue_not_in_catalog` (the Natal-roundup shape); **1 real, currently-live, resolvable dispute** (`@casadaribeira` → a real catalog venue, `Casa da Ribeira`) sitting unactioned in the backlog today |
+| **ambiguous-band events** (`RESOLUTION_QUEUED` + pending suggestions) | **73 / 1,043 = 7.0%** of the live catalog |
+| Instagram handles mapping to >1 `venue_id` (`group_venue_ids_by_handle`) | **57 / 2,014 (2.8%)** |
+| current venue-night duplicate backlog (`event_dedup_backlog`) | **5 groups, 49 excess rows** — non-zero even after the 260912 fix, confirming Club Metrópole-shaped rows are a live, standing residual, not a closed incident |
+| operator engagement with `GET /admin/events/dedup-backlog` / `GET /admin/events/review` | **unknown — no view/last-accessed tracking exists in this codebase for either route** (confirmed by reading both; this cannot be inferred from data that does not exist) |
+| literal `"barchef"` handle search | `barchef.riomar`, `barchef.boteco` found; **0 live events** from either — confirms the premise that prompted Phase 1's own scan for a real "hidden-promoter" case |
+
+### Phase 4 decision: **ship the code inert; do NOT enable it this cycle**
+
+The residual ambiguous volume is real (73 events, 7.0% of the live catalog,
+plus one concretely resolvable attribution dispute sitting unactioned
+today) — this is not "the existing signals already cover everything," so
+Phase 4's code is built, tested, and shipped, per the plan's own
+authorization to do so regardless of the final enablement call.
+
+**But the measured data argues against turning it on this cycle**, for a
+reason the corpus replay above surfaces directly rather than by assumption:
+**the advisor's own trigger surface (`RESOLUTION_QUEUED`) does not overlap
+with where this plan's three named incidents actually live.**
+
+- Club Metrópole's rows are **refused outright** (disjoint distinctive
+  tokens) — they never reach `BAND_SUGGEST`, let alone `RESOLUTION_QUEUED`.
+  An advisor gated on the queued state would never even see them.
+- BeerDock's real motivating row is **already caught** by the existing,
+  already-shipped `event_attribution_dispute` signal — there is nothing
+  left there for an LLM to add.
+- The one REAL, currently-live unrelated-venue gap this session found
+  (Casa Bacurau) resolves via `RESOLUTION_AUTO` (confidently, via rung 4) —
+  it never reaches `RESOLUTION_QUEUED` either, so the advisor as scoped
+  would not have caught it.
+
+So the 73 ambiguous events the advisor WOULD fire on are a real, legitimate,
+separate population (venue-attribution questions where the ladder ranked
+two similarly-scored candidates and correctly declined to guess) — worth an
+operator's attention, but not the incident this plan was commissioned to
+address. Spending LLM cost and review-queue UI real estate on that
+population this cycle would be solving an adjacent problem while leaving
+the three named failure classes exactly as uncovered as they are today.
+
+**The more targeted next investment, backed directly by this cycle's
+measurement**, is a small, deterministic widening of
+`event_attribution_dispute.DISPUTE_METHODS` to accept a high-confidence,
+no-brand-overlap `METHOD_NAME_MATCH` result (the Casa Bacurau shape: score
+≥ some high floor, zero shared brand-root token, and no runner-up within
+margin) — the same validated-gate discipline this plan's Phase 3 already
+proved out, applied to a NAME match instead of an LLM's free-text answer,
+and touching zero new infrastructure. This is recorded here as the
+recommended follow-up rather than attempted in this plan, which is scoped
+to measurement + the inert hook per its own Implementation Approach.
+Candidate C's embedding-based candidate generation (already named in this
+plan's Evidence as "the most likely SECOND follow-up") remains the
+strongest candidate specifically for Club Metrópole-shaped cross-post
+fragmentation, since nothing in the deterministic ladder or the advisor (as
+scoped) ever re-opens a `BAND_REFUSE` pair.
+
+### Acceptance criteria — status
+
+- [x] Labeled corpus exists, committed, covers all three named failure
+  classes plus the unrelated-venue gap plus non-duplicate controls.
+- [x] `scripts/measure_agentic_mitigation_baseline.py` exists, is read-only
+  (verified by inspection and a structural test), and its output against
+  real production data is captured above.
+- [x] The validator is implemented, unit-tested against accepting and
+  hallucinated cases, zero production callers.
+- [x] A written, numbers-backed Phase 4 recommendation exists (above):
+  ships, gated `False`, not recommended for enablement this cycle, with a
+  named reason and a named alternative.
+- [x] Phase 4 writes only the existing `event_venue_link_candidate` shape —
+  never a new table, never `venue_id`, never `location_resolution` (see
+  `tests/test_event_venue_advisor.py::TestTheOneCall::
+  test_a_validated_recommendation_is_written_to_the_candidate_row_only`).
+- [x] Zero change to any existing admin-config default, and zero change to
+  `evaluate_pair`/`resolve_event_venue`/`evaluate_attribution_dispute`'s
+  existing behaviour — confirmed by the full existing test suite (`make
+  test-unit`: 4,473 passed / 7 pre-existing skips / 0 failed; `make
+  test-bdd`: 124 features / 1,564 scenarios / 10,066 steps, all passed)
+  running unmodified against this branch.

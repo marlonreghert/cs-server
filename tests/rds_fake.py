@@ -1324,11 +1324,32 @@ class InMemoryRdsVenueStore:
                 f"event_venue_link_candidate FK violation: event_id {event_id!r} "
                 f"does not exist in events.event yet"
             )
-        self.event_link_candidates[event_id] = [dict(c) for c in candidates]
+        # `llm_recommendation` defaults NULL on every fresh row — a re-run of
+        # the ladder (this method's own docstring: "the old ranking must not
+        # linger") must not let a PRIOR run's advisory recommendation
+        # survive alongside a freshly recomputed candidate set. Mirrors the
+        # real store's INSERT, which likewise never sets this column.
+        self.event_link_candidates[event_id] = [
+            {**dict(c), "llm_recommendation": None} for c in candidates
+        ]
 
     def list_event_venue_link_candidates(self, event_id: str) -> list[dict]:
         rows = self.event_link_candidates.get(event_id, [])
         return [copy.deepcopy(r) for r in sorted(rows, key=lambda r: r["rank"])]
+
+    def set_event_venue_link_candidate_recommendation(
+        self, event_id: str, venue_id: str, recommendation: dict,
+    ) -> bool:
+        """See `RdsVenueStore.set_event_venue_link_candidate_recommendation`
+        (`app/dao/rds_venue_store.py`) — the SAME contract: writes only an
+        EXISTING `(event_id, venue_id)` candidate row, never inserts,
+        returns whether a row was actually updated."""
+        self._guard()
+        for row in self.event_link_candidates.get(event_id, []):
+            if row.get("venue_id") == venue_id:
+                row["llm_recommendation"] = copy.deepcopy(recommendation)
+                return True
+        return False
 
     # ── events.event_merge_suggestion (plans/260812_event-dedup-fuzzy-title.md
     # §C/§E, migration 0038) ────────────────────────────────────────────────

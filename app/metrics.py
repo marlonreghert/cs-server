@@ -1693,6 +1693,27 @@ EVENT_DEDUP_BACKLOG = Gauge(
     ["measure"],
 )
 
+# plans/260913_dedup-agentic-mitigation-discovery.md Phase 4 — mirrors
+# EVENT_DISPLAY_TITLE_TOTAL's own outcome-counting discipline exactly.
+#   suggested   a validated recommendation was written onto the event's
+#               candidate row (never its venue_id/location_resolution).
+#   rejected    the model answered, but `event_venue_advisor_validator`
+#               refused it (outside the candidate set, or evidence not
+#               verbatim). Climbing `rejected` means the gate is doing its
+#               job and the prompt needs work.
+#   error       the call failed. An AVAILABILITY problem, never a data
+#               problem: the fallback writes nothing and the event stays
+#               exactly as the deterministic ladder left it.
+#
+# Advisor SPEND is watched separately from extraction and title-pick spend
+# through OPENAI_API_CALLS_TOTAL{endpoint="event_venue_advisor"} and its
+# token siblings — never conflated with either.
+EVENT_VENUE_ADVISOR_OUTCOME_TOTAL = Counter(
+    "event_venue_advisor_outcome_total",
+    "How the event-venue advisor's recommendation was resolved",
+    ["outcome"],
+)
+
 # Snapshot of events.post_item (post_type="menu" only) by current-vs-expired
 # state, using the DEFAULT expiry window (app.models.menu_lifecycle.
 # DEFAULT_MENU_EXPIRY_DAYS) as an approximation — deliberately NOT the live

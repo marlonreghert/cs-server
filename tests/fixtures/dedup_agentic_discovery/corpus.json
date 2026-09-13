@@ -1,0 +1,148 @@
+{
+  "corpus_version": 1,
+  "generated_at": "2026-09-13",
+  "plan": "plans/260913_dedup-agentic-mitigation-discovery.md",
+  "description": "Labeled corpus of real incident cases (Club Metrópole fragmentation, BeerDock mis-attribution, five venues from the 'oquetemhojeemnatal' Natal roundup account, a real unrelated-venue/hidden-promoter gap found by a one-time production scan, and genuine non-duplicate controls from plans/260812_event-dedup-fuzzy-title.md's own false-positive corpus), reviewed for PII before commit and playing the same role that 260812 corpus already plays for evaluate_pair. Every case below states, field by field, what is a verbatim real string versus a labeled reconstruction — see each case's own 'provenance' block. See tests/fixtures/dedup_agentic_discovery/MANIFEST.md for the full provenance audit.",
+  "cases": [
+    {
+      "id": "club_metropole_fragmentation",
+      "failure_class": "cross_post_fragmentation",
+      "synthetic": false,
+      "provenance": "Titles are VERBATIM from plans/260912_events-venue-night-duplication-rca.md ('Defect 1'), which itself quotes production. venue_id, instagram_handle, event_id and exact lineup membership were NOT captured in the RCA text and are RECONSTRUCTED here to match the RCA's own stated aggregate ('the three pairs that do share a performer share exactly one name, @neguindabasersv') — exactly 3 of the 5 posts are given @neguindabasersv in their lineup so C(3,2)=3 pairs share it and the other 7 pairs share nothing, matching the RCA's count. starts_at is reconstructed as one Saturday night (the RCA's own 'Sábado 12/09').",
+      "description": "Five real Instagram posts about one club's one Saturday night, each naming a different act. Nine of the ten pairs have disjoint distinctive-token title sets (refused outright); the three pairs sharing one performer name sit exactly at the auto-merge floor minus one (DEFAULT_LINEUP_THRESHOLD=2, one shared name only).",
+      "venue": {"venue_id": "corpus-club-metropole", "venue_name": "Club Metrópole", "lat": null, "lng": null, "address": null},
+      "sibling_venues": [],
+      "unrelated_venues": [],
+      "instagram_handle": "clubmetropole.recife",
+      "posts": [
+        {"event_id": "corpus-cm-1", "title": "ROWKA", "starts_at": "2026-09-12T22:00:00-03:00", "lineup": ["ROWKA"], "location_text": null, "caption": null},
+        {"event_id": "corpus-cm-2", "title": "VITINHO POLÊMICO", "starts_at": "2026-09-12T22:00:00-03:00", "lineup": ["VITINHO POLÊMICO"], "location_text": null, "caption": null},
+        {"event_id": "corpus-cm-3", "title": "SÁBADO VAI FERVER", "starts_at": "2026-09-12T22:00:00-03:00", "lineup": ["@neguindabasersv"], "location_text": null, "caption": null},
+        {"event_id": "corpus-cm-4", "title": "SECRET CLUB com @neguindabasersv", "starts_at": "2026-09-12T22:00:00-03:00", "lineup": ["@neguindabasersv"], "location_text": null, "caption": null},
+        {"event_id": "corpus-cm-5", "title": "estreia de @neguindabasersv", "starts_at": "2026-09-12T22:00:00-03:00", "lineup": ["@neguindabasersv"], "location_text": null, "caption": null}
+      ],
+      "notes": "Expected: event_dedup.evaluate_pair reaches BAND_AUTO for zero pairs at the shipped lineup_threshold=2 and window defaults — existing dedup does not collapse this to one listing at any threshold reachable today (no threshold on the title-containment or lineup signal reaches ROWKA/VITINHO, which share no token and no performer with anything)."
+    },
+    {
+      "id": "beerdock_multi_location_misattribution",
+      "failure_class": "multi_location_misattribution",
+      "synthetic": false,
+      "provenance": "Venue names, the mapped handle, and corpus-bd-3's location_text ('CASA FORTE') are REAL and VERBATIM — from plans/260912_events-venue-night-duplication-rca.md ('20 of 44 live rows at \"BeerDock Boa Viagem\" carry location_text = \\'CASA FORTE\\'\"). A read-only production scan on 2026-09-13 re-confirmed the shape is still live today (a different, longer real row currently reads 'Beer Rock - Casa Forte', which does NOT trip the substring-containment check below — included in this case's own notes as a known edge of that check, not papered over). corpus-bd-1/2's location_text values and every post TITLE are SYNTHETIC placeholders (the RCA did not quote BeerDock's individual post titles or its self-referential location_text strings) — only the venue names, handle, and corpus-bd-3's location_text are real.",
+      "description": "A single-venue Instagram handle (beerdock_recife, mapped only to 'BeerDock Boa Viagem') posts about several physical branches; events naming the sibling branch in free text ('CASA FORTE' / 'Beer Rock - Casa Forte') still attribute to Boa Viagem because the handle maps to only one venue.",
+      "venue": {"venue_id": "corpus-beerdock-boa-viagem", "venue_name": "BeerDock Boa Viagem", "lat": null, "lng": null, "address": "Av. Boa Viagem, Recife - PE"},
+      "sibling_venues": [
+        {"venue_id": "corpus-beerdock-casa-forte", "venue_name": "Beerdock Casa Forte", "address": "R. dos Arcos 1745 - Poço da Panela, Recife - PE", "instagram_handle": "beerdock.casaforte"}
+      ],
+      "unrelated_venues": [],
+      "instagram_handle": "beerdock_recife",
+      "posts": [
+        {"event_id": "corpus-bd-1", "title": "Rockout / The Seven", "starts_at": "2026-09-10T21:00:00-03:00", "lineup": [], "location_text": "BOA VIAGEM", "caption": null},
+        {"event_id": "corpus-bd-2", "title": "Sambinha Beerdock", "starts_at": "2026-09-11T20:00:00-03:00", "lineup": [], "location_text": "Beer Rock - Bon Viagem", "caption": null},
+        {"event_id": "corpus-bd-3", "title": "Unplugged Dirt", "starts_at": "2026-09-13T21:00:00-03:00", "lineup": [], "location_text": "CASA FORTE", "caption": null},
+        {"event_id": "corpus-bd-4", "title": "Rádio Ativa", "starts_at": "2026-09-14T21:00:00-03:00", "lineup": [], "location_text": "Beer Rock - Casa Forte", "caption": null}
+      ],
+      "notes": "Expected: evaluate_attribution_dispute disputes corpus-bd-3 (the folded location_text 'casa forte' is a substring of the sibling's own folded NAME 'beerdock casa forte', method=neighbourhood_match) against the mapped Boa Viagem venue — CAUGHT by the existing 260912 signal. corpus-bd-1/2 ('BOA VIAGEM', 'Bon Viagem' typo) correctly do NOT dispute (they describe the venue's own branch). corpus-bd-4 is a deliberately INCLUDED near-miss: its real, currently-live 'Beer Rock - Casa Forte' phrasing is NOT a substring of either the sibling's name or address (extra words break the containment check), so it is NOT disputed either — a real, current, narrower residual gap in the SAME existing signal, worth naming explicitly rather than only showing the signal's best case."
+    },
+    {
+      "id": "oquetemhojeemnatal_xepa_bar_roundup",
+      "failure_class": "multi_location_misattribution",
+      "synthetic": false,
+      "provenance": "Venue name, venue_id, instagram_handle (oquetemhojeemnatal), every location_text value, and every title below are VERBATIM from a read-only production scan on 2026-09-13 (tests/fixtures/dedup_agentic_discovery/MANIFEST.md) — two titles name a performer's stage/DJ name (never a private individual's full legal name), the same PII risk level already accepted elsewhere in this repo's own committed test data (e.g. 'Ação Leitura: Bate-papo com Marcelino Freire', a real author named on a public event flyer). event_id and starts_at were NOT captured by the scan (it read title/location_text/handle only) and are RECONSTRUCTED placeholders.",
+      "description": "One of the five hand-excluded roundup venues this plan's Evidence section names: 'Xepa Bar' is a real catalog venue, but every one of its three live rows carries a location_text naming a DIFFERENT @handle the catalog does not carry — the 'oquetemhojeemnatal' promoter account's own roundup pattern (plans/260812_backfill-misattributed-links.md), not a Xepa-Bar-specific failure. Included here as real, current (unrepaired) production evidence of the failure class, distinct in shape from BeerDock: here the true target is mostly NOT in the catalog at all.",
+      "venue": {"venue_id": "ven_672d62435550317265717a5241516d5f742d33776257694a496843", "venue_name": "Xepa Bar", "lat": null, "lng": null, "address": null},
+      "sibling_venues": [],
+      "unrelated_venues": [],
+      "instagram_handle": "oquetemhojeemnatal",
+      "posts": [
+        {"event_id": "corpus-xepa-1", "title": "Underground", "starts_at": "2026-08-20T22:00:00-03:00", "lineup": [], "location_text": "PA • @casadorock666", "caption": null},
+        {"event_id": "corpus-xepa-2", "title": "Rock — Cleo Lima", "starts_at": "2026-08-22T21:00:00-03:00", "lineup": [], "location_text": "PA • @abissal_bp", "caption": null},
+        {"event_id": "corpus-xepa-3", "title": "DJs — Flô Core", "starts_at": "2026-08-27T22:00:00-03:00", "lineup": [], "location_text": "PA • @carrancas_rn", "caption": null}
+      ],
+      "notes": "MEASURED, not assumed (the actual finding differs from this case's original hypothesis, kept here rather than quietly rewritten): with the corpus's own bounded one-venue candidate set, evaluate_attribution_dispute returns None for all three posts — but NOT because the ladder correctly shrugs at unresolvable evidence. `resolve_event_venue` strips the @handle for rung 4 (`_strip_handles_for_name_match`), leaving a near-empty leftover ('PA •'), and that leftover fuzzy-matches the MAPPED venue's own short name ('Xepa Bar') at score 0.6667 — above DEFAULT_CONFIDENCE_FLOOR (0.55) with only one candidate (no margin check needed) — so the ladder resolves RESOLUTION_AUTO back to the SAME mapped venue via METHOD_NAME_MATCH, which by construction can never disagree with the mapped venue_id and therefore never disputes. This is a DIFFERENT, narrower existing-ladder weakness than the 'venue not in catalog' gap this case was built to demonstrate: a near-empty leftover string after handle-stripping can self-confirm against a short venue name. Measured against the real, full ~2,700+-venue production catalog (not this corpus's single-venue bound), the same leftover would be scored against every other venue too, so whether the real production rows resolve the same way cannot be fully confirmed by this bounded replay alone — flagged explicitly rather than overclaimed."
+    },
+    {
+      "id": "casa_bacurau_unrelated_venue_gap",
+      "failure_class": "unrelated_venue_gap",
+      "synthetic": false,
+      "provenance": "event_id, mapped venue_id (handle 'casabacurau'), title, and location_text below are VERBATIM from a read-only production scan on 2026-09-13 (see MANIFEST.md), which also confirmed the match: the existing rung-4 name_match logic resolves this location_text to a real, DIFFERENT, already-catalogued venue ('Clube Ferroviário de Afogados') at score 1.0. starts_at was not captured by the scan and is a reconstructed placeholder. This is the plan's own 'barchef'-shaped hidden-promoter pattern, found as a GENUINE, currently-undetected gap on the first production scan built for it — not constructed.",
+      "description": "A handle mapped to one venue ('Casa Bacurau') posts an event whose location_text names a DIFFERENT, unrelated, already-catalogued venue ('Clube Ferroviário de Afogados') in plain text — no @ mention, no location tag, and no shared brand-root token ('casa' is a DEFAULT_BRAND_ROOT_STOPWORDS entry, so rung 3 never runs for this venue at all). Rung 4 (name_match) resolves it perfectly (score 1.0) but METHOD_NAME_MATCH is deliberately excluded from DISPUTE_METHODS, so evaluate_attribution_dispute returns None: today this is undisputed, unflagged, and undetected by every existing signal.",
+      "venue": {"venue_id": "vsg_b7996fe3895c7f6a5bbbbec0", "venue_name": "Casa Bacurau", "lat": null, "lng": null, "address": null},
+      "sibling_venues": [],
+      "unrelated_venues": [
+        {"venue_id": "ven_3875515066524b54446e5a52637771667775376e6564464a496843", "venue_name": "Clube Ferroviário de Afogados"}
+      ],
+      "instagram_handle": "casabacurau",
+      "posts": [
+        {"event_id": "evt_01M0Z0FR0MKYQMXCWV7E7SNR9B", "title": "NO BREGA", "starts_at": "2026-09-06T21:00:00-03:00", "lineup": [], "location_text": "Clube Ferroviário de Afogados", "caption": null}
+      ],
+      "notes": "This is the ONE case in the corpus this plan's own BDD feature expects to STAY undetected today ('Leave an unrelated-venue misattribution undisputed today') — its presence here with an empty caught_by list is the finding, not a bug in the replay."
+    },
+    {
+      "id": "ação_leitura_non_duplicate_control",
+      "failure_class": "non_duplicate_control",
+      "synthetic": false,
+      "provenance": "Titles and venue are VERBATIM from plans/260812_event-dedup-fuzzy-title.md's own Evidence section (the false-positive corpus that set the existing auto-merge bar) — already committed, reviewed, and reused elsewhere in this repo's own tests (tests/bdd/steps/event_dedup_fuzzy_title_steps.py).",
+      "description": "Two genuinely different talks in one author-visit programme, same venue, same week — sharing five of nine title tokens by plain string-ratio (which is exactly why a score-based instrument was rejected in favour of the set-containment predicate this case pins).",
+      "venue": {"venue_id": "corpus-sempre-rock-bar", "venue_name": "Sempre Rock Bar", "lat": null, "lng": null, "address": null},
+      "sibling_venues": [],
+      "unrelated_venues": [],
+      "instagram_handle": null,
+      "posts": [
+        {"event_id": "corpus-al-1", "title": "Ação Leitura: Bate-papo com Marcelino Freire", "starts_at": "2026-08-04T19:00:00-03:00", "lineup": [], "location_text": null, "caption": null},
+        {"event_id": "corpus-al-2", "title": "Ação Leitura: Bate-papo com Jeferson Tenório", "starts_at": "2026-08-04T19:00:00-03:00", "lineup": [], "location_text": null, "caption": null}
+      ],
+      "notes": "Expected: BAND_SUGGEST, never BAND_AUTO (intersecting-but-not-containing distinctive sets) — a correctly-NOT-merged pair that must stay apart despite a high plain-string-similarity score."
+    },
+    {
+      "id": "oficina_workshops_non_duplicate_control",
+      "failure_class": "non_duplicate_control",
+      "synthetic": false,
+      "provenance": "Titles and venue are VERBATIM from plans/260812_event-dedup-fuzzy-title.md's own Evidence section.",
+      "description": "Three genuinely different workshops, same venue, same week.",
+      "venue": {"venue_id": "corpus-entre-amigos-o-bode", "venue_name": "Entre Amigos O Bode", "lat": null, "lng": null, "address": null},
+      "sibling_venues": [],
+      "unrelated_venues": [],
+      "instagram_handle": null,
+      "posts": [
+        {"event_id": "corpus-of-1", "title": "Oficina Vida de Inseto", "starts_at": "2026-08-05T15:00:00-03:00", "lineup": [], "location_text": null, "caption": null},
+        {"event_id": "corpus-of-2", "title": "Oficina Cobra Gigante", "starts_at": "2026-08-06T15:00:00-03:00", "lineup": [], "location_text": null, "caption": null},
+        {"event_id": "corpus-of-3", "title": "Oficina de Sorvete", "starts_at": "2026-08-07T15:00:00-03:00", "lineup": [], "location_text": null, "caption": null}
+      ],
+      "notes": "Expected: BAND_REFUSE for all three pairs (disjoint distinctive sets once 'oficina' is recognised as generic vocabulary) — existing signal correctly refuses every pair."
+    },
+    {
+      "id": "ferias_amigos_park_non_duplicate_control",
+      "failure_class": "non_duplicate_control",
+      "synthetic": false,
+      "provenance": "Titles and venue are VERBATIM from plans/260812_event-dedup-fuzzy-title.md's own Evidence section ('Two more the corpus volunteered, and both broke a draft of this design before the measurement caught them').",
+      "description": "A four-week holiday programme at one venue — bare numerals must never be stripped from the distinctive set, or all four weeks collapse into one.",
+      "venue": {"venue_id": "corpus-entre-amigos-o-bode-2", "venue_name": "Entre Amigos O Bode", "lat": null, "lng": null, "address": null},
+      "sibling_venues": [],
+      "unrelated_venues": [],
+      "instagram_handle": null,
+      "posts": [
+        {"event_id": "corpus-fap-1", "title": "Férias Amigos Park — Semana 1", "starts_at": "2026-07-15T15:00:00-03:00", "lineup": [], "location_text": null, "caption": null},
+        {"event_id": "corpus-fap-2", "title": "Férias Amigos Park — Semana 2", "starts_at": "2026-07-22T15:00:00-03:00", "lineup": [], "location_text": null, "caption": null},
+        {"event_id": "corpus-fap-3", "title": "Férias Amigos Park — Semana 3", "starts_at": "2026-07-29T15:00:00-03:00", "lineup": [], "location_text": null, "caption": null},
+        {"event_id": "corpus-fap-4", "title": "Férias Amigos Park — Semana 4", "starts_at": "2026-08-05T15:00:00-03:00", "lineup": [], "location_text": null, "caption": null}
+      ],
+      "notes": "Expected: BAND_SUGGEST for every pair (disjoint once the number is kept), never BAND_AUTO — note these four posts are not even in the same candidate window (weekly apart), included here for the TITLE-signal question alone, not the window question."
+    },
+    {
+      "id": "casanova_ecobar_non_duplicate_control",
+      "failure_class": "non_duplicate_control",
+      "synthetic": false,
+      "provenance": "Titles and venue are VERBATIM from plans/260812_event-dedup-fuzzy-title.md's own Evidence section — the SAME shape as Club Metrópole's cluster (two different acts, one venue, one night, deliberately kept apart), already re-cited by plans/260912_events-venue-night-duplication.md's own Open Questions as the reason the single-night-venue policy is an explicit per-venue opt-in, never a corpus-wide rule.",
+      "description": "Two different acts, one night, one venue — must never auto-merge.",
+      "venue": {"venue_id": "corpus-casanova-ecobar", "venue_name": "Casanova Ecobar", "lat": null, "lng": null, "address": null},
+      "sibling_venues": [],
+      "unrelated_venues": [],
+      "instagram_handle": null,
+      "posts": [
+        {"event_id": "corpus-ce-1", "title": "Bolinha do Cavaco", "starts_at": "2026-08-07T21:00:00-03:00", "lineup": [], "location_text": null, "caption": null},
+        {"event_id": "corpus-ce-2", "title": "JB do Cavaco", "starts_at": "2026-08-07T21:00:00-03:00", "lineup": [], "location_text": null, "caption": null}
+      ],
+      "notes": "Expected: BAND_SUGGEST (intersecting on the shared token 'cavaco'), never BAND_AUTO at the shipped minimum-token-length-two rule."
+    }
+  ]
+}

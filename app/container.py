@@ -633,6 +633,9 @@ class Container:
             validate_dispute_action_config,
             validate_dispute_withhold_enabled_config,
         )
+        from app.services.event_venue_advisor import (
+            validate_event_venue_advisor_enabled_config,
+        )
         from app.services.venue_city_vocabulary import (
             validate_address_city_vocabulary_config,
         )
@@ -733,6 +736,13 @@ class Container:
                 # as True (§D's own `bool("false")` trap).
                 "event_attribution_dispute_action": validate_dispute_action_config,
                 "event_attribution_dispute_withhold_enabled": validate_dispute_withhold_enabled_config,
+                # plans/260913_dedup-agentic-mitigation-discovery.md Phase 4:
+                # the conditional live advisory hook's own kill-switch, false
+                # by default. With it false, no OpenAI call is ever made and
+                # no event_venue_link_candidate row is ever touched by this
+                # pass — production stays byte-identical to today whatever
+                # else in this plan is deployed.
+                "event_venue_advisor_enabled": validate_event_venue_advisor_enabled_config,
                 # plans/260906_address-components-backfill.md Phase 1: the
                 # operator-approved city-name additions beyond the 27 state
                 # capitals — shape only (numeric lat/lng in a plausible
