@@ -501,6 +501,13 @@ def resolve_event_venue(
     # question to answer, and every existing single-venue caller keeps
     # behaving exactly as before this rung existed.
     same_account_venues: Optional[list[VenueLite]] = None,
+    # A caller declaring that it acts ONLY on identity-grade outcomes —
+    # rungs 1-3 and the `venue_not_in_catalog` sentinel — and discards rung
+    # 4's scored `name_match` and rung 5's caption mention entirely. See the
+    # rung-4 block below for the ONE thing this permits and the proof that
+    # it changes no answer such a caller can observe. Default False: every
+    # pre-existing caller runs the full ladder, unchanged.
+    identity_methods_only: bool = False,
 ) -> ResolutionResult:
     """Run the ladder for one event and return its verdict.
 
@@ -579,13 +586,40 @@ def resolve_event_venue(
     # `_strip_handles_for_name_match`'s own docstring). `None` means nothing
     # with real alphabetic content survived the strip, so this rung does not
     # run at all for this text.
-    name_match_text = _strip_handles_for_name_match(location_text)
-    if name_match_text is None:
+    #
+    # This rung is the ladder's ONLY superlinear step: it scores
+    # `location_text` against EVERY venue in `venues` with `name_similarity`
+    # (a `difflib.SequenceMatcher` ratio). One call over a ~3,600-venue
+    # catalog is unremarkable; a BULK caller that runs the ladder once per
+    # row over a whole corpus turns it into rows x catalog fuzzy comparisons.
+    # `app.services.event_dedup_backlog` did exactly that and made
+    # `GET /admin/events/dedup-backlog` take minutes at 85% CPU, on a path
+    # that also runs at the end of every extraction run.
+    #
+    # `identity_methods_only` lets such a caller skip this rung WHEN, AND
+    # ONLY WHEN, doing so cannot change an answer it can observe. The proof,
+    # for a caller that acts on rungs 1-3 and `venue_not_in_catalog` alone:
+    # rungs 1-3 return BEFORE this point, so reaching here means none of them
+    # resolved. From here the only outcomes are this rung's `name_match`
+    # (discarded by such a caller), rung 5's caption mention (likewise), the
+    # `venue_not_in_catalog` sentinel, and a plain unresolved. This rung can
+    # therefore only matter by RETURNING EARLY and thereby suppressing the
+    # `venue_not_in_catalog` sentinel — which is reachable at all only when
+    # the event's own text named an unrecognized handle. With no such handle,
+    # every path from here is an outcome the caller discards, so the rung's
+    # result is unobservable and is not computed.
+    skip_name_match = identity_methods_only and unrecognized_event_handle is None
+    if skip_name_match:
         candidates = []
-        if location_text:
-            EVENT_VENUE_NAME_MATCH_SKIPPED_TOTAL.inc()
+        name_match_text = None
     else:
-        candidates = _name_match_candidates(name_match_text, venues, tag_coords)
+        name_match_text = _strip_handles_for_name_match(location_text)
+        if name_match_text is None:
+            candidates = []
+            if location_text:
+                EVENT_VENUE_NAME_MATCH_SKIPPED_TOTAL.inc()
+        else:
+            candidates = _name_match_candidates(name_match_text, venues, tag_coords)
     if candidates:
         ok, _reason = gate_auto_link(candidates, floor=confidence_floor, margin=margin)
         if ok:

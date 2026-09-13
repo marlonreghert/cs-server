@@ -259,3 +259,115 @@ class TestFoldReviewReason:
         assert fold_review_reason(None, "location_text_disputes_venue") == (
             "location_text_disputes_venue"
         )
+
+
+# ── the ladder's one superlinear rung, and the proof it is safe to skip ────
+@pytest.fixture
+def full_ladder(monkeypatch):
+    """Forces `identity_methods_only=False` for the duration of a test, so
+    the SAME production functions produce both verdicts and the ONLY
+    difference is the flag. Nothing about the verdict logic is reproduced
+    here — that would test the copy, not the code."""
+    import app.services.event_attribution_dispute as mod
+
+    real = mod.resolve_event_venue
+
+    def _full(**kwargs):
+        kwargs["identity_methods_only"] = False
+        return real(**kwargs)
+
+    monkeypatch.setattr(mod, "resolve_event_venue", _full)
+
+
+# Every shape the fast path has to get right, including the two that decide
+# it: a name-matchable text with NO handle (rung 4 skipped, and its
+# `name_match` answer was going to be discarded anyway) and the same text
+# WITH an unrecognized handle (rung 4 must still run, because returning
+# early there is what suppresses the `venue_not_in_catalog` sentinel).
+_EQUIVALENCE_TEXTS = [
+    None, "", "   ",
+    "CASA FORTE", "BOA VIAGEM", "MADALENA",
+    "@beerdock.casaforte", "@beerdock.madalena", "@beerdock_recife",
+    "nossa unidade de Boa Viagem",
+    "BeerDock Boa Viagem — Av. Cons. Aguiar, 1000",
+    "Av. Cons. Aguiar, 1000 — Boa Viagem, Recife",
+    "Maria Café",                      # name-matchable, NO handle
+    "@naoexiste Maria Café",           # name-matchable, unrecognized handle
+    "@naoexiste",                      # handle only, nothing to name-match
+    "@naoexiste CASA FORTE",           # unrecognized handle AND a rung-3 hit
+    "nosso cafe", "vem pro rolê", "Rua da Aurora, 123",
+    "ZS • @mahalilacafe",
+]
+
+
+def _verdict_shape(verdict):
+    if verdict is None:
+        return None
+    return (verdict.method, verdict.target_venue_id, verdict.location_text)
+
+
+@pytest.mark.parametrize("location_text", _EQUIVALENCE_TEXTS)
+@pytest.mark.parametrize("mapped", ["v_bv", "v_cf", "v_mc"])
+def test_skipping_rung_four_changes_no_verdict(location_text, mapped, request):
+    """The hotfix's correctness guarantee, differential-tested: for every
+    text and every mapped venue, the verdict with the ladder's superlinear
+    rung skipped is IDENTICAL to the verdict with it run."""
+    fast = _verdict_shape(_dispute(location_text, mapped=mapped))
+
+    request.getfixturevalue("full_ladder")
+    slow = _verdict_shape(_dispute(location_text, mapped=mapped))
+
+    assert fast == slow, (location_text, mapped, fast, slow)
+
+
+def test_a_name_matchable_text_with_an_unrecognized_handle_still_runs_rung_four(
+    monkeypatch,
+):
+    """The guard that makes the skip safe. Rung 4 returning early is what
+    suppresses `venue_not_in_catalog`; with an unrecognized handle present
+    that suppression is observable, so the rung must still run."""
+    calls = []
+    import app.services.event_venue_resolution as evr
+
+    real = evr.name_similarity
+    monkeypatch.setattr(
+        evr, "name_similarity",
+        lambda *a, **kw: (calls.append(a), real(*a, **kw))[1],
+    )
+    _dispute("@naoexiste Maria Café")
+    assert calls, "rung 4 must run when an unrecognized handle could be suppressed"
+
+
+def test_a_text_with_no_handle_never_reaches_rung_four(monkeypatch):
+    """The other half: with nothing to suppress, the rung is unobservable
+    and is not computed. This is the entire performance fix."""
+    calls = []
+    import app.services.event_venue_resolution as evr
+
+    real = evr.name_similarity
+    monkeypatch.setattr(
+        evr, "name_similarity",
+        lambda *a, **kw: (calls.append(a), real(*a, **kw))[1],
+    )
+    _dispute("Maria Café")
+    assert calls == [], "rung 4 ran even though its answer is discarded here"
+
+
+def test_the_full_ladder_is_still_the_default_for_every_other_caller(monkeypatch):
+    """`identity_methods_only` defaults False, so the promoter/extraction
+    callers — which DO act on `name_match` and persist its ranked candidates
+    — are untouched."""
+    calls = []
+    import app.services.event_venue_resolution as evr
+
+    real = evr.name_similarity
+    monkeypatch.setattr(
+        evr, "name_similarity",
+        lambda *a, **kw: (calls.append(a), real(*a, **kw))[1],
+    )
+    result = evr.resolve_event_venue(
+        caption=None, location_text="Maria Café", location_tag=None,
+        promoter_handle="beerdock_recife", venues=CATALOG, handle_index=HANDLE_INDEX,
+    )
+    assert calls, "the default path must still score every venue"
+    assert result.candidates, "and must still return its ranked candidates"
