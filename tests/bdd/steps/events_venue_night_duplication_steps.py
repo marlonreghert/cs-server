@@ -261,6 +261,18 @@ def step_then_event_carries_review_reason(context, reason):
 
 @then("the event carries no review reason")
 def step_then_event_carries_no_review_reason(context):
+    # plans/260913_dedup-agentic-mitigation-discovery.md reuses this exact
+    # step text over its OWN `context.agentic_*` fixture (behave allows only
+    # one registration of an identical step pattern across the whole
+    # `tests/bdd/steps/` directory) — dispatch there first; see
+    # `dedup_agentic_mitigation_discovery_steps.
+    # agentic_check_gap_event_carries_no_review_reason`'s own docstring.
+    from tests.bdd.steps.dedup_agentic_mitigation_discovery_steps import (
+        agentic_check_gap_event_carries_no_review_reason,
+    )
+
+    if agentic_check_gap_event_carries_no_review_reason(context):
+        return
     row = _reload(context)
     assert not row.get("review_reason"), row.get("review_reason")
 
@@ -287,6 +299,15 @@ def step_then_dispute_counted_handle_mention(context):
 
 @then("no attribution dispute is counted")
 def step_then_no_dispute_counted(context):
+    # See the dispatch note on `step_then_event_carries_no_review_reason`
+    # just above — the same reuse-by-shared-context-attribute convention,
+    # for the SAME reason.
+    from tests.bdd.steps.dedup_agentic_mitigation_discovery_steps import (
+        agentic_check_no_dispute_counted,
+    )
+
+    if agentic_check_no_dispute_counted(context):
+        return
     for (method, result), before in context.vnd_metric_before.items():
         assert _link_metric(method, result) == before, (method, result)
 

@@ -324,6 +324,16 @@ class VenueRepository(RedisVenueDAO):
     def list_event_venue_link_candidates(self, event_id: str):
         return self.rds_store.list_event_venue_link_candidates(event_id)
 
+    # plans/260913_dedup-agentic-mitigation-discovery.md Phase 4 (migration
+    # 0047) — writes ONLY the `llm_recommendation` column of one existing
+    # candidate row, never `venue_id`/`location_resolution` on the event.
+    def set_event_venue_link_candidate_recommendation(
+        self, event_id: str, venue_id: str, recommendation: dict,
+    ) -> bool:
+        return self.rds_store.set_event_venue_link_candidate_recommendation(
+            event_id, venue_id, recommendation,
+        )
+
     # ── events.crawl_target (plans/260809_scheduled-incremental-instagram-crawl.md) ──
     def get_crawl_target(self, handle: str):
         return self.rds_store.get_crawl_target(handle)

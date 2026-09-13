@@ -254,6 +254,19 @@ def step_given_post_supersedes_one_linkable_one_ambiguous(context):
 
 @when("the post is reconciled")
 def step_when_post_is_reconciled(context):
+    # plans/260913_dedup-agentic-mitigation-discovery.md reuses this exact
+    # step text over its OWN `context.agentic_*` fixture (behave allows only
+    # one registration of an identical step pattern across the whole
+    # `tests/bdd/steps/` directory, the same constraint this module's own
+    # docstring documents for `"the event is read from the admin API"`) —
+    # dispatch there first; see `dedup_agentic_mitigation_discovery_steps.
+    # agentic_reconcile_the_post`'s own docstring.
+    from tests.bdd.steps.dedup_agentic_mitigation_discovery_steps import (
+        agentic_reconcile_the_post,
+    )
+
+    if agentic_reconcile_the_post(context):
+        return
     _ensure(context)
     before = _supersede_outcome_counts()
     _reconcile(context, context.rws_prepared or [])

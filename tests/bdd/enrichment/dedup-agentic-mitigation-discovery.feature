@@ -1,4 +1,3 @@
-@wip
 Feature: Measure before building — ground the agentic mitigation decision in real signal coverage
 
   As an operator scaling event crawling from a handful of venues toward

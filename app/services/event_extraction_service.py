@@ -90,6 +90,7 @@ from app.services.event_date_resolver import (
 )
 from app.services.event_dedup_backlog import publish_dedup_backlog_gauges
 from app.services.event_display_title import EventDisplayTitleService
+from app.services.event_venue_advisor import EventVenueAdvisorService
 from app.services.event_identity import normalize_title
 from app.services.event_merge import merge_touched_events
 from app.services.event_reconciliation import (
@@ -704,6 +705,15 @@ class EventExtractionService:
             # default) inside the service itself, and it never raises: an
             # OpenAI failure here must not fail an otherwise-successful run.
             await self._run_display_title_pass()
+            # plans/260913_dedup-agentic-mitigation-discovery.md Phase 4: the
+            # conditional advisory pass, LAST of the two model passes and
+            # after every post's own reconciliation has already settled an
+            # event's resolution state — this NEVER reopens that decision,
+            # it only annotates an already-`RESOLUTION_QUEUED` row's own
+            # candidate set. Gated by `event_venue_advisor_enabled` (false by
+            # default) inside the service itself, and it never raises: an
+            # OpenAI failure here must not fail an otherwise-successful run.
+            await self._run_event_venue_advisor_pass()
             update_events_gauge(self.venue_dao)
             # plans/260912_events-venue-night-duplication.md §A: the
             # duplicate/refusal/attribution backlog, pushed alongside
@@ -731,6 +741,17 @@ class EventExtractionService:
             await service.run_for_events(self._run_touched_event_ids)
         except Exception as e:  # pragma: no cover - defensive
             logger.warning(f"[EventExtraction] display-title pass failed: {e}")
+
+    async def _run_event_venue_advisor_pass(self) -> None:
+        if not self._run_touched_event_ids:
+            return
+        service = EventVenueAdvisorService(
+            self.venue_dao, self.openai_client, redis_client=self.redis_client,
+        )
+        try:
+            await service.run_for_events(self._run_touched_event_ids)
+        except Exception as e:  # pragma: no cover - defensive
+            logger.warning(f"[EventExtraction] event-venue-advisor pass failed: {e}")
 
     async def _run_handles(
         self, cfg: dict, since: datetime, bump, handle_reports: list[dict],

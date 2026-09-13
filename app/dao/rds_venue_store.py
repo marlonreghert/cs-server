@@ -1608,13 +1608,41 @@ class RdsVenueStore:
         with self.engine.connect() as conn:
             rows = conn.execute(
                 text(
-                    "SELECT event_id, venue_id, rank, score, method, evidence, created_at "
+                    "SELECT event_id, venue_id, rank, score, method, evidence, "
+                    "llm_recommendation, created_at "
                     "FROM events.event_venue_link_candidate "
                     "WHERE event_id=:e ORDER BY rank"
                 ),
                 {"e": event_id},
             ).mappings()
             return [dict(r) for r in rows]
+
+    def set_event_venue_link_candidate_recommendation(
+        self, event_id: str, venue_id: str, recommendation: dict,
+    ) -> bool:
+        """plans/260913_dedup-agentic-mitigation-discovery.md Phase 4
+        (migration `0047`). Attaches a VALIDATED advisory recommendation to
+        the one ranked candidate row it is about — never touches
+        `venue_id`/`location_resolution` on `events.event` itself, and
+        never inserts a row: if `(event_id, venue_id)` is not an existing
+        candidate row (the ladder never ranked this venue for this event),
+        nothing is written and this returns `False`. That can only happen if
+        a caller passes a `venue_id` outside the closed candidate set it
+        itself supplied to the validator — a caller bug, not a case to
+        paper over with an upsert."""
+        with self.engine.begin() as conn:
+            result = conn.execute(
+                text(
+                    "UPDATE events.event_venue_link_candidate "
+                    "SET llm_recommendation = CAST(:rec AS jsonb) "
+                    "WHERE event_id=:event_id AND venue_id=:venue_id"
+                ),
+                {
+                    "event_id": event_id, "venue_id": venue_id,
+                    "rec": json.dumps(recommendation),
+                },
+            )
+            return result.rowcount > 0
 
     # ── events.event_merge_suggestion (plans/260812_event-dedup-fuzzy-title.md
     # §C/§E, migration 0038) ────────────────────────────────────────────────
