@@ -623,6 +623,10 @@ class Container:
             validate_stopwords_config,
             validate_undated_window_days_config,
         )
+        from app.services.event_attribution_dispute import (
+            validate_dispute_action_config,
+            validate_dispute_withhold_enabled_config,
+        )
         from app.services.venue_city_vocabulary import (
             validate_address_city_vocabulary_config,
         )
@@ -694,6 +698,16 @@ class Container:
                 "event_dedup_candidate_window_hours": validate_candidate_window_hours_config,
                 "event_dedup_undated_window_days": validate_undated_window_days_config,
                 "event_dedup_auto_merge_enabled": validate_auto_merge_enabled_config,
+                # plans/260912_events-venue-night-duplication.md §C: what a
+                # disputed attribution DOES ("flag", the shipped default, or
+                # "reattribute"), and whether the review reason it records is
+                # allowed to withhold auto-accept (false by default — a real
+                # withdrawal of content is an operator's deliberate act). The
+                # SAME generic admin-config CRUD route every key here uses,
+                # validated on write so a stored "false" can never read back
+                # as True (§D's own `bool("false")` trap).
+                "event_attribution_dispute_action": validate_dispute_action_config,
+                "event_attribution_dispute_withhold_enabled": validate_dispute_withhold_enabled_config,
                 # plans/260906_address-components-backfill.md Phase 1: the
                 # operator-approved city-name additions beyond the 27 state
                 # capitals — shape only (numeric lat/lng in a plausible

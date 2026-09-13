@@ -361,6 +361,10 @@ def _build_rds_layer(context) -> None:
         validate_stopwords_config,
         validate_undated_window_days_config,
     )
+    from app.services.event_attribution_dispute import (
+        validate_dispute_action_config,
+        validate_dispute_withhold_enabled_config,
+    )
     from app.services.venue_city_vocabulary import validate_address_city_vocabulary_config
 
     def _validate_eligibility(value):
@@ -389,6 +393,11 @@ def _build_rds_layer(context) -> None:
             "event_dedup_candidate_window_hours": validate_candidate_window_hours_config,
             "event_dedup_undated_window_days": validate_undated_window_days_config,
             "event_dedup_auto_merge_enabled": validate_auto_merge_enabled_config,
+            # plans/260912_events-venue-night-duplication.md §C: mirrors
+            # app.container's own registration, for the same reason the six
+            # event_dedup_* keys above do.
+            "event_attribution_dispute_action": validate_dispute_action_config,
+            "event_attribution_dispute_withhold_enabled": validate_dispute_withhold_enabled_config,
             # plans/260906_address-components-backfill.md Phase 1: mirrors
             # app.container's own registration — the SAME generic
             # admin-config CRUD route every key here uses, no dedicated

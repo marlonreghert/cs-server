@@ -668,6 +668,7 @@ def reconcile_post_events(
     attribute: AttributeFn,
     touched_event_ids: Optional[list] = None,
     min_confidence: float = 0.5,
+    non_withholding_reasons: tuple = (),
 ) -> int:
     """Reconcile one post's freshly-extracted events against the rows already
     persisted for `(source_handle, source_shortcode)`. Returns the number of
@@ -712,6 +713,16 @@ def reconcile_post_events(
     importing that one (which would import back into this one for
     `REVIEW_REASON_DIVERGES_FROM_CONFIRMED`, a cycle) — see
     plans/260807_one-event-many-posts.md.
+
+    `non_withholding_reasons` (plans/260912_events-venue-night-duplication.md
+    §C) names review-reason tokens that must be RECORDED on the row but must
+    NOT, by themselves, stop `is_clean_extraction` auto-accepting it. It
+    exists for a detection reason whose own gate has not been turned on:
+    writing `location_text_disputes_venue` onto a disputed row would
+    otherwise remove that row from serving the moment the feature ships,
+    which is a real withdrawal of content and therefore an operator's
+    deliberate act, not a side effect of a deploy. Defaults empty, in which
+    case the accept gate sees the EXACT string it always has.
     """
     existing_events = venue_dao.list_events_by_source(source_handle, source_shortcode)
     existing_by_key = {
@@ -871,10 +882,28 @@ def reconcile_post_events(
             reasons.append(REVIEW_REASON_UNRESOLVED_VENUE)
         fields["review_reason"] = "; ".join(reasons) if reasons else None
 
+        # plans/260912_events-venue-night-duplication.md §C: a reason that is
+        # RECORDED on the row but is NOT, by itself, grounds to withhold
+        # auto-accept. `is_clean_extraction` refuses ANY non-empty review
+        # reason — correct as a default, and exactly why writing a new
+        # DETECTION reason would silently withdraw content from serving
+        # unless the caller has asked for that. The caller names the tokens
+        # it wants recorded-but-not-withholding; with the default empty
+        # tuple (every pre-existing caller) the gate sees the identical
+        # string it always has, so this changes nothing for anyone else.
+        if non_withholding_reasons:
+            gate_reasons = [
+                token for token in (fields["review_reason"] or "").split("; ")
+                if token and token not in non_withholding_reasons
+            ]
+            gate_review_reason = "; ".join(gate_reasons) if gate_reasons else None
+        else:
+            gate_review_reason = fields["review_reason"]
+
         fields["status"] = (
             STATUS_ACCEPTED
             if is_clean_extraction(
-                review_reason=fields["review_reason"],
+                review_reason=gate_review_reason,
                 starts_at=fields.get("starts_at"),
                 venue_id=effective_venue_id,
                 confidence=fields.get("confidence"),

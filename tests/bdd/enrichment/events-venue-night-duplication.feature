@@ -1,4 +1,3 @@
-@wip
 Feature: Stop one venue-night producing several listings
   As an operator of the event pipeline
   I want an event filed at the venue its own text names, two announcements of
@@ -70,12 +69,12 @@ Feature: Stop one venue-night producing several listings
   Scenario: Withhold a disputed event from serving only when withholding is enabled
     Given the attribution dispute withholding is enabled
     When a post from "beerdock_recife" announces an event whose location text is "CASA FORTE"
-    Then the event is awaiting review
+    Then the disputed event is awaiting review
     And the event is not selectable for the serving projection
 
   Scenario: Keep serving a disputed event while withholding is disabled
     When a post from "beerdock_recife" announces an event whose location text is "CASA FORTE"
-    Then the event is accepted
+    Then the disputed event is still accepted
     And the event is selectable for the serving projection
 
   Scenario: Never dispute an event whose operator edited its venue
