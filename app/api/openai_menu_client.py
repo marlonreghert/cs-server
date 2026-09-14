@@ -19,6 +19,41 @@ from app.metrics import (
 
 logger = logging.getLogger(__name__)
 
+# plans/260914_openai-token-budget-repo-audit.md: this file's own
+# `OpenAIMenuClient.__init__` default LOOKS non-reasoning (`gpt-5.4-nano`),
+# but app.container always constructs it with `model=settings.
+# menu_extraction_model` (app/config.py:741, container.py:517), which
+# defaults to `gpt-5.6-luna` — a reasoning model whose invisible reasoning
+# tokens bill against `extract_menu_from_photos`'s SAME budget before a
+# single visible menu-item token is written. That call was a FLAT 4096
+# regardless of how many photos it received — up to `settings.
+# menu_photos_per_venue` (20) in one call, no internal batching. A flat cap
+# cannot cover both a single drinks list and a large multi-page menu spread
+# across most of those 20 photos (the difference between, say, 12 items and
+# 80), so this scales the SAME way
+# app.api.openai_event_extraction_client.compute_multi_event_max_completion_tokens
+# already does: a flat reasoning-tax floor, reused from
+# plans/260914_event-venue-advisor-token-budget.md's own measured value
+# (absent a live sample for menu extraction specifically), plus a per-photo
+# term sized for a densely packed menu page (10-15 items at up to ~70 tokens
+# of JSON each, once name/description/prices/dietary_tags/is_available are
+# all counted).
+MENU_EXTRACTION_BASE_COMPLETION_TOKENS = 4096
+MENU_EXTRACTION_PER_PHOTO_COMPLETION_TOKENS = 768
+
+
+def compute_menu_extraction_max_completion_tokens(photo_count: int) -> int:
+    """Output token budget for one `extract_menu_from_photos` call, scaled by
+    how many photos are actually being sent — the real per-item count (how
+    many dishes/prices those photos show) is unknown before the call, so this
+    scales from the input signal that IS known, same justification
+    `compute_multi_event_max_completion_tokens` already uses for scaling from
+    a known ceiling rather than an unknown output count. At least one photo's
+    worth of headroom always applies, even if `photo_count` is 0."""
+    photos = max(1, int(photo_count or 1))
+    return MENU_EXTRACTION_BASE_COMPLETION_TOKENS + MENU_EXTRACTION_PER_PHOTO_COMPLETION_TOKENS * photos
+
+
 EXTRACTION_PROMPT = """## Role
 You are an advanced OCR and Data Extraction Specialist for the food & beverage industry.
 You will receive multiple photos from a venue's Google Maps listing. These photos are a
@@ -95,7 +130,7 @@ class OpenAIMenuClient:
                 model=self.model,
                 messages=[{"role": "user", "content": content}],
                 **sampling_kwargs(self.model, 0.1),
-                max_completion_tokens=4096,
+                max_completion_tokens=compute_menu_extraction_max_completion_tokens(len(photo_urls)),
                 response_format={"type": "json_object"},
             )
 
@@ -214,6 +249,18 @@ class OpenAIMenuClient:
                 "image_url": {"url": url, "detail": "low"},
             })
 
+        # plans/260914_openai-token-budget-repo-audit.md: reviewed and left
+        # flat, unlike extract_menu_from_photos above. This call's own
+        # `model` default (used here — the caller never overrides it) is
+        # `gpt-5.4-nano`, confirmed NOT a reasoning model
+        # (app/api/openai_compat.py's PINNED_SAMPLING_PREFIXES is only
+        # `("gpt-5.6",)`; this method's own temperature=0.1 kwarg would be
+        # rejected with a 400 if it were), so the invisible reasoning-token
+        # failure mode this audit is about does not apply here. Output is one
+        # small `{"index", "is_menu", "confidence"}` object per photo; a
+        # realistic worst case (~20-30 photos, the same order of magnitude as
+        # settings.menu_photos_per_venue=20) is ~20-25 tokens/entry, well
+        # under 1024 with margin.
         start_time = time.perf_counter()
         try:
             response = await self.client.chat.completions.create(

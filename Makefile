@@ -76,6 +76,7 @@ test-unit:
 		tests/test_archive_sources.py \
 		tests/test_apify_instagram_media.py \
 		tests/test_menu_extraction_from_archive.py \
+		tests/test_openai_menu_client.py \
 		tests/test_photo_metadata_fidelity.py \
 		tests/test_apify_profile_parsing.py \
 		tests/test_instagram_cascade_run_scope.py \
@@ -85,6 +86,7 @@ test-unit:
 		tests/test_venue_name_matching.py \
 		tests/test_judge_adjudication_band.py \
 		tests/test_container_judge_wiring.py \
+		tests/test_openai_instagram_judge_client.py \
 		tests/test_openai_call_shape.py \
 		tests/test_google_search_cannot_self_accept.py \
 		tests/test_container_google_search_wiring.py \
@@ -119,6 +121,7 @@ test-unit:
 		tests/test_event_venue_advisor.py \
 		tests/test_event_venue_advisor_migration.py \
 		tests/test_event_venue_advisor_client.py \
+		tests/test_event_title_pick_client.py \
 		tests/test_measure_agentic_mitigation_baseline.py \
 		tests/test_venue_link_audit.py \
 		tests/test_measure_venue_link_audit.py \
@@ -136,6 +139,7 @@ test-unit:
 		tests/test_photo_classification.py \
 		tests/test_classification_batch_retry.py \
 		tests/test_photo_classifier_error_handling.py \
+		tests/test_openai_vibe_client.py \
 		tests/test_review_queue_completeness.py \
 		tests/test_operator_edited_fields_migration.py \
 		tests/test_operator_edited_fields_patch.py \

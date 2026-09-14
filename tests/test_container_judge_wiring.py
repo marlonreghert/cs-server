@@ -119,3 +119,14 @@ class TestSettingsAreNotDuplicated:
         assert isinstance(s.instagram_judge_model, str) and s.instagram_judge_model
         assert 0.0 <= s.instagram_judge_floor <= 1.0
         assert s.instagram_judge_max_venue_photos >= 0
+
+    def test_the_default_model_is_the_reasoning_one(self):
+        """plans/260914_openai-token-budget-repo-audit.md: the UNCONFIGURED
+        default actually reaches production (this repo's tracked `.env` sets
+        no INSTAGRAM_JUDGE_MODEL override), so this is not an academic
+        default — it is what `judge_instagram_match` runs on today. Pinned
+        here because `OpenAIInstagramJudgeClient.MAX_COMPLETION_TOKENS`'s own
+        reasoning-tax justification depends entirely on this being
+        `gpt-5.6-luna`, not the non-reasoning-looking `gpt-5.4-mini` this
+        file's OWN `InstagramJudge.__init__` default would suggest."""
+        assert Settings().instagram_judge_model == "gpt-5.6-luna"

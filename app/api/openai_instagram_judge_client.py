@@ -30,6 +30,25 @@ logger = logging.getLogger(__name__)
 
 ENDPOINT_LABEL = "instagram_judge"
 
+# plans/260914_openai-token-budget-repo-audit.md: this file's own
+# `InstagramJudge.__init__` default LOOKS non-reasoning (`gpt-5.4-mini`,
+# instagram_judge.py:87), but app.container._build_instagram_judge always
+# constructs it with `model=settings.instagram_judge_model`
+# (app/config.py:414), which defaults to `gpt-5.6-luna` — a reasoning model
+# whose invisible reasoning tokens bill against this SAME budget before a
+# single visible `{"is_match", "confidence", "reason"}` token is written.
+# 200 is the exact value
+# plans/260914_event-venue-advisor-token-budget.md measured against real
+# production traffic to silently return EMPTY 7.5% of the time on this same
+# model for a comparably small/simple decision call — this was the smallest
+# budget of any reasoning-model call site found in that audit. No live
+# sample exists for this call specifically; reusing the one figure this
+# codebase HAS validated in production for this exact model on a comparably
+# small text+image judgement task, rather than guessing a smaller number
+# with no evidence behind it. max_completion_tokens is a ceiling, not a
+# floor, so this costs nothing unless the model actually needs it.
+MAX_COMPLETION_TOKENS = 4096
+
 
 class OpenAIInstagramJudgeClient:
     def __init__(self, api_key: str, *, timeout: float = 30.0):
@@ -63,7 +82,7 @@ class OpenAIInstagramJudgeClient:
                 model=model,
                 messages=[{"role": "user", "content": content}],
                 response_format={"type": "json_object"},
-                max_completion_tokens=200,
+                max_completion_tokens=MAX_COMPLETION_TOKENS,
                 **sampling_kwargs(model, 0),
             )
             status = "success"

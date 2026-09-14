@@ -56,10 +56,23 @@ ENDPOINT_TITLE_PICK = "event_title_pick"
 # never per extraction, so its spend is never confused with either of the
 # other two.
 ENDPOINT_EVENT_VENUE_ADVISOR = "event_venue_advisor"
-# A display title is a card headline. 160 output tokens is generous for
-# `{"display_title": "..."}` and small enough that a model answering with a
-# paragraph is truncated into a rejection rather than billed for an essay.
-TITLE_PICK_MAX_COMPLETION_TOKENS = 160
+# plans/260914_openai-token-budget-repo-audit.md: this call runs on
+# DEFAULT_MODEL (gpt-5.6-luna, see below) — a reasoning model whose invisible
+# reasoning tokens bill against this SAME budget before a single visible
+# `{"display_title": "..."}` token is written. 160 was sized only for the
+# visible output (a card headline, capped at 120 chars by the prompt) and
+# never accounted for that — it is smaller than the 200 that
+# plans/260914_event-venue-advisor-token-budget.md measured against real
+# production traffic to silently return EMPTY 7.5% of the time on this same
+# model for a comparably small/simple text-only decision call. There is no
+# live sample for title-pick itself; rather than guess a smaller number with
+# no evidence behind it (the same unproven "this task sounds simple" logic
+# that made 160 unsafe in the first place), this reuses the one figure this
+# codebase HAS validated against production for this exact model on a
+# comparably-sized task — EVENT_VENUE_ADVISOR_MAX_COMPLETION_TOKENS's own
+# value. max_completion_tokens is a ceiling, not a floor, so matching it
+# costs nothing unless the model actually needs it.
+TITLE_PICK_MAX_COMPLETION_TOKENS = 4096
 
 # The prompt's own load-bearing sentence is pinned by a wiring guard
 # (tests/test_event_display_title.py, in the shape of

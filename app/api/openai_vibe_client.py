@@ -21,6 +21,38 @@ from app.metrics import (
 
 logger = logging.getLogger(__name__)
 
+# plans/260914_openai-token-budget-repo-audit.md: both stage methods' own
+# `model` PARAMETER defaults look non-reasoning (`gpt-5.4-nano`/
+# `gpt-5.4-mini`), but app.container always constructs the caller with
+# `stage_a_model=settings.vibe_classifier_stage_a_model` /
+# `stage_b_model=settings.vibe_classifier_stage_b_model` (app/config.py:760-
+# 761, container.py:558-559), both defaulting to `gpt-5.6-luna` — a
+# reasoning model whose invisible reasoning tokens bill against these SAME
+# budgets before a single visible output token is written. Both calls were a
+# flat 3072 with no accounting for that.
+#
+# Stage A's schema is the richest single object in this whole audit — a
+# `photos[]` entry per photo (up to settings.vibe_classifier_target_photos,
+# default 10), all 8 fixed-taxonomy category blocks (labels/confidence/
+# evidence each), top_vibes, overall_confidence, notes, and 4 blurb strings —
+# whose visible JSON alone is already estimated at ~1800-2200 tokens before
+# counting a single reasoning token for a 10-image, 8-taxonomy
+# classification task. No live sample exists for this call; reusing
+# plans/260914_event-venue-advisor-token-budget.md's measured 3000-token
+# reasoning-tax floor as a baseline (conservatively, since this task is
+# reasoned to be at least as reasoning-heavy as that call's single text
+# match) plus this call's own larger visible-content estimate.
+#
+# Stage B is narrower — `refined_categories` covers only the categories
+# `_should_escalate` flagged uncertain (a subset of the 8), over
+# settings.vibe_classifier_stage_b_photos (default 5) photos — smaller
+# visible output than Stage A, so its budget stays below Stage A's,
+# preserving this file's own output-size ordering, while still carrying the
+# same reasoning-tax headroom (fewer photos and categories does not mean
+# trivially less reasoning on a still-real classification task).
+STAGE_A_MAX_COMPLETION_TOKENS = 6144
+STAGE_B_MAX_COMPLETION_TOKENS = 5120
+
 # Stage A prompt: fixed-taxonomy classification + photo scoring
 STAGE_A_PROMPT = """You are VibeSense Venue Vibe Classifier for bars and nightlife in Recife, Brazil. Analyze ALL available evidence (photos + text signals) and return ONLY a JSON object. You must be precise, conservative, and return ONLY valid labels from the provided taxonomy. Do not invent new labels. If evidence is weak, return an empty list for that category and reduce confidence.
 
@@ -297,7 +329,7 @@ class OpenAIVibeClient:
                 model=model,
                 messages=[{"role": "user", "content": content}],
                 **sampling_kwargs(model, 0.2),
-                max_completion_tokens=3072,
+                max_completion_tokens=STAGE_A_MAX_COMPLETION_TOKENS,
                 response_format={"type": "json_object"},
             )
 
@@ -384,7 +416,7 @@ class OpenAIVibeClient:
                 model=model,
                 messages=[{"role": "user", "content": content}],
                 **sampling_kwargs(model, 0.1),
-                max_completion_tokens=3072,
+                max_completion_tokens=STAGE_B_MAX_COMPLETION_TOKENS,
                 response_format={"type": "json_object"},
             )
 
