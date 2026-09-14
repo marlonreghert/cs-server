@@ -640,6 +640,10 @@ class Container:
         from app.services.venue_link_audit import (
             validate_venue_link_audit_enabled_config,
         )
+        from app.services.venue_link_audit_reviewer import (
+            validate_venue_link_audit_reviewer_auto_apply_config,
+            validate_venue_link_audit_reviewer_enabled_config,
+        )
         from app.services.venue_city_vocabulary import (
             validate_address_city_vocabulary_config,
         )
@@ -761,6 +765,25 @@ class Container:
                 # additive fields. The SAME generic admin-config CRUD route
                 # every key here uses, no dedicated endpoint.
                 "venue_link_audit_enabled": validate_venue_link_audit_enabled_config,
+                # plans/260914_agentic-venue-resolution-fallback.md: the
+                # audit-sourced, address-aware reviewer. TWO keys, both false
+                # by default, deliberately not one — the risk here is a write
+                # that HIDES a real defect (a wrongly-closed flag), so the
+                # pass must be runnable in shadow mode, producing a full
+                # inspectable verdict log against live data, before it is
+                # allowed to close anything.
+                #   `..._enabled`     -> whether the pass runs AT ALL. False
+                #                        means no OpenAI call and no row read.
+                #   `..._auto_apply`  -> whether a consensus verdict may
+                #                        SUPPRESS a flag. False means verdicts
+                #                        are still recorded but every flagged
+                #                        pair stays flagged.
+                # The SAME generic admin-config CRUD route every key here
+                # uses, no dedicated endpoint.
+                "venue_link_audit_reviewer_enabled":
+                    validate_venue_link_audit_reviewer_enabled_config,
+                "venue_link_audit_reviewer_auto_apply_enabled":
+                    validate_venue_link_audit_reviewer_auto_apply_config,
                 # plans/260906_address-components-backfill.md Phase 1: the
                 # operator-approved city-name additions beyond the 27 state
                 # capitals — shape only (numeric lat/lng in a plausible

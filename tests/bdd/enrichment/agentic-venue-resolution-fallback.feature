@@ -1,4 +1,3 @@
-@wip
 Feature: Agentic venue-link fallback — an audit-sourced, address-aware reviewer that closes its own false positives
   As an operator triaging the venue-handle link audit
   I want a second, agentic look at every flagged (handle, venue) pair, given the
@@ -59,7 +58,7 @@ Feature: Agentic venue-link fallback — an audit-sourced, address-aware reviewe
     Given a flagged pair whose mapped venue has no stored address row
     When the reviewer runs over the audit's flagged pairs
     Then the reviewer still reaches a recorded outcome for that pair
-    And the run does not fail
+    And the reviewer run does not fail
 
   # ── a contradiction escalates, and never force-fits a venue ────────────────
 
@@ -169,7 +168,7 @@ Feature: Agentic venue-link fallback — an audit-sourced, address-aware reviewe
   Scenario: The reviewer makes no model call and writes nothing while its flag is off
     Given the venue-link-audit reviewer flag is disabled
     When the reviewer runs over the audit's flagged pairs
-    Then no model call is made
+    Then no model call is charged for any pair
     And no review record is written
     And the audit's flagged output is unchanged
 

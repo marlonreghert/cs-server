@@ -1733,6 +1733,38 @@ EVENT_VENUE_ADVISOR_OUTCOME_TOTAL = Counter(
     ["outcome"],
 )
 
+# plans/260914_agentic-venue-resolution-fallback.md: how the audit-sourced
+# venue-link REVIEWER resolved one flagged (handle, venue) pair. Distinct
+# from EVENT_VENUE_ADVISOR_OUTCOME_TOTAL above — different population (the
+# audit's flagged pairs, not RESOLUTION_QUEUED events), different grain (a
+# pair, not an event) and different authority (this one can suppress a flag).
+#
+# outcome ∈ confirmed | contradicted | insufficient | no_consensus |
+#           skipped_multi_mapped | skipped_operator_decided |
+#           skipped_all_events_protected | validator_rejected |
+#           empty_response | error
+#
+# `empty_response` is deliberately its OWN label and never folded into
+# `validator_rejected`. Plan §F measured the reason: a reasoning model whose
+# max_completion_tokens is too small returns an EMPTY body, which parses to
+# None and reads downstream as a malformed answer — indistinguishable, on a
+# dashboard, from the gate correctly refusing a bad one. That confound hid a
+# real configuration bug in the existing advisor for a full cycle. A climbing
+# `empty_response` here means "raise the token budget"; a climbing
+# `validator_rejected` means "the prompt needs work" — two different actions
+# that must never share a counter.
+#
+# Reviewer SPEND rides OPENAI_API_CALLS_TOTAL{endpoint="venue_link_review"}
+# and its token siblings, kept separate from the advisor's own endpoint label
+# so the two passes' costs never merge. Note this pass makes K calls per pair
+# (DEFAULT_REVIEW_CONSENSUS_K = 10), so its call count is an order of
+# magnitude above its pair count by design.
+VENUE_LINK_AUDIT_REVIEW_OUTCOME_TOTAL = Counter(
+    "venue_link_audit_review_outcome_total",
+    "How the audit-sourced venue-link reviewer resolved one flagged pair",
+    ["outcome"],
+)
+
 # Snapshot of events.post_item (post_type="menu" only) by current-vs-expired
 # state, using the DEFAULT expiry window (app.models.menu_lifecycle.
 # DEFAULT_MENU_EXPIRY_DAYS) as an approximation — deliberately NOT the live

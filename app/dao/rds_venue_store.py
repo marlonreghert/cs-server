@@ -77,6 +77,34 @@ _VENUE_SELECT = (
     "FROM venues.venue v LEFT JOIN venues.address a ON a.venue_id = v.venue_id"
 )
 
+# events.venue_link_audit_review (migration 0048, plans/260914_agentic-venue-
+# resolution-fallback.md §5). Every column named explicitly, never `SELECT *`:
+# the returned dict's key set IS the contract tests.rds_fake's mirror of these
+# methods is pinned against, so a future migration adding a column must change
+# this line (and the fake) deliberately rather than widen the shape silently.
+_VENUE_LINK_AUDIT_REVIEW_SELECT = (
+    "SELECT handle, venue_id, outcome, verdict, evidence_quote, matched_field, "
+    "reason, model, consensus_k, tally, checkable_count_at_review, "
+    "non_corroborating_count_at_review, operator_decision, operator_decided_at, "
+    "operator_note, created_at, updated_at FROM events.venue_link_audit_review"
+)
+# The MACHINE-written columns, and the allowlist `upsert_venue_link_audit_review`
+# filters its `fields` dict through. Three deliberate absences:
+# `handle`/`venue_id` are the primary key (passed as arguments, never from
+# `fields`), `created_at`/`updated_at` are database-managed, and the
+# `operator_*` columns below are written ONLY by
+# `set_venue_link_audit_review_decision` — keeping them out of this tuple means
+# a re-review cannot reach an operator's verdict however rich its `fields` gets.
+_VENUE_LINK_AUDIT_REVIEW_COLUMNS = (
+    "outcome", "verdict", "evidence_quote", "matched_field", "reason", "model",
+    "consensus_k", "tally", "checkable_count_at_review",
+    "non_corroborating_count_at_review",
+)
+_VENUE_LINK_AUDIT_REVIEW_JSONB_COLUMNS = ("tally",)
+_VENUE_LINK_AUDIT_REVIEW_OPERATOR_COLUMNS = (
+    "operator_decision", "operator_decided_at", "operator_note",
+)
+
 
 class RdsVenueStore:
     def __init__(self, sqlalchemy_url: str):
@@ -1643,6 +1671,156 @@ class RdsVenueStore:
                 },
             )
             return result.rowcount > 0
+
+    # ── events.venue_link_audit_review (plans/260914_agentic-venue-resolution-
+    # fallback.md §5, migration 0048) ───────────────────────────────────────
+    def upsert_venue_link_audit_review(
+        self, handle: str, venue_id: str, fields: dict,
+    ) -> dict:
+        """Write the machine half of one review row, at the grain
+        `app.services.venue_link_audit.compute_venue_link_audit` actually
+        flags — a `(handle, venue_id)` PAIR, never an event. Re-reviewing a
+        pair overwrites that half in place (`INSERT ... ON CONFLICT
+        (handle, venue_id) DO UPDATE`) and stamps `updated_at`; only the
+        keys present in `fields` are set, mirroring `upsert_promoter_account`
+        above.
+
+        **An operator decision is never clobbered.** `operator_decision`,
+        `operator_decided_at` and `operator_note` are re-asserted from the
+        row's own existing values in the DO UPDATE SET list, and are absent
+        from `_VENUE_LINK_AUDIT_REVIEW_COLUMNS` entirely so no `fields` dict
+        can reach them either. A human's accept/reject outlives every later
+        machine re-run — plan §6 makes a rejection PERMANENT for a pair
+        ("never re-reviewed and never suppresses anything"), which a
+        re-review that silently reset it would destroy. The re-assertion is
+        semantically redundant on its own (a column omitted from an ON
+        CONFLICT SET list keeps its value) and is spelled out anyway, so a
+        later edit that starts generating this SET list from a wider column
+        tuple cannot quietly drop the guarantee.
+
+        `outcome` is required on EVERY call, not merely the first: Postgres
+        validates NOT NULL against the FULLY CONSTRUCTED insert tuple before
+        it ever evaluates `ON CONFLICT`, so an `outcome`-less partial upsert
+        against a row that certainly exists still raises `NotNullViolation`
+        — the identical trap `upsert_crawl_target` below documents from a
+        2026-08-09 production incident. Enforced in Python so it fails the
+        same way, loudly and offline, against the in-memory fake.
+        """
+        if not fields.get("outcome"):
+            raise ValueError(
+                "upsert_venue_link_audit_review requires 'outcome' (NOT NULL, no "
+                "database default) on every call, even against an existing row — "
+                "Postgres checks NOT NULL on the insert tuple before ON CONFLICT."
+            )
+        cols = [c for c in _VENUE_LINK_AUDIT_REVIEW_COLUMNS if c in fields]
+        assign = {c: fields[c] for c in cols}
+        for c in _VENUE_LINK_AUDIT_REVIEW_JSONB_COLUMNS:
+            if c in assign and assign[c] is not None:
+                assign[c] = json.dumps(assign[c])
+        assign["handle"] = handle
+        assign["venue_id"] = venue_id
+        insert_cols = ["handle", "venue_id"] + cols
+
+        def _placeholder(col: str) -> str:
+            return (
+                f"CAST(:{col} AS jsonb)"
+                if col in _VENUE_LINK_AUDIT_REVIEW_JSONB_COLUMNS else f":{col}"
+            )
+
+        col_list = ", ".join(insert_cols)
+        val_list = ", ".join(_placeholder(c) for c in insert_cols)
+        set_clauses = [f"{c}={_placeholder(c)}" for c in cols]
+        set_clauses.append("updated_at=now()")
+        set_clauses += [
+            f"{c}=events.venue_link_audit_review.{c}"
+            for c in _VENUE_LINK_AUDIT_REVIEW_OPERATOR_COLUMNS
+        ]
+        with self.engine.begin() as conn:
+            conn.execute(
+                text(
+                    f"INSERT INTO events.venue_link_audit_review ({col_list}) "
+                    f"VALUES ({val_list}) "
+                    f"ON CONFLICT (handle, venue_id) DO UPDATE SET "
+                    f"{', '.join(set_clauses)}"
+                ),
+                assign,
+            )
+        return self.get_venue_link_audit_review(handle, venue_id)
+
+    def get_venue_link_audit_review(self, handle: str, venue_id: str) -> Optional[dict]:
+        """The stored review for one flagged pair, or None if it has never
+        been reviewed. This is the read the collector's suppression check
+        makes, one pair at a time — `None` simply means "still flagged"."""
+        with self.engine.connect() as conn:
+            row = conn.execute(
+                text(f"{_VENUE_LINK_AUDIT_REVIEW_SELECT} WHERE handle=:h AND venue_id=:v"),
+                {"h": handle, "v": venue_id},
+            ).mappings().first()
+            return dict(row) if row else None
+
+    def list_venue_link_audit_reviews(
+        self, *, verdict: Optional[str] = None, decided: Optional[bool] = None,
+    ) -> list[dict]:
+        """The operator-visible log (plan §6), newest-reviewed first.
+
+        `verdict=None` means no verdict filter. `decided` is tri-state and
+        filters on the OPERATOR's column, not the machine's: `True` =
+        `operator_decision IS NOT NULL` (a human has already accepted or
+        rejected this verdict), `False` = `IS NULL` (still awaiting one),
+        `None` = no filter. `False` is the useful one — it is the operator's
+        actual queue.
+
+        Ordered `updated_at DESC` (the plan's "newest first"), tie-broken by
+        the primary key so the order is TOTAL. Without that tiebreak two rows
+        sharing a timestamp would come back in whatever order Postgres felt
+        like and in insertion order from the fake, which is exactly the kind
+        of fake/real drift this file's parity contract exists to prevent.
+        """
+        sql = _VENUE_LINK_AUDIT_REVIEW_SELECT
+        clauses = []
+        params: dict = {}
+        if verdict is not None:
+            clauses.append("verdict=:verdict")
+            params["verdict"] = verdict
+        if decided is True:
+            clauses.append("operator_decision IS NOT NULL")
+        elif decided is False:
+            clauses.append("operator_decision IS NULL")
+        if clauses:
+            sql += " WHERE " + " AND ".join(clauses)
+        sql += " ORDER BY updated_at DESC, handle, venue_id"
+        with self.engine.connect() as conn:
+            return [dict(r) for r in conn.execute(text(sql), params).mappings()]
+
+    def set_venue_link_audit_review_decision(
+        self, handle: str, venue_id: str, decision: str, note: Optional[str] = None,
+    ) -> Optional[dict]:
+        """Record an operator's accept/reject of a machine verdict (plan §6's
+        decision endpoint). A plain UPDATE with no INSERT branch: there is
+        nothing to decide about a pair no review row exists for, so a missing
+        row returns None rather than inventing a decision with no verdict
+        attached to it.
+
+        Deliberately does NOT touch `updated_at`. That column tracks the
+        MACHINE review — it is what `list_venue_link_audit_reviews` orders by
+        and what a future staleness check would read — while
+        `operator_decided_at` tracks the human. Bumping `updated_at` here
+        would make an operator merely reading through the queue reshuffle it
+        under themselves.
+        """
+        with self.engine.begin() as conn:
+            result = conn.execute(
+                text(
+                    "UPDATE events.venue_link_audit_review "
+                    "SET operator_decision=:decision, operator_decided_at=now(), "
+                    "operator_note=:note "
+                    "WHERE handle=:h AND venue_id=:v"
+                ),
+                {"decision": decision, "note": note, "h": handle, "v": venue_id},
+            )
+            if result.rowcount == 0:
+                return None
+        return self.get_venue_link_audit_review(handle, venue_id)
 
     # ── events.event_merge_suggestion (plans/260812_event-dedup-fuzzy-title.md
     # §C/§E, migration 0038) ────────────────────────────────────────────────

@@ -635,3 +635,141 @@ Manual or integration checks:
    independent arguments already established this plan's design reads no
    `event_venue_link_candidate` row at all, so this was never a dependency —
    it is simply no longer outstanding either.
+
+## Execution Report (2026-09-14, `feature/agentic-venue-resolution-fallback`)
+
+### What shipped
+
+| Area | File |
+|---|---|
+| Skip table, promoted to ONE definition | `app/services/event_link_skip.py` (new); `scripts/backfill_event_venue_links.py` re-exports |
+| Pure core + service adapter | `app/services/venue_link_audit_reviewer.py` (new) |
+| Validator gate | `app/services/venue_link_audit_reviewer_validator.py` (new) |
+| Model call | `app/api/venue_link_review_client.py` (new) |
+| Persistence | `migrations/versions/0048_venue_link_audit_review.py` (new) + DAO on `RdsVenueStore`, `VenueRepository`, `InMemoryRdsVenueStore` |
+| Surfacing | `GET /admin/events/venue-link-audit/reviews`, `POST …/{handle}/{venue_id}/decision`, additive `review` on the audit output |
+| Runner | `scripts/review_venue_link_audit.py` (new) |
+| Observability | `VENUE_LINK_AUDIT_REVIEW_OUTCOME_TOTAL{outcome}`; `OPENAI_*{endpoint="venue_link_review"}` |
+| Flags | `venue_link_audit_reviewer_enabled`, `venue_link_audit_reviewer_auto_apply_enabled` — both `False` |
+
+`app/api/openai_event_extraction_client.py` was deliberately NOT touched (the
+advisor's token-budget fix is a concurrent, independent change), so the new
+prompt and call live in their own module. That module's docstring records why,
+and that the two token budgets must stay separate.
+
+### K=10 noise check — the amended plan's required manual check
+
+Required: "confirm no pair that was unanimous at K=5 becomes non-unanimous at
+K=10 … going from K=5 to K=10 should only ever ADD confidence, never SUBTRACT
+it. Record the real distribution, don't assume it."
+
+Measured, not assumed — both distributions are the real production arm-B runs
+from planning (12 pairs; 60 calls at K=5, 120 at K=10, same model, same
+prompt, same corrected 3000-token budget):
+
+| pair | K=5 | K=10 | unanimous K=5 → K=10 |
+|---|---|---|---|
+| `conchittasbar` | confirm 5 | confirm 10 | ✅ → ✅ |
+| `downtownbeergarden_` | confirm 5 | confirm 10 | ✅ → ✅ |
+| `emporio_universitarioo` | confirm 5 | confirm 10 | ✅ → ✅ |
+| `garage66.recife` | confirm 5 | confirm 10 | ✅ → ✅ |
+| `lacasarecife` | confirm 5 | confirm 10 | ✅ → ✅ |
+| `rockandribsmarcozero` | confirm 5 | confirm 10 | ✅ → ✅ |
+| `botecobeer.jsp` | contradict 5 | contradict 10 | ✅ → ✅ |
+| `entreamigosobode` (Espinheiro) | confirm 5 | confirm 10 | ✅ → ✅ |
+| `entreamigosobode` (Boa Viagem) | confirm 5 | confirm 10 | ✅ → ✅ |
+| `casabacurau` | confirm 4 / insuf 1 | confirm 9 / insuf 1 | ❌ → ❌ |
+| `beerdock_recife` | confirm 3 / contra 1 / insuf 1 | confirm 6 / insuf 4 | ❌ → ❌ |
+| `saladerebocorecife` | insuf 2 / confirm 3 | insuf 2 / confirm 7 / contra 1 | ❌ → ❌ |
+
+**Result: LOST unanimity going 5→10: NONE. GAINED: NONE.** The unanimous set is
+identical (9 of 12) at both K. K=10 adds no noise of its own; it only reduces
+the probability that a mixed-evidence pair reads as unanimous on a given draw
+(`casabacurau` at 9/10: P(unanimous) falls from ~0.59 at K=5 to ~0.35 at K=10).
+The check passes as specified.
+
+Caveat recorded honestly: this is one K=5 draw and one K=10 draw over 12 pairs,
+not a repeated-sampling study. It establishes that K=10 does not *introduce*
+disagreement; it does not establish a precise miss rate for either K.
+
+### Defects found and fixed during execution
+
+1. **`venue_link_audit_reviewer_validator.py` — a non-string `evidence_quote`
+   raised instead of rejecting.** `218 in "…, 218"` raises `TypeError`, and the
+   validator is called outside `_review_one`'s try/except, so one bad answer
+   would abort a whole batch — breaking both the validator's "never raises" and
+   the service's "never raises into its caller". Now rejected as `malformed`.
+   Genuinely reachable: the decisive evidence in this corpus is house numbers.
+2. **`build_review_evidence` restated the skip table.** It carried its own
+   `status == STATUS_SUPERSEDED` branch ahead of `skip_reason`, so superseded
+   rows were excluded but never counted in `protected_event_count` — 5 of 6
+   reasons counted. Removed; `skip_reason` is again the single expression, as
+   Desired Behavior §3 requires.
+3. **Re-persisting an observed pair could destroy a live suppression.** A pair
+   already confirmed, or one an operator had decided, was re-written on every
+   run. With `auto_apply` off for that run it would store a NULL
+   `non_corroborating_count_at_review` over a live one — so merely toggling the
+   auto-apply flag off for one run would silently re-open every previously
+   confirmed pair. `PairOutcome.persist=False` now marks an observed pair and
+   nothing is written.
+4. **Shadow mode misreported itself.** `suppressed` was set from the verdict
+   alone, so in shadow mode a fresh consensus confirm reported
+   `suppressed: true` in the very run report an operator reads before enabling
+   auto-apply. Now gated on `auto_apply` — but only for a fresh consensus; a
+   pair already suppressed really is suppressed whatever the flag now says.
+5. **`--consensus-k 1` would have re-created the single-call auto-apply this
+   plan exists to prevent.** Added `MIN_REVIEW_CONSENSUS_K = 5` (the smallest K
+   the production measurement actually exercised): below it a verdict is
+   recorded but can never suppress a flag. Deliberately a downgrade to
+   "record, never act", not a hard failure, so small-K shadow runs stay cheap.
+
+### Tests
+
+- New BDD: `tests/bdd/enrichment/agentic-venue-resolution-fallback.feature` —
+  **23 scenarios / 171 steps**, all passing, `@wip` removed. Backed by
+  `tests/fixtures/venue_link_audit_reviewer/corpus.json` + `MANIFEST.md`, 7
+  cases sourced per-item to the 2026-09-14 read-only production reads.
+- New pytest: 4 modules, **265 cases** — validator (every rejection reason,
+  incl. case- and accent-sensitivity), pure core, service, script, DAO parity.
+- Full suites green: **`make test-unit` 4856 passed / 7 skipped**;
+  **`make test-bdd` 130 features / 1637 scenarios / 10507 steps, 0 failed**.
+- Two step texts were reworded for collisions in the shared ~130-file step
+  namespace (`the run does not fail` → `the reviewer run does not fail`;
+  `no model call is made` → `no model call is charged for any pair`), per this
+  repo's reword-never-dispatch-patch rule.
+- **Mutation check.** Because the production modules were written before the
+  step definitions existed, the suite was verified to actually bite: relaxing
+  unanimity to a majority (3 failures), removing the multi-mapped gate (1),
+  and ignoring an operator rejection in the suppression rule (2) each fail the
+  new tests. All mutations reverted.
+
+### Acceptance criteria — status
+
+- [x] Both flags `False` → zero model calls, zero rows, zero response-byte change
+- [x] Reaches flagged pairs from `collect_venue_link_audit` alone, no extraction run
+- [x] Street reaches the model; a venue with no address row degrades rather than fails
+- [x] Consensus `confirm` suppresses and writes exactly one row; **no event row is written by any path in this plan**
+- [x] Consensus `contradict` leaves the pair flagged
+- [x] Multi-mapped handle never auto-applied, regardless of agreement
+- [x] Every pair *decided* has a review row (see note below)
+- [x] Operator can list and accept/reject; a rejection is permanent
+- [x] `empty_response` is distinct from `validator_rejected`
+- [x] No `@wip` tag remains
+- [x] `venue_link_audit.py`, `event_venue_resolution.py`, `event_venue_advisor*.py` and `openai_event_extraction_client.py` byte-identical to `408da88`
+
+Refinement to one criterion: "every pair the pass looked at has a review row"
+holds per **decision**, not per **look**. A pair the run only observed — already
+confirmed and still in force, or operator-decided — writes no row, by defect
+fix 3 above. Its prior row is still there and still listed; it is simply not
+rewritten.
+
+### Still outstanding
+
+- The first production run should be `scripts/review_venue_link_audit.py`
+  **dry-run**, with both flags still `False`, to confirm the verdicts reproduce
+  §F's table against live data. **Not done in this session: AWS SSO expired**,
+  so no read-only production verification was possible after implementation
+  began. This is the one Manual/integration check from the plan that remains
+  unexecuted.
+- Cron (Open Question 3) remains deliberately out of scope, to be designed from
+  the deployed system's real behaviour.
