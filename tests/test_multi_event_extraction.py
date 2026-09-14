@@ -164,6 +164,21 @@ class TestBudgetScaling:
         assert MULTI_EVENT_BASE_COMPLETION_TOKENS > 1536
         assert MULTI_EVENT_PER_EVENT_COMPLETION_TOKENS > 300
 
+    def test_event_extraction_max_tokens_setting_matches_the_client_default(self):
+        """plans/260914_openai-token-budget-repo-audit.md: `settings.
+        event_extraction_max_tokens` (app/config.py) feeds ONLY the client's
+        `extract()` (single-event) constructor default — unreachable from
+        real per-post extraction traffic today (both production paths call
+        `extract_events()`, whose own budget instead scales dynamically via
+        `compute_multi_event_max_completion_tokens`). It was found drifted to
+        a stale, lower 4096 while this module's own constant had already been
+        raised to 6400 across three earlier plans. Regression guard: the two
+        must stay equal so `extract()` is never a silent landmine the moment
+        it is wired up again."""
+        from app.config import Settings
+
+        assert Settings().event_extraction_max_tokens == DEFAULT_MAX_COMPLETION_TOKENS
+
 
 # ── attractions / ticket_info (plans/260808_event-ticket-info-and-
 # attractions.md) ─────────────────────────────────────────────────────────────

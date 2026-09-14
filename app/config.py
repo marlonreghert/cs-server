@@ -772,7 +772,19 @@ class Settings(BaseSettings):
     # Below this, an otherwise-successful extraction is queued for review
     # rather than trusted — the operator outranks an unsure model.
     event_extraction_min_confidence: float = 0.5
-    event_extraction_max_tokens: int = 4096
+    # plans/260914_openai-token-budget-repo-audit.md: kept equal to
+    # app.api.openai_event_extraction_client.DEFAULT_MAX_COMPLETION_TOKENS on
+    # purpose — this setting feeds ONLY the client's `extract()` (single-event)
+    # constructor default, which real per-post extraction traffic does not
+    # call today (both production paths call `extract_events()`, whose own
+    # budget instead scales dynamically via
+    # compute_multi_event_max_completion_tokens). This was found drifted to
+    # 4096, below the module constant's already-reasoned 6400, with no live
+    # impact today only because that code path is currently unreachable —
+    # left unsynced, it would have been a silent landmine the moment
+    # `extract()` is wired up again (its own docstring already describes it
+    # backing a future confirmed-event re-extraction path).
+    event_extraction_max_tokens: int = 6400
     # Multi-Event Posts (plans/260806_multi-event-posts.md). A sanity bound on
     # how many events ONE post can yield — also the input the output-token
     # budget scales from (app.api.openai_event_extraction_client.
