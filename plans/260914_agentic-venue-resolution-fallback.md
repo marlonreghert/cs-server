@@ -385,13 +385,18 @@ never logs the raw model payload). Rejections:
 
 Two gates, both required, both justified by §F:
 
-- **K = 5 independent calls, all five agreeing**, all five validating.
-  K=5 and K=10 select the identical set of mixed-evidence pairs
-  (`casabacurau`, `beerdock_recife`, `saladerebocorecife`); K=5 is the
-  cost/safety point. Recorded honestly: `casabacurau` ran 9/10 at K=10, so a
-  K=5 draw has a real chance of reading as unanimous — its verdict (`confirm`)
-  is the human-verified-correct one, so that is a missed hold-back, not a wrong
-  write. K is a module constant and can be raised without a schema change.
+- **K = 10 independent calls, all ten agreeing**, all ten validating.
+  Decided over §F's own K=5 recommendation: at this document volume (12
+  flagged pairs today, not a catalog-wide sweep run continuously), the extra
+  cost of K=10 is negligible and buys a real margin — §F's own data shows
+  `casabacurau` ran 9/10, meaning K=5 has a real chance of reading a
+  mixed-evidence pair as unanimous and missing a hold-back it should have
+  caught. K=10 does not miss `casabacurau` in the measured sample. K is a
+  module constant and can be lowered later if per-pair cost ever becomes the
+  binding constraint. The manual/integration checks below must confirm K=10
+  does not introduce noise of its own (a pair that was unanimous at K=5
+  becoming non-unanimous at K=10 only from added sampling variance, not from
+  genuine new disagreement) before this is treated as settled.
 - **Single-mapped handles only.** A handle mapped to ≥2 venues is never
   auto-applied. §F item 3 is the measurement: both `entreamigosobode` siblings
   return `confirm` 10/10 on a shared, mutually-exclusive event pool. Sampling
@@ -560,6 +565,12 @@ Manual or integration checks:
   with a `MANIFEST.md`, following the per-item provenance convention
   `tests/fixtures/venue_link_audit/MANIFEST.md` established — sourcing every
   `location_text` and address to a live read, PII-reviewed before commit.
+- **K=10 noise check**: re-run §F's K=10 measurement (or a fresh equivalent) and
+  confirm no pair that was unanimous at K=5 becomes non-unanimous at K=10 for
+  reasons other than genuine model disagreement already visible in the K=5
+  sample — i.e. going from K=5 to K=10 should only ever ADD confidence
+  (catching `casabacurau`-shaped near-misses) never SUBTRACT it. Record the
+  real distribution, don't assume it.
 
 ## Acceptance Criteria
 
@@ -588,26 +599,39 @@ Manual or integration checks:
 
 ## Open Questions
 
-1. **The existing advisor's token budget is measurably too small.**
-   `EVENT_VENUE_ADVISOR_MAX_COMPLETION_TOKENS = 200` against a reasoning model
-   produced 9 empty responses in 120 calls at 400 tokens and 0 at 3000 (§F).
-   Those empties are currently counted as `rejected`, which is very likely what
-   the brief observed as "non-determinism". This plan's non-goals forbid
-   touching the existing advisor. **Should this be a separate one-line fix
-   before or after this plan?** It needs an explicit decision, not silence.
-2. **K=5 vs K=10.** K=5 is recommended (§F): same selection, half the spend. But
-   `casabacurau` measured 9/10, so K=5 will sometimes read it as unanimous. Its
-   verdict is correct, so the cost is a missed hold-back rather than a wrong
-   write. Accept K=5, or pay for K=10?
-3. **Should the runner ever become a cron job?** This plan ships it
-   operator-triggered only. Automating it should wait until at least one
-   production batch has been reviewed by a human.
-4. **`casabacurau` and `tatubola.bar` change the working set** (§A). The brief
-   names nine handles; production flags eleven, dropping `tatubola.bar` and
-   adding `casabacurau` (31/34) and `beerdock_recife` (2/31). Confirm the
-   corpus should be the **twelve live pairs**, not the nine named handles.
-5. **`botecobeer.jsp` still needs its venue added.** This plan makes it surface
-   loudly and correctly; it does not fix it. Who picks that up, and when?
-6. **The 93 oversized candidate lists remain unbacked-filled** (§C). Not a
-   prerequisite for this plan, but still real for `oquetemhojeemnatal` (88) and
-   `recifequecabenobolso` (5). Schedule the dry-run/apply separately?
+1. **RESOLVED — separate, small fix, running independently of this plan's own
+   execution** (not before or after as a hard sequencing dependency — the two
+   touch different files and this plan's own §F measurement already worked
+   around the bug by using 3000 tokens in its own calls, so neither blocks the
+   other). `EVENT_VENUE_ADVISOR_MAX_COMPLETION_TOKENS = 200` against a
+   reasoning model produced 9 empty responses in 120 calls at 400 tokens and 0
+   at 3000 (§F). Tracked and shipped as its own tiny plan/PR, outside this
+   plan's non-goals boundary.
+2. **RESOLVED — K=10, not K=5.** At today's document volume (12 flagged pairs,
+   operator-triggered, not a continuous sweep) the extra spend is negligible
+   and buys real margin against `casabacurau`-shaped near-misses. Execution
+   must include the K=10 noise check added to Manual/integration checks above.
+3. **Should the runner ever become a cron job?** Confirmed: operator-triggered
+   only for this plan, unchanged. Once this plan is deployed and has run
+   against real production data, produce a careful, separate writeup (can be
+   done by a subagent) of the pass's actual observed behavior and exactly what
+   turning it into a cron job would mean — cadence, re-review of
+   already-reviewed pairs, interaction with the staleness/re-opening rule,
+   cost at a recurring cadence — so that decision is made from the real,
+   deployed system's behavior, not from this plan's own predictions. Not
+   scheduled as part of this plan's own execution.
+4. **RESOLVED — the corpus is the twelve live flagged pairs**, not the nine
+   handles the original brief named. §A's live measurement is authoritative;
+   the nine-handle list was the brief's own stale working set at the time it
+   was written and is superseded by this plan's own re-verification.
+5. **RESOLVED — `botecobeer.jsp`'s real venue is being added separately**,
+   outside this plan, by the operator directly (investigation + the existing
+   venue-add pipeline). This plan's own scope is unchanged: surface it
+   correctly via `contradict`, never force-fit it.
+6. **RESOLVED — the 93 oversized candidate lists were backfilled on
+   2026-09-14**, ahead of and independent of this plan
+   (`scripts/backfill_event_venue_candidate_cap.py --apply`, all 93 events
+   truncated to `top_k=20`, 203,421 stale rows removed). §C's own two
+   independent arguments already established this plan's design reads no
+   `event_venue_link_candidate` row at all, so this was never a dependency —
+   it is simply no longer outstanding either.
