@@ -1594,9 +1594,10 @@ EVENT_MERGE_TOTAL = Counter(
     # identity=title (plans/260812_event-dedup-fuzzy-title.md — title
     #                 containment + shared lineup, a SECOND pass over what
     #                 identity=venue leaves behind): merged,
-    #                 merged_single_night_venue, suggested,
-    #                 refused_disjoint, refused_no_distinctive_tokens,
-    #                 refused_protected, refused_operator_title. Watch
+    #                 merged_single_night_venue, merged_handle_time_match,
+    #                 suggested, refused_disjoint,
+    #                 refused_no_distinctive_tokens, refused_protected,
+    #                 refused_operator_title. Watch
     #                 refused_no_distinctive_tokens (plan Error Handling: a
     #                 climb means the generic-event vocabulary has grown too
     #                 greedy) and the suggested-to-merged ratio (unactioned
@@ -1614,6 +1615,13 @@ EVENT_MERGE_TOTAL = Counter(
     #                 overstates what the policy itself caused. The list is
     #                 empty by default: the ABSENCE of this series is the
     #                 evidence no venue is on it.
+    #
+    #                 `merged_handle_time_match` (plans/260913_candidate-
+    #                 cap-and-handle-time-merge.md Part B) is the SAME
+    #                 "counted only when sole reason" discipline, for the
+    #                 same-handle/same-exact-time signal. Gated off by
+    #                 default (`event_dedup_handle_time_match_enabled`) —
+    #                 its absence is the evidence the flag is off.
 )
 
 # plans/260814_record-what-superseded-a-row.md §B: every RE-EXTRACTION

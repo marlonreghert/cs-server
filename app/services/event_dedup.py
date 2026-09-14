@@ -61,6 +61,12 @@ REASON_LINEUP = "shared_lineup"
 # through the existing audit row, the existing metric labels and the
 # existing reversal path with no new machinery.
 REASON_SINGLE_NIGHT_VENUE = "single_night_venue"
+# plans/260913_candidate-cap-and-handle-time-merge.md Part B: a FOURTH,
+# independent reason -- same crawled handle, same exact date+time, neither
+# side ambiguous or attribution-disputed (see handle_time_match_eligible
+# below). Unlike REASON_SINGLE_NIGHT_VENUE this needs no per-venue
+# allowlist: the handle+exact-time match is self-limiting.
+REASON_HANDLE_TIME_MATCH = "handle_time_match"
 
 # ── admin config: generic-event vocabulary (plan §B, "runtime-configurable,
 # matching menu_expiry_days, the post-category vocabulary and the busyness
@@ -132,6 +138,21 @@ ADMIN_CONFIG_SINGLE_NIGHT_DEFAULT_ENABLED_KEY = (
 # is the obvious follow-up if this is ever dialled back in anger — recorded
 # here so the next reader does not think the gap was missed.
 DEFAULT_SINGLE_NIGHT_DEFAULT_ENABLED = False
+
+ADMIN_CONFIG_HANDLE_TIME_MATCH_ENABLED_KEY = "admin_config:event_dedup_handle_time_match_enabled"
+# plans/260913_candidate-cap-and-handle-time-merge.md Part B. OFF by
+# default, like every other auto-merge widening in this module: two same-
+# handle, same-exact-time posts auto-merge regardless of title once this
+# is true, which is a real merge-affecting decision and gets the same
+# dry-run-before-flip discipline every other flag here already follows
+# (scripts/measure_event_dedup.py --handle-time-match). Validated live
+# against real production rows before shipping (see the plan's Evidence):
+# it correctly collapses Boteco Nem A Pau Juvenal's three same-time reposts
+# and correctly leaves Casa de Jorge Amado's two different-time plays
+# apart — but the flag still ships off, because enabling a NEW auto-merge
+# path in production is a separate, deliberate operator act, never a side
+# effect of this deploy.
+DEFAULT_HANDLE_TIME_MATCH_ENABLED = False
 
 ADMIN_CONFIG_RECURRING_WINDOW_ENABLED_KEY = "admin_config:event_dedup_recurring_window_enabled"
 # plans/260912_events-venue-night-duplication.md §D, Defect 3. OFF by
@@ -221,6 +242,12 @@ def validate_recurring_window_enabled_config(value) -> bool:
     return value
 
 
+def validate_handle_time_match_enabled_config(value) -> bool:
+    if not isinstance(value, bool):
+        raise TypeError("event dedup handle-time-match flag must be a boolean")
+    return value
+
+
 def validate_single_night_default_enabled_config(value) -> bool:
     if not isinstance(value, bool):
         raise TypeError("event dedup single-night default flag must be a boolean")
@@ -263,6 +290,10 @@ class DedupConfig:
     # §E2, catalog-wide: treat EVERY venue as running one night. Strictly
     # broader than the list above, and OFF by default.
     single_night_default_enabled: bool = False
+    # plans/260913_candidate-cap-and-handle-time-merge.md Part B: whether
+    # `handle_time_match_eligible` pairs are an auto-merge reason. OFF by
+    # default, like every other key here.
+    handle_time_match_enabled: bool = False
 
     def is_single_night_venue(self, venue_id: Optional[str]) -> bool:
         """Whether §E2's single-night bypass applies to `venue_id`.
@@ -373,6 +404,11 @@ def load_dedup_config(redis_like) -> DedupConfig:
         DEFAULT_SINGLE_NIGHT_DEFAULT_ENABLED,
         validator=validate_single_night_default_enabled_config, module_tag="event_dedup",
     )
+    handle_time_match = _load_validated_config(
+        redis_like, ADMIN_CONFIG_HANDLE_TIME_MATCH_ENABLED_KEY,
+        DEFAULT_HANDLE_TIME_MATCH_ENABLED,
+        validator=validate_handle_time_match_enabled_config, module_tag="event_dedup",
+    )
     return DedupConfig(
         generic_vocabulary=tuple(generic), stopwords=tuple(stopwords),
         lineup_threshold=threshold, candidate_window_hours=window_hours,
@@ -380,6 +416,7 @@ def load_dedup_config(redis_like) -> DedupConfig:
         recurring_window_enabled=recurring_window,
         single_night_venues=tuple(single_night),
         single_night_default_enabled=single_night_default,
+        handle_time_match_enabled=handle_time_match,
     )
 
 
@@ -573,6 +610,56 @@ def in_candidate_window_for_rows(
     return bool(_recurring_weekdays(a) & _recurring_weekdays(b))
 
 
+# plans/260913_candidate-cap-and-handle-time-merge.md Part B. Literal
+# duplicate of `app.services.event_attribution_dispute.
+# REVIEW_REASON_LOCATION_TEXT_DISPUTES_VENUE` — NOT an import: that module
+# already imports FROM this one (`from app.services.event_dedup import
+# ...`, event_attribution_dispute.py:60), so importing the other way would
+# cycle. Kept in lockstep by
+# tests/test_event_dedup_handle_time_match.py's own literal-equality guard
+# — the SAME pattern `event_venue_resolution.METHOD_VENUE_NOT_IN_CATALOG`'s
+# own docstring uses for exactly this cross-module constraint.
+_REVIEW_REASON_LOCATION_TEXT_DISPUTES_VENUE = "location_text_disputes_venue"
+
+
+def handle_time_match_eligible(event_a: dict, event_b: dict) -> bool:
+    """plans/260913_candidate-cap-and-handle-time-merge.md Part B: same
+    crawled handle, same EXACT `starts_at` instant, neither side routed
+    through the promoter/multi-venue resolution ladder or attribution-
+    disputed against its mapped venue. Validated against real production
+    rows (the plan's Evidence): true for Boteco Nem A Pau Juvenal's three
+    same-time reposts, false for Casa de Jorge Amado's two different-time
+    plays, and false for every sampled row from the `oquetemhojeemnatal`
+    promoter account (every one of which carries a non-NULL
+    `location_resolution`).
+
+    The caller (`app.services.event_merge._run_pairwise_pass`, never this
+    function) already guarantees same-`venue_id` and `in_candidate_window_
+    for_rows` before this runs, per `evaluate_pair`'s own existing
+    docstring convention — this function does not re-check either.
+
+    v1 requires `time_known` TRUE on BOTH sides (plan's Open Questions #1):
+    the catalog-wide sweep that validated this rule found zero same-handle/
+    same-day clusters anywhere with an unset time on either side, so the
+    "both sides equally unset" case the original ask floated has no real
+    case to measure it against. Deliberately excluded here rather than
+    shipped unvalidated; revisit once a real example surfaces."""
+    handle = event_a.get("source_handle")
+    if not handle or handle != event_b.get("source_handle"):
+        return False
+    for event in (event_a, event_b):
+        if event.get("location_resolution") is not None:
+            return False
+        if _REVIEW_REASON_LOCATION_TEXT_DISPUTES_VENUE in (event.get("review_reason") or ""):
+            return False
+        if not event.get("time_known"):
+            return False
+    a_time, b_time = event_a.get("starts_at"), event_b.get("starts_at")
+    if a_time is None or b_time is None:
+        return False
+    return a_time == b_time
+
+
 # ── the combined pairwise verdict ───────────────────────────────────────────
 @dataclass(frozen=True)
 class PairDecision:
@@ -586,6 +673,7 @@ class PairDecision:
 def evaluate_pair(
     event_a: dict, event_b: dict, *, venue_name, config: DedupConfig,
     single_night_venue: bool = False,
+    handle_time_match: bool = False,
 ) -> Optional[PairDecision]:
     """The pairwise verdict for two ALREADY-CANDIDATE-WINDOWED events at one
     venue (the caller applies `in_candidate_window` and the same-`venue_id`
@@ -628,6 +716,12 @@ def evaluate_pair(
     # thing that turns a band into a write.
     if single_night_venue:
         reasons.append(REASON_SINGLE_NIGHT_VENUE)
+    # plans/260913_candidate-cap-and-handle-time-merge.md Part B: a FOURTH
+    # independent sufficient condition, computed by the caller per pair
+    # (never here — see `handle_time_match_eligible`'s own docstring) and
+    # passed in already gated on `config.handle_time_match_enabled`.
+    if handle_time_match:
+        reasons.append(REASON_HANDLE_TIME_MATCH)
 
     if reasons:
         band = BAND_AUTO
@@ -647,6 +741,7 @@ def evaluate_pair(
 
 __all__ = [
     "BAND_AUTO", "BAND_SUGGEST", "BAND_REFUSE", "REASON_TITLE", "REASON_LINEUP", "REASON_SINGLE_NIGHT_VENUE",
+    "REASON_HANDLE_TIME_MATCH",
     "ADMIN_CONFIG_GENERIC_VOCABULARY_KEY", "DEFAULT_GENERIC_VOCABULARY",
     "ADMIN_CONFIG_STOPWORDS_KEY", "DEFAULT_STOPWORDS",
     "ADMIN_CONFIG_LINEUP_THRESHOLD_KEY", "DEFAULT_LINEUP_THRESHOLD",
@@ -656,13 +751,15 @@ __all__ = [
     "ADMIN_CONFIG_RECURRING_WINDOW_ENABLED_KEY", "DEFAULT_RECURRING_WINDOW_ENABLED",
     "ADMIN_CONFIG_SINGLE_NIGHT_VENUES_KEY", "DEFAULT_SINGLE_NIGHT_VENUES",
     "ADMIN_CONFIG_SINGLE_NIGHT_DEFAULT_ENABLED_KEY", "DEFAULT_SINGLE_NIGHT_DEFAULT_ENABLED",
+    "ADMIN_CONFIG_HANDLE_TIME_MATCH_ENABLED_KEY", "DEFAULT_HANDLE_TIME_MATCH_ENABLED",
     "validate_generic_vocabulary_config", "validate_stopwords_config",
     "validate_lineup_threshold_config", "validate_candidate_window_hours_config",
     "validate_undated_window_days_config", "validate_auto_merge_enabled_config",
     "validate_recurring_window_enabled_config", "validate_single_night_venues_config",
-    "validate_single_night_default_enabled_config",
+    "validate_single_night_default_enabled_config", "validate_handle_time_match_enabled_config",
     "DedupConfig", "load_dedup_config",
     "venue_name_tokens", "distinctive_set", "band_for_distinctive_sets",
     "lineup_name_set", "shared_lineup_names", "lineup_reaches_auto",
     "in_candidate_window", "in_candidate_window_for_rows", "PairDecision", "evaluate_pair",
+    "handle_time_match_eligible",
 ]

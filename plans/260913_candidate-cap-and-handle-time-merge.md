@@ -320,11 +320,12 @@ Question rather than silently shipped as equally safe.
    `unresolved` verdict changes for any event, proven by the rank-0/rank-1
    invariant above.
 2. Two live `post_type='event'` rows at one venue, from the same plain
-   (non-promoter, non-ambiguous) Instagram handle, sharing the exact same
-   `starts_at` instant (or both genuinely `time_known=false` on the same
-   Recife-local date — see Open Questions), with neither side carrying an
-   unresolved attribution dispute against the mapped venue, auto-merge
-   regardless of title or lineup overlap — gated OFF by default, measured
+   (non-promoter, non-ambiguous) Instagram handle, BOTH carrying a known
+   time and sharing the exact same `starts_at` instant (v1 — see Open
+   Questions #1 for why "both unset" is deferred rather than shipped),
+   with neither side carrying an unresolved attribution dispute against
+   the mapped venue, auto-merge regardless of title or lineup overlap —
+   gated OFF by default, measured
    before enabling, exactly like every other auto-merge widening this
    pipeline has shipped.
 3. Two live rows at one venue, same handle, same day, genuinely DIFFERENT
@@ -423,13 +424,12 @@ Question rather than silently shipped as equally safe.
        if e.get("location_resolution") is not None: return False
        if _REVIEW_REASON_LOCATION_TEXT_DISPUTES_VENUE in (e.get("review_reason") or ""):
          return False
+       if not e.get("time_known"): return False  # v1: BOTH sides must carry a known
+                                                  # time -- see Open Questions #1 for
+                                                  # why the both-unset case is deferred
      a_time, b_time = event_a.get("starts_at"), event_b.get("starts_at")
      if a_time is None or b_time is None: return False
-     a_known, b_known = bool(event_a.get("time_known")), bool(event_b.get("time_known"))
-     if a_known and b_known: return a_time == b_time
-     if not a_known and not b_known:
-       return a_time.astimezone(RECIFE_TZ).date() == b_time.astimezone(RECIFE_TZ).date()
-     return False  # one known, one not: cannot confirm, stay conservative
+     return a_time == b_time
    ```
 
    The caller (`_run_pairwise_pass`, never `evaluate_pair` itself) already
@@ -570,8 +570,8 @@ Feature file: `tests/bdd/enrichment/event-dedup-handle-time-match.feature`
   re-derived in this plan's Evidence; different handles excludes; a non-
   null `location_resolution` on either side excludes; the dispute review-
   reason on either side excludes; one side `time_known` true and the other
-  false excludes; both `time_known=false` on the same Recife-local date
-  includes (the unvalidated sub-case — see Open Questions); symmetry over
+  false excludes; both sides `time_known=false` excludes too (v1's
+  deliberate narrowing — Open Questions #1); symmetry over
   `(a, b)`/`(b, a)`; `evaluate_pair` appends `REASON_HANDLE_TIME_MATCH`
   only when the caller's bool is true, independent of title/lineup;
   `_edge_blocked_for_absorption` still blocks a handle-time-match-only
@@ -630,11 +630,17 @@ Feature file: `tests/bdd/enrichment/event-dedup-handle-time-match.feature`
   before `/execute-feature` may enable the flag in any environment**, per
   the task's own instruction, since the original rows cannot be re-measured
   live.
-- The "both sides `time_known=false`" sub-case (Open Questions) is resolved
-  — either shipped with its own separate metric/log line so its real-world
-  frequency can be watched from day one, or deliberately excluded from v1
-  (requiring both sides `time_known=true`) with that narrowing stated
-  explicitly in the PR — before `/execute-feature` proceeds past that gate.
+- **Resolved during execution**: v1 requires `time_known=true` on BOTH
+  sides. The "both sides `time_known=false`" allowance is explicitly
+  deferred, not shipped — the catalog-wide sweep (Evidence) found this
+  sub-case has zero live precedent in either direction (no cluster in the
+  current catalog has even ONE member with an unset time, let alone both),
+  so there is no real case to validate it against, and shipping an
+  unvalidated allowance on the FIRST rollout of a new auto-merge path is
+  exactly the risk this plan's whole design-tension investigation exists to
+  avoid. `handle_time_match_eligible` returns `False` whenever either side's
+  `time_known` is `False` — including when BOTH are. Revisit once a real
+  same-handle/same-day/both-unset-time cluster is observed in production.
 - Zero change to `evaluate_pair`'s title-containment/shared-lineup bands,
   `in_candidate_window_for_rows`, `_is_protected`, `_edge_blocked_for_
   absorption`'s existing clauses, or any existing `event_dedup_*`/
@@ -646,28 +652,29 @@ Feature file: `tests/bdd/enrichment/event-dedup-handle-time-match.feature`
 
 ## Open Questions
 
-**Blocking for Part B's flag enablement (not for `/execute-feature`
-starting — see Acceptance Criteria above for exactly what gates what):**
+**Resolved during execution (2026-09-13/14), not left for a future reader:**
 
-1. **The "both sides `time_known=false`" allowance has zero live precedent,
+1. **The "both sides `time_known=false`" allowance had zero live precedent,
    in either direction.** The catalog-wide sweep (7 same-handle/same-day
    clusters) found no cluster where either member had `time_known=false`,
    let alone both — so the task's own allowance ("or both sides carrying
-   `time_known=False`, if that's how equally-unset times present") is
-   neither validated safe nor shown to be a real risk by this session's
-   data; it is simply untested. Two honest options, both compatible with
-   this plan's design:
-   - Ship it as designed above (both-unset-on-the-same-day matches), but
-     log/count it on a SEPARATE reason sub-label (e.g.
-     `merged_handle_time_match_unset_time`) distinct from the exact-time
-     case, so its real frequency and any false positives become visible
-     from day one rather than being silently blended into one counter.
-   - Or narrow v1 to require `time_known=true` on both sides (the only
-     case this session actually measured), deferring the unset-time
-     allowance to a follow-up once a real example of it is observed.
-   This plan does not pick one — `/execute-feature` must resolve it
-   explicitly (per Acceptance Criteria) rather than silently implement the
-   task's literal wording without re-reading this caveat.
+   `time_known=False`, if that's how equally-unset times present") was
+   neither validated safe nor shown to be a real risk; it was simply
+   untested. **Decision: narrowed v1 to require `time_known=true` on BOTH
+   sides** — the only case this session actually measured.
+   `handle_time_match_eligible` returns `False` whenever either side's
+   `time_known` is `False`, including when both are. Revisit once a real
+   same-handle/same-day/both-unset-time cluster is observed in production,
+   at which point it can be added back with its own separate outcome
+   label/counter so its real frequency is visible from day one rather than
+   blended into the exact-time case's numbers.
+
+**Resolved, non-blocking (Part A):**
+
+2. Whether `top_k=20` should be `AdminConfigService`-tunable rather than a
+   deploy-time `settings.*` value remains open but explicitly non-blocking
+   per the plan's own Implementation Approach — a small follow-up if
+   production data later shows 20 needs adjusting, not a gate on this PR.
 2. Should `top_k=20` (Part A) be admin-config-tunable after all, rather
    than a deploy-time `settings.*` value? This plan chose `settings.*`
    because the change provably alters no decision and because

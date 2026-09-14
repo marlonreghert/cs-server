@@ -51,14 +51,17 @@ def dao(monkeypatch):
 _SEQ = {"n": 0}
 
 
-def _seed(store, title, *, lineup=None, venue_id="v1", starts_at=_SATURDAY) -> str:
+def _seed(
+    store, title, *, lineup=None, venue_id="v1", starts_at=_SATURDAY,
+    source_handle="club_handle", time_known=True,
+) -> str:
     _SEQ["n"] += 1
     event_id = new_event_id()
     store.insert_event({
         "event_id": event_id, "venue_id": venue_id, "starts_at": starts_at,
         "title": title, "post_type": "event", "status": "accepted",
-        "lineup": lineup or [], "source_kind": "venue_post",
-        "source_handle": "club_handle", "source_shortcode": f"med_sc_{_SEQ['n']}",
+        "lineup": lineup or [], "source_kind": "venue_post", "time_known": time_known,
+        "source_handle": source_handle, "source_shortcode": f"med_sc_{_SEQ['n']}",
         "first_seen_at": _NOW, "last_seen_at": _NOW,
     })
     return event_id
@@ -338,3 +341,70 @@ class TestRecurringWindowFlag:
         payload = json.loads(target.read_text())
         assert payload["config"]["recurring_window_enabled"] is False
         assert payload["counts"]["auto_pairs"] == 0
+
+
+class TestHandleTimeMatchFlag:
+    """plans/260913_candidate-cap-and-handle-time-merge.md Part B. Boteco
+    Nem A Pau Juvenal's real shape: two same-handle, same-exact-time posts
+    whose titles share no distinctive words and no lineup threshold —
+    invisible to the title/lineup bands alone, an auto pair once this flag
+    is forced on for the measurement."""
+
+    def _boteco_pair(self, dao):
+        when = datetime(2026, 9, 13, 18, 0, tzinfo=timezone.utc)
+        return [
+            _seed(dao, "Domingo é dia de Boteco!", starts_at=when, source_handle="boteconemapaujuvenal"),
+            _seed(dao, "ALEX CARRERAS E BANDA", starts_at=when, source_handle="boteconemapaujuvenal"),
+        ]
+
+    def test_the_pair_is_invisible_without_the_flag(self, dao):
+        self._boteco_pair(dao)
+        assert med.measure(dao, config=med.build_config()).auto_count == 0
+
+    def test_the_flag_makes_it_an_auto_pair(self, dao):
+        self._boteco_pair(dao)
+        report = med.measure(dao, config=med.build_config(handle_time_match_enabled=True))
+        assert report.auto_count == 1, report.auto_pairs
+        assert event_dedup.REASON_HANDLE_TIME_MATCH in report.auto_pairs[0].reasons
+
+    def test_a_different_known_time_on_the_same_day_stays_invisible(self):
+        """Casa de Jorge Amado's real shape: genuinely different events,
+        must never become an auto pair even with the flag forced on."""
+        store = InMemoryRdsVenueStore()
+        store.upsert_venue(Venue(
+            venue_id="v_jorge", venue_name="Casa de Jorge Amado", venue_lat=-8.05, venue_lng=-34.88,
+        ))
+        _seed(
+            store, "PETER PAN", venue_id="v_jorge", source_handle="teatrojorgeamado",
+            starts_at=datetime(2026, 9, 13, 14, 0, tzinfo=timezone.utc),
+        )
+        _seed(
+            store, "CHAPEUZINHO VERMELHO", venue_id="v_jorge", source_handle="teatrojorgeamado",
+            starts_at=datetime(2026, 9, 13, 19, 0, tzinfo=timezone.utc),
+        )
+        report = med.measure(store, config=med.build_config(handle_time_match_enabled=True))
+        assert report.auto_count == 0
+
+    def test_the_cli_flag_reaches_the_measurement(self, dao, tmp_path):
+        self._boteco_pair(dao)
+        target = tmp_path / "handle_time_match.json"
+        assert med.main(["--handle-time-match", "--report-json", str(target)]) == 0
+        payload = json.loads(target.read_text())
+        assert payload["config"]["handle_time_match_enabled"] is True
+        assert payload["counts"]["auto_pairs"] == 1
+
+    def test_no_handle_time_match_is_the_default(self, dao, tmp_path):
+        self._boteco_pair(dao)
+        target = tmp_path / "default_htm.json"
+        assert med.main(["--report-json", str(target)]) == 0
+        payload = json.loads(target.read_text())
+        assert payload["config"]["handle_time_match_enabled"] is False
+        assert payload["counts"]["auto_pairs"] == 0
+
+    def test_the_flag_never_writes_anything_without_apply(self, dao):
+        ids = self._boteco_pair(dao)
+        before = {row["event_id"]: dict(row) for row in dao.list_events()}
+        assert med.main(["--handle-time-match"]) == 0
+        after = {row["event_id"]: dict(row) for row in dao.list_events()}
+        assert after == before
+        assert set(ids) <= set(after)
