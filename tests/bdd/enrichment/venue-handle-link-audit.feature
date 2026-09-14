@@ -1,4 +1,3 @@
-@wip
 Feature: Venue-handle link audit — flag a kind='venue' crawl target whose own posts never corroborate its mapped venue
 
   As an operator relying on automatic venue attribution for ~80 crawled

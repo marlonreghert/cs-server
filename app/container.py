@@ -636,6 +636,9 @@ class Container:
         from app.services.event_venue_advisor import (
             validate_event_venue_advisor_enabled_config,
         )
+        from app.services.venue_link_audit import (
+            validate_venue_link_audit_enabled_config,
+        )
         from app.services.venue_city_vocabulary import (
             validate_address_city_vocabulary_config,
         )
@@ -743,6 +746,14 @@ class Container:
                 # pass — production stays byte-identical to today whatever
                 # else in this plan is deployed.
                 "event_venue_advisor_enabled": validate_event_venue_advisor_enabled_config,
+                # plans/260913_venue-handle-link-audit.md: whether
+                # GET /admin/events/dedup-backlog computes and surfaces the
+                # venue-handle link audit at all. False by default — with
+                # it off, `collect_venue_link_audit` is never called and
+                # the response carries only the two new, empty/zero
+                # additive fields. The SAME generic admin-config CRUD route
+                # every key here uses, no dedicated endpoint.
+                "venue_link_audit_enabled": validate_venue_link_audit_enabled_config,
                 # plans/260906_address-components-backfill.md Phase 1: the
                 # operator-approved city-name additions beyond the 27 state
                 # capitals — shape only (numeric lat/lng in a plausible

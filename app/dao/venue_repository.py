@@ -81,6 +81,17 @@ class VenueRepository(RedisVenueDAO):
         needed on this wrapper."""
         self.rds_store.update_venue_address_components(venue_id, **components)
 
+    def get_address_bulk(self, venue_ids):
+        """Forwards to the RDS store's bulk `venue_id -> {lat, lng,
+        neighborhood}` address read — already used internally by
+        `redis_projection_service` via `self.rds_store` directly; exposed
+        HERE so a caller that only holds a `VenueRepository` (every
+        `collect_*`-shaped report in `app/routers/admin_events_router.py`,
+        per plans/260913_venue-handle-link-audit.md's
+        `collect_venue_link_audit`) never has to reach into `.rds_store`
+        itself to get it."""
+        return self.rds_store.get_address_bulk(venue_ids)
+
     def list_address_backfill_candidates(
         self, after_venue_id, limit: int, *, mode: str = "fill"
     ) -> list[dict]:

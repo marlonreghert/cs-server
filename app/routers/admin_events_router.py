@@ -31,6 +31,7 @@ from app.services.event_merge import apply_merge_suggestion, reject_merge_sugges
 from app.services.event_reconciliation import event_unread_time
 from app.services.event_source_media import resolve_event_media
 from app.services.promoter_registry_service import InvalidPromoterAccount, PromoterRegistryService
+from app.services.venue_link_audit import collect_venue_link_audit, load_venue_link_audit_enabled
 
 logger = logging.getLogger(__name__)
 
@@ -657,6 +658,27 @@ class DedupBacklogDisputeOut(BaseModel):
     resolves_to_venue_name: Optional[str] = None
 
 
+# plans/260913_venue-handle-link-audit.md: additive. A `kind='venue'` crawl
+# target whose own posts give no corroborating evidence for a currently-
+# mapped venue, across at least two checkable posts. `mapped_venues` lists
+# EVERY venue currently mapped to the handle, flagged or not, so a
+# double-mapped handle's good sibling (the `real.botequim` shape) stays
+# visible next to the spurious one rather than being dropped.
+class VenueLinkAuditVenueOut(BaseModel):
+    venue_id: str
+    venue_name: Optional[str] = None
+    checkable_count: int
+    non_corroborating_count: int
+    flagged: bool
+    sample_location_texts: list[str] = Field(default_factory=list)
+    sample_scores: list[Optional[float]] = Field(default_factory=list)
+
+
+class VenueLinkAuditCandidateOut(BaseModel):
+    handle: str
+    mapped_venues: list[VenueLinkAuditVenueOut] = Field(default_factory=list)
+
+
 class DedupBacklogOut(BaseModel):
     """Every measure `event_dedup_backlog{measure}` publishes, plus the group
     and dispute detail an operator needs to decide which venues belong on
@@ -676,6 +698,12 @@ class DedupBacklogOut(BaseModel):
     offset: int
     venue_night_groups: list[DedupBacklogVenueNightOut] = Field(default_factory=list)
     attribution_disputes: list[DedupBacklogDisputeOut] = Field(default_factory=list)
+    # plans/260913_venue-handle-link-audit.md: additive. Empty and zero
+    # whenever `venue_link_audit_enabled` is False (the shipped default) —
+    # `collect_venue_link_audit` is never even called in that case, not
+    # merely hidden from the response.
+    venue_link_audit_candidates: list[VenueLinkAuditCandidateOut] = Field(default_factory=list)
+    venue_link_audit_total: int = 0
 
 
 @router.get("/dedup-backlog", response_model=DedupBacklogOut)
@@ -687,6 +715,14 @@ def get_dedup_backlog(
     backlog = collect_dedup_backlog(dao, redis_like=_admin_config_redis())
     groups = backlog.venue_night_groups[offset: offset + limit]
     disputes = backlog.attribution_disputes[offset: offset + limit]
+    # plans/260913_venue-handle-link-audit.md: the kill-switch decides
+    # whether this runs AT ALL, not just whether its output is shown — the
+    # same "disabled costs nothing" discipline `event_venue_advisor_enabled`
+    # already established.
+    venue_link_audit_candidates = []
+    if load_venue_link_audit_enabled(_admin_config_redis()):
+        venue_link_audit_candidates = collect_venue_link_audit(dao)
+    audit_page = venue_link_audit_candidates[offset: offset + limit]
     return DedupBacklogOut(
         live_rows=backlog.live_rows,
         venue_night_group_total=backlog.venue_night_group_count,
@@ -699,6 +735,8 @@ def get_dedup_backlog(
         limit=limit, offset=offset,
         venue_night_groups=[DedupBacklogVenueNightOut(**g.to_dict()) for g in groups],
         attribution_disputes=[DedupBacklogDisputeOut(**d.to_dict()) for d in disputes],
+        venue_link_audit_candidates=[VenueLinkAuditCandidateOut(**c.to_dict()) for c in audit_page],
+        venue_link_audit_total=len(venue_link_audit_candidates),
     )
 
 

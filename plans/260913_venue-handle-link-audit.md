@@ -111,8 +111,8 @@ the original description.
    (live, served); the other 2 are `pending_review` for an UNRELATED reason
    (`review_reason='date_range'`), not a venue flag — i.e. those two would
    ALSO auto-accept at the wrong venue the moment their date issue is fixed.
-   9 of 14 events have an EMPTY `location_text` (nothing to check either
-   way). Of the 5 with text, 2 are decisive, real evidence of a different
+   10 of 14 events have an EMPTY `location_text` (nothing to check either
+   way). Of the 4 with text, 2 are decisive, real evidence of a different
    place: `"Casa de Câmara e Cadeia de Brejo da Madre de Deus"` and `"Torre
    Malakoff"` — neither clears `name_similarity` against the mapped venue
    (0.4688 and 0.2791 respectively, both below the 0.55 floor) and neither
