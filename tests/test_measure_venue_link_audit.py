@@ -113,15 +113,21 @@ class TestTheCommittedCorpusMatchesThisPlansOwnFindings:
         assert result["matches_expectation"] is True, result
         assert result["flagged"] is False, result
 
-    def test_beerdock_recife_already_reattributed_is_not_flagged(self):
+    def test_beerdock_recife_reduced_but_still_flagged(self):
         """plans/260914_venue-link-audit-checks-current-attribution.md's
-        own case: 16 of 17 events already carry a DIFFERENT venue_id
-        (correctly reattributed by an unrelated mechanism hours earlier)
-        and must not count against the original mapping — leaving only
-        one genuinely non-corroborating event, below the pattern bar."""
+        own case, corrected after an independent review individually
+        re-checked all 16 CASA FORTE events rather than trusting a 3-event
+        spot check: 15 of 16 already carry a DIFFERENT venue_id (correctly
+        reattributed by an unrelated mechanism hours earlier) and are
+        excluded; the 16th was NEVER reattributed and, combined with one
+        further genuinely unresolved event, is exactly 2 real checkable
+        non-corroborating events — meeting the pattern bar. The handle
+        stays flagged, count reduced from 17 to 2 — matching the real
+        full-dataset production result (2/31) this fix was independently
+        re-verified against, not silently rounded down to "fixed"."""
         result = m.measure_corpus()["beerdock_recife_already_reattributed_elsewhere"]
         assert result["matches_expectation"] is True, result
-        assert result["flagged"] is False, result
+        assert result["flagged"] is True, result
 
 
 class TestReadOnlyGuarantee:
