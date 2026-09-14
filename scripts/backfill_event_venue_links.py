@@ -61,12 +61,52 @@ status is computed as if it were not there — the SAME default the live
 pipeline's `event_attribution_dispute_withhold_enabled` ships with, so this
 repair cannot quietly withdraw content from serving.
 
+## Two MORE modes (plans/260914_recife-venue-mapping-corrections.md) —
+## an operator-pinned write, and a fair re-run for never-resolved rows
+
+`--mode force-reassign` is an unconditional, operator-pinned `venue_id`
+write, never a ladder re-run — the shape needed when a handle's
+`instagram.handle` mapping itself was wrong (a spurious duplicate venue, or
+a wrong force-assigned single venue) and the already-written events must be
+corrected to match the fixed mapping. Takes `--handle <h>` (exactly one),
+`--from-venue-id <id|none>`, `--to-venue-id <id|none>` — selection is
+`source_handle == handle AND linked_by IS NULL AND venue_id == (from_venue_id
+or NULL)`. `to-venue-id none` DETACHES (clears `venue_id`/
+`location_resolution` to `NULL`, folds `unresolved_venue` INTO
+`review_reason`); any other `--to-venue-id` ASSIGNS (`location_resolution =
+RESOLUTION_MANUAL`, folds `unresolved_venue`/`venue_not_in_catalog` OUT of
+`review_reason`). Neither branch writes `linked_by` — this is not a ladder
+verdict, so there is no new link method to record. The SAME skip table
+every mode applies protects an operator's own prior correction even from
+this operator-pinned script run. `status` is recomputed through the SAME
+`is_clean_extraction`-based tail every mode uses, never asserted.
+
+`--mode unresolved-venue` reuses `decide_one` — and therefore
+`resolve_event_venue`/`gate_auto_link` — completely UNCHANGED; only the
+SELECTION is new: `venue_id IS NULL`, optionally scoped by one or more
+repeated `--handle <h>` (catalog-wide when omitted). The intended use is a
+second pass run AFTER a `force-reassign` detach, so the now-unresolved rows
+get the identical fair shot at auto-resolution the live pipeline already
+gives every future post.
+
+Both new modes keep every property the two selections above already have:
+dry-run default, `--apply` to write, idempotent (selection itself excludes
+an already-corrected row on a second run), resumable, no network client
+importable, `operator_edited_fields` always wins, and the same
+`ArithmeticImbalance`/`WriteAffectedNoRows` hard-stops.
+
 Usage:
     python -m scripts.backfill_event_venue_links                        # dry-run: report only
     python -m scripts.backfill_event_venue_links --apply                # write the repaired links
     python -m scripts.backfill_event_venue_links --apply --since-id X   # resume after event_id X
     python -m scripts.backfill_event_venue_links --mode disputed-location-text
     python -m scripts.backfill_event_venue_links --mode disputed-location-text --apply
+    python -m scripts.backfill_event_venue_links --mode force-reassign \\
+        --handle real.botequim --from-venue-id none --to-venue-id ven_... --apply
+    python -m scripts.backfill_event_venue_links --mode force-reassign \\
+        --handle editaisculturape --from-venue-id ven_... --to-venue-id none --apply
+    python -m scripts.backfill_event_venue_links --mode unresolved-venue \\
+        --handle editaisculturape --apply
 
 Capture the dry-run report to a file BEFORE running --apply — it is the
 only record of every changed row's previous venue_id. There is no revert
@@ -124,7 +164,11 @@ logger = logging.getLogger("backfill_event_venue_links")
 # repair engine. See this module's docstring.
 MODE_HANDLE_MENTION = "handle-mention"
 MODE_DISPUTED_LOCATION_TEXT = "disputed-location-text"
-MODES = (MODE_HANDLE_MENTION, MODE_DISPUTED_LOCATION_TEXT)
+# plans/260914_recife-venue-mapping-corrections.md: two MORE selections,
+# alongside (never replacing) the two above. See this module's docstring.
+MODE_FORCE_REASSIGN = "force-reassign"
+MODE_UNRESOLVED_VENUE = "unresolved-venue"
+MODES = (MODE_HANDLE_MENTION, MODE_DISPUTED_LOCATION_TEXT, MODE_FORCE_REASSIGN, MODE_UNRESOLVED_VENUE)
 
 # Skip reasons — plan §B's per-status/per-protection table.
 SKIP_CONFIRMED = "confirmed"
@@ -257,6 +301,72 @@ def _fold_no_venue_reason(existing_reason: Optional[str], no_venue_reason: Optio
     return "; ".join(tokens) if tokens else None
 
 
+def _skip_reason(event: dict) -> Optional[str]:
+    """plan §B's per-status/per-protection skip table (plans/260914_recife-
+    venue-mapping-corrections.md's Refactor note) — the ONE place this check
+    is expressed, shared by `decide_one`, `decide_one_disputed`, and
+    `decide_one_force_reassign` rather than duplicated a third time. An
+    operator's own prior action always wins, unconditionally, regardless of
+    which mode/selection reached this row."""
+    status = event.get("status")
+    edited = event.get("operator_edited_fields") or []
+    if status == STATUS_CONFIRMED:
+        return SKIP_CONFIRMED
+    if event.get("location_resolution") == RESOLUTION_MANUAL:
+        return SKIP_MANUAL_LINK
+    if status == STATUS_SUPERSEDED:
+        return SKIP_SUPERSEDED
+    if status == _STATUS_EXTRACTION_FAILED:
+        return SKIP_EXTRACTION_FAILED
+    if status == _STATUS_REJECTED:
+        return SKIP_REJECTED
+    if "venue_id" in edited:
+        return SKIP_OPERATOR_EDITED_VENUE
+    return None
+
+
+def _skip_decision(event: dict, reason: str) -> "Decision":
+    """The `action="skip"` `Decision` shape for a row `_skip_reason` already
+    flagged — shared for the same reason `_skip_reason` itself is."""
+    return Decision(
+        event_id=event["event_id"], action="skip", skip_reason=reason,
+        old_venue_id=event.get("venue_id"), old_status=event.get("status"),
+        old_linked_by=event.get("linked_by"),
+        old_location_resolution=event.get("location_resolution"),
+        venue_name_before=event.get("venue_name"),
+    )
+
+
+def _restore_status(
+    event: dict, *, gate_reason: Optional[str], new_venue_id: Optional[str],
+    new_review_reason: Optional[str], min_confidence: float,
+) -> tuple[str, Optional[str]]:
+    """plan §C's status-restoration tail, shared by every decision function
+    (plans/260914_recife-venue-mapping-corrections.md's Refactor note):
+    recompute `status` through `is_clean_extraction` — never asserted — then
+    apply the SAME `needs_review` fallback `event_reconciliation.
+    reconcile_post_events` itself falls back to when a queued row would
+    otherwise carry a null reason.
+
+    `gate_reason` is the review reason FED TO THE GATE: equal to
+    `new_review_reason` for `decide_one`/`decide_one_force_reassign`, but a
+    withholding-adjusted variant for `decide_one_disputed` (which still
+    PERSISTS the unadjusted `new_review_reason` — only the gate input
+    differs, never what gets written).
+    """
+    clean = is_clean_extraction(
+        review_reason=gate_reason, starts_at=event.get("starts_at"),
+        venue_id=new_venue_id, confidence=event.get("confidence"),
+        min_confidence=min_confidence, post_type=event.get("post_type") or KIND_EVENT,
+    )
+    new_status = STATUS_ACCEPTED if clean else STATUS_PENDING_REVIEW
+    if new_status == STATUS_PENDING_REVIEW and not new_review_reason:
+        # Mirrors event_reconciliation.reconcile_post_events' own residual
+        # fallback — a queued row must never carry a null reason.
+        new_review_reason = REVIEW_REASON_NEEDS_REVIEW
+    return new_status, new_review_reason
+
+
 @dataclass
 class Decision:
     """The pure verdict for one candidate row — computed without touching
@@ -306,32 +416,12 @@ def decide_one(
     then §C (review-reason fold + status restoration). Pure: takes and
     returns plain values, makes no DAO call."""
     event_id = event["event_id"]
-    status = event.get("status")
-    edited = event.get("operator_edited_fields") or []
     old_venue_id = event.get("venue_id")
 
-    def _skip(reason: str) -> Decision:
-        return Decision(
-            event_id=event_id, action="skip", skip_reason=reason,
-            old_venue_id=old_venue_id, old_status=status,
-            old_linked_by=event.get("linked_by"),
-            old_location_resolution=event.get("location_resolution"),
-            venue_name_before=event.get("venue_name"),
-        )
-
     # ── plan §B: the per-status/per-protection skip table ────────────────
-    if status == STATUS_CONFIRMED:
-        return _skip(SKIP_CONFIRMED)
-    if event.get("location_resolution") == RESOLUTION_MANUAL:
-        return _skip(SKIP_MANUAL_LINK)
-    if status == STATUS_SUPERSEDED:
-        return _skip(SKIP_SUPERSEDED)
-    if status == _STATUS_EXTRACTION_FAILED:
-        return _skip(SKIP_EXTRACTION_FAILED)
-    if status == _STATUS_REJECTED:
-        return _skip(SKIP_REJECTED)
-    if "venue_id" in edited:
-        return _skip(SKIP_OPERATOR_EDITED_VENUE)
+    reason = _skip_reason(event)
+    if reason is not None:
+        return _skip_decision(event, reason)
 
     # ── plan §A: re-resolve from the event's OWN stored location text ────
     location_text_input = _location_text_input(event)
@@ -367,21 +457,10 @@ def decide_one(
     new_review_reason = _fold_no_venue_reason(old_review_reason, no_venue_reason)
 
     # ── plan §C: status restoration goes through is_clean_extraction, never asserted ──
-    # plans/260813_review-gate-and-date-vocabulary.md §C: `post_type` is a
-    # real, NOT-NULL column on every already-persisted row this script
-    # reads, so `event.get("post_type")` should always resolve — the
-    # `or KIND_EVENT` fallback mirrors event_reconciliation.
-    # reconcile_post_events' own defensive default for the same call.
-    clean = is_clean_extraction(
-        review_reason=new_review_reason, starts_at=event.get("starts_at"),
-        venue_id=new_venue_id, confidence=event.get("confidence"),
-        min_confidence=min_confidence, post_type=event.get("post_type") or KIND_EVENT,
+    new_status, new_review_reason = _restore_status(
+        event, gate_reason=new_review_reason, new_venue_id=new_venue_id,
+        new_review_reason=new_review_reason, min_confidence=min_confidence,
     )
-    new_status = STATUS_ACCEPTED if clean else STATUS_PENDING_REVIEW
-    if new_status == STATUS_PENDING_REVIEW and not new_review_reason:
-        # Mirrors event_reconciliation.reconcile_post_events' own residual
-        # fallback — a queued row must never carry a null reason.
-        new_review_reason = REVIEW_REASON_NEEDS_REVIEW
 
     unrecognized_handle = None
     if resolution.method == METHOD_VENUE_NOT_IN_CATALOG:
@@ -395,7 +474,7 @@ def decide_one(
         and new_location_confidence == event.get("location_confidence")
         and new_linked_by == event.get("linked_by")
         and new_review_reason == old_review_reason
-        and new_status == status
+        and new_status == event.get("status")
     )
     action = "unchanged" if unchanged else ("detach" if new_venue_id is None else "repoint")
 
@@ -408,7 +487,7 @@ def decide_one(
         old_location_confidence=event.get("location_confidence"),
         new_location_confidence=new_location_confidence,
         old_review_reason=old_review_reason, new_review_reason=new_review_reason,
-        old_status=status, new_status=new_status,
+        old_status=event.get("status"), new_status=new_status,
         new_linked_at=new_linked_at, resolution_method=resolution.method,
         unrecognized_handle=unrecognized_handle,
         venue_name_before=event.get("venue_name"),
@@ -430,31 +509,12 @@ def decide_one_disputed(
     pipeline can never disagree about a row.
     """
     event_id = event["event_id"]
-    status = event.get("status")
     edited = event.get("operator_edited_fields") or []
     old_venue_id = event.get("venue_id")
 
-    def _skip(reason: str) -> Decision:
-        return Decision(
-            event_id=event_id, action="skip", skip_reason=reason,
-            old_venue_id=old_venue_id, old_status=status,
-            old_linked_by=event.get("linked_by"),
-            old_location_resolution=event.get("location_resolution"),
-            venue_name_before=event.get("venue_name"),
-        )
-
-    if status == STATUS_CONFIRMED:
-        return _skip(SKIP_CONFIRMED)
-    if event.get("location_resolution") == RESOLUTION_MANUAL:
-        return _skip(SKIP_MANUAL_LINK)
-    if status == STATUS_SUPERSEDED:
-        return _skip(SKIP_SUPERSEDED)
-    if status == _STATUS_EXTRACTION_FAILED:
-        return _skip(SKIP_EXTRACTION_FAILED)
-    if status == _STATUS_REJECTED:
-        return _skip(SKIP_REJECTED)
-    if "venue_id" in edited:
-        return _skip(SKIP_OPERATOR_EDITED_VENUE)
+    reason = _skip_reason(event)
+    if reason is not None:
+        return _skip_decision(event, reason)
 
     location_text_input = _location_text_input(event)
     verdict = evaluate_attribution_dispute(
@@ -478,7 +538,7 @@ def decide_one_disputed(
             old_location_confidence=event.get("location_confidence"),
             new_location_confidence=event.get("location_confidence"),
             old_review_reason=old_review_reason, new_review_reason=old_review_reason,
-            old_status=status, new_status=status,
+            old_status=event.get("status"), new_status=event.get("status"),
             venue_name_before=event.get("venue_name"),
             venue_name_after=event.get("venue_name"),
         )
@@ -519,20 +579,16 @@ def decide_one_disputed(
             if token and token != REVIEW_REASON_LOCATION_TEXT_DISPUTES_VENUE
         ]
         gate_reason = "; ".join(remaining) if remaining else None
-    clean = is_clean_extraction(
-        review_reason=gate_reason, starts_at=event.get("starts_at"),
-        venue_id=new_venue_id, confidence=event.get("confidence"),
-        min_confidence=min_confidence, post_type=event.get("post_type") or KIND_EVENT,
+    new_status, new_review_reason = _restore_status(
+        event, gate_reason=gate_reason, new_venue_id=new_venue_id,
+        new_review_reason=new_review_reason, min_confidence=min_confidence,
     )
-    new_status = STATUS_ACCEPTED if clean else STATUS_PENDING_REVIEW
-    if new_status == STATUS_PENDING_REVIEW and not new_review_reason:
-        new_review_reason = REVIEW_REASON_NEEDS_REVIEW
 
     unchanged = (
         new_venue_id == old_venue_id
         and new_linked_by == event.get("linked_by")
         and new_review_reason == old_review_reason
-        and new_status == status
+        and new_status == event.get("status")
     )
     if unchanged:
         action = "unchanged"
@@ -550,7 +606,7 @@ def decide_one_disputed(
         old_location_confidence=event.get("location_confidence"),
         new_location_confidence=new_location_confidence,
         old_review_reason=old_review_reason, new_review_reason=new_review_reason,
-        old_status=status, new_status=new_status,
+        old_status=event.get("status"), new_status=new_status,
         new_linked_at=new_linked_at, resolution_method=verdict.method,
         unrecognized_handle=(
             _first_unrecognized_handle(
@@ -562,8 +618,91 @@ def decide_one_disputed(
     )
 
 
+def decide_one_force_reassign(
+    event: dict, *, to_venue_id: Optional[str], venue_names_by_id: dict,
+    min_confidence: float, now: datetime,
+) -> Decision:
+    """`--mode force-reassign`'s per-row decision (plans/260914_recife-
+    venue-mapping-corrections.md §2): an unconditional, operator-pinned
+    `venue_id` write, never a ladder re-run. `_select_candidates` already
+    enforces `source_handle == handle`, `linked_by IS NULL`, and
+    `venue_id == from_venue_id` — this function does not re-check
+    `from_venue_id`, it only decides the write. The SAME skip table
+    `decide_one`/`decide_one_disputed` apply protects an operator's own
+    prior correction even from an operator-pinned script run.
+
+    `to_venue_id is None` is the DETACH shape (`editaisculturape`):
+    `venue_id`/`location_resolution` are cleared to `NULL` — an honest
+    "never decided," not `RESOLUTION_UNRESOLVED` (no ladder ran here) —
+    `location_confidence` is left exactly as it was (the plan's own Open
+    Questions specify this), and `unresolved_venue` is folded IN.
+    `to_venue_id` set is the ASSIGN shape (`real.botequim`/
+    `marcellos_music_bar`): `location_resolution = RESOLUTION_MANUAL` (the
+    existing sentinel for an operator-pinned link, otherwise unused by any
+    automated path), `location_confidence = None` (no algorithmic score
+    exists for a pinned write — the same value `POST /{event_id}/link`
+    writes when called with a bare `venue_id`, no `candidate_rank`), and
+    `unresolved_venue`/`venue_not_in_catalog` are folded OUT. Neither branch
+    touches `linked_by` — the plan's Data Impact section lists only
+    `venue_id`, `location_resolution`, `review_reason`, `status`, and
+    `linked_at` as touched columns; this is not a ladder verdict, so there
+    is no new link method to record.
+    """
+    reason = _skip_reason(event)
+    if reason is not None:
+        return _skip_decision(event, reason)
+
+    event_id = event["event_id"]
+    old_venue_id = event.get("venue_id")
+    old_review_reason = event.get("review_reason")
+
+    if to_venue_id is not None:
+        new_venue_id = to_venue_id
+        new_location_resolution = RESOLUTION_MANUAL
+        new_location_confidence = None
+        new_linked_at: Optional[datetime] = now
+        no_venue_reason: Optional[str] = None
+    else:
+        new_venue_id = None
+        new_location_resolution = None
+        new_location_confidence = event.get("location_confidence")
+        new_linked_at = None
+        no_venue_reason = REVIEW_REASON_UNRESOLVED_VENUE
+
+    new_review_reason = _fold_no_venue_reason(old_review_reason, no_venue_reason)
+    new_status, new_review_reason = _restore_status(
+        event, gate_reason=new_review_reason, new_venue_id=new_venue_id,
+        new_review_reason=new_review_reason, min_confidence=min_confidence,
+    )
+
+    unchanged = (
+        new_venue_id == old_venue_id
+        and new_location_resolution == event.get("location_resolution")
+        and new_location_confidence == event.get("location_confidence")
+        and new_review_reason == old_review_reason
+        and new_status == event.get("status")
+    )
+    action = "unchanged" if unchanged else ("detach" if new_venue_id is None else "repoint")
+
+    return Decision(
+        event_id=event_id, action=action,
+        old_venue_id=old_venue_id, new_venue_id=new_venue_id,
+        old_linked_by=event.get("linked_by"), new_linked_by=event.get("linked_by"),
+        old_location_resolution=event.get("location_resolution"),
+        new_location_resolution=new_location_resolution,
+        old_location_confidence=event.get("location_confidence"),
+        new_location_confidence=new_location_confidence,
+        old_review_reason=old_review_reason, new_review_reason=new_review_reason,
+        old_status=event.get("status"), new_status=new_status,
+        new_linked_at=new_linked_at, resolution_method=None,
+        venue_name_before=event.get("venue_name"),
+        venue_name_after=venue_names_by_id.get(new_venue_id) if new_venue_id else None,
+    )
+
+
 @dataclass
 class Report:
+    mode: str = MODE_HANDLE_MENTION
     selected: int = 0
     skipped_by_reason: Counter = field(default_factory=Counter)
     repointed: int = 0
@@ -617,8 +756,11 @@ def check_balance(report: Report) -> None:
     report.balanced = True
 
 
-def _select_candidates(all_events: list, *, mode: str, since_id: Optional[str]) -> list:
-    """The ONE place either mode's selection is expressed.
+def _select_candidates(
+    all_events: list, *, mode: str, since_id: Optional[str],
+    handles: Optional[list] = None, from_venue_id: Optional[str] = None,
+) -> list:
+    """The ONE place any mode's selection is expressed.
 
     `handle-mention` (default): rows the caption-mention precedence bug
     linked, exactly as this script has always selected them.
@@ -629,6 +771,21 @@ def _select_candidates(all_events: list, *, mode: str, since_id: Optional[str]) 
     closure writes none of the four link columns. That last clause is what
     keeps this mode off every row any RUNG ever decided (those all carry a
     `linked_by`), so the two modes can never select the same row.
+
+    `force-reassign` (plans/260914_recife-venue-mapping-corrections.md §2):
+    ONE handle (`handles[0]` — the CLI enforces exactly one), `linked_by IS
+    NULL` (an operator-pinned write never overrides a ladder verdict — an
+    already-linked row is not this mode's business), and `venue_id ==
+    from_venue_id` (`None` selects a currently-unlinked row for an ASSIGN;
+    a real id selects a currently-mis-mapped row for a DETACH or a
+    repoint) — this is also what makes the mode idempotent BY SELECTION: a
+    row this mode already corrected no longer has `venue_id == from_venue_id`
+    on a second run with the same arguments.
+
+    `unresolved-venue`: `venue_id IS NULL`, optionally scoped to one or more
+    `handles` (catalog-wide when omitted/empty) — the capability plan
+    §2 opens up for a future general sweep, though every invocation this
+    plan itself makes always scopes it to one handle.
     """
     if mode == MODE_DISPUTED_LOCATION_TEXT:
         candidates = (
@@ -636,6 +793,21 @@ def _select_candidates(all_events: list, *, mode: str, since_id: Optional[str]) 
             if (e.get("post_type") or KIND_EVENT) == KIND_EVENT
             and e.get("venue_id")
             and not e.get("linked_by")
+        )
+    elif mode == MODE_FORCE_REASSIGN:
+        handle = handles[0] if handles else None
+        candidates = (
+            e for e in all_events
+            if e.get("source_handle") == handle
+            and not e.get("linked_by")
+            and e.get("venue_id") == from_venue_id
+        )
+    elif mode == MODE_UNRESOLVED_VENUE:
+        handle_set = set(handles) if handles else None
+        candidates = (
+            e for e in all_events
+            if e.get("venue_id") is None
+            and (handle_set is None or e.get("source_handle") in handle_set)
         )
     else:
         candidates = (e for e in all_events if e.get("linked_by") == METHOD_HANDLE_MENTION)
@@ -648,6 +820,8 @@ def _select_candidates(all_events: list, *, mode: str, since_id: Optional[str]) 
 def run_backfill(
     venue_dao, *, apply: bool, since_id: Optional[str] = None, now: Optional[datetime] = None,
     mode: str = MODE_HANDLE_MENTION, withhold_disputed: bool = False,
+    handles: Optional[list] = None, from_venue_id: Optional[str] = None,
+    to_venue_id: Optional[str] = None,
 ) -> Report:
     """The whole backfill in one pass: dependency guard, selection,
     per-row decisions, writes (when `apply`), balance/write-failure
@@ -659,6 +833,13 @@ def run_backfill(
     processed by an earlier invocation, or simply outside the resumed
     range) contributes its CURRENT stored state to the after-counts and
     collision detection unchanged.
+
+    `handles`/`from_venue_id`/`to_venue_id` only matter for the two newest
+    modes (plans/260914_recife-venue-mapping-corrections.md): `handles`
+    scopes `force-reassign` (exactly one) and optionally `unresolved-venue`
+    (zero or more — catalog-wide when empty/omitted); `from_venue_id`/
+    `to_venue_id` are `force-reassign`'s own pinned write and are ignored by
+    every other mode.
     """
     _assert_forward_fix_landed()
     now = now or datetime.now(timezone.utc)
@@ -668,11 +849,13 @@ def run_backfill(
     handle_index = build_handle_index(venue_dao)
     venue_names_by_id = {v.venue_id: v.venue_name for v in venues}
 
-    report = Report(applied=apply)
+    report = Report(applied=apply, mode=mode)
     report.before_linked_by = Counter(e.get("linked_by") for e in all_events if e.get("linked_by"))
     report.before_venue_counts = Counter(e.get("venue_name") for e in all_events if e.get("venue_id"))
 
-    candidates = _select_candidates(all_events, mode=mode, since_id=since_id)
+    candidates = _select_candidates(
+        all_events, mode=mode, since_id=since_id, handles=handles, from_venue_id=from_venue_id,
+    )
     report.selected = len(candidates)
 
     decisions_by_id: dict[str, Decision] = {}
@@ -684,7 +867,14 @@ def run_backfill(
                 min_confidence=settings.event_extraction_min_confidence,
                 now=now, withhold_disputed=withhold_disputed,
             )
+        elif mode == MODE_FORCE_REASSIGN:
+            decision = decide_one_force_reassign(
+                event, to_venue_id=to_venue_id, venue_names_by_id=venue_names_by_id,
+                min_confidence=settings.event_extraction_min_confidence, now=now,
+            )
         else:
+            # MODE_HANDLE_MENTION or MODE_UNRESOLVED_VENUE — the SAME
+            # engine; only `_select_candidates` differs between them.
             decision = decide_one(
                 event, venues=venues, handle_index=handle_index, venue_names_by_id=venue_names_by_id,
                 confidence_floor=settings.promoter_link_confidence_floor,
@@ -800,7 +990,7 @@ def run_backfill(
 def _print_report(report: Report) -> None:
     mode = "APPLY" if report.applied else "DRY RUN"
     logger.info("=== backfill_event_venue_links (%s) ===", mode)
-    logger.info("selected (linked_by=handle_mention): %d", report.selected)
+    logger.info("selected (mode=%s): %d", report.mode, report.selected)
     logger.info("skipped: %s", dict(report.skipped_by_reason))
     logger.info(
         "repointed: %d | flagged: %d | detached: %d (venue_not_in_catalog=%d, unresolved=%d) "
@@ -838,6 +1028,13 @@ def _print_report(report: Report) -> None:
     logger.info("balanced: %s", report.balanced)
 
 
+def _parse_venue_id_arg(raw: str) -> Optional[str]:
+    """`--from-venue-id`/`--to-venue-id` both accept a real venue_id or the
+    literal `none` (case-insensitive — no real venue_id is ever spelled that
+    way) meaning "no venue" / `NULL`."""
+    return None if raw.strip().lower() == "none" else raw
+
+
 def main(argv: Optional[list] = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     ap = argparse.ArgumentParser(
@@ -855,15 +1052,42 @@ def main(argv: Optional[list] = None) -> int:
     )
     ap.add_argument(
         "--mode", choices=MODES, default=MODE_HANDLE_MENTION,
-        help="which rows to re-decide: 'handle-mention' (the default, unchanged) or "
-             "'disputed-location-text' (260912 §C's venue-post attribution repair)",
+        help="which rows to re-decide: 'handle-mention' (the default, unchanged), "
+             "'disputed-location-text' (260912 §C's venue-post attribution repair), "
+             "'force-reassign' (an unconditional, operator-pinned venue_id write — "
+             "260914 §2), or 'unresolved-venue' (re-run the unchanged ladder against "
+             "venue_id IS NULL rows — 260914 §2)",
     )
     ap.add_argument(
         "--withhold-disputed", action="store_true",
         help="let a flagged row's new review reason withhold auto-accept "
              "(default: record the reason, leave the row's status as it was)",
     )
+    ap.add_argument(
+        "--handle", action="append", default=None,
+        help="scope selection to this handle — 'force-reassign' requires exactly "
+             "one; 'unresolved-venue' accepts zero or more (repeat the flag), "
+             "catalog-wide when omitted",
+    )
+    ap.add_argument(
+        "--from-venue-id", default=None,
+        help="'force-reassign' only: the venue_id (or the literal 'none') a row "
+             "must currently carry to be selected",
+    )
+    ap.add_argument(
+        "--to-venue-id", default=None,
+        help="'force-reassign' only: the venue_id (or the literal 'none') to write",
+    )
     args = ap.parse_args(argv)
+
+    from_venue_id = to_venue_id = None
+    if args.mode == MODE_FORCE_REASSIGN:
+        if not args.handle or len(args.handle) != 1:
+            ap.error("--mode force-reassign requires exactly one --handle")
+        if args.from_venue_id is None or args.to_venue_id is None:
+            ap.error("--mode force-reassign requires --from-venue-id and --to-venue-id")
+        from_venue_id = _parse_venue_id_arg(args.from_venue_id)
+        to_venue_id = _parse_venue_id_arg(args.to_venue_id)
 
     venue_dao = VenueRepository(client=None, rds_store=RdsVenueStore(settings.rds_sqlalchemy_url))
 
@@ -871,6 +1095,7 @@ def main(argv: Optional[list] = None) -> int:
         report = run_backfill(
             venue_dao, apply=args.apply, since_id=args.since_id,
             mode=args.mode, withhold_disputed=args.withhold_disputed,
+            handles=args.handle, from_venue_id=from_venue_id, to_venue_id=to_venue_id,
         )
     except DependencyNotLanded as exc:
         logger.error(str(exc))
