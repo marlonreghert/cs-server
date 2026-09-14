@@ -212,6 +212,8 @@ _PATTERN_HANDLE = "pattern_handle"
 _SINGLE_MENTION_HANDLE = "single_mention_handle"
 _DOUBLE_HANDLE = "double_mapped_handle"
 _ORPHAN_HANDLE = "orphan_handle"
+_REATTRIBUTED_HANDLE = "beerdock_recife"
+_UNRESOLVED_HANDLE = "unresolved_handle"
 
 
 @given("a kind='venue' crawl target whose posts give at least two non-corroborating, checkable pieces of location text for its mapped venue")
@@ -241,7 +243,14 @@ def step_given_single_incidental_mention(context):
 
 @given("a kind='venue' crawl target currently mapped to two venues, where every post's location text corroborates only one of them")
 def step_given_double_mapped_handle(context):
-    # The real, re-verified real.botequim shape.
+    # The real, re-verified real.botequim shape: BOTH candidates fail
+    # DEFAULT_CONFIDENCE_FLOOR (0.4615 vs 0.3881, re-checked live
+    # 2026-09-14 — see plans/260914_venue-link-audit-checks-current-
+    # attribution.md's Evidence), so every event stays venue_id=None,
+    # never resolved to EITHER mapped venue — not pre-resolved to the
+    # correct one. Using venue_id=None here (not correct_id) matters once
+    # the audit filters by an event's current attribution: a wrongly
+    # pre-resolved fixture would silently stop exercising the real shape.
     correct_id = _make_venue(context, "Bar Real Botequim", "Casa Forte")
     wrong_id = _make_venue(context, "Real Bar e Lanches", "Pinheiros")
     _map_handle_to_venue(context, _DOUBLE_HANDLE, correct_id)
@@ -251,7 +260,7 @@ def step_given_double_mapped_handle(context):
         _seed_event(
             context, _DOUBLE_HANDLE,
             "Real Botequim\nAv. 17 de agosto, 1761 - Casa Forte",
-            venue_id=correct_id,
+            venue_id=None,
         )
     context.vla_target_handle = _DOUBLE_HANDLE
     context.vla_correct_venue_id = correct_id
@@ -262,6 +271,49 @@ def step_given_double_mapped_handle(context):
 def step_given_orphaned_target(context):
     _register_crawl_target(context, _ORPHAN_HANDLE)
     context.vla_target_handle = _ORPHAN_HANDLE
+
+
+@given("most of its posts' location text has already been reattributed to a different, specific venue by an unrelated mechanism")
+def step_given_mostly_reattributed_elsewhere(context):
+    # The real, re-verified beerdock_recife shape: mapped to "BeerDock Boa
+    # Viagem", but most of its posts' own location_text is "CASA FORTE" —
+    # and those events already carry venue_id=<Beerdock Casa Forte>,
+    # linked_by='neighbourhood_match', set by the UNRELATED
+    # attribution-dispute reattribute mechanism hours before this audit
+    # ever runs. Never force-assigned to Boa Viagem at all.
+    mapped_id = _make_venue(context, "BeerDock Boa Viagem", "Boa Viagem")
+    reattributed_id = _make_venue(context, "Beerdock Casa Forte", "Casa Forte")
+    _map_handle_to_venue(context, _REATTRIBUTED_HANDLE, mapped_id)
+    _register_crawl_target(context, _REATTRIBUTED_HANDLE)
+    for _ in range(16):
+        _seed_event(context, _REATTRIBUTED_HANDLE, "CASA FORTE", venue_id=reattributed_id)
+    context.vla_target_handle = _REATTRIBUTED_HANDLE
+    context.vla_target_venue_id = mapped_id
+    context.vla_reattributed_venue_id = reattributed_id
+
+
+@given("fewer than two of its remaining posts fail to corroborate the mapped venue")
+def step_given_fewer_than_two_remaining_noncorroborating(context):
+    # One single, real, still-unchecked BeerDock post below the pattern
+    # bar of 2 — proves the fix is "exclude the already-reattributed
+    # events," not "exclude every non-corroborating event unconditionally."
+    _seed_event(
+        context, _REATTRIBUTED_HANDLE, "Mirante do Paço, Recife",
+        venue_id=context.vla_target_venue_id,
+    )
+
+
+@given("at least two of its posts have never been resolved to any venue and do not corroborate the mapped venue")
+def step_given_two_unresolved_noncorroborating(context):
+    venue_id = _make_venue(context, "Casa da Cultura de Pernambuco", "São José")
+    _map_handle_to_venue(context, _UNRESOLVED_HANDLE, venue_id)
+    _register_crawl_target(context, _UNRESOLVED_HANDLE)
+    # venue_id=None: never resolved to anything — must still count, or the
+    # fix over-corrects into excluding every non-corroborating event.
+    for text in ("Torre Malakoff", "Casa de Câmara e Cadeia de Brejo da Madre de Deus"):
+        _seed_event(context, _UNRESOLVED_HANDLE, text, venue_id=None)
+    context.vla_target_handle = _UNRESOLVED_HANDLE
+    context.vla_target_venue_id = venue_id
 
 
 @when("the venue-handle link audit aggregation runs for that target")

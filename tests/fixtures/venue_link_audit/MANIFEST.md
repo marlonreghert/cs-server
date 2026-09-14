@@ -51,6 +51,31 @@ code, which did not exist on that host at scan time.
   unrelated mechanism — not itself reproduced in this fixture, which exists
   only to pin that this handle's AUDIT verdict is "not flagged."
 
+- **`beerdock_recife_already_reattributed_elsewhere`** — added by
+  `plans/260914_venue-link-audit-checks-current-attribution.md`, corrected
+  after an independent review individually re-checked all 16 `CASA FORTE`
+  events rather than trusting a 3-event spot check. `venue_name`/
+  `neighborhood` for `BeerDock Boa Viagem` are verbatim from a live read.
+  Running the shipped audit against production for the first time
+  (2026-09-13/14) re-flagged this handle at 17/46 non-corroborating. Of the
+  16 `CASA FORTE` events, **15** already carry `venue_id='beerdock_casa_
+  forte'` (a real, different, specific venue, re-verified live), correctly
+  reattributed hours earlier by `plans/260912_events-venue-night-
+  duplication.md`'s own backfill (`linked_by='neighbourhood_match'`) — the
+  **16th** (`evt_01M1R2H85295C2CBPS1PZVJSJF`) was NEVER reattributed and
+  still carries `venue_id=<BeerDock Boa Viagem itself>`, `linked_by=None`,
+  so it is correctly still checkable and non-corroborating under the fix.
+  Combined with the one genuinely still-unresolved "Mirante do Paço,
+  Recife" (also still own-venue), that is exactly 2 real checkable
+  non-corroborating events — the handle REMAINS flagged after the fix, with
+  its count reduced from 17 to 2, matching the real full-dataset production
+  result (2/31) this fix was independently re-verified against. This
+  fixture is a REPRESENTATIVE SUBSET of the real 46 live events, not the
+  full set — the remaining ~29 events' `location_text` values were not
+  individually re-fetched and are not fabricated here. Sufficient to prove
+  the fix (expected verdict: still flagged, count reduced) without
+  inventing unverified data for the rest.
+
 ## PII review
 
 No personal names appear in any `location_text` value above — every one

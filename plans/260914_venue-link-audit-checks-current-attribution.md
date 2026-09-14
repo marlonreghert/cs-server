@@ -11,11 +11,14 @@ EVERY venue currently mapped to that handle — including events whose OWN
 mechanism (the attribution-dispute reattribute action, a historical backfill,
 or a future correction). Running the shipped tool against production for the
 first time (2026-09-13/14) surfaced exactly this: `beerdock_recife` was
-flagged for "BeerDock Boa Viagem" at 17/46 non-corroborating, but all 16 of
-the sampled non-corroborating events already carry `venue_id='Beerdock Casa
+flagged for "BeerDock Boa Viagem" at 17/46 non-corroborating, and 15 of the
+17 sampled non-corroborating events already carry `venue_id='Beerdock Casa
 Forte'`, `linked_by='neighbourhood_match'` — correctly reattributed hours
-earlier by `plans/260912_events-venue-night-duplication.md`'s own backfill.
-The audit re-flagged an already-fixed case as if it were new.
+earlier by `plans/260912_events-venue-night-duplication.md`'s own backfill
+(a claim of "16" was corrected after independent review individually
+re-checked all 16 `CASA FORTE`-texted events rather than trusting a
+3-event spot check — see Evidence). The audit re-flagged an already-fixed
+case's OWN events as if they were still evidence against it.
 
 Fix: a mapped venue V is checked only against events whose CURRENT
 `venue_id` is either unset (`None` — never yet resolved, exactly the
@@ -57,11 +60,27 @@ evt_01M27GY1XX1D6R5X8EXH4FP9QZ | 'SMILE ESPECIAL...'   | location_text='CASA FOR
 ```
 All three, re-read live: `venue_id='ven_637a...Jf496843'` (Beerdock Casa
 Forte), `linked_by='neighbourhood_match'` — i.e. correctly resolved, not
-force-assigned to Boa Viagem at all. 16 of the 17 sampled non-corroborating
-events share this exact shape (the 17th, "Oktoberfest BeerDock" /
-"Mirante do Paço, Recife", is a genuinely separate, unchecked case — a real
-location_text that doesn't corroborate Boa Viagem either, worth an
-operator's own look once this fix ships, not folded into this plan).
+force-assigned to Boa Viagem at all.
+
+**Correction (independent review, pre-merge):** the original version of
+this plan claimed "16 of the 17" share this shape, extrapolated from the
+3-event spot check above rather than individually re-checking all 16
+`CASA FORTE`-texted events. A full re-check found **15** of the 16 already
+carry `venue_id='Beerdock Casa Forte'` — the 16th
+(`evt_01M1R2H85295C2CBPS1PZVJSJF`) was NEVER reattributed and still carries
+`venue_id=<BeerDock Boa Viagem itself>`, `linked_by=None`; its own text
+("CASA FORTE") genuinely disagrees with its mapping and is correctly still
+checkable and non-corroborating under this fix. Combined with the 17th
+event ("Oktoberfest BeerDock" / "Mirante do Paço, Recife", also still
+own-venue, genuinely unresolved), that is exactly 2 real checkable
+non-corroborating events — meeting `MIN_NON_CORROBORATING_EVENTS=2`. The
+handle therefore REMAINS flagged after this fix, with its count reduced
+from 17 to 2 (not zero) — matching the real full-dataset production result
+independently re-verified below (2/31). This is the correct, intended
+outcome, not a residual bug: the fix removes the FALSE evidence (already-
+resolved-elsewhere events), not every non-corroborating signal — a genuine
+2-event pattern still clears the bar and stays visible to an operator,
+exactly as designed.
 
 ### Why the fix is exactly "filter by current venue_id," not a broader redesign
 `compute_venue_link_audit`'s inner loop (`app/services/venue_link_audit.py`)

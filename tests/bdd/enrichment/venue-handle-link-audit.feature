@@ -67,6 +67,25 @@ Feature: Venue-handle link audit — flag a kind='venue' crawl target whose own 
     When the venue-handle link audit aggregation runs for that target
     Then the target produces no venue-link-audit candidate and no error
 
+  # ── an event's current attribution, not just its handle's history ──────
+  # 2026-09-13/14: running the shipped audit against production for the
+  # first time found it re-flagging beerdock_recife for events an unrelated
+  # mechanism had already, correctly, reattributed to a sibling venue hours
+  # earlier. Fixed by checking each event's own current venue_id.
+
+  Scenario: An event already reattributed to a different venue is never held against its original mapping
+    Given a kind='venue' crawl target mapped to one venue
+    And most of its posts' location text has already been reattributed to a different, specific venue by an unrelated mechanism
+    And fewer than two of its remaining posts fail to corroborate the mapped venue
+    When the venue-handle link audit aggregation runs for that target
+    Then the target's mapped venue is not reported as a venue-link-audit candidate
+
+  Scenario: An event that was never resolved to any venue still counts toward the mapped venue's totals
+    Given a kind='venue' crawl target mapped to one venue
+    And at least two of its posts have never been resolved to any venue and do not corroborate the mapped venue
+    When the venue-handle link audit aggregation runs for that target
+    Then the target's mapped venue is reported as a venue-link-audit candidate
+
   # ── the existing admin surface, gated off by default ────────────────────
 
   Scenario: The audit is invisible in the dedup-backlog report by default
