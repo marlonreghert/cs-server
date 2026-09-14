@@ -118,6 +118,7 @@ test-unit:
 		tests/test_event_venue_advisor_validator.py \
 		tests/test_event_venue_advisor.py \
 		tests/test_event_venue_advisor_migration.py \
+		tests/test_event_venue_advisor_client.py \
 		tests/test_measure_agentic_mitigation_baseline.py \
 		tests/test_venue_link_audit.py \
 		tests/test_measure_venue_link_audit.py \
