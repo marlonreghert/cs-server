@@ -86,16 +86,17 @@ class TestMeasureCorpus:
 
 
 class TestTheCommittedCorpusMatchesThisPlansOwnFindings:
-    """The three re-verified real cases this plan's Evidence section
-    derives the whole detection design from. A mismatch here means either
-    the corpus or the comparison logic drifted from the re-verified
-    production data — exactly the regression this plan exists to prevent,
-    so these are pinned exactly, unlike the sibling measurement script's
-    own deliberately looser corpus guard."""
+    """The four re-verified real cases this plan's Evidence section (plus
+    plans/260914_venue-link-audit-checks-current-attribution.md's own
+    beerdock_recife addition) derives the whole detection design from. A
+    mismatch here means either the corpus or the comparison logic drifted
+    from the re-verified production data — exactly the regression this
+    plan exists to prevent, so these are pinned exactly, unlike the
+    sibling measurement script's own deliberately looser corpus guard."""
 
     def test_the_committed_corpus_loads_and_every_case_replays(self):
         report = m.measure_corpus()
-        assert len(report) == 3
+        assert len(report) == 4
 
     def test_real_botequim_flags_only_the_wrong_venue(self):
         result = m.measure_corpus()["real_botequim_double_mapped_handle"]
@@ -109,6 +110,16 @@ class TestTheCommittedCorpusMatchesThisPlansOwnFindings:
 
     def test_teatroluizmendonca_is_not_flagged(self):
         result = m.measure_corpus()["teatroluizmendonca_benign_control"]
+        assert result["matches_expectation"] is True, result
+        assert result["flagged"] is False, result
+
+    def test_beerdock_recife_already_reattributed_is_not_flagged(self):
+        """plans/260914_venue-link-audit-checks-current-attribution.md's
+        own case: 16 of 17 events already carry a DIFFERENT venue_id
+        (correctly reattributed by an unrelated mechanism hours earlier)
+        and must not count against the original mapping — leaving only
+        one genuinely non-corroborating event, below the pattern bar."""
+        result = m.measure_corpus()["beerdock_recife_already_reattributed_elsewhere"]
         assert result["matches_expectation"] is True, result
         assert result["flagged"] is False, result
 

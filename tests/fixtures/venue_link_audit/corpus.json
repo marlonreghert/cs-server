@@ -76,6 +76,34 @@
         {"location_text": "Teatro Luiz Mendonça"},
         {"location_text": "Teatro Luiz Mendonça"}
       ]
+    },
+    {
+      "case_id": "beerdock_recife_already_reattributed_elsewhere",
+      "handle": "beerdock_recife",
+      "description": "A kind='venue' crawl target single-mapped to BeerDock Boa Viagem. 16 of a real, larger live set of events already carry venue_id='beerdock_casa_forte' -- a DIFFERENT, specific venue, correctly reattributed hours earlier by plans/260912_events-venue-night-duplication.md's own backfill (neighbourhood_match) -- and must not count as non-corroborating evidence against the ORIGINAL mapping. One further real, distinct, genuinely still-unresolved event ('Mirante do Paco, Recife') stays below the pattern bar of 2 alone. Running the shipped tool against production for the first time (2026-09-13/14) re-flagged this handle at 17/46 before this fix; this is a representative subset (17 of the real 46), not the full set, sufficient to prove the fix without fabricating unfetched location_text values for the remaining ~29.",
+      "expected_flagged_venue_ids": [],
+      "mapped_venues": [
+        {"venue_id": "beerdock_boa_viagem", "venue_name": "BeerDock Boa Viagem", "neighborhood": "Boa Viagem"}
+      ],
+      "events": [
+        {"location_text": "CASA FORTE", "venue_id": "beerdock_casa_forte"},
+        {"location_text": "CASA FORTE", "venue_id": "beerdock_casa_forte"},
+        {"location_text": "CASA FORTE", "venue_id": "beerdock_casa_forte"},
+        {"location_text": "CASA FORTE", "venue_id": "beerdock_casa_forte"},
+        {"location_text": "CASA FORTE", "venue_id": "beerdock_casa_forte"},
+        {"location_text": "CASA FORTE", "venue_id": "beerdock_casa_forte"},
+        {"location_text": "CASA FORTE", "venue_id": "beerdock_casa_forte"},
+        {"location_text": "CASA FORTE", "venue_id": "beerdock_casa_forte"},
+        {"location_text": "CASA FORTE", "venue_id": "beerdock_casa_forte"},
+        {"location_text": "CASA FORTE", "venue_id": "beerdock_casa_forte"},
+        {"location_text": "CASA FORTE", "venue_id": "beerdock_casa_forte"},
+        {"location_text": "CASA FORTE", "venue_id": "beerdock_casa_forte"},
+        {"location_text": "CASA FORTE", "venue_id": "beerdock_casa_forte"},
+        {"location_text": "CASA FORTE", "venue_id": "beerdock_casa_forte"},
+        {"location_text": "CASA FORTE", "venue_id": "beerdock_casa_forte"},
+        {"location_text": "CASA FORTE", "venue_id": "beerdock_casa_forte"},
+        {"location_text": "Mirante do Paço, Recife"}
+      ]
     }
   ]
 }

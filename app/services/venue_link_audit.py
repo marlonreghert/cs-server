@@ -213,6 +213,19 @@ def compute_venue_link_audit(
     read — never the caption, the same per-event-over-post-level precedence
     `resolve_event_venue`/`evaluate_attribution_dispute` already use.
 
+    Each mapped venue V is checked only against events whose OWN CURRENT
+    `venue_id` is `None` (never resolved — the `editaisculturape`/
+    `real.botequim` shape this sweep exists to catch) or V itself — never
+    against an event already, confidently resolved to a DIFFERENT venue by
+    an unrelated mechanism (the attribution-dispute ladder, a historical
+    backfill). plans/260914_venue-link-audit-checks-current-attribution.md:
+    running this sweep against production found it re-flagging
+    `beerdock_recife` for 16 events already correctly reattributed to
+    "Beerdock Casa Forte" hours earlier — an event that is no longer
+    evidence about its ORIGINAL mapping's correctness at all, it is a
+    closed case. Do not "simplify" this back to iterating the handle's
+    full event list — that is precisely the bug this filter fixes.
+
     Returns one `VenueLinkAuditCandidate` per handle that has at least one
     flagged mapped venue — a handle with zero flagged venues (including one
     with zero checkable events at all) produces no candidate."""
@@ -230,7 +243,14 @@ def compute_venue_link_audit(
             non_corroborating = 0
             samples: list = []
             scores: list = []
-            for row in events:
+            # Only events currently unresolved (venue_id is None) or
+            # already resolved to THIS venue are evidence about THIS
+            # venue's mapping — see this function's own docstring.
+            checkable_rows = [
+                row for row in events
+                if row.get("venue_id") in (None, venue["venue_id"])
+            ]
+            for row in checkable_rows:
                 verdict = venue_corroborates_location_text(
                     venue.get("venue_name"), venue.get("neighborhood"),
                     row.get("location_text"),

@@ -206,6 +206,75 @@ class TestComputeVenueLinkAudit:
         candidates = compute_venue_link_audit([target], {"quiet": []})
         assert candidates == []
 
+    def test_events_already_reattributed_elsewhere_never_flag_their_original_mapping(self):
+        """plans/260914_venue-link-audit-checks-current-attribution.md: the
+        real beerdock_recife shape. 16 events already carry
+        venue_id='beerdock_casa_forte' — a DIFFERENT, specific venue,
+        already correctly resolved by an unrelated mechanism hours before
+        this sweep runs. They must not count as non-corroborating evidence
+        against the ORIGINAL mapped venue, "BeerDock Boa Viagem", which
+        they were never force-assigned to and are no longer evidence
+        about."""
+        target = {
+            "handle": "beerdock_recife",
+            "mapped_venues": [{
+                "venue_id": "beerdock_boa_viagem", "venue_name": "BeerDock Boa Viagem",
+                "neighborhood": "Boa Viagem",
+            }],
+        }
+        events = [
+            {"location_text": "CASA FORTE", "venue_id": "beerdock_casa_forte"},
+        ] * 16
+        candidates = compute_venue_link_audit(
+            [target], {"beerdock_recife": events},
+        )
+        assert candidates == [], candidates
+
+    def test_an_unresolved_event_still_counts_toward_the_mapped_venue(self):
+        """The regression guard the fix above needs: `venue_id=None`
+        (never resolved to anything) is NOT the same as "already resolved
+        elsewhere" — it must still count, or the fix over-corrects into
+        excluding every non-corroborating event regardless of shape."""
+        target = {
+            "handle": "editaisculturape",
+            "mapped_venues": [{
+                "venue_id": "casa_da_cultura", "venue_name": _CASA_DA_CULTURA,
+                "neighborhood": _CASA_DA_CULTURA_NEIGHBOURHOOD,
+            }],
+        }
+        events = [
+            {"location_text": "Torre Malakoff", "venue_id": None},
+            {"location_text": "Casa de Câmara e Cadeia de Brejo da Madre de Deus", "venue_id": None},
+        ]
+        candidates = compute_venue_link_audit(
+            [target], {"editaisculturape": events},
+        )
+        assert len(candidates) == 1, candidates
+        flagged = {v.venue_id for v in candidates[0].mapped_venues if v.flagged}
+        assert flagged == {"casa_da_cultura"}, candidates
+
+    def test_an_event_already_resolved_to_the_mapped_venue_itself_still_counts(self):
+        """The third branch of the filter: venue_id == the venue being
+        checked (not None, not a different venue) must still be a
+        checkable event, or a force-assigned handle whose events all
+        already carry the one mapped venue_id (the real editaisculturape
+        shape) would silently stop being auditable at all."""
+        target = {
+            "handle": "editaisculturape",
+            "mapped_venues": [{
+                "venue_id": "casa_da_cultura", "venue_name": _CASA_DA_CULTURA,
+                "neighborhood": _CASA_DA_CULTURA_NEIGHBOURHOOD,
+            }],
+        }
+        events = [
+            {"location_text": "Torre Malakoff", "venue_id": "casa_da_cultura"},
+            {"location_text": "Casa de Câmara e Cadeia de Brejo da Madre de Deus", "venue_id": "casa_da_cultura"},
+        ]
+        candidates = compute_venue_link_audit(
+            [target], {"editaisculturape": events},
+        )
+        assert len(candidates) == 1, candidates
+
 
 class TestCollectVenueLinkAuditThroughVenueRepository:
     """`collect_venue_link_audit` is called in production with a

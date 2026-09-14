@@ -51,6 +51,23 @@ code, which did not exist on that host at scan time.
   unrelated mechanism — not itself reproduced in this fixture, which exists
   only to pin that this handle's AUDIT verdict is "not flagged."
 
+- **`beerdock_recife_already_reattributed_elsewhere`** — added by
+  `plans/260914_venue-link-audit-checks-current-attribution.md`.
+  `venue_name`/`neighborhood` for `BeerDock Boa Viagem` are verbatim from a
+  live read. Running the shipped audit against production for the first
+  time (2026-09-13/14) re-flagged this handle at 17/46 non-corroborating —
+  16 of the 17 sampled events already carry `venue_id='beerdock_casa_forte'`
+  (a real, different, specific venue, re-verified live), correctly
+  reattributed hours earlier by `plans/260912_events-venue-night-
+  duplication.md`'s own backfill (`linked_by='neighbourhood_match'`). This
+  fixture is a REPRESENTATIVE SUBSET of the real 46 live events (the 16
+  reattributed ones plus the one genuinely still-unresolved
+  "Mirante do Paço, Recife"), not the full set — the remaining ~29 events'
+  `location_text` values were not individually re-fetched and are not
+  fabricated here. Sufficient to prove the fix (expected verdict: NOT
+  flagged, since 16/17 are excluded from the check and 1 alone stays below
+  the pattern bar of 2) without inventing unverified data for the rest.
+
 ## PII review
 
 No personal names appear in any `location_text` value above — every one
