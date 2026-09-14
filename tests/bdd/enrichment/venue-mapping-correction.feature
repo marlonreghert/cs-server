@@ -1,4 +1,3 @@
-@wip
 Feature: Venue-mapping correction — drop a spurious handle mapping, remove a wrong force-assign, and backfill the events already written under it
 
   As an operator who has confirmed, by reading real posts, that a

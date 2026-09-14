@@ -47,6 +47,8 @@ from app.services.event_venue_resolution import (
 )
 from scripts.backfill_event_venue_links import (
     MODE_DISPUTED_LOCATION_TEXT,
+    MODE_FORCE_REASSIGN,
+    MODE_UNRESOLVED_VENUE,
     ArithmeticImbalance,
     DependencyNotLanded,
     Report,
@@ -59,6 +61,7 @@ from scripts.backfill_event_venue_links import (
     WriteAffectedNoRows,
     check_balance,
     decide_one,
+    decide_one_force_reassign,
     run_backfill,
 )
 from tests.rds_fake import InMemoryRdsVenueStore
@@ -629,3 +632,428 @@ class TestDisputedLocationTextMode:
         assert report.balanced is True
         assert report.selected == 3
         assert (report.repointed, report.flagged, report.unchanged) == (1, 1, 1)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# plans/260914_recife-venue-mapping-corrections.md — the two NEWEST modes
+# ══════════════════════════════════════════════════════════════════════════
+
+_FR_VENUE_NAMES_BY_ID = {"v_a": "Venue A", "v_b": "Venue B"}
+
+
+def _base_force_event(**overrides) -> dict:
+    event = {
+        "event_id": "evt_fr_1", "venue_id": None, "venue_name": None,
+        "starts_at": _STARTS_AT, "title": "Post", "status": "pending_review",
+        "review_reason": REVIEW_REASON_UNRESOLVED_VENUE, "location_resolution": None,
+        "location_confidence": None, "linked_by": None, "linked_at": None,
+        "operator_edited_fields": None, "confidence": 0.9, "post_type": "event",
+    }
+    event.update(overrides)
+    return event
+
+
+def _decide_fr(event: dict, *, to_venue_id):
+    return decide_one_force_reassign(
+        event, to_venue_id=to_venue_id, venue_names_by_id=_FR_VENUE_NAMES_BY_ID,
+        min_confidence=_MIN_CONFIDENCE, now=_NOW,
+    )
+
+
+# ── decide_one_force_reassign: pure-function coverage ────────────────────────
+class TestForceReassignDecisionAssign:
+    def test_sets_venue_and_manual_resolution(self):
+        decision = _decide_fr(_base_force_event(), to_venue_id="v_a")
+        assert decision.action == "repoint"
+        assert decision.new_venue_id == "v_a"
+        assert decision.new_location_resolution == RESOLUTION_MANUAL
+        assert decision.new_location_confidence is None
+
+    def test_never_writes_a_link_method(self):
+        # plan's Data Impact section: linked_by is NOT one of the touched
+        # columns for either force-reassign branch — this is an
+        # operator-pinned write, never a ladder verdict.
+        decision = _decide_fr(_base_force_event(linked_by=None), to_venue_id="v_a")
+        assert decision.old_linked_by is None
+        assert decision.new_linked_by is None
+
+    def test_folds_unresolved_venue_out(self):
+        decision = _decide_fr(
+            _base_force_event(review_reason=REVIEW_REASON_UNRESOLVED_VENUE), to_venue_id="v_a",
+        )
+        assert decision.new_review_reason is None
+
+    def test_accepts_when_no_other_reason_remains(self):
+        decision = _decide_fr(
+            _base_force_event(review_reason=REVIEW_REASON_UNRESOLVED_VENUE), to_venue_id="v_a",
+        )
+        assert decision.new_status == "accepted"
+
+    def test_stays_pending_when_an_unrelated_reason_remains(self):
+        # Pinned against real.botequim's own real 2 "missing_date;
+        # unresolved_venue" rows (plan Evidence).
+        decision = _decide_fr(
+            _base_force_event(review_reason="missing_date; unresolved_venue", starts_at=None),
+            to_venue_id="v_a",
+        )
+        assert decision.new_status == "pending_review"
+        assert decision.new_review_reason == "missing_date"
+
+
+class TestForceReassignDecisionDetach:
+    def test_clears_venue_and_location_resolution(self):
+        decision = _decide_fr(
+            _base_force_event(
+                venue_id="v_a", venue_name="Venue A", status="accepted", review_reason=None,
+                location_resolution=RESOLUTION_AUTO, location_confidence=0.9,
+            ),
+            to_venue_id=None,
+        )
+        assert decision.action == "detach"
+        assert decision.new_venue_id is None
+        assert decision.new_location_resolution is None
+
+    def test_leaves_location_confidence_untouched(self):
+        # plan's Open Questions: the detach branch clears location_resolution
+        # but explicitly leaves location_confidence alone.
+        decision = _decide_fr(
+            _base_force_event(
+                venue_id="v_a", status="accepted", review_reason=None, location_confidence=0.77,
+            ),
+            to_venue_id=None,
+        )
+        assert decision.new_location_confidence == 0.77
+
+    def test_folds_unresolved_venue_in(self):
+        decision = _decide_fr(
+            _base_force_event(venue_id="v_a", status="accepted", review_reason=None),
+            to_venue_id=None,
+        )
+        assert decision.new_review_reason == REVIEW_REASON_UNRESOLVED_VENUE
+
+    def test_drives_status_to_pending_review(self):
+        decision = _decide_fr(
+            _base_force_event(venue_id="v_a", status="accepted", review_reason=None),
+            to_venue_id=None,
+        )
+        assert decision.new_status == "pending_review"
+
+
+class TestForceReassignSkipTable:
+    """The SAME skip table decide_one/decide_one_disputed apply — reusing
+    `_skip_reason`/`_skip_decision`, not re-derived."""
+
+    def test_confirmed_row_is_skipped(self):
+        decision = _decide_fr(_base_force_event(status="confirmed"), to_venue_id="v_a")
+        assert decision.action == "skip"
+        assert decision.skip_reason == SKIP_CONFIRMED
+
+    def test_manually_linked_row_is_skipped(self):
+        decision = _decide_fr(
+            _base_force_event(location_resolution=RESOLUTION_MANUAL), to_venue_id="v_a",
+        )
+        assert decision.action == "skip"
+        assert decision.skip_reason == SKIP_MANUAL_LINK
+
+    def test_superseded_row_is_skipped(self):
+        decision = _decide_fr(_base_force_event(status="superseded"), to_venue_id="v_a")
+        assert decision.action == "skip"
+        assert decision.skip_reason == SKIP_SUPERSEDED
+
+    def test_operator_edited_venue_is_skipped(self):
+        decision = _decide_fr(
+            _base_force_event(operator_edited_fields=["venue_id"]), to_venue_id="v_a",
+        )
+        assert decision.action == "skip"
+        assert decision.skip_reason == SKIP_OPERATOR_EDITED_VENUE
+
+
+# ── force-reassign: DAO-level selection/apply/idempotency/balance ────────────
+class TestForceReassignSelection:
+    def test_selects_only_matching_handle_linked_by_null_and_from_venue(self):
+        dao = _dao()
+        correct_venue = _add_venue(dao, "Bar Real Botequim", "real.botequim")
+        other_venue = _add_venue(dao, "Real Bar e Lanches")
+
+        target = _insert(
+            dao, venue_id=None, location_text=None, title="target",
+            source_handle="real.botequim", linked_by=None,
+            status="pending_review", review_reason=REVIEW_REASON_UNRESOLVED_VENUE,
+        )
+        different_venue = _insert(
+            dao, venue_id=other_venue, location_text=None, title="different_venue",
+            source_handle="real.botequim", linked_by=None, status="accepted",
+        )
+        already_linked = _insert(
+            dao, venue_id=None, location_text=None, title="already_linked",
+            source_handle="real.botequim", linked_by=METHOD_HANDLE_MENTION,
+            status="pending_review", review_reason=REVIEW_REASON_UNRESOLVED_VENUE,
+        )
+        different_handle = _insert(
+            dao, venue_id=None, location_text=None, title="different_handle",
+            source_handle="some_other_handle", linked_by=None,
+            status="pending_review", review_reason=REVIEW_REASON_UNRESOLVED_VENUE,
+        )
+
+        report = run_backfill(
+            dao, apply=False, now=_NOW, mode=MODE_FORCE_REASSIGN,
+            handles=["real.botequim"], from_venue_id=None, to_venue_id=correct_venue,
+        )
+        assert report.selected == 1
+        touched_ids = {d.event_id for d in report.rows}
+        assert target in touched_ids
+        assert different_venue not in touched_ids
+        assert already_linked not in touched_ids
+        assert different_handle not in touched_ids
+
+
+class TestForceReassignApply:
+    def test_assign_writes_venue_manual_resolution_and_accepts(self):
+        dao = _dao()
+        correct_venue = _add_venue(dao, "Bar Real Botequim", "real.botequim")
+        event_id = _insert(
+            dao, venue_id=None, location_text=None, title="stuck",
+            source_handle="real.botequim", linked_by=None,
+            status="pending_review", review_reason=REVIEW_REASON_UNRESOLVED_VENUE,
+        )
+
+        report = run_backfill(
+            dao, apply=True, now=_NOW, mode=MODE_FORCE_REASSIGN,
+            handles=["real.botequim"], from_venue_id=None, to_venue_id=correct_venue,
+        )
+        assert report.repointed == 1
+        row = dao.get_event(event_id)
+        assert row["venue_id"] == correct_venue
+        assert row["location_resolution"] == RESOLUTION_MANUAL
+        assert row["status"] == "accepted"
+        assert row["review_reason"] is None
+
+    def test_assign_leaves_an_unrelated_reason_row_pending(self):
+        # Pinned against real.botequim's own real 2 "missing_date;
+        # unresolved_venue" rows (plan Evidence).
+        dao = _dao()
+        correct_venue = _add_venue(dao, "Bar Real Botequim", "real.botequim")
+        event_id = _insert(
+            dao, venue_id=None, location_text=None, title="missing_date_row",
+            source_handle="real.botequim", linked_by=None, starts_at=None,
+            status="pending_review", review_reason="missing_date; unresolved_venue",
+        )
+
+        run_backfill(
+            dao, apply=True, now=_NOW, mode=MODE_FORCE_REASSIGN,
+            handles=["real.botequim"], from_venue_id=None, to_venue_id=correct_venue,
+        )
+        row = dao.get_event(event_id)
+        assert row["venue_id"] == correct_venue
+        assert row["status"] == "pending_review"
+        assert row["review_reason"] == "missing_date"
+
+    def test_detach_clears_venue_and_folds_unresolved_venue_in(self):
+        dao = _dao()
+        wrong_venue = _add_venue(dao, "Casa da Cultura de Pernambuco", "editaisculturape")
+        event_id = _insert(
+            dao, venue_id=wrong_venue, location_text=None, title="bulletin_row",
+            source_handle="editaisculturape", linked_by=None, status="accepted", review_reason=None,
+        )
+
+        report = run_backfill(
+            dao, apply=True, now=_NOW, mode=MODE_FORCE_REASSIGN,
+            handles=["editaisculturape"], from_venue_id=wrong_venue, to_venue_id=None,
+        )
+        assert report.detached == 1
+        row = dao.get_event(event_id)
+        assert row["venue_id"] is None
+        assert row["status"] == "pending_review"
+        assert row["review_reason"] == REVIEW_REASON_UNRESOLVED_VENUE
+
+    def test_detach_leaves_location_confidence_untouched(self):
+        dao = _dao()
+        wrong_venue = _add_venue(dao, "Casa da Cultura de Pernambuco", "editaisculturape")
+        event_id = _insert(
+            dao, venue_id=wrong_venue, location_text=None, title="bulletin_row",
+            source_handle="editaisculturape", linked_by=None, status="accepted",
+            review_reason=None, location_confidence=0.77,
+        )
+
+        run_backfill(
+            dao, apply=True, now=_NOW, mode=MODE_FORCE_REASSIGN,
+            handles=["editaisculturape"], from_venue_id=wrong_venue, to_venue_id=None,
+        )
+        row = dao.get_event(event_id)
+        assert row["location_confidence"] == 0.77
+
+    def test_an_operator_edited_row_is_never_reassigned(self):
+        dao = _dao()
+        correct_venue = _add_venue(dao, "Bar Real Botequim", "real.botequim")
+        event_id = _insert(
+            dao, venue_id=None, location_text=None, title="operator_edited",
+            source_handle="real.botequim", linked_by=None,
+            status="pending_review", review_reason=REVIEW_REASON_UNRESOLVED_VENUE,
+            operator_edited_fields=["venue_id"],
+        )
+
+        report = run_backfill(
+            dao, apply=True, now=_NOW, mode=MODE_FORCE_REASSIGN,
+            handles=["real.botequim"], from_venue_id=None, to_venue_id=correct_venue,
+        )
+        assert report.skipped_by_reason[SKIP_OPERATOR_EDITED_VENUE] == 1
+        row = dao.get_event(event_id)
+        assert row["venue_id"] is None
+
+
+class TestForceReassignIdempotency:
+    def test_second_apply_is_a_true_no_op(self):
+        dao = _dao()
+        correct_venue = _add_venue(dao, "Bar Real Botequim", "real.botequim")
+        event_id = _insert(
+            dao, venue_id=None, location_text=None, title="stuck",
+            source_handle="real.botequim", linked_by=None,
+            status="pending_review", review_reason=REVIEW_REASON_UNRESOLVED_VENUE,
+        )
+
+        first = run_backfill(
+            dao, apply=True, now=_NOW, mode=MODE_FORCE_REASSIGN,
+            handles=["real.botequim"], from_venue_id=None, to_venue_id=correct_venue,
+        )
+        assert first.repointed == 1
+
+        second = run_backfill(
+            dao, apply=True, now=_NOW, mode=MODE_FORCE_REASSIGN,
+            handles=["real.botequim"], from_venue_id=None, to_venue_id=correct_venue,
+        )
+        assert second.selected == 0  # no longer venue_id == from_venue_id
+        assert second.changed_count == 0
+        row = dao.get_event(event_id)
+        assert row["venue_id"] == correct_venue
+
+
+class TestForceReassignArithmeticBalance:
+    def test_a_realistic_mixed_run_balances(self):
+        dao = _dao()
+        correct_venue = _add_venue(dao, "Bar Real Botequim", "real.botequim")
+        _insert(
+            dao, venue_id=None, location_text=None, title="assign",
+            source_handle="real.botequim", linked_by=None,
+            status="pending_review", review_reason=REVIEW_REASON_UNRESOLVED_VENUE,
+        )
+        _insert(
+            dao, venue_id=None, location_text=None, title="confirmed_protected",
+            source_handle="real.botequim", linked_by=None, status="confirmed",
+        )
+
+        report = run_backfill(
+            dao, apply=True, now=_NOW, mode=MODE_FORCE_REASSIGN,
+            handles=["real.botequim"], from_venue_id=None, to_venue_id=correct_venue,
+        )
+        assert report.balanced is True
+        assert report.repointed == 1
+        assert report.skipped_by_reason[SKIP_CONFIRMED] == 1
+
+
+# ── unresolved-venue: DAO-level selection/apply/idempotency ──────────────────
+class TestUnresolvedVenueSelection:
+    def test_selection_is_scoped_to_the_given_handles(self):
+        dao = _dao()
+        rock = _add_venue(dao, "Sempre Rock Bar", "semprerockbar")
+
+        in_scope = _insert(
+            dao, venue_id=None, location_text="@semprerockbar", title="in_scope",
+            source_handle="editaisculturape", linked_by=None,
+            status="pending_review", review_reason=REVIEW_REASON_UNRESOLVED_VENUE,
+        )
+        out_of_scope = _insert(
+            dao, venue_id=None, location_text="@semprerockbar", title="different_handle",
+            source_handle="some_other_handle", linked_by=None,
+            status="pending_review", review_reason=REVIEW_REASON_UNRESOLVED_VENUE,
+        )
+        already_has_venue = _insert(
+            dao, venue_id=rock, location_text="@semprerockbar", title="already_resolved",
+            source_handle="editaisculturape", linked_by=METHOD_HANDLE_MENTION,
+        )
+
+        report = run_backfill(
+            dao, apply=False, now=_NOW, mode=MODE_UNRESOLVED_VENUE, handles=["editaisculturape"],
+        )
+        touched_ids = {d.event_id for d in report.rows}
+        assert in_scope in touched_ids
+        assert out_of_scope not in touched_ids
+        assert already_has_venue not in touched_ids
+
+    def test_selection_is_catalog_wide_when_no_handle_given(self):
+        dao = _dao()
+        _add_venue(dao, "Sempre Rock Bar", "semprerockbar")
+        a = _insert(
+            dao, venue_id=None, location_text="@semprerockbar", title="a",
+            source_handle="handle_a", linked_by=None,
+            status="pending_review", review_reason=REVIEW_REASON_UNRESOLVED_VENUE,
+        )
+        b = _insert(
+            dao, venue_id=None, location_text="@semprerockbar", title="b",
+            source_handle="handle_b", linked_by=None,
+            status="pending_review", review_reason=REVIEW_REASON_UNRESOLVED_VENUE,
+        )
+
+        report = run_backfill(dao, apply=False, now=_NOW, mode=MODE_UNRESOLVED_VENUE)
+        touched_ids = {d.event_id for d in report.rows}
+        assert {a, b} <= touched_ids
+
+
+class TestUnresolvedVenueApply:
+    def test_a_specific_named_venue_auto_links(self):
+        dao = _dao()
+        rock = _add_venue(dao, "Sempre Rock Bar", "semprerockbar")
+        event_id = _insert(
+            dao, venue_id=None, location_text="@semprerockbar", title="specific",
+            source_handle="editaisculturape", linked_by=None,
+            status="pending_review", review_reason=REVIEW_REASON_UNRESOLVED_VENUE,
+        )
+
+        report = run_backfill(
+            dao, apply=True, now=_NOW, mode=MODE_UNRESOLVED_VENUE, handles=["editaisculturape"],
+        )
+        assert report.repointed == 1
+        row = dao.get_event(event_id)
+        assert row["venue_id"] == rock
+        assert row["status"] == "accepted"
+
+    def test_generic_text_stays_unresolved(self):
+        # Pinned against editaisculturape's real shape (plan Evidence): a
+        # generic statewide/branding mention names no specific catalogued
+        # place and correctly stays unresolved.
+        dao = _dao()
+        _add_venue(dao, "Sempre Rock Bar", "semprerockbar")
+        event_id = _insert(
+            dao, venue_id=None, location_text="Pernambuco", title="generic",
+            source_handle="editaisculturape", linked_by=None,
+            status="pending_review", review_reason=REVIEW_REASON_UNRESOLVED_VENUE,
+        )
+
+        report = run_backfill(
+            dao, apply=True, now=_NOW, mode=MODE_UNRESOLVED_VENUE, handles=["editaisculturape"],
+        )
+        assert report.detached_unresolved == 1
+        row = dao.get_event(event_id)
+        assert row["venue_id"] is None
+        assert row["status"] == "pending_review"
+
+
+class TestUnresolvedVenueIdempotency:
+    def test_second_apply_is_a_true_no_op(self):
+        dao = _dao()
+        _add_venue(dao, "Sempre Rock Bar", "semprerockbar")
+        event_id = _insert(
+            dao, venue_id=None, location_text="Pernambuco", title="generic",
+            source_handle="editaisculturape", linked_by=None,
+            status="pending_review", review_reason=REVIEW_REASON_UNRESOLVED_VENUE,
+        )
+
+        first = run_backfill(
+            dao, apply=True, now=_NOW, mode=MODE_UNRESOLVED_VENUE, handles=["editaisculturape"],
+        )
+        assert first.detached == 1  # a real write: location_resolution -> RESOLUTION_UNRESOLVED
+        second = run_backfill(
+            dao, apply=True, now=_NOW, mode=MODE_UNRESOLVED_VENUE, handles=["editaisculturape"],
+        )
+        assert second.changed_count == 0
+        row = dao.get_event(event_id)
+        assert row["venue_id"] is None
