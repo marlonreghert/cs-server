@@ -32,6 +32,7 @@ from app.services.event_reconciliation import event_unread_time
 from app.services.event_source_media import resolve_event_media
 from app.services.promoter_registry_service import InvalidPromoterAccount, PromoterRegistryService
 from app.services.venue_link_audit import collect_venue_link_audit, load_venue_link_audit_enabled
+from app.services.venue_link_audit_reviewer import DECISIONS, apply_reviews_to_audit
 
 logger = logging.getLogger(__name__)
 
@@ -664,6 +665,20 @@ class DedupBacklogDisputeOut(BaseModel):
 # EVERY venue currently mapped to the handle, flagged or not, so a
 # double-mapped handle's good sibling (the `real.botequim` shape) stays
 # visible next to the spurious one rather than being dropped.
+# plans/260914_agentic-venue-resolution-fallback.md: the machine verdict on
+# one flagged pair, shown inline on a pair that is still flagged. `None` when
+# the pair has never been reviewed — an absent review and a review that
+# decided nothing are different states and must stay distinguishable.
+class VenueLinkAuditReviewOut(BaseModel):
+    verdict: Optional[str] = None
+    outcome: Optional[str] = None
+    evidence_quote: Optional[str] = None
+    matched_field: Optional[str] = None
+    reason: Optional[str] = None
+    operator_decision: Optional[str] = None
+    reviewed_at: Optional[datetime] = None
+
+
 class VenueLinkAuditVenueOut(BaseModel):
     venue_id: str
     venue_name: Optional[str] = None
@@ -672,6 +687,9 @@ class VenueLinkAuditVenueOut(BaseModel):
     flagged: bool
     sample_location_texts: list[str] = Field(default_factory=list)
     sample_scores: list[Optional[float]] = Field(default_factory=list)
+    # Additive and optional — plans/260914_agentic-venue-resolution-fallback.md.
+    # Every existing field above keeps its exact shape and meaning.
+    review: Optional[VenueLinkAuditReviewOut] = None
 
 
 class VenueLinkAuditCandidateOut(BaseModel):
@@ -722,6 +740,18 @@ def get_dedup_backlog(
     venue_link_audit_candidates = []
     if load_venue_link_audit_enabled(_admin_config_redis()):
         venue_link_audit_candidates = collect_venue_link_audit(dao)
+        # plans/260914_agentic-venue-resolution-fallback.md: fold stored
+        # reviews in. A pair the reviewer CONFIRMED (and an operator has not
+        # rejected, and whose non-corroborating count has not grown since)
+        # drops out of the flagged list entirely; every surviving pair carries
+        # its machine verdict inline. Reading the reviews is cheap and
+        # unconditional here — the reviewer's own two flags gate whether
+        # anything ever WRITES a review, not whether a written one is
+        # honoured. An operator who turns the reviewer off does not thereby
+        # want yesterday's confirmed false positives to come flooding back.
+        venue_link_audit_candidates = apply_reviews_to_audit(
+            venue_link_audit_candidates, _venue_link_audit_reviews(dao),
+        )
     audit_page = venue_link_audit_candidates[offset: offset + limit]
     return DedupBacklogOut(
         live_rows=backlog.live_rows,
@@ -735,9 +765,94 @@ def get_dedup_backlog(
         limit=limit, offset=offset,
         venue_night_groups=[DedupBacklogVenueNightOut(**g.to_dict()) for g in groups],
         attribution_disputes=[DedupBacklogDisputeOut(**d.to_dict()) for d in disputes],
-        venue_link_audit_candidates=[VenueLinkAuditCandidateOut(**c.to_dict()) for c in audit_page],
+        # `apply_reviews_to_audit` already returns plain dicts (it cannot
+        # mutate the audit's frozen dataclasses), so no `.to_dict()` here.
+        venue_link_audit_candidates=[VenueLinkAuditCandidateOut(**c) for c in audit_page],
         venue_link_audit_total=len(venue_link_audit_candidates),
     )
+
+
+def _venue_link_audit_reviews(dao) -> dict:
+    """`{(handle, venue_id): review_row}` for the audit fold-in. Degrades to
+    an empty map rather than failing the whole backlog report if the review
+    table is unreadable — the audit itself is still worth serving."""
+    try:
+        rows = dao.list_venue_link_audit_reviews() or []
+    except Exception as e:
+        logger.warning(f"[AdminEvents] venue-link-audit reviews unreadable: {e}")
+        return {}
+    return {(r["handle"], r["venue_id"]): r for r in rows}
+
+
+class VenueLinkAuditReviewRecordOut(BaseModel):
+    """One stored review, as an operator sees it in the review log. Carries
+    the full consensus tally, not just the winning verdict — "six confirms
+    and four insufficients" and "ten confirms" are very different things to
+    a human deciding whether to trust a machine verdict."""
+
+    handle: str
+    venue_id: str
+    outcome: str
+    verdict: Optional[str] = None
+    evidence_quote: Optional[str] = None
+    matched_field: Optional[str] = None
+    reason: Optional[str] = None
+    model: Optional[str] = None
+    consensus_k: Optional[int] = None
+    tally: dict = Field(default_factory=dict)
+    checkable_count_at_review: Optional[int] = None
+    non_corroborating_count_at_review: Optional[int] = None
+    operator_decision: Optional[str] = None
+    operator_decided_at: Optional[datetime] = None
+    operator_note: Optional[str] = None
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+
+
+@router.get("/venue-link-audit/reviews", response_model=list[VenueLinkAuditReviewRecordOut])
+def list_venue_link_audit_reviews(
+    verdict: Optional[str] = Query(None),
+    decided: Optional[bool] = Query(None),
+    limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+):
+    """The operator-visible review log — plans/260914_agentic-venue-resolution-
+    fallback.md §6. Every pair the reviewer looked at, including the ones it
+    skipped and the ones it could not agree on, newest-reviewed first. A log
+    line alone is not "shown"; this is the surface a human actually reads."""
+    rows = _dao().list_venue_link_audit_reviews(verdict=verdict, decided=decided) or []
+    return [VenueLinkAuditReviewRecordOut(**r) for r in rows[offset: offset + limit]]
+
+
+class VenueLinkAuditReviewDecisionIn(BaseModel):
+    decision: str
+    note: Optional[str] = None
+
+
+@router.post(
+    "/venue-link-audit/reviews/{handle}/{venue_id}/decision",
+    response_model=VenueLinkAuditReviewRecordOut,
+)
+def decide_venue_link_audit_review(
+    handle: str, venue_id: str, body: VenueLinkAuditReviewDecisionIn,
+):
+    """An operator accepts or rejects a machine verdict.
+
+    A REJECTION is permanent for that pair: `review_suppresses_pair` refuses
+    to suppress on it, and `VenueLinkAuditReviewerService` skips it without a
+    model call forever after. That is the intended escape hatch — an operator
+    who disagrees with the machine never has to argue with it twice."""
+    if body.decision not in DECISIONS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"decision must be one of {', '.join(DECISIONS)}",
+        )
+    row = _dao().set_venue_link_audit_review_decision(
+        handle, venue_id, body.decision, note=body.note,
+    )
+    if row is None:
+        raise HTTPException(status_code=404, detail="review not found")
+    return VenueLinkAuditReviewRecordOut(**row)
 
 
 class EventCoverOut(BaseModel):

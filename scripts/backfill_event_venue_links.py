@@ -124,6 +124,7 @@ from typing import Optional
 from app.config import settings
 from app.dao.rds_venue_store import RdsVenueStore
 from app.dao.venue_repository import VenueRepository
+from app.services import event_link_skip as _skip
 from app.models.event_kind import KIND_EVENT
 from app.services.event_merge import (
     _fold_review_reason,  # plan §C: "import it" — see _fold_no_venue_reason below for the one extension it needs.
@@ -170,18 +171,19 @@ MODE_FORCE_REASSIGN = "force-reassign"
 MODE_UNRESOLVED_VENUE = "unresolved-venue"
 MODES = (MODE_HANDLE_MENTION, MODE_DISPUTED_LOCATION_TEXT, MODE_FORCE_REASSIGN, MODE_UNRESOLVED_VENUE)
 
-# Skip reasons — plan §B's per-status/per-protection table.
-SKIP_CONFIRMED = "confirmed"
-SKIP_MANUAL_LINK = "manual_link"
-SKIP_SUPERSEDED = "superseded"
-SKIP_EXTRACTION_FAILED = "extraction_failed"
-SKIP_REJECTED = "rejected"
-SKIP_OPERATOR_EDITED_VENUE = "operator_edited_venue"
-
-# Statuses not named by an event_reconciliation constant — the same bare
-# literals ALL_STATUSES itself uses.
-_STATUS_EXTRACTION_FAILED = "extraction_failed"
-_STATUS_REJECTED = "rejected"
+# Skip reasons — plan §B's per-status/per-protection table. Re-exported from
+# `app.services.event_link_skip`, which is now the ONE definition
+# (plans/260914_agentic-venue-resolution-fallback.md §1 moved it there so the
+# reviewer pass could share it instead of becoming a fourth copy). These
+# names stay importable from this module unchanged: `decide_one`,
+# `decide_one_disputed` and `decide_one_force_reassign` below, and every
+# existing test, keep referring to the identical objects.
+SKIP_CONFIRMED = _skip.SKIP_CONFIRMED
+SKIP_MANUAL_LINK = _skip.SKIP_MANUAL_LINK
+SKIP_SUPERSEDED = _skip.SKIP_SUPERSEDED
+SKIP_EXTRACTION_FAILED = _skip.SKIP_EXTRACTION_FAILED
+SKIP_REJECTED = _skip.SKIP_REJECTED
+SKIP_OPERATOR_EDITED_VENUE = _skip.SKIP_OPERATOR_EDITED_VENUE
 
 
 class BackfillError(Exception):
@@ -301,28 +303,13 @@ def _fold_no_venue_reason(existing_reason: Optional[str], no_venue_reason: Optio
     return "; ".join(tokens) if tokens else None
 
 
-def _skip_reason(event: dict) -> Optional[str]:
-    """plan §B's per-status/per-protection skip table (plans/260914_recife-
-    venue-mapping-corrections.md's Refactor note) — the ONE place this check
-    is expressed, shared by `decide_one`, `decide_one_disputed`, and
-    `decide_one_force_reassign` rather than duplicated a third time. An
-    operator's own prior action always wins, unconditionally, regardless of
-    which mode/selection reached this row."""
-    status = event.get("status")
-    edited = event.get("operator_edited_fields") or []
-    if status == STATUS_CONFIRMED:
-        return SKIP_CONFIRMED
-    if event.get("location_resolution") == RESOLUTION_MANUAL:
-        return SKIP_MANUAL_LINK
-    if status == STATUS_SUPERSEDED:
-        return SKIP_SUPERSEDED
-    if status == _STATUS_EXTRACTION_FAILED:
-        return SKIP_EXTRACTION_FAILED
-    if status == _STATUS_REJECTED:
-        return SKIP_REJECTED
-    if "venue_id" in edited:
-        return SKIP_OPERATOR_EDITED_VENUE
-    return None
+# The skip table itself now lives in `app.services.event_link_skip` — the
+# ONE definition, shared with `app.services.venue_link_audit_reviewer`
+# (plans/260914_agentic-venue-resolution-fallback.md §1). This name stays
+# bound here so `decide_one`, `decide_one_disputed` and
+# `decide_one_force_reassign` below call the identical function they always
+# did; nothing about its six checks or their order changed in the move.
+_skip_reason = _skip.skip_reason
 
 
 def _skip_decision(event: dict, reason: str) -> "Decision":

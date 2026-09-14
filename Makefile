@@ -124,6 +124,10 @@ test-unit:
 		tests/test_event_title_pick_client.py \
 		tests/test_measure_agentic_mitigation_baseline.py \
 		tests/test_venue_link_audit.py \
+		tests/test_venue_link_audit_reviewer_validator.py \
+		tests/test_venue_link_audit_reviewer.py \
+		tests/test_venue_link_audit_review_dao.py \
+		tests/test_review_venue_link_audit.py \
 		tests/test_measure_venue_link_audit.py \
 		tests/test_events_venue_night_deploy_safety.py \
 		tests/test_backfill_event_venue_candidate_cap.py \

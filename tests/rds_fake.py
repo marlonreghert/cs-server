@@ -110,6 +110,11 @@ class InMemoryRdsVenueStore:
         # events.event_merge_suggestion: suggestion_id -> row (plans/260812_
         # event-dedup-fuzzy-title.md §C/§E, migration 0038).
         self.event_merge_suggestions: dict[str, dict] = {}
+        # events.venue_link_audit_review: (handle, venue_id) -> row (plans/
+        # 260914_agentic-venue-resolution-fallback.md §5, migration 0048).
+        # Keyed by the PAIR, mirroring the real composite PRIMARY KEY — the
+        # grain compute_venue_link_audit flags, never an event's.
+        self.venue_link_audit_reviews: dict[tuple[str, str], dict] = {}
         self._down = False
 
     # ── test controls ────────────────────────────────────────────────────────
@@ -1350,6 +1355,128 @@ class InMemoryRdsVenueStore:
                 row["llm_recommendation"] = copy.deepcopy(recommendation)
                 return True
         return False
+
+    # ── events.venue_link_audit_review (plans/260914_agentic-venue-resolution-
+    # fallback.md §5, migration 0048) ───────────────────────────────────────
+    # Behaviour parity with RdsVenueStore's four methods is LOAD-BEARING here,
+    # on five points the real store's own docstrings spell out: the returned
+    # key set, `list_...`'s total ordering, the tri-state `decided` filter, the
+    # operator columns surviving a re-review, and `set_..._decision` returning
+    # None for a row that does not exist. This file has three times before
+    # modelled the happy path instead of the constraint and let a write the
+    # real store rejects (or silently no-ops) pass every offline scenario —
+    # see `upsert_crawl_target` above and `update_event`'s `event_cols`
+    # allowlist note in app/dao/rds_venue_store.py.
+    _VENUE_LINK_AUDIT_REVIEW_MACHINE_COLUMNS = (
+        "outcome", "verdict", "evidence_quote", "matched_field", "reason", "model",
+        "consensus_k", "tally", "checkable_count_at_review",
+        "non_corroborating_count_at_review",
+    )
+    _VENUE_LINK_AUDIT_REVIEW_OPERATOR_COLUMNS = (
+        "operator_decision", "operator_decided_at", "operator_note",
+    )
+
+    def upsert_venue_link_audit_review(
+        self, handle: str, venue_id: str, fields: dict,
+    ) -> dict:
+        """See `RdsVenueStore.upsert_venue_link_audit_review` — the SAME
+        contract, including both of its guarantees:
+
+        * `outcome` is required on EVERY call, not only the first. The real
+          `INSERT ... ON CONFLICT DO UPDATE` validates NOT NULL against the
+          fully-constructed insert tuple BEFORE evaluating `ON CONFLICT`, so
+          a partial re-upsert without it raises `NotNullViolation` even
+          against a row that certainly exists. A bare dict-update fake would
+          accept exactly what production rejects.
+        * The `operator_*` columns are NOT writable here. They are filtered
+          out of `fields` rather than merely left un-set, mirroring the real
+          store's allowlist (`_VENUE_LINK_AUDIT_REVIEW_COLUMNS`, which omits
+          them) and its explicit self-assignment in the DO UPDATE SET list.
+          An operator's accept/reject outlives every later machine re-run.
+        """
+        self._guard()
+        if not fields.get("outcome"):
+            raise ValueError(
+                "venue_link_audit_review.outcome is NOT NULL (migration "
+                "0048_venue_link_audit_review) -- upsert_venue_link_audit_review "
+                "requires it on every call, even against an existing row: the real "
+                "store checks NOT NULL on the insert tuple before ON CONFLICT."
+            )
+        key = (handle, venue_id)
+        existing = self.venue_link_audit_reviews.get(key)
+        now = _now()
+        writable = {
+            c: copy.deepcopy(fields[c])
+            for c in self._VENUE_LINK_AUDIT_REVIEW_MACHINE_COLUMNS
+            if c in fields
+        }
+        if existing is None:
+            row = {
+                "handle": handle, "venue_id": venue_id,
+                # Every machine column is nullable with no database default
+                # except `outcome`, which the guard above already required.
+                "outcome": None, "verdict": None, "evidence_quote": None,
+                "matched_field": None, "reason": None, "model": None,
+                "consensus_k": None, "tally": None,
+                "checkable_count_at_review": None,
+                "non_corroborating_count_at_review": None,
+                # NULL until a human actually decides — never invented, the
+                # same convention crawl_target's `last_failure_kind` follows.
+                "operator_decision": None, "operator_decided_at": None,
+                "operator_note": None,
+                "created_at": now, "updated_at": now,
+            }
+            row.update(writable)
+        else:
+            row = dict(existing)
+            row.update(writable)
+            row["updated_at"] = now
+        self.venue_link_audit_reviews[key] = row
+        return copy.deepcopy(row)
+
+    def get_venue_link_audit_review(self, handle: str, venue_id: str) -> Optional[dict]:
+        row = self.venue_link_audit_reviews.get((handle, venue_id))
+        return copy.deepcopy(row) if row else None
+
+    def list_venue_link_audit_reviews(
+        self, *, verdict: Optional[str] = None, decided: Optional[bool] = None,
+    ) -> list[dict]:
+        """Mirrors the real `ORDER BY updated_at DESC, handle, venue_id` — a
+        TOTAL order, so two reviews written in the same instant cannot come
+        back one way here and the other way from Postgres. `decided` is
+        tri-state on the OPERATOR column: True = decided, False = awaiting an
+        operator, None = no filter."""
+        out = []
+        for row in self.venue_link_audit_reviews.values():
+            if verdict is not None and row.get("verdict") != verdict:
+                continue
+            if decided is True and row.get("operator_decision") is None:
+                continue
+            if decided is False and row.get("operator_decision") is not None:
+                continue
+            out.append(copy.deepcopy(row))
+        # Two passes, relying on sort stability: ascending primary key first,
+        # then descending `updated_at`, which is the mixed-direction ORDER BY
+        # the real store issues in one clause.
+        out.sort(key=lambda r: (r["handle"], r["venue_id"]))
+        out.sort(key=lambda r: r["updated_at"], reverse=True)
+        return out
+
+    def set_venue_link_audit_review_decision(
+        self, handle: str, venue_id: str, decision: str, note: Optional[str] = None,
+    ) -> Optional[dict]:
+        """See `RdsVenueStore.set_venue_link_audit_review_decision` — a plain
+        UPDATE: returns None (writing nothing) for a pair that has no review
+        row, and deliberately leaves `updated_at` alone so an operator
+        working through the queue does not reshuffle it under themselves."""
+        self._guard()
+        row = self.venue_link_audit_reviews.get((handle, venue_id))
+        if row is None:
+            return None
+        row["operator_decision"] = decision
+        row["operator_decided_at"] = _now()
+        row["operator_note"] = note
+        return copy.deepcopy(row)
 
     # ── events.event_merge_suggestion (plans/260812_event-dedup-fuzzy-title.md
     # §C/§E, migration 0038) ────────────────────────────────────────────────

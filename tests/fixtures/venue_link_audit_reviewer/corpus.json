@@ -1,0 +1,283 @@
+{
+  "provenance": "Every venue_name, street, neighborhood, city and location_text below is a REAL value read read-only from production on 2026-09-14. See MANIFEST.md for the per-case sourcing. venue_id values are readable placeholders for the real opaque ven_... ids.",
+  "cases": [
+    {
+      "case_id": "conchittasbar_street_number_confirms",
+      "handle": "conchittasbar",
+      "description": "Single-mapped kind='venue' crawl target. The posts repeatedly give the mapped venue's OWN street and number, spelled 'Tereza' where the catalogue spells 'Teresa' — one letter apart. The audit's textual check compares name and neighbourhood only, so it cannot see the street at all and flags the pair. Expected: a consensus confirm on matched_field=street that closes the flag.",
+      "expected": {
+        "flagged_by_audit": true,
+        "outcome": "confirmed",
+        "verdict": "confirm",
+        "matched_field": "street"
+      },
+      "canned_model_answer": {
+        "verdict": "confirm",
+        "evidence_quote": "Rua da Imperatriz Tereza Cristina, 218",
+        "matched_field": "street",
+        "reason": "The posts give this venue's own street and number; Teresa/Tereza is a spelling difference, not a different street."
+      },
+      "mapped_venues": [
+        {
+          "venue_id": "conchittas_bar",
+          "venue_name": "Conchittas Bar",
+          "street": "R. Imperatriz Teresa Cristina 218",
+          "neighborhood": "Boa Vista",
+          "city": "Recife"
+        }
+      ],
+      "events": [
+        {"location_text": "Rua da Imperatriz Tereza Cristina, 218"},
+        {"location_text": "Rua da Imperatriz Tereza Cristina, 218"},
+        {"location_text": "Rua da Imperatriz Tereza Cristina, 218"},
+        {"location_text": "Rua da Imperatriz Tereza Cristina, 218"},
+        {"location_text": "Rua da Imperatriz Tereza Cristina, 218"},
+        {"location_text": "Rua da Imperatriz Tereza Cristina, 218"},
+        {"location_text": "Rua da Imperatriz Tereza Cristina, 218"},
+        {"location_text": "Rua da Imperatriz Tereza Cristina, 218"},
+        {"location_text": "Rua da Imperatriz Tereza Cristina, 218"},
+        {"location_text": "Conchittas Bar — Rua da Imperatriz Tereza Cristina, 218"},
+        {"location_text": "Conchittas Bar"},
+        {"location_text": "Rua da Imperatriz Tereza Cristina, 218 — Boa Vista"}
+      ]
+    },
+    {
+      "case_id": "downtownbeergarden_street_number_confirms",
+      "handle": "downtownbeergarden_",
+      "description": "Single-mapped kind='venue' crawl target with a FULL structured address row (street + neighborhood + city all populated) and both corroborating and non-corroborating location texts. The catalogued neighbourhood is 'Quintal Espinheiro'; the posts say plain 'Espinheiro', which does not contain the catalogued string, so three real spellings of the venue's own street fail the audit's check. Expected: a consensus confirm on matched_field=street.",
+      "expected": {
+        "flagged_by_audit": true,
+        "outcome": "confirmed",
+        "verdict": "confirm",
+        "matched_field": "street"
+      },
+      "canned_model_answer": {
+        "verdict": "confirm",
+        "evidence_quote": "Rua Quarenta e Oito, 490 - Espinheiro",
+        "matched_field": "street",
+        "reason": "The posts give this venue's own street and number; only the neighbourhood label differs from the catalogue."
+      },
+      "mapped_venues": [
+        {
+          "venue_id": "downtown_beer_garden",
+          "venue_name": "Downtown Beer Garden",
+          "street": "Rua Quarenta e Oito, 490",
+          "neighborhood": "Quintal Espinheiro",
+          "city": "Recife"
+        }
+      ],
+      "events": [
+        {"location_text": "Downtown Beer Garden"},
+        {"location_text": "Downtown Beer Garden"},
+        {"location_text": "Downtown Beer Garden"},
+        {"location_text": "Downtown Beer Garden"},
+        {"location_text": "Downtown Beer Garden"},
+        {"location_text": "Downtown Beer Garden"},
+        {"location_text": "Rua Quarenta e Oito, 490 - Espinheiro"},
+        {"location_text": "RUA QUARENTA E OITO, 490 - ESPINHEIRO"},
+        {"location_text": "Rua Quarenta e Oito, 490 – Espinheiro"}
+      ]
+    },
+    {
+      "case_id": "lacasarecife_catalogued_neighbourhood_wrong",
+      "handle": "lacasarecife",
+      "description": "The decisive arm-A-versus-arm-B case (plan §D). The CATALOGUED neighbourhood ('Parnamirim') is the erroneous field: it appears in none of the handle's own posts, which say 'Casa Forte'. A reviewer shown only name + neighbourhood returned a confident, unanimous and WRONG contradict 5/5 live; adding the street flips it to a unanimous, correctly-reasoned confirm citing the street. Expected: confirm on matched_field=street, never neighborhood.",
+      "expected": {
+        "flagged_by_audit": true,
+        "outcome": "confirmed",
+        "verdict": "confirm",
+        "matched_field": "street"
+      },
+      "canned_model_answer": {
+        "verdict": "confirm",
+        "evidence_quote": "Av. 17 de Agosto,1893 - Casa Forte",
+        "matched_field": "street",
+        "reason": "The post gives the same street and number as the catalogue venue despite spelling and neighbourhood-label differences."
+      },
+      "mapped_venues": [
+        {
+          "venue_id": "la_casa_recife",
+          "venue_name": "La Casa Recife",
+          "street": "Av. Dezessete de Agosto 1893",
+          "neighborhood": "Parnamirim",
+          "city": "Recife"
+        }
+      ],
+      "events": [
+        {"location_text": "La Casa em Casa Forte — Av. 17 de Agosto,1893 - Casa Forte"},
+        {"location_text": "La Casa Recife (Av. Dezesseste de Agosto, 1893)"},
+        {"location_text": "Lá Casa"}
+      ]
+    },
+    {
+      "case_id": "rockandribsmarcozero_short_name_form_confirms",
+      "handle": "rockandribsmarcozero",
+      "description": "A pure scoring artefact. The posts say 'Marco Zero', which is a literal substring of the mapped venue's own long catalogue name 'Rock & Ribs Lounge Pub - Marco Zero - Recife/PE' — but a short form scores only 0.4186 against the long name, below DEFAULT_CONFIDENCE_FLOOR (0.55), and the catalogued neighbourhood ('Recife') does not appear in it either. Expected: a consensus confirm on matched_field=name.",
+      "expected": {
+        "flagged_by_audit": true,
+        "outcome": "confirmed",
+        "verdict": "confirm",
+        "matched_field": "name"
+      },
+      "canned_model_answer": {
+        "verdict": "confirm",
+        "evidence_quote": "Marco Zero",
+        "matched_field": "name",
+        "reason": "The posts name a short form that is contained verbatim in this venue's own catalogue name."
+      },
+      "mapped_venues": [
+        {
+          "venue_id": "rock_and_ribs_marco_zero",
+          "venue_name": "Rock & Ribs Lounge Pub - Marco Zero - Recife/PE",
+          "street": "Avenida Alfredo Lisboa",
+          "neighborhood": "Recife",
+          "city": "Recife"
+        }
+      ],
+      "events": [
+        {"location_text": "Marco Zero"},
+        {"location_text": "Marco Zero"},
+        {"location_text": "Marco Zero"},
+        {"location_text": "Marco Zero"},
+        {"location_text": "Marco Zero"},
+        {"location_text": "Marco Zero"},
+        {"location_text": "Rock & Ribs Steakhouse — Marco Zero"}
+      ]
+    },
+    {
+      "case_id": "botecobeer_jsp_different_street_contradicts",
+      "handle": "botecobeer.jsp",
+      "description": "The one REAL DEFECT in the live flagged set. The handle is mapped to 'Recife Beer Cervejaria' (R. Abdon Batista, 300 - Santo Amaro) but every one of its posts gives a different street in a different neighbourhood (Rua Madre Rosa, 181 - Jd. São Paulo). The place the posts actually describe, 'Boteco Beer Bistrô & Bar', is NOT in the catalogue at all — so the correct machine answer is contradict, which must leave the pair flagged and must never force-fit a venue.",
+      "expected": {
+        "flagged_by_audit": true,
+        "outcome": "contradicted",
+        "verdict": "contradict",
+        "matched_field": "street"
+      },
+      "canned_model_answer": {
+        "verdict": "contradict",
+        "evidence_quote": "Rua Madre Rosa, 181 – Jd. São Paulo",
+        "matched_field": "street",
+        "reason": "The posts consistently give a different street in a different neighbourhood; the mapped venue is not the place the posts describe."
+      },
+      "mapped_venues": [
+        {
+          "venue_id": "recife_beer_cervejaria",
+          "venue_name": "Recife Beer Cervejaria",
+          "street": "R. Abdon Batista, 300",
+          "neighborhood": "Santo Amaro",
+          "city": "Recife"
+        }
+      ],
+      "events": [
+        {"location_text": "Rua Madre Rosa, 181 – Jd. São Paulo"},
+        {"location_text": "Rua Madre Rosa, 181 – Jd. São Paulo"},
+        {"location_text": "Boteco Beer — RUA MADRE ROSA, 181 - JD. SÃO PAULO"},
+        {"location_text": "Boteco Beer Bistrô & Bar — Rua Madre Rosa, 181 - Jd. São Paulo"}
+      ]
+    },
+    {
+      "case_id": "entreamigosobode_double_mapped_siblings",
+      "handle": "entreamigosobode",
+      "description": "The structural-gate case (plan §F item 3). One handle, TWO mapped sibling venues in different neighbourhoods, sharing one pool of 12 'Amigos Park' posts that cannot belong to both. Asked independently per sibling, the live model returned confirm 10/10 for BOTH, one run even citing house number 30 for a venue catalogued at 50. Sampling cannot detect that. Expected: skipped_multi_mapped for both siblings, with ZERO model calls charged.",
+      "expected": {
+        "flagged_by_audit": true,
+        "outcome": "skipped_multi_mapped",
+        "verdict": null,
+        "matched_field": null
+      },
+      "canned_model_answer": {
+        "verdict": "confirm",
+        "evidence_quote": "Entre Amigos",
+        "matched_field": "name",
+        "reason": "Programmed only to prove the structural gate fires BEFORE any call is made; it must never be consumed."
+      },
+      "mapped_venues": [
+        {
+          "venue_id": "entre_amigos_o_bode_espinheiro",
+          "venue_name": "Entre Amigos O Bode Espinheiro",
+          "street": "R. da Hora, 695",
+          "neighborhood": "Espinheiro",
+          "city": "Recife"
+        },
+        {
+          "venue_id": "entre_amigos_o_bode_boa_viagem",
+          "venue_name": "Entre Amigos O Bode",
+          "street": "R. Marquês de Valença, 50",
+          "neighborhood": "Boa Viagem",
+          "city": "Recife"
+        }
+      ],
+      "events": [
+        {"location_text": "Amigos Park"},
+        {"location_text": "Amigos Park"},
+        {"location_text": "Amigos Park"},
+        {"location_text": "Amigos Park"},
+        {"location_text": "Amigos Park"},
+        {"location_text": "Amigos Park"},
+        {"location_text": "Amigos Park"},
+        {"location_text": "Amigos Park"},
+        {"location_text": "Amigos Park"},
+        {"location_text": "Amigos Park"},
+        {"location_text": "Amigos Park"},
+        {"location_text": "Amigos Park"},
+        {"location_text": "Entre Amigos"},
+        {"location_text": "Entre Amigos"},
+        {"location_text": "Entre Amigos"},
+        {"location_text": "Entre Amigos"},
+        {"location_text": "Boa Viagem – Rua Marquês de Valença, 30; Espinheiro – Rua da Hora, 695"}
+      ]
+    },
+    {
+      "case_id": "saladerebocorecife_genuine_offsite_gigs",
+      "handle": "saladerebocorecife",
+      "description": "The mapping is CORRECT and the audit is still right to ask: 15 posts corroborate the venue's own street and neighbourhood, and the 2 that do not are genuine off-site gigs (a beach kiosk and a gig in the town of Bonito). Exactly the mixed-evidence shape a human should see, and the shape the K-of-K unanimity gate exists to hold back. Expected: no_consensus, still flagged.",
+      "expected": {
+        "flagged_by_audit": true,
+        "outcome": "no_consensus",
+        "verdict": null,
+        "matched_field": null
+      },
+      "canned_model_answer": {
+        "verdict": "confirm",
+        "evidence_quote": "RUA GREGÓRIO JÚNIOR, 264 - CORDEIRO - RECIFE - PE",
+        "matched_field": "street",
+        "reason": "Most posts give this venue's own street, number and neighbourhood."
+      },
+      "canned_dissenting_answer": {
+        "verdict": "insufficient",
+        "evidence_quote": null,
+        "matched_field": "none",
+        "reason": "Two texts name places that are not this venue, so the texts do not settle the mapping either way."
+      },
+      "mapped_venues": [
+        {
+          "venue_id": "sala_de_reboco",
+          "venue_name": "Sala de Reboco",
+          "street": "R. Gregório Júnior, 264",
+          "neighborhood": "Cordeiro",
+          "city": "Recife"
+        }
+      ],
+      "events": [
+        {"location_text": "RUA GREGÓRIO JÚNIOR, 264 - CORDEIRO - RECIFE - PE"},
+        {"location_text": "RUA GREGÓRIO JÚNIOR, 264 - CORDEIRO - RECIFE - PE"},
+        {"location_text": "RUA GREGÓRIO JÚNIOR, 264 - CORDEIRO - RECIFE - PE"},
+        {"location_text": "RUA GREGÓRIO JÚNIOR, 264 - CORDEIRO - RECIFE - PE"},
+        {"location_text": "RUA GREGÓRIO JÚNIOR, 264 - CORDEIRO - RECIFE - PE"},
+        {"location_text": "RUA GREGÓRIO JÚNIOR, 264 - CORDEIRO - RECIFE - PE"},
+        {"location_text": "RUA GREGÓRIO JÚNIOR, 264 - CORDEIRO - RECIFE - PE"},
+        {"location_text": "RUA GREGÓRIO JÚNIOR, 264 - CORDEIRO - RECIFE - PE"},
+        {"location_text": "RUA GREGÓRIO JÚNIOR, 264 - CORDEIRO - RECIFE - PE"},
+        {"location_text": "RUA GREGÓRIO JÚNIOR, 264 - CORDEIRO - RECIFE - PE"},
+        {"location_text": "RUA GREGÓRIO JÚNIOR, 264 - CORDEIRO - RECIFE - PE"},
+        {"location_text": "RUA GREGÓRIO JÚNIOR, 264 - CORDEIRO - RECIFE - PE"},
+        {"location_text": "RUA GREGÓRIO JÚNIOR, 264 - CORDEIRO - RECIFE - PE"},
+        {"location_text": "RUA GREGÓRIO JÚNIOR, 264 - CORDEIRO - RECIFE - PE"},
+        {"location_text": "RUA GREGÓRIO JÚNIOR, 264 - CORDEIRO - RECIFE - PE"},
+        {"location_text": "Praia de Boa Viagem – Quiosque 13"},
+        {"location_text": "BONITO – PE"}
+      ]
+    }
+  ]
+}

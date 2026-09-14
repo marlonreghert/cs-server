@@ -345,6 +345,29 @@ class VenueRepository(RedisVenueDAO):
             event_id, venue_id, recommendation,
         )
 
+    # ── events.venue_link_audit_review (plans/260914_agentic-venue-resolution-
+    # fallback.md §5, migration 0048) — the reviewer's verdict at the grain the
+    # audit flags, a (handle, venue_id) PAIR. Reusing 0047's per-event
+    # `llm_recommendation` column was rejected: 8 of the 9 flagged handles have
+    # ZERO `event_venue_link_candidate` rows to attach anything to (plan §B).
+    def upsert_venue_link_audit_review(self, handle: str, venue_id: str, fields: dict) -> dict:
+        return self.rds_store.upsert_venue_link_audit_review(handle, venue_id, fields)
+
+    def get_venue_link_audit_review(self, handle: str, venue_id: str):
+        return self.rds_store.get_venue_link_audit_review(handle, venue_id)
+
+    def list_venue_link_audit_reviews(self, *, verdict=None, decided=None):
+        return self.rds_store.list_venue_link_audit_reviews(
+            verdict=verdict, decided=decided,
+        )
+
+    def set_venue_link_audit_review_decision(
+        self, handle: str, venue_id: str, decision: str, note=None,
+    ):
+        return self.rds_store.set_venue_link_audit_review_decision(
+            handle, venue_id, decision, note,
+        )
+
     # ── events.crawl_target (plans/260809_scheduled-incremental-instagram-crawl.md) ──
     def get_crawl_target(self, handle: str):
         return self.rds_store.get_crawl_target(handle)
