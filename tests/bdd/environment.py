@@ -357,6 +357,7 @@ def _build_rds_layer(context) -> None:
         validate_auto_merge_enabled_config,
         validate_candidate_window_hours_config,
         validate_generic_vocabulary_config,
+        validate_handle_time_match_enabled_config,
         validate_lineup_threshold_config,
         validate_recurring_window_enabled_config,
         validate_single_night_venues_config,
@@ -414,6 +415,9 @@ def _build_rds_layer(context) -> None:
             # operator chose this scope explicitly, accepting that the
             # Bolinha/JB do Cavaco shape will re-merge wherever it recurs.
             "event_dedup_single_night_default_enabled": validate_single_night_default_enabled_config,
+            # plans/260913_candidate-cap-and-handle-time-merge.md Part B:
+            # same-handle/same-exact-time auto-merge, false by default.
+            "event_dedup_handle_time_match_enabled": validate_handle_time_match_enabled_config,
             # plans/260912_events-venue-night-duplication.md §G: whether the
             # post-merge display-title pass runs at all. False by default —
             # it is the one pass in this plan that WRITES a column.

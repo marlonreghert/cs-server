@@ -977,11 +977,16 @@ def _absorb_title_similarity(
     # the policy ALONE reached. A pair that ALSO passed title containment or
     # the shared-lineup rule would have merged anyway, so counting it here
     # would overstate what the policy actually caused.
-    outcome = (
-        "merged_single_night_venue"
-        if decision.reasons == (event_dedup.REASON_SINGLE_NIGHT_VENUE,)
-        else "merged"
-    )
+    # plans/260913_candidate-cap-and-handle-time-merge.md Part B: same
+    # treatment, same reasoning, for the fourth reason -- counted only when
+    # it is the SOLE reason the pair reached auto, so a pair that also
+    # passed title/lineup is not double-attributed to this newer mechanism.
+    if decision.reasons == (event_dedup.REASON_SINGLE_NIGHT_VENUE,):
+        outcome = "merged_single_night_venue"
+    elif decision.reasons == (event_dedup.REASON_HANDLE_TIME_MATCH,):
+        outcome = "merged_handle_time_match"
+    else:
+        outcome = "merged"
     EVENT_MERGE_TOTAL.labels(identity="title", outcome=outcome).inc()
     EVENT_SOURCES_PER_EVENT.observe(len(venue_dao.list_event_sources(canonical["event_id"])))
     logger.info(
@@ -1035,9 +1040,19 @@ def _run_pairwise_pass(
             recurring_window_enabled=config.recurring_window_enabled,
         ):
             continue
+        # plans/260913_candidate-cap-and-handle-time-merge.md Part B: PER-
+        # PAIR, unlike `single_night_venue` (one bool for the whole venue
+        # pass) -- the predicate depends on both rows' own source_handle/
+        # starts_at/time_known, and reads ONLY data already on these two
+        # row dicts, so no extra DAO call is added to this loop.
+        handle_time_match = (
+            config.handle_time_match_enabled
+            and event_dedup.handle_time_match_eligible(a, b)
+        )
         decision = event_dedup.evaluate_pair(
             a, b, venue_name=venue_name, config=config,
             single_night_venue=single_night_venue,
+            handle_time_match=handle_time_match,
         )
         if decision is None:
             _observe_title_refusal(a, b, venue_name, config)

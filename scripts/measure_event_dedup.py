@@ -144,6 +144,7 @@ def build_config(
     recurring_window_enabled: bool = False,
     single_night_venue_ids=(),
     single_night_default_enabled: bool = False,
+    handle_time_match_enabled: bool = False,
     auto_merge_enabled: bool = True,
 ) -> event_dedup.DedupConfig:
     """The config every path in this script measures/sweeps with, built from
@@ -166,6 +167,7 @@ def build_config(
         recurring_window_enabled=recurring_window_enabled,
         single_night_venues=tuple(single_night_venue_ids or ()),
         single_night_default_enabled=single_night_default_enabled,
+        handle_time_match_enabled=handle_time_match_enabled,
     )
 
 
@@ -280,9 +282,19 @@ def measure(venue_dao, *, config: Optional[event_dedup.DedupConfig] = None) -> R
                 recurring_window_enabled=config.recurring_window_enabled,
             ):
                 continue
+            # plans/260913_candidate-cap-and-handle-time-merge.md Part B:
+            # per-pair, the SAME computation `app.services.event_merge.
+            # _run_pairwise_pass` makes -- this script and the runtime pass
+            # can never disagree about a pair, per this module's own "one
+            # predicate, never two" rule.
+            handle_time_match = (
+                config.handle_time_match_enabled
+                and event_dedup.handle_time_match_eligible(a, b)
+            )
             decision = event_dedup.evaluate_pair(
                 a, b, venue_name=venue_name, config=config,
                 single_night_venue=single_night_venue,
+                handle_time_match=handle_time_match,
             )
             if decision is None:
                 venue_tokens = event_dedup.venue_name_tokens(venue_name)
@@ -331,6 +343,7 @@ def report_to_dict(report: Report, *, config: event_dedup.DedupConfig, applied: 
             "recurring_window_enabled": config.recurring_window_enabled,
             "single_night_venues": list(config.single_night_venues),
             "single_night_default_enabled": config.single_night_default_enabled,
+            "handle_time_match_enabled": config.handle_time_match_enabled,
         },
         "counts": {
             "venues_considered": report.venues_considered,
@@ -403,6 +416,7 @@ def sweep(
     recurring_window_enabled: bool = False,
     single_night_venue_ids=(),
     single_night_default_enabled: bool = False,
+    handle_time_match_enabled: bool = False,
 ) -> dict:
     """`--apply`: calls `app.services.event_merge.run_title_similarity_pass`
     for every venue with 2+ `post_type == KIND_EVENT` rows, forcing
@@ -426,6 +440,7 @@ def sweep(
             recurring_window_enabled=recurring_window_enabled,
             single_night_venue_ids=single_night_venue_ids,
             single_night_default_enabled=single_night_default_enabled,
+            handle_time_match_enabled=handle_time_match_enabled,
         )
     all_events = [e for e in venue_dao.list_events() if e.get("post_type") == KIND_EVENT and e.get("status") != "superseded"]
     venue_counts: Counter = Counter(e["venue_id"] for e in all_events if e.get("venue_id"))
@@ -473,6 +488,12 @@ def main(argv: Optional[list] = None) -> int:
              "catalog-wide scope); never writes the admin-config key",
     )
     ap.add_argument(
+        "--handle-time-match", dest="handle_time_match", action="store_true", default=False,
+        help="plans/260913_candidate-cap-and-handle-time-merge.md Part B: measure/sweep "
+             "with the same-handle/same-exact-time auto-merge signal forced ON for THIS "
+             "run only; never reads or writes the live admin-config key",
+    )
+    ap.add_argument(
         "--max-auto-pairs", type=int, default=None, metavar="N",
         help="blast-radius guard: with --apply, write NOTHING and exit non-zero when the "
              "dry-run report finds more than N auto pairs",
@@ -491,6 +512,7 @@ def main(argv: Optional[list] = None) -> int:
         recurring_window_enabled=args.recurring_window,
         single_night_venue_ids=args.single_night_venue,
         single_night_default_enabled=args.single_night_all,
+        handle_time_match_enabled=args.handle_time_match,
     )
     logger.info(
         "config: lineup_threshold=%d recurring_window=%s single_night_all=%s "

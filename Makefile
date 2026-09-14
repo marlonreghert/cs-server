@@ -122,6 +122,8 @@ test-unit:
 		tests/test_venue_link_audit.py \
 		tests/test_measure_venue_link_audit.py \
 		tests/test_events_venue_night_deploy_safety.py \
+		tests/test_backfill_event_venue_candidate_cap.py \
+		tests/test_event_dedup_handle_time_match.py \
 		tests/test_backfill_event_venue_links.py \
 		tests/test_backfill_source_provenance.py \
 		tests/test_backfill_reels_seeded.py \
