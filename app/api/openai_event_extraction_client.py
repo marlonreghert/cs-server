@@ -99,9 +99,21 @@ Rules:
 - If no candidate is clearly supported by the text, answer with venue_id set to null.
 
 Answer with JSON only: {"venue_id": "...", "evidence_quote": "..."}"""
-# A recommendation is one venue_id plus a short quoted span — generous
-# headroom for a quote of a few sentences without inviting an essay.
-EVENT_VENUE_ADVISOR_MAX_COMPLETION_TOKENS = 200
+# plans/260914_event-venue-advisor-token-budget.md: 200 was measured against
+# real production traffic to silently truncate to an EMPTY response on
+# `gpt-5.6-luna` — a reasoning model whose invisible reasoning tokens are
+# billed against this SAME budget before a single visible output token is
+# written (see DEFAULT_MODEL's own comment below). An empty response is
+# indistinguishable, downstream, from a legitimate "no candidate supported by
+# the text" refusal (`event_venue_advisor_validator.REJECTION_MALFORMED`) —
+# 9/120 real calls (7.5%) came back empty at max_completion_tokens=400;
+# 0/120 came back empty at 3000. 4096 carries ~37% headroom above that
+# measured floor (max_completion_tokens is a ceiling, not a floor, so extra
+# headroom costs nothing unless the model actually needs it) while staying
+# well under DEFAULT_MAX_COMPLETION_TOKENS below — this call's own output is
+# one venue_id plus a short quoted span, never a multi-field/multi-event
+# object, so it does not need that call's budget.
+EVENT_VENUE_ADVISOR_MAX_COMPLETION_TOKENS = 4096
 
 DEFAULT_MODEL = "gpt-5.6-luna"
 # Reasoning tokens (gpt-5.6 is a reasoning model) count against
