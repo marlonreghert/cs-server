@@ -32,9 +32,9 @@ code, which did not exist on that host at scan time.
   anyone cross-checking against production).
 - **`editaisculturape_force_assigned_wrong_venue`** — `venue_name`/
   `neighborhood` for `Casa da Cultura de Pernambuco` are verbatim from a
-  live read. All 14 `location_text` values (9 empty, 5 with text) are
+  live read. All 14 `location_text` values (10 empty, 4 with text) are
   verbatim from the 14 live, non-superseded events under
-  `source_handle='editaisculturape'`. Two of the five non-empty values
+  `source_handle='editaisculturape'`. Two of the four non-empty values
   ("Casa de Câmara e Cadeia de Brejo da Madre de Deus", "Torre Malakoff")
   are the decisive evidence this plan's Evidence section cites as
   currently undetected by `evaluate_attribution_dispute`; in production,

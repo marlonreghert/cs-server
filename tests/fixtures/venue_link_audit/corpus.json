@@ -34,7 +34,7 @@
     {
       "case_id": "editaisculturape_force_assigned_wrong_venue",
       "handle": "editaisculturape",
-      "description": "A kind='venue' crawl target single-mapped to Casa da Cultura de Pernambuco. The handle is actually Pernambuco's statewide culture-department grants-bulletin account. 9 of 14 live events carry empty location_text (not checkable); of the 5 that do not, two name a real, different, specific place in plain prose that evaluate_attribution_dispute cannot see (METHOD_NAME_MATCH excluded from DISPUTE_METHODS). 12 of 14 are status=accepted in production -- live, served, wrong.",
+      "description": "A kind='venue' crawl target single-mapped to Casa da Cultura de Pernambuco. The handle is actually Pernambuco's statewide culture-department grants-bulletin account. 10 of 14 live events carry empty location_text (not checkable); of the 4 that do not, two name a real, different, specific place in plain prose that evaluate_attribution_dispute cannot see (METHOD_NAME_MATCH excluded from DISPUTE_METHODS). 12 of 14 are status=accepted in production -- live, served, wrong.",
       "expected_flagged_venue_ids": ["casa_da_cultura_de_pernambuco"],
       "mapped_venues": [
         {"venue_id": "casa_da_cultura_de_pernambuco", "venue_name": "Casa da Cultura de Pernambuco", "neighborhood": "São José"}
