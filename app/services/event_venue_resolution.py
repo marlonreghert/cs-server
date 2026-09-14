@@ -590,6 +590,16 @@ def resolve_event_venue(
     # it changes no answer such a caller can observe. Default False: every
     # pre-existing caller runs the full ladder, unchanged.
     identity_methods_only: bool = False,
+    # plans/260914_promoter-roundup-caption-mention.md: the caller's own
+    # `location_text` for EVERY event the SAME POST yields (this event's own
+    # included) — `None` (the default) is what every pre-existing caller
+    # still passes, and changes nothing for them. Consulted ONLY by rung 5
+    # below: when the post's own events collectively name more than one
+    # distinct place, the post-level caption is worthless as per-event
+    # evidence for ANY of them, whether or not those places are catalogued
+    # (a strictly stronger refusal than the existing "several known venues"
+    # check, which only saw the catalogued subset).
+    sibling_location_texts: Optional[list[str]] = None,
 ) -> ResolutionResult:
     """Run the ladder for one event and return its verdict.
 
@@ -718,7 +728,23 @@ def resolve_event_venue(
     distinct_caption_venues: dict[str, tuple[str, VenueLite]] = {}
     for mention, venue in caption_mentions:
         distinct_caption_venues.setdefault(venue.venue_id, (mention, venue))
-    if len(distinct_caption_venues) == 1:
+
+    # plans/260914_promoter-roundup-caption-mention.md: the SAME rung-5
+    # ambiguity check the "several known venues" branch below already runs,
+    # widened to what the post's own extracted events actually name —
+    # known or not. A roundup post's caption plausibly names exactly one
+    # CATALOGUED venue while its sibling events' own location texts name
+    # several DIFFERENT places (most of them uncatalogued) — from
+    # `distinct_caption_venues` alone that reads as "unambiguous", which is
+    # exactly the false-unambiguous shape this guard closes. Blank/whitespace
+    # sibling texts are excluded (an event with no location_text at all
+    # contributes nothing to "how many places does this post talk about").
+    sibling_places = {
+        text.strip() for text in (sibling_location_texts or []) if text and text.strip()
+    }
+    siblings_name_several_places = len(sibling_places) > 1
+
+    if len(distinct_caption_venues) == 1 and not siblings_name_several_places:
         mention, venue = next(iter(distinct_caption_venues.values()))
         candidate = LinkCandidate(
             venue_id=venue.venue_id, venue_name=venue.venue_name,
@@ -728,7 +754,9 @@ def resolve_event_venue(
         return ResolutionResult(
             RESOLUTION_AUTO, venue.venue_id, METHOD_CAPTION_HANDLE_MENTION, 1.0, [candidate],
         )
-    if len(distinct_caption_venues) > 1:
+    if len(distinct_caption_venues) > 1 or (
+        len(distinct_caption_venues) == 1 and siblings_name_several_places
+    ):
         # plans/260813_handle-attribution-hardening.md §B: the event's own
         # text is per-event evidence; the caption is post-level evidence for
         # every event the post yields. plans/260812_event-attribution-and-
@@ -815,6 +843,13 @@ def build_location_text_attribute_fn(
     top_k: int = DEFAULT_NAME_MATCH_TOP_K,
     location_text_fallback_to_caption: bool = False,
     attribution_outcomes: Optional[list] = None,
+    # plans/260914_promoter-roundup-caption-mention.md: every event THIS
+    # POST yields, by their own `location_text` — threaded straight through
+    # to `resolve_event_venue`'s identically-named parameter for every event
+    # this closure attributes (the SAME list every call in this closure's
+    # per-event loop consults, not recomputed per event). `None` (the
+    # default) is byte-for-byte the pre-existing behaviour.
+    sibling_location_texts: Optional[list[str]] = None,
 ) -> AttributeFn:
     """THE one definition of "how a caller resolves one post's events against
     a bounded venue candidate set from each event's own `location_text`" —
@@ -867,6 +902,7 @@ def build_location_text_attribute_fn(
             # `same_account_venues` for exactly the callers where that is
             # true by construction.
             same_account_venues=venues if location_text_fallback_to_caption else None,
+            sibling_location_texts=sibling_location_texts,
         )
 
         def _on_persisted() -> None:

@@ -1,4 +1,3 @@
-@wip
 Feature: Promoter roundup caption mention
   A promoter post's caption is only trustworthy evidence for one of its own
   events when the post is genuinely about one place. A roundup post whose own

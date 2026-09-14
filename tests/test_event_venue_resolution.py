@@ -321,6 +321,91 @@ class TestLadderOrdering:
         assert len(result.candidates) == 2
 
 
+class TestSiblingLocationTextsGuardRung5:
+    """plans/260914_promoter-roundup-caption-mention.md: rung 5 must refuse
+    to auto-link off the post's caption when the SAME POST's own extracted
+    events collectively name more than one distinct place — regardless of
+    how many of those places are catalogued (a roundup post whose caption
+    happens to name exactly one CATALOGUED venue is the exact false-
+    unambiguous shape this guard closes)."""
+
+    def test_refuses_even_when_exactly_one_caption_mention_is_catalogued(self):
+        venue = _venue("v1", "Seu Chico Botequim")
+        handle_index = {"seuchicobotequim": "v1"}
+        result = resolve_event_venue(
+            caption="Roteiro: @seuchicobotequim e muito mais!",
+            location_text="@teatroalbertomaranhao", location_tag=None,
+            promoter_handle="oquetemhojeemnatal", venues=[venue], handle_index=handle_index,
+            sibling_location_texts=[
+                "@seuchicobotequim", "@teatroalbertomaranhao", "@eskinaprime",
+            ],
+        )
+        # This event's OWN text named a specific, uncatalogued handle --
+        # concrete evidence, so the refusal tail's venue_not_in_catalog
+        # branch fires, not the generic ambiguous-caption sentinel.
+        assert result.resolution == RESOLUTION_UNRESOLVED
+        assert result.venue_id is None
+        assert result.method == METHOD_VENUE_NOT_IN_CATALOG
+
+    def test_refuses_as_ambiguous_when_this_events_own_text_gives_nothing(self):
+        """Same roundup shape, but THIS event's own text is blank -- the
+        refusal tail's OTHER branch (ambiguous_caption_refusal)."""
+        venue = _venue("v1", "Seu Chico Botequim")
+        handle_index = {"seuchicobotequim": "v1"}
+        result = resolve_event_venue(
+            caption="Roteiro: @seuchicobotequim e muito mais!",
+            location_text=None, location_tag=None,
+            promoter_handle="oquetemhojeemnatal", venues=[venue], handle_index=handle_index,
+            sibling_location_texts=["@seuchicobotequim", "Some Other Place"],
+        )
+        assert result.resolution == RESOLUTION_UNRESOLVED
+        assert result.venue_id is None
+        assert result.method == METHOD_AMBIGUOUS_CAPTION_REFUSAL
+
+    @pytest.mark.parametrize("sibling_location_texts", [
+        None,
+        ["@semprerockbar"],
+        ["@semprerockbar", "@semprerockbar"],  # repeated -- still one distinct place
+        ["@semprerockbar", None, ""],  # blanks excluded from the distinct count
+        ["@semprerockbar", "  "],  # whitespace-only is blank too
+    ])
+    def test_unambiguous_case_is_byte_for_byte_unchanged(self, sibling_location_texts):
+        """Pinned against `TestLadderOrdering.
+        test_caption_mention_still_resolves_when_unambiguous_and_event_has_
+        nothing` above -- no existing assertion changes value; the new
+        parameter's default (`None`) and every single-distinct-place shape
+        must resolve identically to today."""
+        venue = _venue("v1", "Sempre Rock Bar")
+        handle_index = {"semprerockbar": "v1"}
+        result = resolve_event_venue(
+            caption="Hoje: @semprerockbar com festa!",
+            location_text=None, location_tag=None,
+            promoter_handle="promo", venues=[venue], handle_index=handle_index,
+            sibling_location_texts=sibling_location_texts,
+        )
+        assert result.resolution == RESOLUTION_AUTO
+        assert result.venue_id == "v1"
+        assert result.method == METHOD_CAPTION_HANDLE_MENTION
+
+    def test_ambiguous_several_known_venues_is_unaffected_by_a_single_sibling_text(self):
+        """Pinned against `TestLadderOrdering.
+        test_ambiguous_caption_with_no_event_evidence_refuses_to_link` above
+        -- a single-distinct-place sibling list changes nothing; the
+        pre-existing >1-KNOWN-venues refusal path is untouched."""
+        v1 = _venue("v1", "Sempre Rock Bar")
+        v2 = _venue("v2", "Taverna Pub")
+        handle_index = {"semprerockbar": "v1", "tavernapubnatal": "v2"}
+        result = resolve_event_venue(
+            caption="Roteiro: @semprerockbar, @tavernapubnatal e muito mais!",
+            location_text=None, location_tag=None,
+            promoter_handle="promo", venues=[v1, v2], handle_index=handle_index,
+            sibling_location_texts=["Sempre Rock Bar"],
+        )
+        assert result.resolution == RESOLUTION_UNRESOLVED
+        assert result.venue_id is None
+        assert result.method == METHOD_AMBIGUOUS_CAPTION_REFUSAL
+
+
 class TestProximityTieBreak:
     def test_nearer_venue_wins_between_two_identically_scored_venues(self):
         """Rung 4: when two venues score identically on name alone, the one

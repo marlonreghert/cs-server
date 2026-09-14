@@ -766,6 +766,11 @@ class PromoterCrawlService:
             confidence_floor=self.confidence_floor, margin=self.margin, top_k=self.top_k,
             location_text_fallback_to_caption=location_text_fallback_to_caption,
             attribution_outcomes=attribution_outcomes,
+            # plans/260914_promoter-roundup-caption-mention.md: every event
+            # THIS post yields, by its own location_text — already built
+            # above, before this closure — so rung 5 can refuse a roundup
+            # caption as per-event evidence for any of them.
+            sibling_location_texts=[ev["location_text"] for ev in prepared_events],
         )
 
         touched_event_ids: list[str] = []
