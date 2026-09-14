@@ -1,0 +1,81 @@
+{
+  "cases": [
+    {
+      "case_id": "real_botequim_double_mapped_handle",
+      "handle": "real.botequim",
+      "description": "A kind='venue' crawl target currently double-mapped via instagram.handle to a correct Recife venue and an unrelated Sao Paulo venue sharing generic name tokens. All 18 live events' location_text describe the correct venue's own address; the wrong venue should be flagged, the correct one should not.",
+      "expected_flagged_venue_ids": ["real_bar_e_lanches"],
+      "expected_not_flagged_venue_ids": ["bar_real_botequim"],
+      "mapped_venues": [
+        {"venue_id": "bar_real_botequim", "venue_name": "Bar Real Botequim", "neighborhood": "Casa Forte"},
+        {"venue_id": "real_bar_e_lanches", "venue_name": "Real Bar e Lanches", "neighborhood": "Pinheiros"}
+      ],
+      "events": [
+        {"location_text": "Real Botequim\nAv. 17 de agosto, 1761 - Casa Forte"},
+        {"location_text": "Real Botequim\nAv. 17 de agosto, 1761 - Casa Forte"},
+        {"location_text": "Real Botequim\nAv. 17 de agosto, 1761 - Casa Forte"},
+        {"location_text": "Real Botequim\nAv. 17 de agosto, 1761 - Casa Forte"},
+        {"location_text": "Real Botequim\nAv. 17 de agosto, 1761 - Casa Forte"},
+        {"location_text": "Real Botequim\nAv. 17 de agosto, 1761 - Casa Forte"},
+        {"location_text": "Real Botequim\nAv. 17 de agosto, 1761 - Casa Forte"},
+        {"location_text": "Real Botequim — Av. 17 de agosto, 1761 - Casa Forte"},
+        {"location_text": "Real Botequim — Av. 17 de agosto, 1761 - Casa Forte"},
+        {"location_text": "Real Botequim — Av. 17 de agosto, 1761 - Casa Forte"},
+        {"location_text": "Real Botequim\nAv. 17 de agosto, 1761 - Casa Forte"},
+        {"location_text": "Real Botequim — Av. 17 de agosto, 1761 - Casa Forte"},
+        {"location_text": "Real Botequim\nAv. 17 de agosto, 1761 - Casa Forte"},
+        {"location_text": "Real Botequim\nAv. 17 de agosto, 1761 - Casa Forte"},
+        {"location_text": "Real Botequim\nAv. 17 de agosto, 1761 - Casa Forte"},
+        {"location_text": "Real Botequim\nAv. 17 de agosto, 1761 - Casa Forte"},
+        {"location_text": "Real Botequim\nAv. 17 de agosto, 1761 - Casa Forte"},
+        {"location_text": "Real Botequim\nAv. 17 de agosto, 1761 - Casa Forte"}
+      ]
+    },
+    {
+      "case_id": "editaisculturape_force_assigned_wrong_venue",
+      "handle": "editaisculturape",
+      "description": "A kind='venue' crawl target single-mapped to Casa da Cultura de Pernambuco. The handle is actually Pernambuco's statewide culture-department grants-bulletin account. 10 of 14 live events carry empty location_text (not checkable); of the 4 that do not, two name a real, different, specific place in plain prose that evaluate_attribution_dispute cannot see (METHOD_NAME_MATCH excluded from DISPUTE_METHODS). 12 of 14 are status=accepted in production -- live, served, wrong.",
+      "expected_flagged_venue_ids": ["casa_da_cultura_de_pernambuco"],
+      "mapped_venues": [
+        {"venue_id": "casa_da_cultura_de_pernambuco", "venue_name": "Casa da Cultura de Pernambuco", "neighborhood": "São José"}
+      ],
+      "events": [
+        {"location_text": ""},
+        {"location_text": ""},
+        {"location_text": ""},
+        {"location_text": ""},
+        {"location_text": ""},
+        {"location_text": "Casa de Câmara e Cadeia de Brejo da Madre de Deus"},
+        {"location_text": "Torre Malakoff"},
+        {"location_text": "Mapa Cultural de Pernambuco"},
+        {"location_text": ""},
+        {"location_text": ""},
+        {"location_text": "Pernambuco"},
+        {"location_text": ""},
+        {"location_text": ""},
+        {"location_text": ""}
+      ]
+    },
+    {
+      "case_id": "teatroluizmendonca_benign_control",
+      "handle": "teatroluizmendonca",
+      "description": "A kind='venue' crawl target single-mapped to Theater Luis Mendonca. 9 of 10 live events' location_text are a spelling/transliteration variant of the venue's own name. The one exception, 'Teatro Nacional', already carries review_reason=sources_disagree via an unrelated existing mechanism and sits in pending_review -- confirmed benign, no live misattribution. Included here as a negative control: this handle must NOT be flagged.",
+      "expected_flagged_venue_ids": [],
+      "mapped_venues": [
+        {"venue_id": "theater_luis_mendonca", "venue_name": "Theater Luís Mendonça", "neighborhood": "Boa Viagem"}
+      ],
+      "events": [
+        {"location_text": "Teatro Luiz Mendonça"},
+        {"location_text": "Teatro Luiz Mendonça — Parque Dona Lindu"},
+        {"location_text": "Teatro Luiz Mendonça"},
+        {"location_text": "Teatro Luiz Mendonça"},
+        {"location_text": "Teatro Luiz Mendonça"},
+        {"location_text": "Teatro Nacional"},
+        {"location_text": "Teatro Luiz Mendonça — Av. Boa Viagem, S/N, Boa Viagem, Recife/PE"},
+        {"location_text": "Teatro Luiz Mendonça"},
+        {"location_text": "Teatro Luiz Mendonça"},
+        {"location_text": "Teatro Luiz Mendonça"}
+      ]
+    }
+  ]
+}
