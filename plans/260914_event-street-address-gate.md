@@ -255,4 +255,50 @@ Manual or integration checks:
 
 ## Open Questions
 
-None.
+**PAUSED 2026-09-14 — scope correction needed before implementation, do not
+proceed.** The operator clarified after this plan was written: the original
+ask ("don't surface an event with no address evidence") was aimed at
+promoter/roundup-sourced events and future non-venue event-owner submissions
+— cases where the event's own VENUE ATTRIBUTION is uncertain. It was not
+meant to apply to an event sourced from the venue's own account: "Venue
+specific handler that has clear event details without address, we can
+assume that is from the venue address itself." For a `kind='venue'`
+crawl-target's own post, the venue_id attribution is maximally confident by
+construction (the venue is posting about itself) — gating it out for a gap
+in OUR OWN `venues.address` data (an address-backfill/data-quality problem,
+not an attribution-confidence problem) contradicts that intent, even though
+today's measured blast radius happens to be zero either way.
+
+This plan's current design (Desired Behavior / Implementation Approach)
+gates on `venue_id`'s resolved `venues.address.street` UNIVERSALLY — no
+per-event exemption for venue-sourced events. That needs to change before
+implementation:
+
+- Open question 1: what is the correct row-level signal for "this event's
+  own source account is a `kind='venue'` crawl target" (not merely
+  `linked_by='handle_mention'` — confirmed by `260914_promoter-roundup-
+  caption-mention.md`'s own evidence that rung 1/`handle_mention` also fires
+  for a PROMOTER post that happens to @-mention a venue's registered
+  handle, e.g. 188 of `oquetemhojeemnatal`'s 807 events). Investigate
+  whether `events.post_item_source.source_handle` joined against
+  `events.crawl_target.kind` (or `instagram.handle`) is already reachable
+  from `_EVENT_SELECT`, or needs a new join — do not guess, read the actual
+  schema and join keys.
+- Open question 2: once that signal exists, should the gate be "skip the
+  street-address check entirely for venue-kind-sourced events" or "still
+  require SOME address evidence, just also accept the venue's own account
+  as suficient corroboration for a street lookup gap" — re-derive from the
+  operator's own words above; the former reading looks correct but confirm
+  against real data before finalizing.
+- Open question 3: re-measure blast radius under the corrected design
+  against production before finalizing numbers in Evidence/Acceptance
+  Criteria — the zero-blast-radius claim was measured under the OLD
+  universal-only design and may no longer be the headline number worth
+  leading with once the exemption exists.
+
+Do not implement against the plan as currently written below. If you are an
+execute-feature agent and reached this file, STOP per this repo's own
+`execute-feature` skill preconditions ("the plan has no unresolved open
+questions") and report this exact blocker rather than proceeding — this is
+not a hypothetical precondition check, it is real: the design below is
+confirmed outdated.
