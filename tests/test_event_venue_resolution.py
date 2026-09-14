@@ -9,10 +9,14 @@ helpers — so a regression in the arithmetic fails fast and close to the bug.
 """
 import pytest
 
-from app.metrics import EVENT_VENUE_NAME_MATCH_SKIPPED_TOTAL
+from app.metrics import (
+    EVENT_VENUE_NAME_MATCH_CANDIDATES_TRUNCATED_TOTAL,
+    EVENT_VENUE_NAME_MATCH_SKIPPED_TOTAL,
+)
 from app.services.event_reconciliation import REVIEW_REASON_VENUE_NOT_IN_CATALOG
 from app.services.event_venue_resolution import (
     DEFAULT_CONFIDENCE_FLOOR,
+    DEFAULT_NAME_MATCH_TOP_K,
     METHOD_AMBIGUOUS_CAPTION_REFUSAL,
     METHOD_CAPTION_HANDLE_MENTION,
     METHOD_HANDLE_MENTION,
@@ -743,3 +747,91 @@ class TestUnrecognizedHandleOutranksAmbiguousCaption:
         assert result.resolution == RESOLUTION_UNRESOLVED
         assert result.venue_id is None
         assert result.method == METHOD_AMBIGUOUS_CAPTION_REFUSAL
+
+
+# ── plans/260913_candidate-cap-and-handle-time-merge.md Part A ────────────
+def _similar_catalog(n: int) -> list:
+    """`n` venues that all score well above zero against the location text
+    "Espaco Teste Show" used throughout this class — a stand-in for the
+    live "whole catalog scores something" shape (2026-09-13 production:
+    up to 2,661 candidates for one event)."""
+    return [_venue(f"v{i}", f"Espaco Teste {i}") for i in range(n)]
+
+
+class TestNameMatchCandidatesTopK:
+    def test_truncates_to_top_k_when_the_unranked_list_is_larger(self):
+        candidates = _name_match_candidates(
+            "Espaco Teste Show", _similar_catalog(30), top_k=20,
+        )
+        assert len(candidates) == 20
+
+    def test_is_a_no_op_when_the_unranked_list_already_fits(self):
+        candidates = _name_match_candidates(
+            "Espaco Teste Show", _similar_catalog(3), top_k=20,
+        )
+        assert len(candidates) == 3
+
+    def test_preserves_sort_order_after_truncation(self):
+        catalog = _similar_catalog(30) + [_venue("v_exact", "Espaco Teste Show")]
+        candidates = _name_match_candidates("Espaco Teste Show", catalog, top_k=5)
+        scores = [c.score for c in candidates]
+        assert scores == sorted(scores, reverse=True)
+        assert candidates[0].venue_id == "v_exact"
+
+    def test_never_drops_the_winner_or_the_runner_up_at_the_floor_of_two(self):
+        catalog = _similar_catalog(30) + [_venue("v_exact", "Espaco Teste Show")]
+        candidates = _name_match_candidates("Espaco Teste Show", catalog, top_k=2)
+        assert len(candidates) == 2
+        assert candidates[0].venue_id == "v_exact"
+
+    def test_counts_a_truncation_only_when_something_was_actually_dropped(self):
+        before = EVENT_VENUE_NAME_MATCH_CANDIDATES_TRUNCATED_TOTAL._value.get()
+        _name_match_candidates("Espaco Teste Show", _similar_catalog(30), top_k=20)
+        after_truncated = EVENT_VENUE_NAME_MATCH_CANDIDATES_TRUNCATED_TOTAL._value.get()
+        assert after_truncated == before + 1
+
+        _name_match_candidates("Espaco Teste Show", _similar_catalog(3), top_k=20)
+        after_not_truncated = EVENT_VENUE_NAME_MATCH_CANDIDATES_TRUNCATED_TOTAL._value.get()
+        assert after_not_truncated == after_truncated
+
+    def test_default_top_k_is_twenty(self):
+        assert DEFAULT_NAME_MATCH_TOP_K == 20
+
+
+class TestCapNeverChangesAnExistingVerdict:
+    """The rank-0/rank-1 proof (event_venue_resolution.py's own docstring
+    for DEFAULT_NAME_MATCH_TOP_K): `gate_auto_link` and the
+    RESOLUTION_QUEUED gate only ever read candidates[0]/candidates[1], so
+    any top_k >= 2 must reproduce the UNCAPPED verdict exactly."""
+
+    def test_auto_link_verdict_is_unchanged_by_a_tight_cap(self):
+        catalog = _similar_catalog(30) + [_venue("v_exact", "Espaco Teste Show")]
+        uncapped = resolve_event_venue(
+            caption=None, location_text="Espaco Teste Show", location_tag=None,
+            promoter_handle=None, venues=catalog, handle_index={}, top_k=10_000,
+        )
+        capped = resolve_event_venue(
+            caption=None, location_text="Espaco Teste Show", location_tag=None,
+            promoter_handle=None, venues=catalog, handle_index={}, top_k=2,
+        )
+        assert uncapped.resolution == capped.resolution == RESOLUTION_AUTO
+        assert uncapped.venue_id == capped.venue_id == "v_exact"
+        assert uncapped.confidence == capped.confidence
+
+    def test_queued_verdict_and_its_top_two_candidates_are_unchanged_by_a_tight_cap(self):
+        # Two near-tied venues below the margin -> queued either way, with
+        # the SAME top two candidates regardless of how many other
+        # low-scoring venues also exist in the catalog.
+        near_tie_a = _venue("v_a", "Espaco Teste Show A")
+        near_tie_b = _venue("v_b", "Espaco Teste Show B")
+        catalog = [near_tie_a, near_tie_b] + _similar_catalog(30)
+        uncapped = resolve_event_venue(
+            caption=None, location_text="Espaco Teste Show", location_tag=None,
+            promoter_handle=None, venues=catalog, handle_index={}, top_k=10_000,
+        )
+        capped = resolve_event_venue(
+            caption=None, location_text="Espaco Teste Show", location_tag=None,
+            promoter_handle=None, venues=catalog, handle_index={}, top_k=2,
+        )
+        assert uncapped.resolution == capped.resolution == RESOLUTION_QUEUED
+        assert [c.venue_id for c in uncapped.candidates[:2]] == [c.venue_id for c in capped.candidates]

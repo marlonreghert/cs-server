@@ -81,7 +81,11 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Callable, Optional
 
-from app.metrics import EVENT_VENUE_LINK_TOTAL, EVENT_VENUE_NAME_MATCH_SKIPPED_TOTAL
+from app.metrics import (
+    EVENT_VENUE_LINK_TOTAL,
+    EVENT_VENUE_NAME_MATCH_CANDIDATES_TRUNCATED_TOTAL,
+    EVENT_VENUE_NAME_MATCH_SKIPPED_TOTAL,
+)
 from app.services.instagram_cascade_service import name_similarity
 from app.services.instagram_handle_sources import normalize_handle
 from app.services.venue_eligibility import haversine_km
@@ -149,6 +153,27 @@ DEFAULT_MARGIN = 0.08
 # identity (Instagram's own place database), not scored like a guess, so it
 # must not double as a fuzzy name match at a lower bar than rung 3 uses.
 LOCATION_TAG_MATCH_FLOOR = 0.85
+
+# plans/260913_candidate-cap-and-handle-time-merge.md Part A: rung 4 has
+# always scored `location_text` against the WHOLE `venues` list and kept
+# every venue with `score > 0` — confirmed live on 2026-09-13 at up to 2,661
+# stored candidates for one event against a 3,532-venue catalog, ~90% of
+# that table's rows concentrated in 93 events. `gate_auto_link` (below) and
+# `RESOLUTION_QUEUED`'s own gate only ever read `candidates[0]`/
+# `candidates[1]`, so capping at any `top_k >= 2` reproduces every existing
+# auto/queued/unresolved verdict unchanged — proved, not assumed: see the
+# plan's Evidence for the rank-0/rank-1 argument. 20 is not a round guess:
+# every genuine runner-up candidate found in 15 sampled production auto-
+# links sat at rank <= 5; 20 is a 4x margin above the deepest real
+# alternative this session could find, while still cutting the worst
+# offenders by over 99%. Unlike `DEFAULT_CONFIDENCE_FLOOR`/`DEFAULT_MARGIN`,
+# this is NOT gated behind `AdminConfigService` — the rank-0/rank-1 proof
+# means it changes no decision, so it follows the precedent
+# `_strip_handles_for_name_match` set (a correctness fix to this same
+# function, shipped unconditionally) rather than this repo's off-by-default
+# convention, which exists for changes that DO alter a decision or withhold
+# content.
+DEFAULT_NAME_MATCH_TOP_K = 20
 
 # An "@" immediately preceded by a letter, digit, or dot is the local part of
 # an email address ("contato@barx.com.br"), not a mention: an Instagram
@@ -349,13 +374,23 @@ def _name_match_candidates(
     location_text: Optional[str],
     venues: list[VenueLite],
     tag_coords: Optional[tuple[float, float]] = None,
+    *,
+    top_k: int = DEFAULT_NAME_MATCH_TOP_K,
 ) -> list[LinkCandidate]:
     """Rung 4: every venue scored against `location_text`, ranked best
-    first. When `tag_coords` is available (the location tag supplied
-    coordinates even though its name did not clear rung 2), distance to it
-    breaks ties among equally-scored venues — the proximity tie-break. A
-    venue with no distance information never outranks one that has a real
-    measurement at the same score.
+    first, truncated to the best `top_k` (plans/260913_candidate-cap-and-
+    handle-time-merge.md Part A). When `tag_coords` is available (the
+    location tag supplied coordinates even though its name did not clear
+    rung 2), distance to it breaks ties among equally-scored venues — the
+    proximity tie-break. A venue with no distance information never
+    outranks one that has a real measurement at the same score.
+
+    The truncation happens AFTER sorting, so it only ever drops the lowest-
+    ranked tail — rank 0 and rank 1 (everything `gate_auto_link` and the
+    `RESOLUTION_QUEUED` gate ever read) survive for any `top_k >= 2`. Counts
+    `EVENT_VENUE_NAME_MATCH_CANDIDATES_TRUNCATED_TOTAL` once per call where
+    truncation actually removed something, so an operator can watch how
+    often — and how hard — the cap bites in production.
 
     plans/260813_handle-attribution-hardening.md §C: refuses outright — no
     candidates, regardless of what any score would have been — when
@@ -381,6 +416,9 @@ def _name_match_candidates(
         scored.append((venue, score, distance))
 
     scored.sort(key=lambda t: (-t[1], t[2] if t[2] is not None else float("inf")))
+    if len(scored) > top_k:
+        EVENT_VENUE_NAME_MATCH_CANDIDATES_TRUNCATED_TOTAL.inc()
+        scored = scored[:top_k]
     return [
         LinkCandidate(
             venue_id=venue.venue_id, venue_name=venue.venue_name,
@@ -534,6 +572,10 @@ def resolve_event_venue(
     handle_index: dict[str, str],
     confidence_floor: float = DEFAULT_CONFIDENCE_FLOOR,
     margin: float = DEFAULT_MARGIN,
+    # plans/260913_candidate-cap-and-handle-time-merge.md Part A: the most
+    # candidates rung 4 will ever rank and return, before
+    # `gate_auto_link`/the `RESOLUTION_QUEUED` gate below ever see them.
+    top_k: int = DEFAULT_NAME_MATCH_TOP_K,
     # §B: a caller-bounded subset of `venues` sharing the SAME crawl
     # target/handle or brand as this event's source — e.g. two branches of
     # one account. `None` (the default) or a single-member list disables
@@ -659,7 +701,7 @@ def resolve_event_venue(
             if location_text:
                 EVENT_VENUE_NAME_MATCH_SKIPPED_TOTAL.inc()
         else:
-            candidates = _name_match_candidates(name_match_text, venues, tag_coords)
+            candidates = _name_match_candidates(name_match_text, venues, tag_coords, top_k=top_k)
     if candidates:
         ok, _reason = gate_auto_link(candidates, floor=confidence_floor, margin=margin)
         if ok:
@@ -770,6 +812,7 @@ def build_location_text_attribute_fn(
     now: datetime,
     confidence_floor: float = DEFAULT_CONFIDENCE_FLOOR,
     margin: float = DEFAULT_MARGIN,
+    top_k: int = DEFAULT_NAME_MATCH_TOP_K,
     location_text_fallback_to_caption: bool = False,
     attribution_outcomes: Optional[list] = None,
 ) -> AttributeFn:
@@ -814,7 +857,7 @@ def build_location_text_attribute_fn(
             caption=caption, location_text=location_text,
             location_tag=location_tag, promoter_handle=promoter_handle,
             venues=venues, handle_index=handle_index,
-            confidence_floor=confidence_floor, margin=margin,
+            confidence_floor=confidence_floor, margin=margin, top_k=top_k,
             # §B: `location_text_fallback_to_caption=True` is EXACTLY the
             # signal both real bounded-candidate callers already set (see
             # this function's own docstring: "Both callers that pass
@@ -885,6 +928,7 @@ __all__ = [
     "METHOD_VENUE_NOT_IN_CATALOG",
     "RESOLUTION_AUTO", "RESOLUTION_MANUAL", "RESOLUTION_UNRESOLVED", "RESOLUTION_QUEUED",
     "DEFAULT_CONFIDENCE_FLOOR", "DEFAULT_MARGIN", "LOCATION_TAG_MATCH_FLOOR",
+    "DEFAULT_NAME_MATCH_TOP_K",
     "VenueLite", "LinkCandidate", "ResolutionResult", "RESULT_LABEL", "AttributeFn",
     "extract_mentions", "gate_auto_link", "build_venue_catalog", "candidate_venues_for_ids",
     "_venue_field",

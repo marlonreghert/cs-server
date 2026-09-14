@@ -120,6 +120,8 @@ test-unit:
 		tests/test_event_venue_advisor_migration.py \
 		tests/test_measure_agentic_mitigation_baseline.py \
 		tests/test_events_venue_night_deploy_safety.py \
+		tests/test_backfill_event_venue_candidate_cap.py \
+		tests/test_event_dedup_handle_time_match.py \
 		tests/test_backfill_event_venue_links.py \
 		tests/test_backfill_source_provenance.py \
 		tests/test_backfill_reels_seeded.py \

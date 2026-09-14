@@ -1420,6 +1420,17 @@ EVENT_VENUE_NAME_MATCH_SKIPPED_TOTAL = Counter(
     "Rung-4 name-match invocations skipped because location_text was handle-only",
 )
 
+# plans/260913_candidate-cap-and-handle-time-merge.md Part A: rung 4 used to
+# keep EVERY venue it scored above zero — up to 2,661 candidates for one
+# event in production. A climbing count here means the cap is doing its
+# job (dropping a catalog-sized tail), not a fault; watch the MAGNITUDE of
+# the drop (the backfill/measurement scripts report it), not just this
+# counter's own rate.
+EVENT_VENUE_NAME_MATCH_CANDIDATES_TRUNCATED_TOTAL = Counter(
+    "event_venue_name_match_candidates_truncated_total",
+    "Rung-4 name-match calls where the ranked candidate list exceeded top_k and was truncated",
+)
+
 # plans/260812_event-attribution-and-dates.md §C/Error Handling: how each
 # event's date was actually reached — `deterministic` (the proven regex
 # finders in event_date_resolver.py resolved it on their own, no model

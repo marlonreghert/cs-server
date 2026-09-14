@@ -791,6 +791,16 @@ class Settings(BaseSettings):
     # Questions), not asserted correct here.
     promoter_link_confidence_floor: float = 0.55
     promoter_link_margin: float = 0.08
+    # plans/260913_candidate-cap-and-handle-time-merge.md Part A: the most
+    # ranked venue candidates rung 4 (name match) keeps and persists per
+    # event, regardless of how many score above zero against the whole
+    # catalog. A deploy-time tuning parameter, not an AdminConfigService
+    # flag — a cap at any value >= 2 provably changes no existing auto-
+    # link/queued/unresolved decision (see app.services.event_venue_
+    # resolution.DEFAULT_NAME_MATCH_TOP_K's own docstring for the proof),
+    # so this mirrors promoter_link_confidence_floor/margin's posture, not
+    # event_dedup's off-by-default convention.
+    event_venue_name_match_top_k: int = 20
     # A promoter posts far more than a venue does, so this bound is NOT
     # optional and defaults small — unlike event extraction's per-venue cap.
     promoter_max_posts_per_account: int = 15

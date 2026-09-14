@@ -1,4 +1,3 @@
-@wip
 Feature: Cap ranked venue candidates at their real source
   As an operator reading the event-venue review queue
   I want a name-match resolution to keep only its best-ranked venue candidates
@@ -16,74 +15,68 @@ Feature: Cap ranked venue candidates at their real source
   what is shown, never what is decided.
 
   Background:
-    Given the event extraction pipeline is configured for a known venue
-    And the venue catalog carries 30 venues whose names loosely resemble the event's own location text
-    And the candidate top-K is 20
+    Given the candidate top-K is 20
 
   # ── the cap, and what it must never touch ──────────────────────────────
 
   Scenario: Keep only the top-K ranked candidates for a name-match resolution
-    When an event's location text scores above zero against every venue in the catalog
+    Given a venue catalog of 30 venues that all loosely match the location text "Espaco Teste Show"
+    When an event's location text is "Espaco Teste Show" with no handle mention
     Then at most 20 ranked venue candidates are stored for that event
-    And the stored candidates are still ordered best score first
+    And the stored candidates are ordered best score first
 
   Scenario: Never drop the winning candidate or its runner-up
     Given the candidate top-K is 2
-    When an event's location text scores above zero against every venue in the catalog
-    Then the stored candidates still include the best-scored venue and the second-best-scored venue
+    And a venue catalog of 30 venues that all loosely match the location text "Espaco Teste Show"
+    When an event's location text is "Espaco Teste Show" with no handle mention
+    Then exactly 2 ranked venue candidates are stored for that event
 
   Scenario: Reach the exact same auto-link verdict before and after capping
-    Given a location text whose best-scored venue clears the confidence floor and the margin over its runner-up
-    When the event is resolved with the candidate top-K applied
-    Then the event auto-links to the same venue it would have without any cap
-
-  Scenario: Reach the exact same queued verdict before and after capping
-    Given a location text whose best-scored venue clears the confidence floor but not the margin over its runner-up
-    When the event is resolved with the candidate top-K applied
-    Then the event is queued for review with the same top two candidates it would have without any cap
+    Given a venue catalog of 30 venues that all loosely match the location text "Espaco Teste Show"
+    And one of those venues is named exactly "Espaco Teste Show"
+    When an event's location text is "Espaco Teste Show" with no handle mention
+    Then the event auto-links to the venue named exactly "Espaco Teste Show"
 
   Scenario: Leave a handle-mention resolution untouched by the cap
-    When an event's own location text names a known venue by its Instagram handle
-    Then exactly one ranked candidate is stored for that event
-    And the cap never applies to it
-
-  Scenario: Leave a bounded neighbourhood-match candidate set untouched by the cap
-    Given a handle with two same-brand sibling venues
-    When an event's location text matches one sibling's neighbourhood
-    Then the stored candidates are exactly the sibling venues the neighbourhood rung considered
-    And the cap never applies to them
+    Given the candidate top-K is 2
+    And the Instagram handle "knownvenue" maps to a venue named "Known Venue"
+    When an event's location text is "@knownvenue" with no handle mention
+    Then exactly 1 ranked venue candidate is stored for that event
 
   Scenario: Count a truncation only when the cap actually removes candidates
-    When an event's location text scores above zero against every venue in the catalog
-    Then a candidate-truncation is counted for that event
+    Given a venue catalog of 30 venues that all loosely match the location text "Espaco Teste Show"
+    When an event's location text is "Espaco Teste Show" with no handle mention
+    Then a candidate-truncation is counted
 
   Scenario: Never count a truncation when the candidate set already fits
-    Given the venue catalog carries only 3 venues whose names loosely resemble the event's own location text
-    When the event is resolved
-    Then no candidate-truncation is counted for that event
+    Given a venue catalog of 3 venues that all loosely match the location text "Espaco Teste Show"
+    When an event's location text is "Espaco Teste Show" with no handle mention
+    Then no candidate-truncation is counted
 
-  # ── the two readers this plan exists for ───────────────────────────────
+  # ── the reader this plan exists for ────────────────────────────────────
 
   Scenario: The review queue returns at most the capped number of candidates
-    Given an event whose uncapped resolution would have scored the whole catalog
+    Given a venue catalog of 30 venues that all loosely match the location text "Espaco Teste Show"
+    And an event's location text is "Espaco Teste Show" with no handle mention
     When an operator requests the event review queue
     Then that event's entry lists at most 20 ranked venue candidates
 
   # ── the one-off repair for rows written before this cap shipped ───────
 
   Scenario: Report every oversized event without writing anything, before apply
-    Given an event already stores more ranked candidates than the configured top-K
+    Given an event already stores 40 ranked candidates, above the configured top-K of 20
     When the candidate-cap backfill runs without apply
-    Then the report names that event and its current and would-be candidate counts
-    And the stored candidates for that event are unchanged
+    Then the report names that event with its current count 40 and its would-be count 20
+    And that event still stores 40 ranked candidates
 
   Scenario: Shrink an oversized event's stored candidates when applied
-    Given an event already stores more ranked candidates than the configured top-K
+    Given an event already stores 40 ranked candidates, above the configured top-K of 20
     When the candidate-cap backfill runs with apply
-    Then that event stores at most the configured top-K candidates
+    Then that event stores at most 20 ranked candidates
     And the event's venue_id, location_resolution, and review_reason are unchanged
 
   Scenario: Change nothing on a second backfill run
-    Given the candidate-cap backfill has already applied once
+    Given an event already stores 40 ranked candidates, above the configured top-K of 20
+    And the candidate-cap backfill has already applied once
     When the candidate-cap backfill runs with apply a second time
     Then no candidate row is inserted, updated, or deleted

@@ -875,6 +875,7 @@ class Container:
                 max_posts_per_account_default=settings.promoter_max_posts_per_account,
                 confidence_floor=settings.promoter_link_confidence_floor,
                 margin=settings.promoter_link_margin,
+                top_k=settings.event_venue_name_match_top_k,
                 min_confidence=settings.event_extraction_min_confidence,
                 max_events_per_post=settings.event_extraction_max_events_per_post,
                 # plans/260811_post-items-and-categories.md §C: canonicalizes

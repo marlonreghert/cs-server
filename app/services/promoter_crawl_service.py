@@ -85,6 +85,7 @@ from app.services.event_reconciliation import (
 from app.services.event_venue_resolution import (
     DEFAULT_CONFIDENCE_FLOOR,
     DEFAULT_MARGIN,
+    DEFAULT_NAME_MATCH_TOP_K,
     build_handle_index,
     build_location_text_attribute_fn,
     build_venue_catalog,
@@ -214,6 +215,8 @@ class PromoterCrawlService:
         max_posts_per_account_default: int = DEFAULT_MAX_POSTS_PER_ACCOUNT,
         confidence_floor: float = DEFAULT_CONFIDENCE_FLOOR,
         margin: float = DEFAULT_MARGIN,
+        # plans/260913_candidate-cap-and-handle-time-merge.md Part A.
+        top_k: int = DEFAULT_NAME_MATCH_TOP_K,
         min_confidence: float = 0.5,
         max_events_per_post: int = DEFAULT_MAX_EVENTS_PER_POST,
         now_provider=None,
@@ -233,6 +236,7 @@ class PromoterCrawlService:
         self.max_posts_per_account_default = max_posts_per_account_default
         self.confidence_floor = confidence_floor
         self.margin = margin
+        self.top_k = top_k
         self.min_confidence = min_confidence
         self.max_events_per_post = max_events_per_post
         self._now = now_provider or (lambda: datetime.now(timezone.utc))
@@ -759,7 +763,7 @@ class PromoterCrawlService:
             caption=caption, location_tag=post.get("location_tag"),
             promoter_handle=handle, venues=venues, handle_index=handle_index,
             venue_dao=self.venue_dao, now=now,
-            confidence_floor=self.confidence_floor, margin=self.margin,
+            confidence_floor=self.confidence_floor, margin=self.margin, top_k=self.top_k,
             location_text_fallback_to_caption=location_text_fallback_to_caption,
             attribution_outcomes=attribution_outcomes,
         )
