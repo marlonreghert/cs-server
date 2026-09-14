@@ -835,7 +835,6 @@ class EventExtractionService:
                 # record, independent of (and not necessarily identical in
                 # casing to) any crawl_target key.
                 handle = self._handle_for(venue_id)
-                attribute_fn = None  # fixed-venue closure, built inside _extract_one
             else:
                 venue_id = None
                 # MULTI-VENUE convention: `target["handle"]` — the
@@ -887,26 +886,20 @@ class EventExtractionService:
                 if cfg["dry_run"]:
                     continue
 
-                if venue_id is None:
-                    # Built PER POST — the ladder closes over each post's
-                    # own caption/location_tag, never a sibling's.
-                    attribute_fn = build_location_text_attribute_fn(
-                        caption=post.caption, location_tag=post.location_tag,
-                        promoter_handle=archive_handle, venues=candidate_venues,
-                        handle_index=handle_index, venue_dao=self.venue_dao, now=now,
-                        confidence_floor=self.venue_resolution_confidence_floor,
-                        margin=self.venue_resolution_margin,
-                        # Bounded to this handle's own venues (two or three,
-                        # never the whole catalog) — the SAME reasoning
-                        # `_chain_shared_handle` already applies for opting
-                        # in: a caption naming a branch in passing is a
-                        # trustworthy signal against a FEW candidates.
-                        location_text_fallback_to_caption=True,
-                    )
-
+                # plans/260914_promoter-roundup-caption-mention.md: the
+                # ladder closure itself (caption/location_tag are each
+                # post's own; `candidate_venues`/`handle_index` are this
+                # handle's) can only be built once THIS post's own events —
+                # and therefore their `location_text` values, needed for
+                # rung 5's sibling-aware refusal — are known, which is
+                # inside `_extract_one` after extraction runs. Pass the
+                # bounded candidate set through instead of a pre-built
+                # closure; `_extract_one` builds it at the right moment.
                 outcome, kind_label = await self._extract_one(
                     venue_id, handle, post, cfg, trigger=TRIGGER_HANDLE_REEXTRACTION,
-                    attribute_fn=attribute_fn,
+                    # Already `(None, None)` for the single-venue case (set
+                    # above, alongside `venue_id`) — never recomputed here.
+                    candidate_venues=candidate_venues, handle_index=handle_index,
                 )
                 bump(outcome, kind_label)
 
@@ -915,7 +908,8 @@ class EventExtractionService:
     async def _extract_one(
         self, venue_id: Optional[str], handle: str, post: ArchivedPost, cfg: dict,
         *, trigger: str = TRIGGER_EXTRACTION,
-        attribute_fn: Optional[Callable[[dict, str], tuple[dict, Optional[Callable[[], None]]]]] = None,
+        candidate_venues: Optional[list] = None,
+        handle_index: Optional[dict] = None,
     ) -> tuple[str, str]:
         """Returns (outcome, kind_label) — see KIND_LABEL_* above for what
         the second element means. `trigger` labels
@@ -925,15 +919,20 @@ class EventExtractionService:
         pre-existing modes (unchanged behaviour), TRIGGER_HANDLE_REEXTRACTION
         when `_run_handles` is the caller.
 
-        `attribute_fn` — plans/260811_extract-by-handle.md: pluggable so
-        `_run_handles`' multi-venue branch can pass the SAME resolution-
-        ladder closure `PromoterCrawlService._process_post` uses
+        `candidate_venues`/`handle_index` — plans/260811_extract-by-handle.md,
+        widened by plans/260914_promoter-roundup-caption-mention.md: when
+        `_run_handles`' multi-venue branch passes these (bounded to one
+        handle's own venues), THIS method builds the SAME resolution-ladder
+        closure `PromoterCrawlService._process_post` uses
         (`event_venue_resolution.build_location_text_attribute_fn`), instead
-        of this method's own fixed-`venue_id` attribution. Defaults to
-        `None`, in which case the fixed-venue closure below is built exactly
-        as it always has been — the single-venue path (the common case) is
+        of this method's own fixed-`venue_id` attribution — built HERE,
+        after this post's own events (and therefore their `location_text`
+        values) are known, rather than by the caller beforehand, so the
+        closure can be given `sibling_location_texts` for rung 5's
+        roundup-refusal guard. `None` (the default) is byte-for-byte the
+        pre-existing behaviour — the single-venue path (the common case) is
         BYTE-FOR-BYTE unchanged. `venue_id` may be `None` only when
-        `attribute_fn` is given (the multi-venue branch does not know a
+        `candidate_venues` is given (the multi-venue branch does not know a
         single venue ahead of time); `_record_failure` below already treats
         a `None` venue_id as "not yet known", matching how a promoter post's
         own failure placeholder never sets one either."""
@@ -1286,10 +1285,11 @@ class EventExtractionService:
         # `location_text` is recorded but never re-attributes the event
         # elsewhere (plans/260806_venue-post-multi-event.md §D). No side
         # effect to defer — always None. UNCHANGED for every caller that
-        # does not pass `attribute_fn` (the single-venue path, the common
-        # case). `_run_handles`' multi-venue branch passes the SAME
+        # does not pass `candidate_venues` (the single-venue path, the
+        # common case). `_run_handles`' multi-venue branch builds the SAME
         # resolution-ladder closure PromoterCrawlService._process_post uses
-        # instead (plans/260811_extract-by-handle.md).
+        # instead (plans/260811_extract-by-handle.md, widened by
+        # plans/260914_promoter-roundup-caption-mention.md), above.
         # plans/260912_events-venue-night-duplication.md §C (Defect 2): the
         # posting venue is still the answer for the overwhelming majority of
         # rows and STAYS the answer unless this event's OWN text is
@@ -1303,8 +1303,24 @@ class EventExtractionService:
         # an operator can act on.
         dispute_config = load_attribution_dispute_config(self.redis_client)
 
-        if attribute_fn is not None:
-            _attribute = attribute_fn
+        if candidate_venues is not None:
+            # Built HERE, not by the caller — `prepared_events` (this
+            # post's own events, just finished above) is what lets rung 5
+            # refuse a roundup caption as per-event evidence for a sibling.
+            _attribute = build_location_text_attribute_fn(
+                caption=post.caption, location_tag=post.location_tag,
+                promoter_handle=handle, venues=candidate_venues,
+                handle_index=handle_index, venue_dao=self.venue_dao, now=now,
+                confidence_floor=self.venue_resolution_confidence_floor,
+                margin=self.venue_resolution_margin,
+                # Bounded to this handle's own venues (two or three, never
+                # the whole catalog) — the SAME reasoning
+                # `_chain_shared_handle` already applies for opting in: a
+                # caption naming a branch in passing is a trustworthy signal
+                # against a FEW candidates.
+                location_text_fallback_to_caption=True,
+                sibling_location_texts=[ev["location_text"] for ev in prepared_events],
+            )
         else:
             def _attribute(fields: dict, event_id: str) -> tuple[dict, Optional[Callable[[], None]]]:
                 result_fields: dict = {"venue_id": venue_id}

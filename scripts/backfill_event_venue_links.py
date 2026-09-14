@@ -95,6 +95,23 @@ an already-corrected row on a second run), resumable, no network client
 importable, `operator_edited_fields` always wins, and the same
 `ArithmeticImbalance`/`WriteAffectedNoRows` hard-stops.
 
+## A FIFTH mode (plans/260914_promoter-roundup-caption-mention.md) — the
+## roundup-caption repair
+
+`--mode caption-handle-mention` selects `linked_by = 'caption_handle_mention'`
+rows — exactly the shape the OLD, pre-fix rung 5 produced: a roundup post
+whose caption happened to name exactly one catalogued venue, auto-linked
+to it even though the post's own sibling events named several different
+places. Reuses `decide_one` completely UNCHANGED, the same engine
+`handle-mention`/`unresolved-venue` already use: that function's own
+`resolve_event_venue` call passes `caption=None` (re-deciding strictly from
+the event's OWN stored `location_text`, never a fresh model call and never
+the post's caption), so rung 5 can never fire in this engine regardless of
+today's fix — no sibling-location-text plumbing is needed here. Keeps every
+property the other modes have: dry-run default, `--apply` to write,
+idempotent, resumable, no network client importable,
+`operator_edited_fields` always wins.
+
 Usage:
     python -m scripts.backfill_event_venue_links                        # dry-run: report only
     python -m scripts.backfill_event_venue_links --apply                # write the repaired links
@@ -107,6 +124,8 @@ Usage:
         --handle editaisculturape --from-venue-id ven_... --to-venue-id none --apply
     python -m scripts.backfill_event_venue_links --mode unresolved-venue \\
         --handle editaisculturape --apply
+    python -m scripts.backfill_event_venue_links --mode caption-handle-mention
+    python -m scripts.backfill_event_venue_links --mode caption-handle-mention --apply
 
 Capture the dry-run report to a file BEFORE running --apply — it is the
 only record of every changed row's previous venue_id. There is no revert
@@ -142,6 +161,7 @@ from app.services.event_reconciliation import (
     is_clean_extraction,
 )
 from app.services.event_venue_resolution import (
+    METHOD_CAPTION_HANDLE_MENTION,
     METHOD_HANDLE_MENTION,
     METHOD_VENUE_NOT_IN_CATALOG,
     RESOLUTION_AUTO,
@@ -169,7 +189,16 @@ MODE_DISPUTED_LOCATION_TEXT = "disputed-location-text"
 # alongside (never replacing) the two above. See this module's docstring.
 MODE_FORCE_REASSIGN = "force-reassign"
 MODE_UNRESOLVED_VENUE = "unresolved-venue"
-MODES = (MODE_HANDLE_MENTION, MODE_DISPUTED_LOCATION_TEXT, MODE_FORCE_REASSIGN, MODE_UNRESOLVED_VENUE)
+# plans/260914_promoter-roundup-caption-mention.md: a FIFTH selection, same
+# repair engine as `handle-mention`/`unresolved-venue` (`decide_one`,
+# completely unchanged — see this module's docstring for why its own
+# `caption=None` call can never even reach rung 5). Selects rows the OLD,
+# pre-fix rung 5 wrongly auto-linked from a roundup post's caption.
+MODE_CAPTION_HANDLE_MENTION = "caption-handle-mention"
+MODES = (
+    MODE_HANDLE_MENTION, MODE_DISPUTED_LOCATION_TEXT, MODE_FORCE_REASSIGN,
+    MODE_UNRESOLVED_VENUE, MODE_CAPTION_HANDLE_MENTION,
+)
 
 # Skip reasons — plan §B's per-status/per-protection table. Re-exported from
 # `app.services.event_link_skip`, which is now the ONE definition
@@ -773,6 +802,16 @@ def _select_candidates(
     `handles` (catalog-wide when omitted/empty) — the capability plan
     §2 opens up for a future general sweep, though every invocation this
     plan itself makes always scopes it to one handle.
+
+    `caption-handle-mention` (plans/260914_promoter-roundup-caption-
+    mention.md): `linked_by == METHOD_CAPTION_HANDLE_MENTION` — rows the
+    OLD, pre-fix rung 5 auto-linked purely because a roundup post's caption
+    happened to name exactly one catalogued venue, even though the post's
+    own sibling events named several different places. Re-decided by the
+    SAME `decide_one` engine as `handle-mention`/`unresolved-venue`
+    (unchanged — its `caption=None` re-resolution can never itself reach
+    rung 5, so no sibling-location-text plumbing belongs here); the mode
+    only changes WHICH rows are selected.
     """
     if mode == MODE_DISPUTED_LOCATION_TEXT:
         candidates = (
@@ -795,6 +834,10 @@ def _select_candidates(
             e for e in all_events
             if e.get("venue_id") is None
             and (handle_set is None or e.get("source_handle") in handle_set)
+        )
+    elif mode == MODE_CAPTION_HANDLE_MENTION:
+        candidates = (
+            e for e in all_events if e.get("linked_by") == METHOD_CAPTION_HANDLE_MENTION
         )
     else:
         candidates = (e for e in all_events if e.get("linked_by") == METHOD_HANDLE_MENTION)
@@ -860,8 +903,9 @@ def run_backfill(
                 min_confidence=settings.event_extraction_min_confidence, now=now,
             )
         else:
-            # MODE_HANDLE_MENTION or MODE_UNRESOLVED_VENUE — the SAME
-            # engine; only `_select_candidates` differs between them.
+            # MODE_HANDLE_MENTION, MODE_UNRESOLVED_VENUE, or
+            # MODE_CAPTION_HANDLE_MENTION — the SAME engine; only
+            # `_select_candidates` differs between them.
             decision = decide_one(
                 event, venues=venues, handle_index=handle_index, venue_names_by_id=venue_names_by_id,
                 confidence_floor=settings.promoter_link_confidence_floor,
@@ -1042,8 +1086,10 @@ def main(argv: Optional[list] = None) -> int:
         help="which rows to re-decide: 'handle-mention' (the default, unchanged), "
              "'disputed-location-text' (260912 §C's venue-post attribution repair), "
              "'force-reassign' (an unconditional, operator-pinned venue_id write — "
-             "260914 §2), or 'unresolved-venue' (re-run the unchanged ladder against "
-             "venue_id IS NULL rows — 260914 §2)",
+             "260914 §2), 'unresolved-venue' (re-run the unchanged ladder against "
+             "venue_id IS NULL rows — 260914 §2), or 'caption-handle-mention' "
+             "(re-run the unchanged ladder against rows the old, pre-fix rung 5 "
+             "wrongly linked from a roundup post's caption)",
     )
     ap.add_argument(
         "--withhold-disputed", action="store_true",

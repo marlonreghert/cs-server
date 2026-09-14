@@ -38,6 +38,7 @@ from app.services.event_reconciliation import (
 from app.services.event_venue_resolution import (
     METHOD_CAPTION_HANDLE_MENTION,
     METHOD_HANDLE_MENTION,
+    METHOD_LOCATION_TAG,
     METHOD_NAME_MATCH,
     METHOD_VENUE_NOT_IN_CATALOG,
     RESOLUTION_AUTO,
@@ -46,6 +47,7 @@ from app.services.event_venue_resolution import (
     VenueLite,
 )
 from scripts.backfill_event_venue_links import (
+    MODE_CAPTION_HANDLE_MENTION,
     MODE_DISPUTED_LOCATION_TEXT,
     MODE_FORCE_REASSIGN,
     MODE_UNRESOLVED_VENUE,
@@ -337,6 +339,39 @@ class TestSelection:
         assert already_correct in touched_ids
         assert caption_mention not in touched_ids
         assert name_match not in touched_ids
+
+
+class TestCaptionHandleMentionSelection:
+    """plans/260914_promoter-roundup-caption-mention.md: the fifth mode
+    selects ONLY the shape the old, pre-fix rung 5 produced — never a row
+    any other rung decided."""
+
+    def test_selects_only_caption_handle_mention_rows(self):
+        dao = _dao()
+        venue = _add_venue(dao, "Sempre Rock Bar", "semprerockbar")
+
+        target = _insert(
+            dao, venue_id=venue, location_text=None, title="A",
+            linked_by=METHOD_CAPTION_HANDLE_MENTION,
+        )
+        handle_mention = _insert(
+            dao, venue_id=venue, location_text="@semprerockbar", title="B",
+            linked_by=METHOD_HANDLE_MENTION,
+        )
+        name_match = _insert(
+            dao, venue_id=venue, location_text=None, title="C", linked_by=METHOD_NAME_MATCH,
+        )
+        location_tag = _insert(
+            dao, venue_id=venue, location_text=None, title="D", linked_by=METHOD_LOCATION_TAG,
+        )
+
+        report = run_backfill(dao, apply=False, now=_NOW, mode=MODE_CAPTION_HANDLE_MENTION)
+        assert report.selected == 1
+        touched_ids = {d.event_id for d in report.rows}
+        assert target in touched_ids
+        assert handle_mention not in touched_ids
+        assert name_match not in touched_ids
+        assert location_tag not in touched_ids
 
 
 class TestArithmeticBalance:
