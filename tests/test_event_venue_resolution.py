@@ -835,3 +835,39 @@ class TestCapNeverChangesAnExistingVerdict:
         )
         assert uncapped.resolution == capped.resolution == RESOLUTION_QUEUED
         assert [c.venue_id for c in uncapped.candidates[:2]] == [c.venue_id for c in capped.candidates]
+
+
+class TestTopKMustNeverGoBelowTwo:
+    """`top_k` has no runtime guard (event_venue_resolution.py's own plan
+    calls it a deploy-time constant, not operator input) — this test IS the
+    promised safety net. `gate_auto_link`'s margin check needs a runner-up
+    to compare a near-tie top score against; a `top_k` of 1 truncates the
+    runner-up away before `gate_auto_link` ever sees it, silently turning a
+    should-be-`queued` near-tie into a wrong `auto` link. `top_k=2` is the
+    floor precisely because it is the smallest value that still leaves a
+    runner-up for the margin check to compare against."""
+
+    def _near_tie_catalog(self):
+        near_tie_a = _venue("v_a", "Espaco Teste Show A")
+        near_tie_b = _venue("v_b", "Espaco Teste Show B")
+        return [near_tie_a, near_tie_b] + _similar_catalog(30)
+
+    def test_top_k_of_two_correctly_queues_a_near_tie(self):
+        result = resolve_event_venue(
+            caption=None, location_text="Espaco Teste Show", location_tag=None,
+            promoter_handle=None, venues=self._near_tie_catalog(), handle_index={},
+            top_k=2,
+        )
+        assert result.resolution == RESOLUTION_QUEUED
+
+    def test_top_k_of_one_wrongly_auto_links_the_same_near_tie(self):
+        """The regression this test exists to catch: dropping below the
+        documented floor of 2 is not merely untested, it is actively wrong —
+        confirmed here so a future change to the deploy-time default cannot
+        silently reintroduce it without a test failing."""
+        result = resolve_event_venue(
+            caption=None, location_text="Espaco Teste Show", location_tag=None,
+            promoter_handle=None, venues=self._near_tie_catalog(), handle_index={},
+            top_k=1,
+        )
+        assert result.resolution == RESOLUTION_AUTO
