@@ -1315,15 +1315,22 @@ async def get_admin_config(key: str):
 
 
 @router.put("/config/{key}")
-async def put_admin_config(key: str, value: Union[dict, list] = Body(...)):
+async def put_admin_config(key: str, value: Union[bool, dict, list] = Body(...)):
     """Write a config key to RDS (truth) then mirror Redis. Per-key validation
     runs before any write; a failed mirror after the RDS commit returns 502 so
     the caller retries (idempotent).
 
-    Accepts a JSON object OR array: most config keys are objects, but a few are
-    list-valued (notably ``vibe_modes``, an ordered array of mode configs). The
-    storage layer (RDS ``jsonb`` + the ``json.dumps`` Redis mirror) handles both,
-    so the HTTP boundary must not reject a top-level array."""
+    Accepts a JSON object, array, OR bare boolean: most config keys are
+    objects, some are list-valued (notably ``vibe_modes``, an ordered array of
+    mode configs), and several are boolean flags (e.g.
+    ``event_dedup_handle_time_match_enabled``) whose validators require a
+    native Python bool — see docs/events-venue-night-repair-runbook.md's own
+    ``PUT .../event_dedup_single_night_default_enabled body: true`` example.
+    The storage layer (RDS ``jsonb`` + the ``json.dumps`` Redis mirror)
+    handles all three JSON shapes, so the HTTP boundary must not reject any of
+    them; ``value`` is forwarded to the key's validator untouched, so a
+    boolean-typed key's ``isinstance(value, bool)`` check now sees the real
+    bool instead of never being reachable."""
     svc = _admin_config_service()
     try:
         stored = svc.set(key, value, updated_by="admin")

@@ -1,4 +1,3 @@
-@wip
 Feature: Admin config PUT accepts a bare boolean body
   Several admin-config keys are boolean flags whose validators require a
   native Python bool (isinstance(value, bool)). The generic
@@ -32,7 +31,7 @@ Feature: Admin config PUT accepts a bare boolean body
   Scenario: A list-typed key still accepts a JSON array body unchanged
     When the admin PUTs a well-formed vibe_modes array to the "vibe_modes" config key
     Then the response status is 200
-    And the stored vibe_modes value equals the submitted array
+    And the round-tripped vibe_modes value equals the submitted array
 
   Scenario: A bare boolean body is rejected for a dict-typed key
     When the admin PUTs a bare boolean true to the "venue_category_map" config key

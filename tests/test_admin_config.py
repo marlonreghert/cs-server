@@ -11,8 +11,10 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from app.models.venue_category import validate_category_map_config
 from app.routers.admin_trigger_router import router, set_container
 from app.services.admin_config_service import AdminConfigService
+from app.services.event_dedup import validate_handle_time_match_enabled_config
 from app.services.venue_eligibility import EligibilityConfig, load_eligibility_config
 from tests.rds_fake import InMemoryRdsVenueStore, RdsUnavailable
 
@@ -134,6 +136,60 @@ def test_put_accepts_top_level_list_value():
     assert client.put("/admin/config/vibe_modes", json=modes).status_code == 200
     got = client.get("/admin/config/vibe_modes").json()["value"]
     assert got == modes and isinstance(got, list)
+
+
+# ── bare boolean body (plans/260914_admin-config-boolean-body.md) ──────────────
+def test_put_accepts_bare_boolean_body_for_a_boolean_typed_key():
+    # PUT /admin/config/{key} must accept a bare JSON true/false body for a
+    # boolean-typed key -- docs/events-venue-night-repair-runbook.md documents
+    # exactly this call shape (`PUT .../event_dedup_single_night_default_enabled
+    # body: true`) -- and hand the validator a native Python bool.
+    svc, _, _ = _svc(validators={
+        "event_dedup_handle_time_match_enabled": validate_handle_time_match_enabled_config,
+    })
+    client = _client(svc)
+
+    resp_true = client.put(
+        "/admin/config/event_dedup_handle_time_match_enabled", json=True
+    )
+    assert resp_true.status_code == 200, resp_true.text
+    assert resp_true.json()["value"] is True
+
+    resp_false = client.put(
+        "/admin/config/event_dedup_handle_time_match_enabled", json=False
+    )
+    assert resp_false.status_code == 200, resp_false.text
+    assert resp_false.json()["value"] is False
+
+
+def test_put_bare_boolean_body_still_rejected_for_a_dict_typed_key():
+    # The widened Union[bool, dict, list] must not let a bare boolean
+    # silently satisfy a dict-typed key's validator: it still 400s via that
+    # validator's own isinstance(value, dict) check, exactly as an
+    # obviously-wrong object body would.
+    svc, _, store = _svc(validators={"venue_category_map": validate_category_map_config})
+    client = _client(svc)
+
+    resp = client.put("/admin/config/venue_category_map", json=True)
+    assert resp.status_code == 400, resp.text
+    assert store.get_admin_config("venue_category_map") is None
+
+
+def test_put_wrapped_value_object_still_rejected_for_a_boolean_typed_key():
+    # {"value": true} is NOT the documented call shape (the runbook always
+    # sends a bare true/false) and must stay rejected: the single Body(...)
+    # parameter has no embed=True, so this wrapper arrives at the validator as
+    # the dict {"value": True}, not an unwrapped bool -- unchanged by this fix.
+    svc, _, store = _svc(validators={
+        "event_dedup_handle_time_match_enabled": validate_handle_time_match_enabled_config,
+    })
+    client = _client(svc)
+
+    resp = client.put(
+        "/admin/config/event_dedup_handle_time_match_enabled", json={"value": True}
+    )
+    assert resp.status_code == 400, resp.text
+    assert store.get_admin_config("event_dedup_handle_time_match_enabled") is None
 
 
 def test_put_returns_502_when_mirror_fails():
