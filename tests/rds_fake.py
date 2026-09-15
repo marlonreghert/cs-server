@@ -1022,7 +1022,7 @@ class InMemoryRdsVenueStore:
         out.sort(key=lambda r: (r.get("starts_at") is None, r.get("starts_at"), r["event_id"]))
         return out
 
-    def list_events_for_projection(self, *, now) -> list[dict]:
+    def list_events_for_projection(self, *, now, non_music_categories=None) -> list[dict]:
         """The events serving projection's selection query (plans/260905_
         events-serving-projection.md, Phase 4 §3) — a sibling of
         `list_events`, never a caller of it (the two have genuinely
@@ -1035,6 +1035,14 @@ class InMemoryRdsVenueStore:
         the selected set, exactly as the plan specifies (never one query
         per row).
 
+        `non_music_categories` (plans/260914_musical-events-scope.md)
+        defaults to `None`, meaning "let `is_selectable` apply its own pure-
+        module default" — mirrored from `RdsVenueStore.list_events_for_
+        projection`'s identical parameter, which the LIVE caller
+        (`RedisProjectionService.project_events`) always supplies explicitly
+        after reading the admin-config deny-list; a caller here that does
+        not care (most pytest/BDD fixtures) may simply omit it.
+
         `is_selectable`'s recurring branch needs `last_seen_at` — the MAX
         across every attached `event_sources` row — which is NOT one of
         `self.events`' own stored fields (see `_merged_view`'s docstring:
@@ -1046,13 +1054,18 @@ class InMemoryRdsVenueStore:
         from datetime import timedelta
 
         from app.config import settings
-        from app.services.event_projection_selection import is_selectable
+        from app.services.event_projection_selection import (
+            DEFAULT_NON_MUSIC_CATEGORIES,
+            is_selectable,
+        )
 
         self._guard()
         servable = set(self.list_servable_venue_ids())
         max_recurring_source_age = timedelta(
             days=settings.events_recurring_max_source_age_days
         )
+        if non_music_categories is None:
+            non_music_categories = DEFAULT_NON_MUSIC_CATEGORIES
         out = []
         for row in self.events.values():
             if row.get("venue_id") not in servable:
@@ -1061,6 +1074,7 @@ class InMemoryRdsVenueStore:
             candidate = {**row, "last_seen_at": last_seen_at}
             if not is_selectable(
                 candidate, now=now, max_recurring_source_age=max_recurring_source_age,
+                non_music_categories=non_music_categories,
             ):
                 continue
             out.append(self._merged_view(row))

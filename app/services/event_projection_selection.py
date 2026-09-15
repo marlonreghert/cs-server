@@ -29,6 +29,8 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
+from app.models.post_category import DEFAULT_NON_MUSIC_CATEGORIES, is_music_category
+
 SELECTABLE_STATUSES = ("accepted", "confirmed")
 
 # A night that started yesterday evening is still tonight's event to a user
@@ -59,6 +61,7 @@ def _as_aware(value: datetime) -> datetime:
 def is_selectable(
     row: dict, *, now: datetime,
     max_recurring_source_age: timedelta = DEFAULT_RECURRING_MAX_SOURCE_AGE,
+    non_music_categories=DEFAULT_NON_MUSIC_CATEGORIES,
 ) -> bool:
     """True when `row` (an `events.post_item` row, in the same shape
     `RdsVenueStore._EVENT_SELECT`/the fake's `_merged_view` produce) passes
@@ -97,6 +100,12 @@ def is_selectable(
       reason to duplicate the check here); a NON-recurring row with a
       concrete `starts_at` must be at or after `now - PAST_GRACE`, EXACTLY
       as before this change — the new bound applies ONLY to recurring rows.
+    - `category` is not on the (live, caller-supplied) `non_music_
+      categories` deny-list — plans/260914_musical-events-scope.md.
+      Delegates to `app.models.post_category.is_music_category`, the SAME
+      matching pass the agentic-cost gate uses, so the two can never drift.
+      Fail-open by construction: a `None`/blank, off-vocabulary, or simply
+      unlisted category is always still selectable.
     """
     if row.get("post_type") != "event":
         return False
@@ -105,6 +114,8 @@ def is_selectable(
     if not row.get("venue_id"):
         return False
     if row.get("superseded_by") is not None:
+        return False
+    if not is_music_category(row.get("category"), non_music_categories):
         return False
 
     starts_at: Optional[datetime] = row.get("starts_at")

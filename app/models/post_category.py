@@ -182,6 +182,91 @@ def classify_category(raw, vocabulary) -> tuple[Optional[str], str]:
     return text, CATEGORY_OUTCOME_OFF_VOCABULARY
 
 
+ADMIN_CONFIG_NON_MUSIC_CATEGORIES_KEY = "admin_config:event_non_music_categories"
+
+# See plans/260914_musical-events-scope.md's Desired Behavior for the
+# boundary reasoning behind each entry (and, just as importantly, each
+# vocabulary entry deliberately left OFF this list — `DJ / club night` and
+# `party` are judged music-driven for this nightlife product; `live music`,
+# `samba / pagode`, `forró`, `rock`, `MPB`, `jazz`, `sertanejo`, `funk` and
+# `karaoke` are unambiguous music). A deny-list, never an allow-list: the
+# vocabulary is already proven stale on contact with real data (90 distinct
+# raw category values against a 17-value seed), so anything NOT on this
+# list — including every off-vocabulary and null category — stays eligible.
+DEFAULT_NON_MUSIC_CATEGORIES: tuple[str, ...] = (
+    "kids / family", "workshop", "food festival", "tasting",
+    "sports screening", "comedy", "quiz / trivia",
+)
+
+
+def validate_non_music_categories_config(value) -> list[str]:
+    """Validate an admin write to `admin_config:event_non_music_categories`
+    before persistence (AdminConfigService.set dispatches here). Same shape
+    as `validate_post_category_vocabulary_config`: a JSON array of
+    non-empty strings, whitespace-normalized and de-duplicated
+    case-insensitively via `casefold()` — first spelling wins."""
+    if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
+        raise TypeError("event non-music categories must be a list of strings")
+    seen: set[str] = set()
+    result: list[str] = []
+    for raw in value:
+        text = _normalize_text(raw)
+        if not text:
+            raise ValueError("event non-music categories entries must not be blank")
+        key = text.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(text)
+    # Unlike the vocabulary, an EMPTY deny-list is a legitimate admin state
+    # (an operator who wants every category eligible again) — never raised
+    # here the way an empty vocabulary is.
+    return result
+
+
+def load_non_music_categories(redis_like) -> tuple[list[str], Optional[str]]:
+    """Read the admin override, falling back to `DEFAULT_NON_MUSIC_
+    CATEGORIES` on any problem. Returns `(non_music_categories,
+    fallback_reason)`; `fallback_reason` is None unless the caller should
+    count a fallback metric — a missing key is NOT a fallback, it is the
+    expected pre-first-write state. Mirrors
+    `load_post_category_vocabulary` exactly."""
+    if redis_like is None:
+        return list(DEFAULT_NON_MUSIC_CATEGORIES), None
+    try:
+        raw = redis_like.get(ADMIN_CONFIG_NON_MUSIC_CATEGORIES_KEY)
+    except Exception as e:  # pragma: no cover - defensive
+        logger.warning(f"[post_category] non-music config read failed, using defaults: {e}")
+        return list(DEFAULT_NON_MUSIC_CATEGORIES), "unreadable"
+    if raw is None:
+        return list(DEFAULT_NON_MUSIC_CATEGORIES), None
+    try:
+        data = json.loads(raw)
+    except (TypeError, ValueError) as e:
+        logger.warning(f"[post_category] non-music config invalid JSON, using defaults: {e}")
+        return list(DEFAULT_NON_MUSIC_CATEGORIES), "invalid_json"
+    try:
+        return validate_non_music_categories_config(data), None
+    except (TypeError, ValueError) as e:
+        logger.warning(f"[post_category] non-music config invalid shape, using defaults: {e}")
+        return list(DEFAULT_NON_MUSIC_CATEGORIES), "invalid_shape"
+
+
+def is_music_category(category, non_music_categories) -> bool:
+    """`False` only when `category` case-insensitively matches an entry in
+    `non_music_categories`; `True` for a `None`/blank category, an
+    off-vocabulary category, or any category simply not on the deny-list.
+    Fail-open by construction — mirrors `is_in_vocabulary`'s own shape
+    (reusing `_normalize_text`/`casefold()`, never a second fold rule), but
+    inverted: an ABSENT signal here means "still eligible", never
+    "excluded"."""
+    text = _normalize_text(category)
+    if text is None:
+        return True
+    folded = text.casefold()
+    return not any(denied.casefold() == folded for denied in non_music_categories)
+
+
 def is_in_vocabulary(category, vocabulary) -> bool:
     """Whether `category` matches a vocabulary entry case-insensitively.
     Used to decide whether a stored category should count as off-vocabulary
@@ -220,4 +305,7 @@ __all__ = [
     "validate_post_category_vocabulary_config", "load_post_category_vocabulary",
     "canonicalize_category", "classify_category", "is_in_vocabulary",
     "record_off_vocabulary_category",
+    "ADMIN_CONFIG_NON_MUSIC_CATEGORIES_KEY", "DEFAULT_NON_MUSIC_CATEGORIES",
+    "validate_non_music_categories_config", "load_non_music_categories",
+    "is_music_category",
 ]

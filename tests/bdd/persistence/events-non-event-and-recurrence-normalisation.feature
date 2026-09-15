@@ -29,6 +29,18 @@ Feature: Non-events stay out of the events serving projection, and its recurrenc
   # "event" must restore the occurrences (that PATCH is the whole mechanism
   # by which §0's concession is reversible).
   #
+  # AMENDMENT, 2026-09-14: the line above ("the projection must never filter
+  # on category") described THIS plan's own scope and is still true of it —
+  # this file still implements no category filter. It is no longer true of
+  # the projection as a whole: `plans/260914_musical-events-scope.md` is a
+  # separate, later, explicit product-scope decision that adds a category
+  # deny-list to `is_selectable` for an unrelated reason (music-only serving
+  # scope, not event-classification correctness), and it deliberately does
+  # NOT exempt an operator-corrected row. See `musical-events-scope.feature`
+  # for that gate's own scenarios, and the two scenarios below (now updated)
+  # for how that later decision supersedes the specific claim this comment
+  # used to make about them.
+  #
   # The `ends_at` scenarios below split on whether an occurrence's
   # `starts_at` was RE-DERIVED from a weekday pattern (`occurrence_id` is
   # `<event_id>_<date>`) or served on the announcement's own stored
@@ -71,21 +83,50 @@ Feature: Non-events stay out of the events serving projection, and its recurrenc
     When the events projection runs
     Then the city events index for "recife" holds at least one occurrence of that event
 
-  Scenario: A food-anchored row typed as an event is still projected
+  Scenario: A food-anchored row typed as an event is now excluded by the later music-only scope gate
     Given an accepted event row for venue "Cachaçaria Tradição" titled "Feijoada com samba ao vivo"
     And that row has post_type "event"
     And that row has category "food festival"
     And that row is recurring with recurrence text "todos os sábados"
     And that row was last seen 3 days ago
     When the events projection runs
-    Then the city events index for "recife" holds at least one occurrence of that event
-    # The projection must never filter on category. Under the plan's §0 the
-    # extraction rule now SUPPRESSES food-anchored captions, so the only way
-    # a row like this exists is that an operator typed it `event` by hand --
-    # which makes this scenario stronger, not weaker. `food festival` and
-    # `tasting` are first-class entries in this repo's own shipped
-    # DEFAULT_CATEGORY_VOCABULARY, and a category blocklist here would
-    # delete the operator's own correction and make §0's trade irreversible.
+    Then no occurrence key exists for that event
+    And the city events index for "recife" holds no occurrence of that event
+    # SUPERSEDED 2026-09-14 — this scenario was named "... is still
+    # projected" and asserted the opposite of the Then above. It is inverted
+    # here, not deleted, so it stays a live regression guard on the NEW
+    # behavior.
+    #
+    # `plans/260907_events-non-event-and-recurrence-normalisation.md` §0
+    # (2026-09-07 operator decision) conceded a CLASSIFICATION-layer
+    # question only — whether a food/price-anchored caption's `kind`
+    # extracts as `event` vs. `menu`/`promotion` — and that plan's own
+    # Non-goals explicitly rejected "a category blocklist... that hides a
+    # row while leaving post_type='event' in RDS" as the mechanism for THAT
+    # question. This row is correctly classified: post_type "event" here
+    # represents the classifier (or an operator, by hand) correctly judging
+    # it a genuine event despite being food-themed — exactly the outcome §0
+    # protects. The comment this replaces argued that excluding a row like
+    # this at the projection layer would delete that correction and make
+    # §0's trade irreversible.
+    #
+    # `plans/260914_musical-events-scope.md` (2026-09-14 operator decision)
+    # is a separate, later, EXPLICIT product-scope decision — "music only,
+    # for now" — made at the SERVING layer, independent of classification
+    # quality. It deliberately seeds `food festival` onto the
+    # `event_non_music_categories` deny-list `is_selectable` now reads, and
+    # by that plan's own design the gate is NOT scoped to exempt an
+    # operator-corrected row: a correctly-classified food-anchored event is
+    # now excluded from the projection regardless of `post_type`. This does
+    # NOT reopen or reverse §0's classification reasoning — the `kind`
+    # concession described above is untouched and still correct — it only
+    # changes whether a correctly-classified food-anchored event is SERVED.
+    # See the amendment appended to §0's plan's own Non-goals section for
+    # the forward pointer, and `musical-events-scope.feature` for the gate's
+    # full behavior, including its live-admin-config reversibility (editing
+    # `event_non_music_categories` is now the re-admission mechanism for
+    # this class of row, superseding the PATCH-post_type path the removed
+    # comment used to rely on).
 
   Scenario: An operator re-admitting a suppressed row re-projects every occurrence
     Given a recurring event row titled "Feijoada com samba ao vivo" with post_type "menu"
@@ -99,14 +140,33 @@ Feature: Non-events stay out of the events serving projection, and its recurrenc
     # proof that §0's food-boundary concession is reversible per row with no
     # migration, no re-extraction and no deploy.
 
-  Scenario: A recurring class with a paid enrolment is still projected
+  Scenario: A recurring paid class categorized as a workshop is now excluded by the later music-only scope gate
     Given an accepted event row for venue "Sala de Reboco" titled "Aula de FORRÓ"
     And that row has post_type "event"
     And that row has category "workshop"
     And that row is recurring with recurrence text "Toda QUARTA"
     And that row was last seen 3 days ago
     When the events projection runs
-    Then the city events index for "recife" holds at least one occurrence of that event
+    Then no occurrence key exists for that event
+    And the city events index for "recife" holds no occurrence of that event
+    # SUPERSEDED 2026-09-14 — formerly "A recurring class with a paid
+    # enrolment is still projected", asserting the opposite of the Then
+    # above. Same supersession as the food-anchored scenario earlier in this
+    # file: `plans/260907_events-non-event-and-recurrence-normalisation.md`
+    # §5 pins "Aula de FORRÓ na Sala de Reboco" as a live example that must
+    # stay `event` AT THE CLASSIFICATION LAYER — its announced subject is a
+    # forró class, category `workshop`, with a price ("Mensalidade") named
+    # alongside it, and §1's closing sentence is what correctly keeps its
+    # `kind` as `event` rather than `promotion`. That classification
+    # reasoning is untouched and still correct.
+    #
+    # What changed is `plans/260914_musical-events-scope.md`'s separate,
+    # later, explicit SERVING-layer decision to also deny-list `workshop`
+    # (music-only product scope, not event-classification correctness),
+    # which now excludes even this correctly-classified row from the
+    # projection regardless of `post_type`. See the food-anchored scenario
+    # above for the full citation trail, and the amendment appended to
+    # `plans/260907_...md`'s Non-goals section.
 
   Scenario: An operator reclassification deprojects every occurrence of the event
     Given an accepted recurring event row titled "Buffet de Terça a Domingo" with post_type "event"
