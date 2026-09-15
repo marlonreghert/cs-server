@@ -22,6 +22,7 @@ from app.services.event_venue_advisor import (
     ADMIN_CONFIG_EVENT_VENUE_ADVISOR_ENABLED_KEY,
     OUTCOME_ERROR,
     OUTCOME_REJECTED,
+    OUTCOME_SKIPPED_NON_MUSIC,
     OUTCOME_SUGGESTED,
     EventVenueAdvisorService,
     parse_event_venue_advisor_response,

@@ -57,6 +57,7 @@ import logging
 from typing import Optional
 
 from app.metrics import EVENT_VENUE_ADVISOR_OUTCOME_TOTAL
+from app.models.post_category import is_music_category, load_non_music_categories
 from app.services.event_dedup import _load_validated_config  # noqa: F401 — the SAME validated-read path every other key in this plan uses; never coerced.
 from app.services.event_venue_advisor_validator import (
     VenueCandidate,
@@ -75,6 +76,10 @@ DEFAULT_EVENT_VENUE_ADVISOR_ENABLED = False
 OUTCOME_SUGGESTED = "suggested"
 OUTCOME_REJECTED = "rejected"
 OUTCOME_ERROR = "error"
+# plans/260914_musical-events-scope.md: a deny-listed-category row never
+# reaches this pass's model call at all — counted separately from every
+# other outcome so an operator can see the scope filter's own effect.
+OUTCOME_SKIPPED_NON_MUSIC = "skipped_non_music"
 
 
 def validate_event_venue_advisor_enabled_config(value) -> bool:
@@ -166,6 +171,10 @@ class EventVenueAdvisorService:
         pass must not fail the extraction run that triggered it."""
         if not load_event_venue_advisor_enabled(self.redis_client):
             return {}
+        # ONE admin-config read per CALL — an operator's deny-list edit
+        # reaches the NEXT extraction run, never requiring a deploy
+        # (plans/260914_musical-events-scope.md).
+        non_music_categories, _ = load_non_music_categories(self.redis_client)
 
         counts: dict = {}
 
@@ -176,6 +185,10 @@ class EventVenueAdvisorService:
         for event_id in dict.fromkeys(event_ids):
             row = self.venue_dao.get_event(event_id)
             if row is None or row.get("status") == "superseded":
+                continue
+            if not is_music_category(row.get("category"), non_music_categories):
+                # Before any candidate lookup OR the model call itself.
+                _bump(OUTCOME_SKIPPED_NON_MUSIC)
                 continue
             if not _is_resolution_queued(row):
                 # Covers RESOLUTION_AUTO (venue_id set) and RESOLUTION_
@@ -257,7 +270,7 @@ class EventVenueAdvisorService:
 
 __all__ = [
     "ADMIN_CONFIG_EVENT_VENUE_ADVISOR_ENABLED_KEY", "DEFAULT_EVENT_VENUE_ADVISOR_ENABLED",
-    "OUTCOME_SUGGESTED", "OUTCOME_REJECTED", "OUTCOME_ERROR",
+    "OUTCOME_SUGGESTED", "OUTCOME_REJECTED", "OUTCOME_ERROR", "OUTCOME_SKIPPED_NON_MUSIC",
     "validate_event_venue_advisor_enabled_config", "load_event_venue_advisor_enabled",
     "parse_event_venue_advisor_response", "EventVenueAdvisorService",
 ]

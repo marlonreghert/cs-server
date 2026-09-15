@@ -1,4 +1,3 @@
-@wip
 Feature: Musical events scope gate — non-musical posts skip agentic cost and never surface
   As an operator paying for per-event OpenAI/agentic calls and serving a
   nightlife/venue busyness product

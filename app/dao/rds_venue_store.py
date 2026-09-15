@@ -1378,7 +1378,7 @@ class RdsVenueStore:
         with self.engine.connect() as conn:
             return [dict(r) for r in conn.execute(text(sql), params).mappings()]
 
-    def list_events_for_projection(self, *, now) -> list[dict]:
+    def list_events_for_projection(self, *, now, non_music_categories=None) -> list[dict]:
         """The events serving projection's selection query (plans/260905_
         events-serving-projection.md, Phase 4 §3) — one bulk query, a
         SIBLING of `list_events` (never a caller of it: the predicates
@@ -1388,6 +1388,14 @@ class RdsVenueStore:
         `serving.eligible_venue` — both stay in lockstep by hand, the same
         way `venue_eligibility.evaluate()` and the real view are kept in
         lockstep elsewhere in this module.
+
+        `non_music_categories` (plans/260914_musical-events-scope.md): the
+        LIVE admin-config deny-list, always supplied explicitly by the one
+        production caller (`RedisProjectionService.project_events`, which
+        reads it once per cycle) — `None` (a caller that does not care, e.g.
+        most tests) falls back to `is_selectable`'s own pure-module default.
+        An empty deny-list is a legitimate admin state (every category
+        eligible) and adds no SQL condition at all.
 
         Deliberately does NOT filter promoter-sourced items: that needs a
         GROUPED read of every selected event's sources
@@ -1419,10 +1427,16 @@ class RdsVenueStore:
             `is_selectable` gives in Python (see its own docstring).
         """
         from app.config import settings
-        from app.services.event_projection_selection import PAST_GRACE
+        from app.services.event_projection_selection import (
+            DEFAULT_NON_MUSIC_CATEGORIES,
+            PAST_GRACE,
+        )
 
+        if non_music_categories is None:
+            non_music_categories = DEFAULT_NON_MUSIC_CATEGORIES
         cutoff = now - PAST_GRACE
         recurring_cutoff = now - timedelta(days=settings.events_recurring_max_source_age_days)
+        params: dict = {"cutoff": cutoff, "recurring_cutoff": recurring_cutoff}
         sql = (
             f"{self._EVENT_SELECT} "
             "WHERE e.post_type = 'event' "
@@ -1434,14 +1448,24 @@ class RdsVenueStore:
             "  OR (e.is_recurring AND agg.last_seen_at >= :recurring_cutoff)"
             ") "
             "AND e.venue_id IN (SELECT venue_id FROM serving.eligible_venue) "
-            "ORDER BY e.starts_at NULLS LAST, e.post_item_id"
         )
+        bind_params = []
+        if non_music_categories:
+            # Case-insensitive via LOWER(), matching `is_music_category`'s
+            # own `casefold()` closely enough for this deny-list's plain-
+            # ASCII/pt-BR label text; `category IS NULL` is fail-open, same
+            # as `is_music_category`'s `None`-input rule. An EMPTY deny-list
+            # (a legitimate admin state) adds no condition at all.
+            sql += (
+                "AND (e.category IS NULL "
+                "OR LOWER(e.category) NOT IN :non_music_categories_lower) "
+            )
+            params["non_music_categories_lower"] = [c.lower() for c in non_music_categories]
+            bind_params.append(bindparam("non_music_categories_lower", expanding=True))
+        sql += "ORDER BY e.starts_at NULLS LAST, e.post_item_id"
+        stmt = text(sql).bindparams(*bind_params)
         with self.engine.connect() as conn:
-            return [
-                dict(r) for r in conn.execute(
-                    text(sql), {"cutoff": cutoff, "recurring_cutoff": recurring_cutoff}
-                ).mappings()
-            ]
+            return [dict(r) for r in conn.execute(stmt, params).mappings()]
 
     def get_address_bulk(self, venue_ids: list[str]) -> dict[str, dict]:
         """One `venues.address` row per requested venue_id, keyed by

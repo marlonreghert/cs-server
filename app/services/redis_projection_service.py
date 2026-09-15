@@ -43,7 +43,11 @@ from app.models import (
     WeekRawDay,
 )
 from app.models.event_occurrence import EventOccurrence
-from app.models.post_category import classify_category, load_post_category_vocabulary
+from app.models.post_category import (
+    classify_category,
+    load_non_music_categories,
+    load_post_category_vocabulary,
+)
 from app.models.promoter_event_visibility import is_promoter_only_item, load_hide_promoter_events
 from app.services.event_city_slug import nearest_city_slug
 from app.services.event_date_resolver import RECIFE_TZ
@@ -370,7 +374,18 @@ class RedisProjectionService:
         # must never be mistaken for "there are no events", so any failure
         # aborts the WHOLE cycle before a single Redis key is touched.
         try:
-            rows = self.rds_store.list_events_for_projection(now=now)
+            # ONE admin-config read per CYCLE, before the selection query
+            # itself: plans/260914_musical-events-scope.md's deny-list must
+            # reach `list_events_for_projection`'s own WHERE clause (both
+            # stores), not just be consulted afterward, so an operator's
+            # edit changes which ROWS are selected on the next cycle — the
+            # loader already falls back to the shipped defaults (and logs)
+            # on an unreadable or malformed config, so this can never be the
+            # reason a cycle is lost.
+            non_music_categories, _ = load_non_music_categories(self.redis_only_dao.client)
+            rows = self.rds_store.list_events_for_projection(
+                now=now, non_music_categories=non_music_categories,
+            )
             fence = self.rds_store.get_geo_fence()
             cities = fence.get("cities") or []
             venue_ids = sorted({r["venue_id"] for r in rows if r.get("venue_id")})

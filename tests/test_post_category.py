@@ -13,7 +13,9 @@ import json
 import pytest
 
 from app.models.post_category import (
+    ADMIN_CONFIG_NON_MUSIC_CATEGORIES_KEY,
     DEFAULT_CATEGORY_VOCABULARY,
+    DEFAULT_NON_MUSIC_CATEGORIES,
     OFF_VOCABULARY_OVERFLOW_LABEL,
     ADMIN_CONFIG_POST_CATEGORY_VOCABULARY_KEY,
     _MAX_TRACKED_OFF_VOCABULARY_LABELS,
@@ -21,8 +23,11 @@ from app.models.post_category import (
     canonicalize_category,
     classify_category,
     is_in_vocabulary,
+    is_music_category,
+    load_non_music_categories,
     load_post_category_vocabulary,
     record_off_vocabulary_category,
+    validate_non_music_categories_config,
     validate_post_category_vocabulary_config,
 )
 
@@ -237,6 +242,104 @@ def test_canonicalize_category_agrees_with_classify_category():
         assert canonicalize_category(raw, _VOCABULARY) == (
             classify_category(raw, _VOCABULARY)[0]
         )
+
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# is_music_category / the non-music deny-list
+# (plans/260914_musical-events-scope.md)
+# ══════════════════════════════════════════════════════════════════════════
+class TestIsMusicCategory:
+    def test_deny_listed_category_is_not_music_case_insensitive(self):
+        assert is_music_category("kids / family", DEFAULT_NON_MUSIC_CATEGORIES) is False
+        assert is_music_category("KIDS / FAMILY", DEFAULT_NON_MUSIC_CATEGORIES) is False
+        assert is_music_category("  Workshop  ", DEFAULT_NON_MUSIC_CATEGORIES) is False
+
+    def test_none_and_blank_are_always_music_fail_open(self):
+        assert is_music_category(None, DEFAULT_NON_MUSIC_CATEGORIES) is True
+        assert is_music_category("", DEFAULT_NON_MUSIC_CATEGORIES) is True
+        assert is_music_category("   ", DEFAULT_NON_MUSIC_CATEGORIES) is True
+
+    def test_off_vocabulary_category_is_music_fail_open(self):
+        # "reggae" is a real production off-vocabulary value the plan's own
+        # Evidence names as unambiguous music — must never be silently
+        # excluded by an accidental allow-list.
+        assert is_music_category("reggae", DEFAULT_NON_MUSIC_CATEGORIES) is True
+
+    def test_music_vocabulary_category_is_music(self):
+        assert is_music_category("rock", DEFAULT_NON_MUSIC_CATEGORIES) is True
+
+    def test_dj_club_night_and_party_are_deliberately_not_deny_listed(self):
+        """The plan's own boundary reasoning: this is a nightlife/venue
+        busyness product, so a club night and "party" are judged
+        music-driven and must stay eligible."""
+        assert is_music_category("DJ / club night", DEFAULT_NON_MUSIC_CATEGORIES) is True
+        assert is_music_category("party", DEFAULT_NON_MUSIC_CATEGORIES) is True
+
+    def test_not_on_the_list_at_all_is_music_fail_open(self):
+        assert is_music_category("turismo / excursão", DEFAULT_NON_MUSIC_CATEGORIES) is True
+
+    def test_empty_deny_list_makes_everything_music(self):
+        assert is_music_category("kids / family", []) is True
+
+
+class TestValidateNonMusicCategoriesConfig:
+    def test_rejects_non_list(self):
+        with pytest.raises(TypeError):
+            validate_non_music_categories_config({"comedy": True})
+
+    def test_rejects_non_string_entries(self):
+        with pytest.raises(TypeError):
+            validate_non_music_categories_config(["comedy", 5])
+
+    def test_rejects_blank_entry(self):
+        with pytest.raises(ValueError):
+            validate_non_music_categories_config(["comedy", "   "])
+
+    def test_empty_list_is_a_legitimate_admin_state(self):
+        # Unlike the vocabulary, an empty deny-list is meaningful (every
+        # category eligible again) and must not raise.
+        assert validate_non_music_categories_config([]) == []
+
+    def test_normalizes_whitespace_and_dedupes_case_insensitively(self):
+        result = validate_non_music_categories_config([
+            "  comedy ", "Comedy", "COMEDY", "quiz / trivia",
+        ])
+        assert result == ["comedy", "quiz / trivia"]
+
+
+class TestLoadNonMusicCategories:
+    def test_none_redis_falls_back_to_defaults(self):
+        categories, reason = load_non_music_categories(None)
+        assert categories == list(DEFAULT_NON_MUSIC_CATEGORIES)
+        assert reason is None
+
+    def test_missing_key_falls_back_to_defaults_without_a_fallback_reason(self):
+        categories, reason = load_non_music_categories(_FakeRedis())
+        assert categories == list(DEFAULT_NON_MUSIC_CATEGORIES)
+        assert reason is None  # missing key is the expected pre-first-write state
+
+    def test_reads_the_admin_override(self):
+        redis = _FakeRedis({
+            ADMIN_CONFIG_NON_MUSIC_CATEGORIES_KEY: json.dumps(["comedy"]),
+        })
+        categories, reason = load_non_music_categories(redis)
+        assert categories == ["comedy"]
+        assert reason is None
+
+    def test_invalid_json_falls_back_to_defaults_with_a_reason(self):
+        redis = _FakeRedis({ADMIN_CONFIG_NON_MUSIC_CATEGORIES_KEY: "{not json"})
+        categories, reason = load_non_music_categories(redis)
+        assert categories == list(DEFAULT_NON_MUSIC_CATEGORIES)
+        assert reason == "invalid_json"
+
+    def test_invalid_shape_falls_back_to_defaults_with_a_reason(self):
+        redis = _FakeRedis({
+            ADMIN_CONFIG_NON_MUSIC_CATEGORIES_KEY: json.dumps({"not": "a list"}),
+        })
+        categories, reason = load_non_music_categories(redis)
+        assert categories == list(DEFAULT_NON_MUSIC_CATEGORIES)
+        assert reason == "invalid_shape"
 
 
 def test_canonicalize_category_actually_delegates(monkeypatch):

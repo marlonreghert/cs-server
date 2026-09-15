@@ -85,6 +85,39 @@ open finding.
 - **A title blocklist, a `category` blocklist, or any downstream string
   filter that hides a row while leaving `post_type = 'event'` in RDS.** See
   "Why a general rule, and why a blocklist is not achievable".
+
+  > **Amendment, 2026-09-14 — superseded for a different, later reason, not
+  > reversed.** The bullet above rejected a `category` blocklist as the
+  > mechanism for THIS plan's question: is a given post correctly classified
+  > as an event at all (the `kind` field: event vs. menu vs. promotion). That
+  > reasoning is unchanged and still correct — nothing here retracts it, and
+  > this plan still implements no category filter anywhere.
+  >
+  > `plans/260914_musical-events-scope.md` (operator decision, 2026-09-14)
+  > answers a different, later, separate question — a "music only, for now"
+  > SERVING-scope decision, independent of classification quality — and for
+  > that question a `category` deny-list (`event_non_music_categories`, read
+  > by `app/services/event_projection_selection.py::is_selectable`) is the
+  > chosen mechanism, seeded with `food festival` and `workshop` among
+  > others. It deliberately excludes a row from the serving projection even
+  > when `post_type = 'event'` is correct in RDS — exactly the shape this
+  > bullet rejected, but for the SERVING question, not the CLASSIFICATION
+  > question this plan scopes.
+  >
+  > Concretely, this changes the outcome for the two BDD scenarios in
+  > `tests/bdd/persistence/events-non-event-and-recurrence-normalisation.feature`
+  > that used to assert a `food festival`/`workshop`-categorized event
+  > "is still projected" (venues "Cachaçaria Tradição" and "Sala de Reboco").
+  > Both have been updated in place — with a comment at the point of change
+  > citing both plans — to assert the row is now excluded from the
+  > projection. `§5`'s pinning of "Aula de FORRÓ na Sala de Reboco" as a row
+  > that must stay `event` is a claim about the `kind` field at the
+  > CLASSIFICATION layer and remains correct; it is no longer a claim about
+  > whether that row is SERVED. The "Follow-ups" re-admission item below is
+  > about relaxing §0's classification concession, and is unaffected by this
+  > amendment; re-admitting a category at the serving layer is a separate
+  > edit to `event_non_music_categories`, documented in
+  > `plans/260914_musical-events-scope.md` itself.
 - **Defending the food-anchored boundary in the `kind` rule.** Conceded by
   §0. A recurring feijoada with a roda de samba, a weekly guided
   degustação, a recurring food festival and a rodízio-with-the-game will

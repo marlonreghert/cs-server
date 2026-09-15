@@ -65,6 +65,7 @@ from app.services.event_dedup import (
     load_dedup_config,
     venue_name_tokens,
 )
+from app.models.post_category import is_music_category, load_non_music_categories
 from app.services.event_identity import normalize_title
 
 logger = logging.getLogger(__name__)
@@ -85,6 +86,10 @@ OUTCOME_LLM_ACCEPTED = "llm_accepted"
 OUTCOME_REJECTED = "rejected"
 OUTCOME_ERROR = "error"
 OUTCOME_SKIPPED_OPERATOR_EDITED = "skipped_operator_edited"
+# plans/260914_musical-events-scope.md: a deny-listed-category row never
+# reaches this pass's model call at all — counted separately from every
+# other skip reason so an operator can see the scope filter's own effect.
+OUTCOME_SKIPPED_NON_MUSIC = "skipped_non_music"
 
 
 def validate_display_title_enabled_config(value) -> bool:
@@ -275,6 +280,10 @@ class EventDisplayTitleService:
             return {}
         if config is None:
             config = load_dedup_config(self.redis_client)
+        # ONE admin-config read per CALL, same as `config` above — an
+        # operator's deny-list edit reaches the NEXT extraction run, never
+        # requiring a deploy (plans/260914_musical-events-scope.md).
+        non_music_categories, _ = load_non_music_categories(self.redis_client)
 
         counts: dict = {}
 
@@ -285,6 +294,11 @@ class EventDisplayTitleService:
         for event_id in dict.fromkeys(event_ids):
             row = self.venue_dao.get_event(event_id)
             if row is None or row.get("status") == "superseded":
+                continue
+            if not is_music_category(row.get("category"), non_music_categories):
+                # Before any free OR paid work: a non-musical row never
+                # reaches `obvious_canonical_title` or `_pick_with_model`.
+                _bump(OUTCOME_SKIPPED_NON_MUSIC)
                 continue
             if row.get("display_title"):
                 # Already chosen, and still valid: `_finish_absorption`
@@ -380,7 +394,7 @@ __all__ = [
     "ADMIN_CONFIG_DISPLAY_TITLE_ENABLED_KEY", "DEFAULT_DISPLAY_TITLE_ENABLED",
     "MAX_DISPLAY_TITLE_LENGTH",
     "OUTCOME_OBVIOUS", "OUTCOME_LLM_ACCEPTED", "OUTCOME_REJECTED", "OUTCOME_ERROR",
-    "OUTCOME_SKIPPED_OPERATOR_EDITED",
+    "OUTCOME_SKIPPED_OPERATOR_EDITED", "OUTCOME_SKIPPED_NON_MUSIC",
     "validate_display_title_enabled_config", "load_display_title_enabled",
     "obvious_canonical_title", "validate_display_title",
     "parse_display_title_response", "DisplayTitleGroup", "EventDisplayTitleService",

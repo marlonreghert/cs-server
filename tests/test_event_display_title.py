@@ -46,6 +46,7 @@ from app.services.event_display_title import (
     OUTCOME_LLM_ACCEPTED,
     OUTCOME_OBVIOUS,
     OUTCOME_REJECTED,
+    OUTCOME_SKIPPED_NON_MUSIC,
     OUTCOME_SKIPPED_OPERATOR_EDITED,
     EventDisplayTitleService,
     load_display_title_enabled,
@@ -252,7 +253,7 @@ _SEQ = {"n": 0}
 
 
 def _seed_merged(store, source_titles, *, operator_edited_fields=None, display_title=None,
-                 lineup=None):
+                 lineup=None, category=None):
     """One canonical row carrying one source per title — the shape a merge
     leaves behind (the rows fold, the sources never do)."""
     _SEQ["n"] += 1
@@ -262,7 +263,7 @@ def _seed_merged(store, source_titles, *, operator_edited_fields=None, display_t
             "event_id": event_id, "venue_id": "v_club", "starts_at": _SATURDAY,
             "title": source_titles[0], "post_type": "event", "status": "accepted",
             "lineup": lineup or [], "operator_edited_fields": operator_edited_fields,
-            "display_title": display_title,
+            "display_title": display_title, "category": category,
             "source_kind": "venue_post", "source_handle": "clubmetropole",
             "source_shortcode": f"dt_sc_{_SEQ['n']}_{index}",
             "raw_extraction": {"title": title},
@@ -340,6 +341,68 @@ class TestTheCallIsAvoidedWhereverPossible:
         assert counts == {}
         assert client.calls == []
         assert store.get_event(event_id)["display_title"] is None
+
+
+class TestTheNonMusicScopeGate:
+    """plans/260914_musical-events-scope.md: a deny-listed-category row
+    never reaches `obvious_canonical_title` OR `_pick_with_model` — checked
+    before even the "two source titles" free path, so it is a hard stop,
+    not merely one more way to avoid a paid call."""
+
+    def test_a_deny_listed_category_never_calls_the_model_even_with_five_acts(
+        self, enabled_redis,
+    ):
+        store = _store()
+        event_id = _seed_merged(store, _FIVE_ACTS, category="kids / family")
+        client = _FakeOpenAI()
+        counts = _run(EventDisplayTitleService(store, client, redis_client=enabled_redis), [event_id])
+        assert client.calls == []
+        assert counts == {OUTCOME_SKIPPED_NON_MUSIC: 1}
+        assert store.get_event(event_id)["display_title"] is None
+
+    def test_a_music_category_row_in_the_same_batch_is_processed_normally(
+        self, enabled_redis,
+    ):
+        store = _store()
+        skipped_id = _seed_merged(store, _FIVE_ACTS, category="workshop")
+        music_id = _seed_merged(store, _FIVE_ACTS, category="rock")
+        client = _FakeOpenAI(json.dumps({"display_title": "ROWKA e VITINHO POLÊMICO"}))
+        counts = _run(
+            EventDisplayTitleService(store, client, redis_client=enabled_redis),
+            [skipped_id, music_id],
+        )
+        assert len(client.calls) == 1
+        assert counts == {OUTCOME_SKIPPED_NON_MUSIC: 1, OUTCOME_LLM_ACCEPTED: 1}
+        assert store.get_event(skipped_id)["display_title"] is None
+        assert store.get_event(music_id)["display_title"] == "ROWKA e VITINHO POLÊMICO"
+
+    def test_null_off_vocabulary_and_music_categories_are_all_unaffected(self, enabled_redis):
+        for category in (None, "reggae", "rock"):
+            store = _store()
+            event_id = _seed_merged(store, _FIVE_ACTS, category=category)
+            client = _FakeOpenAI(json.dumps({"display_title": "ROWKA"}))
+            counts = _run(
+                EventDisplayTitleService(store, client, redis_client=enabled_redis), [event_id],
+            )
+            assert len(client.calls) == 1, category
+            assert OUTCOME_SKIPPED_NON_MUSIC not in counts, category
+
+    def test_the_deny_list_is_read_live_not_a_hardcoded_constant(self, enabled_redis):
+        """An operator's admin-config edit changes which categories are
+        skipped, without a deploy — mirrors every other admin-config-backed
+        gate in this pipeline."""
+        from app.models.post_category import ADMIN_CONFIG_NON_MUSIC_CATEGORIES_KEY
+
+        store = _store()
+        event_id = _seed_merged(store, _FIVE_ACTS, category="rock")
+        client = _FakeOpenAI(json.dumps({"display_title": "ROWKA"}))
+        _run(EventDisplayTitleService(store, client, redis_client=enabled_redis), [event_id])
+        assert len(client.calls) == 1
+
+        enabled_redis.set(ADMIN_CONFIG_NON_MUSIC_CATEGORIES_KEY, json.dumps(["rock"]))
+        event_id_2 = _seed_merged(store, _FIVE_ACTS, category="rock")
+        _run(EventDisplayTitleService(store, client, redis_client=enabled_redis), [event_id_2])
+        assert len(client.calls) == 1  # unchanged — the second row was skipped
 
 
 class TestTheOneCall:

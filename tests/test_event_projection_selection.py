@@ -208,3 +208,63 @@ def test_re_admitting_a_row_as_an_event_makes_it_selectable_again():
     assert is_selectable(row, now=NOW) is False
     row["post_type"] = "event"
     assert is_selectable(row, now=NOW) is True
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# plans/260914_musical-events-scope.md: the category deny-list check.
+# Every fixture row otherwise passes every OTHER criterion (accepted,
+# resolved venue, not superseded, a current starts_at) — only the category
+# and the deny-list vary — so a failure here isolates the new check alone.
+# ══════════════════════════════════════════════════════════════════════════
+def test_a_deny_listed_category_is_excluded_even_with_every_other_criterion_passing():
+    row = _row(category="kids / family")
+    assert is_selectable(row, now=NOW) is False
+
+
+def test_deny_list_match_is_case_insensitive():
+    row = _row(category="KIDS / FAMILY")
+    assert is_selectable(row, now=NOW) is False
+
+
+def test_none_category_is_unaffected():
+    row = _row(category=None)
+    assert is_selectable(row, now=NOW) is True
+
+
+def test_absent_category_field_is_unaffected():
+    row = _row()
+    assert "category" not in row or row.get("category") is None
+    assert is_selectable(row, now=NOW) is True
+
+
+def test_off_vocabulary_category_is_unaffected():
+    row = _row(category="reggae")
+    assert is_selectable(row, now=NOW) is True
+
+
+def test_music_category_is_unaffected():
+    row = _row(category="rock")
+    assert is_selectable(row, now=NOW) is True
+
+
+def test_deny_list_is_a_caller_supplied_parameter_not_a_hardcoded_constant():
+    """Mirrors `test_recurring_bound_honours_a_caller_supplied_window`: both
+    stores' list_events_for_projection thread the LIVE admin-config
+    deny-list through explicitly rather than relying on this module's own
+    default."""
+    row = _row(category="reggae")
+    assert is_selectable(row, now=NOW, non_music_categories=["reggae"]) is False
+    assert is_selectable(row, now=NOW, non_music_categories=["rock"]) is True
+
+
+def test_empty_deny_list_makes_every_category_selectable():
+    row = _row(category="kids / family")
+    assert is_selectable(row, now=NOW, non_music_categories=[]) is True
+
+
+def test_every_other_criterion_still_applies_alongside_the_category_check():
+    """A deny-listed category never RESCUES a row another criterion already
+    excludes — the checks are independent, never a substitute for one
+    another."""
+    row = _row(category="kids / family", status="pending_review")
+    assert is_selectable(row, now=NOW) is False
